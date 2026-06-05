@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>agentropy — {{ agent.id }}</title>
+  <script src="/assets/htmx.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f1115; --panel: #181b22; --border: #262b35;
+      --fg: #e6e8ec; --muted: #9aa3b2; --accent: #6ea8fe;
+      --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 1.5rem;
+      background: var(--bg); color: var(--fg);
+      font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    h1 { font-size: 1.1rem; margin: 0; }
+    h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em;
+         color: var(--muted); margin: 0 0 .6rem; }
+    .bar { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
+    .badge { padding: .15rem .55rem; border-radius: 999px; font-size: .75rem;
+             font-weight: 600; }
+    .badge.running { background: rgba(74,222,128,.15); color: var(--ok); }
+    .badge.paused  { background: rgba(251,191,36,.15); color: var(--warn); }
+    .controls { margin-left: auto; display: flex; gap: .5rem; }
+    button {
+      background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+      border-radius: 6px; padding: .35rem .8rem; cursor: pointer; font: inherit;
+    }
+    button:hover { border-color: var(--accent); }
+    button.stop:hover { border-color: var(--bad); color: var(--bad); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    .panel {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 8px; padding: 1rem;
+    }
+    .panel.wide { grid-column: 1 / -1; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid var(--border);
+             vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; font-size: .72rem;
+         text-transform: uppercase; letter-spacing: .05em; }
+    tr:last-child td { border-bottom: none; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1rem; margin: 0; }
+    dt { color: var(--muted); }
+    dd { margin: 0; word-break: break-all; }
+    .empty { color: var(--muted); font-style: italic; }
+    .events { margin: 0; padding: 0; list-style: none; max-height: 22rem; overflow-y: auto; }
+    .events li { padding: .15rem 0; border-bottom: 1px solid var(--border);
+                 white-space: pre-wrap; word-break: break-all; }
+    .events li:last-child { border-bottom: none; }
+    .rbadge { padding: .1rem .5rem; border-radius: 999px; font-size: .72rem; font-weight: 600; }
+    .rbadge.completed { background: rgba(74,222,128,.15); color: var(--ok); }
+    .rbadge.failed { background: rgba(248,113,113,.15); color: var(--bad); }
+    .rbadge.interrupted { background: rgba(251,191,36,.15); color: var(--warn); }
+    .rbadge.retrying { background: rgba(110,168,254,.15); color: var(--accent); }
+    .rbadge.running { background: rgba(110,168,254,.15); color: var(--accent); }
+    td.muted { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div id="content" hx-get="/" hx-trigger="every 2s" hx-select="#content" hx-swap="outerHTML">
+  <div class="bar">
+    <h1>agentropy</h1>
+    {% if paused %}
+    <span class="badge paused">paused</span>
+    {% else %}
+    <span class="badge running">running</span>
+    {% endif %}
+    <div class="controls">
+      <button class="stop" hx-post="/control/stop" hx-swap="none">Stop child</button>
+      <button hx-post="/control/pause" hx-swap="none">Pause</button>
+      <button hx-post="/control/resume" hx-swap="none">Resume</button>
+    </div>
+  </div>
+
+  <div class="grid">
+    <section class="panel">
+      <h2>Agent</h2>
+      <dl>
+        <dt>id</dt><dd>{{ agent.id }}</dd>
+        <dt>folder</dt><dd>{{ agent.folder }}</dd>
+        <dt>polling</dt><dd>{% if paused %}paused{% else %}running{% endif %}</dd>
+        <dt>tracker</dt><dd>{{ agent.tracker }}</dd>
+        <dt>runner</dt><dd>{{ agent.runner }}</dd>
+      </dl>
+    </section>
+
+    <section class="panel">
+      <h2>Active run</h2>
+      {% match active %}
+      {% when Some with (a) %}
+      <dl>
+        <dt>issue</dt><dd>{{ a.identifier }}</dd>
+        <dt>state</dt><dd>{{ a.state }}</dd>
+        <dt>status</dt><dd>{{ active_status }}</dd>
+        <dt>workspace</dt><dd>{{ a.workspace }}</dd>
+        <dt>pid</dt><dd>{{ a.pid }}</dd>
+        <dt>started</dt><dd>{{ a.started_at }}</dd>
+        <dt>elapsed</dt><dd>{{ elapsed_secs }}s</dd>
+        <dt>last event</dt><dd>{{ a.last_event }}</dd>
+      </dl>
+      {% when None %}
+      <p class="empty">No active run.</p>
+      {% endmatch %}
+    </section>
+
+    <section class="panel">
+      <h2>Queue</h2>
+      {% if queue.is_empty() %}
+      <p class="empty">Queue empty.</p>
+      {% else %}
+      <table>
+        <thead><tr><th>Issue</th><th>Title</th><th>State</th><th>Prio</th><th>Created</th></tr></thead>
+        <tbody>
+          {% for q in queue %}
+          <tr>
+            <td>{{ q.identifier }}</td>
+            <td>{{ q.title }}</td>
+            <td>{{ q.state }}</td>
+            <td>{% match q.priority %}{% when Some with (p) %}{{ p }}{% when None %}—{% endmatch %}</td>
+            <td>{% match q.created_at %}{% when Some with (c) %}{{ c }}{% when None %}—{% endmatch %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </section>
+
+    <section class="panel">
+      <h2>Retry queue</h2>
+      {% if retry.is_empty() %}
+      <p class="empty">No retries pending.</p>
+      {% else %}
+      <table>
+        <thead><tr><th>Issue</th><th>Attempt</th><th>Due</th><th>Last error</th></tr></thead>
+        <tbody>
+          {% for r in retry %}
+          <tr>
+            <td>{{ r.identifier }}</td>
+            <td>{{ r.attempt }}</td>
+            <td>{{ r.due_at }}</td>
+            <td>{{ r.last_error }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </section>
+
+    <section class="panel wide">
+      <h2>Recent events</h2>
+      {% if events.is_empty() %}
+      <p class="empty">No events yet.</p>
+      {% else %}
+      <ul class="events">
+        {% for line in events %}
+        <li>{{ line }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </section>
+
+    <section class="panel wide">
+      <h2>Run history</h2>
+      {% if history.is_empty() %}
+      <p class="empty">No finished runs yet.</p>
+      {% else %}
+      <table>
+        <thead><tr><th>Status</th><th>Issue</th><th>Run</th><th>Age</th></tr></thead>
+        <tbody>
+          {% for h in history %}
+          <tr>
+            <td><span class="rbadge {{ h.status_class }}">{{ h.status }}</span></td>
+            <td>{{ h.identifier }}</td>
+            <td class="muted">{{ h.run }}</td>
+            <td>{{ h.age }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </section>
+  </div>
+  </div>
+</body>
+</html>

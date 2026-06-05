@@ -1,0 +1,51 @@
+[package]
+name = "agentropy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+
+[[bin]]
+name = "agentropy"
+path = "src/main.rs"
+
+[dependencies]
+# async runtime + process + signals
+tokio = { version = "1.43", features = ["full"] }
+# web / dashboard
+axum = "0.8"
+tower-http = { version = "0.6", features = ["trace"] }
+# templates
+askama = "0.13"          # compile-time dashboard templates (Template derive + into_response w/ "with-axum")
+minijinja = "2.5"        # runtime WORKFLOW.md prompt rendering, strict undefined
+# serde stack
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"       # PRD-pinned (0.9.34, deprecated upstream but functional)
+serde_json = "1"
+# time
+chrono = { version = "0.4", features = ["serde"] }
+# cli
+clap = { version = "4.5", features = ["derive"] }
+# logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+# unix signals (SIGTERM/SIGKILL to child process groups)
+nix = { version = "0.29", features = ["signal", "process"] }
+# errors
+anyhow = "1"
+thiserror = "2"
+# static dashboard assets (only htmx.min.js is embedded; templates are askama-compiled)
+rust-embed = { version = "8", features = ["axum-ex"] }
+mime_guess = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+
+[package.metadata]
+# askama: create askama.toml at crate root OR rely on default ./templates dir.
+# Dashboard templates live in ./templates/*.html (askama default search path).
