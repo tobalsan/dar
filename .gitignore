@@ -1,0 +1,14 @@
+# Rust
+/target/
+
+# macOS
+.DS_Store
+
+# Agent runtime artifacts (keep the .gitkeep placeholders + issue files)
+example-agent/workspaces/*
+!example-agent/workspaces/.gitkeep
+example-agent/logs/*
+!example-agent/logs/.gitkeep
+
+# Local Claude Code config dropped into agent folders
+**/.claude/settings.local.json
