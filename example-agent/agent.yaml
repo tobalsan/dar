@@ -1,0 +1,27 @@
+id: example-agent
+name: "Example Agent"
+
+tracker:
+  use: files
+  config:
+    path: ./issues
+  active_states: [todo, in_progress]
+  terminal_states: [done, cancelled]
+
+runner:
+  use: claude-code
+  command: claude
+  max_run_timeout_ms: 1800000
+
+orchestrator:
+  poll_interval_ms: 10000
+  max_concurrent: 1
+  max_retries: 3
+  retry_backoff_ms: 10000
+
+workspace:
+  root: ./workspaces
+
+dashboard:
+  bind: 127.0.0.1
+  port: 7878
