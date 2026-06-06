@@ -252,6 +252,7 @@ impl Orchestrator {
     async fn reconcile(&mut self) {
         let active = &self.effective_cfg.active_states;
         let terminal = &self.effective_cfg.terminal_states;
+        let needs_human = self.effective_cfg.needs_human.as_deref();
 
         let mut to_cancel: Vec<(usize, RunStatus, &'static str)> = Vec::new();
 
@@ -267,6 +268,13 @@ impl Orchestrator {
                     if terminal.contains(st) {
                         logging::ev(&slot.identifier, "reconcile", "issue terminal; finishing");
                         to_cancel.push((idx, RunStatus::Succeeded, "terminal at reconcile"));
+                    } else if needs_human == Some(st.as_str()) {
+                        logging::ev(
+                            &slot.identifier,
+                            "reconcile",
+                            &format!("issue state {st:?} is needs-human; releasing without retry"),
+                        );
+                        to_cancel.push((idx, RunStatus::NeedsHuman, "needs-human at reconcile"));
                     } else if !active.contains(st) {
                         logging::ev(
                             &slot.identifier,
@@ -306,6 +314,7 @@ impl Orchestrator {
     async fn collect_finished(&mut self) {
         let active = &self.effective_cfg.active_states.clone();
         let terminal = &self.effective_cfg.terminal_states.clone();
+        let needs_human = self.effective_cfg.needs_human.clone();
         let max_retries = self.effective_cfg.max_retries;
 
         let mut finished: Vec<usize> = Vec::new();
@@ -340,6 +349,10 @@ impl Orchestrator {
                         Some(ref st) if terminal.contains(st) => {
                             logging::ev(&id, "succeeded", "terminal after normal exit");
                             self.record_history(&id, RunStatus::Succeeded, pid, "terminal after normal exit");
+                        }
+                        Some(ref st) if needs_human.as_deref() == Some(st.as_str()) => {
+                            logging::ev(&id, "needs_human", "needs-human state after normal exit; releasing without retry");
+                            self.record_history(&id, RunStatus::NeedsHuman, pid, "needs-human after normal exit");
                         }
                         Some(ref st) if active.contains(st) => {
                             logging::ev(&id, "continuation", "still active after exit 0; retry 1s");
@@ -516,6 +529,8 @@ impl Orchestrator {
         let last_event_at = Arc::new(Mutex::new(Utc::now()));
         let params = SpawnParams {
             command: &self.effective_cfg.runner_command,
+            runner_kind: &self.effective_cfg.runner_kind,
+            model: self.effective_cfg.model.clone(),
             workspace: &workspace,
             workspace_root: &ws_root,
             prompt,
@@ -747,6 +762,7 @@ mod tests {
             identifier: id.to_string(),
             title: id.to_string(),
             description: None,
+            url: None,
             state: "todo".to_string(),
             priority: prio,
             assignees: vec![],

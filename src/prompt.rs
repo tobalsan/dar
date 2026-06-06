@@ -207,6 +207,17 @@ fn build_context_appendix(
         issue.identifier
     ));
 
+    // Issue metadata: title, description, url (per PRD §4).
+    lines.push(format!("**Title:** {}", issue.title));
+    if let Some(desc) = &issue.description {
+        if !desc.trim().is_empty() {
+            lines.push(format!("**Description:**\n{desc}"));
+        }
+    }
+    if let Some(url) = &issue.url {
+        lines.push(format!("**URL:** {url}"));
+    }
+
     if let Some(state) = needs_human {
         lines.push(format!(
             "If the issue cannot be resolved automatically, set `state:` to `{state}` in the issue file."
@@ -242,6 +253,7 @@ mod tests {
             identifier: id.to_string(),
             title: "Test issue".to_string(),
             description: Some("Do the thing.".to_string()),
+            url: None,
             state: "todo".to_string(),
             priority: None,
             assignees: vec![],
@@ -346,5 +358,65 @@ mod tests {
         assert!(result.is_ok(), "allow_stale should swallow parse errors");
         // Snapshot unchanged: still has the original tracker config.
         assert!(renderer.snapshot().frontmatter.tracker.is_some());
+    }
+
+    #[test]
+    fn appendix_includes_title_and_description() {
+        use std::io::Write;
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "body").unwrap();
+        let renderer = PromptRenderer::load(f.path()).unwrap();
+        let mut issue = make_issue("ALG-1");
+        issue.title = "My Feature".to_string();
+        issue.description = Some("Do the thing.".to_string());
+        let out = renderer.render(&issue, 0, 3).unwrap();
+        assert!(out.contains("**Title:** My Feature"), "got: {out}");
+        assert!(out.contains("**Description:**"), "got: {out}");
+        assert!(out.contains("Do the thing."), "got: {out}");
+    }
+
+    #[test]
+    fn appendix_includes_url_when_present() {
+        use std::io::Write;
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "body").unwrap();
+        let renderer = PromptRenderer::load(f.path()).unwrap();
+        let mut issue = make_issue("ALG-2");
+        issue.url = Some("https://linear.app/org/issue/ALG-2".to_string());
+        let out = renderer.render(&issue, 0, 3).unwrap();
+        assert!(out.contains("**URL:** https://linear.app/org/issue/ALG-2"), "got: {out}");
+    }
+
+    #[test]
+    fn appendix_omits_url_when_absent() {
+        use std::io::Write;
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "body").unwrap();
+        let renderer = PromptRenderer::load(f.path()).unwrap();
+        let out = renderer.render(&make_issue("ALG-3"), 0, 3).unwrap();
+        assert!(!out.contains("**URL:**"), "URL line should be absent; got: {out}");
+    }
+
+    #[test]
+    fn maybe_reload_allow_stale_camel_case_false_surfaces_error() {
+        use std::io::Write;
+        let mut f = NamedTempFile::new().unwrap();
+        // Use camelCase allowStale=false so parse errors surface.
+        write!(f, "---\npolling:\n  allowStale: false\n---\nbody").unwrap();
+        let mut renderer = PromptRenderer::load(f.path()).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        {
+            let mut f2 = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(f.path())
+                .unwrap();
+            write!(f2, "---\n  bad: [unclosed\n---\nbody").unwrap();
+        }
+
+        // allowStale=false (via camelCase alias) means parse errors must surface.
+        let result = renderer.maybe_reload();
+        assert!(result.is_err(), "allowStale=false should surface parse errors; got Ok");
     }
 }

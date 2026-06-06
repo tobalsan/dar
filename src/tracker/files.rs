@@ -168,6 +168,7 @@ fn parse_issue_file(path: &Path) -> Result<Issue> {
         identifier,
         title,
         description,
+        url: None,
         state: fm.state.unwrap_or_default(),
         priority: fm.priority,
         assignees: fm.assignees,

@@ -81,6 +81,8 @@ pub struct WfPollingConfig {
     pub retry_backoff_ms: Option<u64>,
     /// When true (the default), a WORKFLOW.md parse error on a live-reload
     /// keeps the last-good snapshot. When false, the error is surfaced.
+    /// Accepts both `allow_stale` and `allowStale` in YAML.
+    #[serde(alias = "allowStale")]
     pub allow_stale: Option<bool>,
 }
 
@@ -601,5 +603,52 @@ body"#;
         let snap = parse_workflow_md(raw).unwrap();
         let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
         assert!(!eff.allow_stale);
+    }
+
+    #[test]
+    fn parse_allow_stale_camel_case_alias() {
+        // `allowStale` (camelCase) must deserialize the same as `allow_stale`.
+        let raw = "---\npolling:\n  allowStale: false\n---\nbody";
+        let snap = parse_workflow_md(raw).unwrap();
+        assert_eq!(
+            snap.frontmatter.polling.as_ref().unwrap().allow_stale,
+            Some(false),
+            "allowStale alias must deserialize to allow_stale=false"
+        );
+    }
+
+    #[test]
+    fn merge_allow_stale_camel_case() {
+        let base = base_config();
+        let raw = "---\npolling:\n  allowStale: false\n---";
+        let snap = parse_workflow_md(raw).unwrap();
+        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        assert!(!eff.allow_stale, "allowStale camelCase should map to allow_stale=false");
+    }
+
+    #[test]
+    fn merge_needs_human_from_flat() {
+        let base = base_config();
+        let raw = "---\ntracker:\n  needs_human: needs-review\n---";
+        let snap = parse_workflow_md(raw).unwrap();
+        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        assert_eq!(eff.needs_human, Some("needs-review".into()));
+    }
+
+    #[test]
+    fn merge_needs_human_from_legacy_nested() {
+        let base = base_config();
+        let raw = "---\ntracker:\n  states:\n    needs_human: waiting-for-human\n---";
+        let snap = parse_workflow_md(raw).unwrap();
+        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        assert_eq!(eff.needs_human, Some("waiting-for-human".into()));
+    }
+
+    #[test]
+    fn merge_needs_human_absent_is_none() {
+        let base = base_config();
+        let wf = WorkflowFrontmatter::default();
+        let eff = EffectiveLoopConfig::merge(&base, &wf);
+        assert_eq!(eff.needs_human, None);
     }
 }

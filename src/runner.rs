@@ -46,9 +46,13 @@ pub enum KillReason {
     Reconcile,
 }
 
-/// Parameters for spawning one Claude Code run.
+/// Parameters for spawning one agent run.
 pub struct SpawnParams<'a> {
     pub command: &'a str,
+    /// Runner kind (e.g. "claude-code"). Determines which CLI flags are added.
+    pub runner_kind: &'a str,
+    /// Model override; passed as `--model <model>` for claude-code runners.
+    pub model: Option<String>,
     pub workspace: &'a Path,
     pub workspace_root: &'a Path,
     pub prompt: String,
@@ -106,19 +110,26 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     assert_contained(p.workspace_root, p.workspace)
         .context("workspace containment check failed; refusing to spawn child")?;
 
-    // Autonomous runner: no human is present to answer Claude's permission
-    // prompts, and the workflow needs the child to edit its issue file, which
-    // lives outside the workspace cwd (under the agent folder). Bypass the
-    // permission sandbox and widen the allowed dirs to the agent folder
-    // (parent of the workspace root). See PRD open question on Claude flags.
-    let agent_dir = p.workspace_root.parent().unwrap_or(p.workspace_root);
     let mut cmd = Command::new(p.command);
-    cmd.arg("-p")
-        .arg("--permission-mode")
-        .arg("bypassPermissions")
-        .arg("--add-dir")
-        .arg(agent_dir)
-        .current_dir(p.workspace)
+
+    if p.runner_kind == "claude-code" {
+        // Autonomous runner: no human is present to answer Claude's permission
+        // prompts, and the workflow needs the child to edit its issue file, which
+        // lives outside the workspace cwd (under the agent folder). Bypass the
+        // permission sandbox and widen the allowed dirs to the agent folder
+        // (parent of the workspace root). See PRD open question on Claude flags.
+        let agent_dir = p.workspace_root.parent().unwrap_or(p.workspace_root);
+        cmd.arg("-p")
+            .arg("--permission-mode")
+            .arg("bypassPermissions")
+            .arg("--add-dir")
+            .arg(agent_dir);
+        if let Some(ref model) = p.model {
+            cmd.arg("--model").arg(model);
+        }
+    }
+
+    cmd.current_dir(p.workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
