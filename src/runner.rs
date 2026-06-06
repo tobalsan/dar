@@ -36,8 +36,10 @@ const KILL_GRACE: Duration = Duration::from_secs(5);
 pub enum ExitKind {
     /// Process exited with code 0.
     Normal,
-    /// Non-zero exit, killed by signal, or timed out.
-    Abnormal,
+    /// Non-zero exit, killed by signal, or timed out. Carries the OS exit code
+    /// when the process exited on its own (non-zero status), or `None` when
+    /// killed by signal, timed out, or the wait call failed.
+    Abnormal(Option<i32>),
 }
 
 /// Why the orchestrator asked to kill a running child.
@@ -87,7 +89,7 @@ impl RunnerHandle {
     pub async fn wait(self) -> ExitKind {
         // The supervising task always resolves to an ExitKind; a JoinError
         // (panic/cancel) is treated as abnormal.
-        self.done.await.unwrap_or(ExitKind::Abnormal)
+        self.done.await.unwrap_or(ExitKind::Abnormal(None))
     }
 
     /// Ask the supervising task to terminate the child for the given reason.
@@ -218,19 +220,20 @@ async fn supervise(
                     return ExitKind::Normal;
                 }
                 Ok(s) => {
+                    let code = s.code();
                     logging::ev(&issue_id, "exit", &format!("status={s} (abnormal)"));
-                    return ExitKind::Abnormal;
+                    return ExitKind::Abnormal(code);
                 }
                 Err(e) => {
                     logging::ev(&issue_id, "exit", &format!("wait error: {e} (abnormal)"));
-                    return ExitKind::Abnormal;
+                    return ExitKind::Abnormal(None);
                 }
             }
         }
         // Per-attempt timeout.
         _ = tokio::time::sleep(timeout) => {
             logging::ev(&issue_id, "timeout", "max_run_timeout_ms exceeded; killing");
-            ExitKind::Abnormal
+            ExitKind::Abnormal(None)
         }
         // Operator stop / reconcile / timeout-from-orchestrator.
         reason = kill_rx => {
@@ -242,7 +245,7 @@ async fn supervise(
                 // through and just ensure the child is gone.
                 Err(_) => logging::ev(&issue_id, "kill", "handle dropped"),
             }
-            ExitKind::Abnormal
+            ExitKind::Abnormal(None)
         }
     };
 

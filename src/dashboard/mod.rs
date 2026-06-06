@@ -9,12 +9,13 @@ pub mod view;
 
 use std::net::IpAddr;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use askama::Template;
+use std::collections::HashMap;
 use tokio::sync::watch;
 
 use crate::state::{AppState, ControlMsg};
@@ -38,6 +39,9 @@ pub async fn serve(
         .route("/control/pause", post(control_pause))
         .route("/control/resume", post(control_resume))
         .route("/assets/{*path}", get(asset))
+        // Logs/Events API: paged run list and per-issue event cursor.
+        .route("/api/runs", get(api_runs))
+        .route("/api/events/{identifier}", get(api_events))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind((bind, port))
@@ -91,6 +95,35 @@ fn send_control(state: &AppState, msg: ControlMsg) -> StatusCode {
     match state.control_tx.send(msg) {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
+/// `GET /api/runs?page=N&size=N` — paged run list from SQLite (newest-first).
+async fn api_runs(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let page: usize = params.get("page").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let size: usize = params.get("size").and_then(|s| s.parse().ok()).unwrap_or(50).min(250);
+    match state.store.list_runs_paged(page, size) {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// `GET /api/events/{identifier}?since=N&limit=N` — events for an issue since
+/// an `event_id` cursor (pass `since=0` for all). Returns JSON array of event
+/// rows, ascending by `event_id`; the last row's `event_id` is the next cursor.
+async fn api_events(
+    State(state): State<AppState>,
+    Path(identifier): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let since: i64 = params.get("since").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let limit: usize = params.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100).min(500);
+    match state.store.list_events_since(&identifier, since, limit) {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 

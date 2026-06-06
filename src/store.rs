@@ -44,7 +44,7 @@ pub struct RunFinish {
 }
 
 /// A run row returned by list queries.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RunRow {
     pub run_id: String,
     pub issue_id: String,
@@ -74,7 +74,7 @@ pub struct NewEvent<'a> {
 }
 
 /// An event row returned by list queries.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct EventRow {
     pub event_id: i64,
     pub run_id: Option<String>,
@@ -231,17 +231,21 @@ impl Store {
         Ok(())
     }
 
-    /// On startup, mark any runs still flagged `process_alive=1` as crashed
-    /// (the process died without a clean finish). This prevents stale live rows.
-    pub fn mark_crashed_runs(&self) -> Result<()> {
+    /// On startup, mark any runs still flagged `process_alive=1` as
+    /// `interrupted_gateway_restart`, set `finished_at` to now, and clear
+    /// `process_alive`. Returns the number of rows updated.
+    pub fn mark_crashed_runs(&self) -> Result<usize> {
+        let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE runs SET outcome='Crashed', process_alive=0
-             WHERE process_alive=1 AND finished_at IS NULL",
-            [],
-        )
-        .context("mark_crashed_runs")?;
-        Ok(())
+        let n = conn
+            .execute(
+                "UPDATE runs
+                 SET outcome='interrupted_gateway_restart', process_alive=0, finished_at=?1
+                 WHERE process_alive=1 AND finished_at IS NULL",
+                params![now],
+            )
+            .context("mark_crashed_runs")?;
+        Ok(n)
     }
 
     /// Load the `limit` most recent finished runs, newest-first. Used to seed
@@ -282,6 +286,39 @@ impl Store {
             });
         }
         Ok(entries)
+    }
+
+    /// List events for `run_id` with `event_id > since`, ascending, up to
+    /// `limit`. Pass `since = 0` for the first page.
+    pub fn list_events_for_run(
+        &self,
+        run_id: &str,
+        since: i64,
+        limit: usize,
+    ) -> Result<Vec<EventRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT event_id, run_id, issue_identifier, kind, payload, ts
+             FROM events
+             WHERE run_id = ?1 AND event_id > ?2
+             ORDER BY event_id ASC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![run_id, since, limit as i64], |row| {
+            Ok(EventRow {
+                event_id: row.get(0)?,
+                run_id: row.get(1)?,
+                issue_identifier: row.get(2)?,
+                kind: row.get(3)?,
+                payload: row.get(4)?,
+                ts: row.get(5)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// List all runs, paged (0-based `page`), newest-first.
@@ -430,6 +467,7 @@ fn run_status_to_str(s: RunStatus) -> &'static str {
         RunStatus::Cancelled => "Cancelled",
         RunStatus::Failed => "Failed",
         RunStatus::Succeeded => "Succeeded",
+        RunStatus::Crashed => "interrupted_gateway_restart",
     }
 }
 
@@ -440,6 +478,7 @@ fn str_to_run_status(s: &str) -> Option<RunStatus> {
         "Cancelled" => Some(RunStatus::Cancelled),
         "Failed" => Some(RunStatus::Failed),
         "Succeeded" => Some(RunStatus::Succeeded),
+        "Crashed" | "interrupted_gateway_restart" => Some(RunStatus::Crashed),
         _ => None,
     }
 }
@@ -540,6 +579,44 @@ mod tests {
     }
 
     #[test]
+    fn non_zero_exit_code_stored() {
+        let store = open_tmp();
+        let now = Utc::now();
+        let run_id = new_run_id("TEST-EC", &now);
+
+        store
+            .insert_run(&NewRun {
+                run_id: &run_id,
+                issue_id: "idec",
+                issue_identifier: "TEST-EC",
+                workspace: "/tmp/ws",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 4242,
+                worker_id: None,
+                started_at: now,
+            })
+            .unwrap();
+
+        store
+            .finish_run(
+                &run_id,
+                &RunFinish {
+                    outcome: RunStatus::Failed,
+                    exit_code: Some(2),
+                    finished_at: Utc::now(),
+                },
+            )
+            .unwrap();
+
+        let pages = store.list_runs_paged(0, 10).unwrap();
+        let row = pages.iter().find(|r| r.run_id == run_id).unwrap();
+        assert_eq!(row.exit_code, Some(2), "non-zero exit code must be stored");
+        assert_eq!(row.outcome.as_deref(), Some("Failed"));
+    }
+
+    #[test]
     fn mark_crashed_runs_clears_alive_flag() {
         let store = open_tmp();
         let now = Utc::now();
@@ -561,12 +638,89 @@ mod tests {
             .unwrap();
 
         // Simulate crash: run never finished.
-        store.mark_crashed_runs().unwrap();
+        let n = store.mark_crashed_runs().unwrap();
+        assert_eq!(n, 1, "exactly one row should be marked");
 
         let pages = store.list_runs_paged(0, 10).unwrap();
         let row = pages.iter().find(|r| r.run_id == run_id).unwrap();
         assert!(!row.process_alive);
-        assert_eq!(row.outcome.as_deref(), Some("Crashed"));
+        assert_eq!(row.outcome.as_deref(), Some("interrupted_gateway_restart"));
+        assert!(row.finished_at.is_some(), "finished_at must be set after crash mark");
+    }
+
+    #[test]
+    fn crashed_runs_load_after_restart() {
+        let store = open_tmp();
+        let now = Utc::now();
+        let run_id = new_run_id("TEST-5", &now);
+
+        store
+            .insert_run(&NewRun {
+                run_id: &run_id,
+                issue_id: "id5",
+                issue_identifier: "TEST-5",
+                workspace: "/tmp/ws",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 5555,
+                worker_id: None,
+                started_at: now,
+            })
+            .unwrap();
+
+        // Mark as crashed (simulating gateway restart).
+        store.mark_crashed_runs().unwrap();
+
+        // load_recent_runs must include the crashed row.
+        let recent = store.load_recent_runs(10).unwrap();
+        let entry = recent.iter().find(|e| e.identifier == "TEST-5");
+        assert!(entry.is_some(), "crashed run must appear in load_recent_runs");
+        assert!(
+            matches!(entry.unwrap().status, RunStatus::Crashed),
+            "status must be Crashed"
+        );
+    }
+
+    #[test]
+    fn list_events_for_run_paged() {
+        let store = open_tmp();
+        let now = Utc::now();
+
+        let run_id = new_run_id("TEST-6", &now);
+        store
+            .insert_run(&NewRun {
+                run_id: &run_id,
+                issue_id: "id6",
+                issue_identifier: "TEST-6",
+                workspace: "/tmp/ws",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 6666,
+                worker_id: None,
+                started_at: now,
+            })
+            .unwrap();
+
+        for i in 0..5 {
+            store
+                .insert_event(&NewEvent {
+                    run_id: Some(&run_id),
+                    issue_identifier: "TEST-6",
+                    kind: "stdout",
+                    payload: &format!("line {i}"),
+                    ts: now,
+                })
+                .unwrap();
+        }
+
+        let page1 = store.list_events_for_run(&run_id, 0, 3).unwrap();
+        assert_eq!(page1.len(), 3);
+        let cursor = page1.last().unwrap().event_id;
+
+        let page2 = store.list_events_for_run(&run_id, cursor, 10).unwrap();
+        assert_eq!(page2.len(), 2);
     }
 
     #[test]

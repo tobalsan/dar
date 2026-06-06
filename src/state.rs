@@ -23,6 +23,9 @@ pub enum RunStatus {
     Cancelled,
     Failed,
     Succeeded,
+    /// Run was in-progress when the gateway process exited without a clean
+    /// shutdown; marked at startup via `Store::mark_crashed_runs`.
+    Crashed,
 }
 
 /// Snapshot of the currently-active run for the dashboard.

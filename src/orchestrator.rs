@@ -30,7 +30,7 @@ use crate::paths::{issue_workspace, AgentPaths};
 use crate::prompt::PromptRenderer;
 use crate::runner::{self, ExitKind, KillReason, RunnerHandle, SpawnParams};
 use crate::state::{ActiveRun, AppState, ControlMsg, HistoryEntry, QueueItem, RetryItem, RunStatus};
-use crate::store::{new_run_id, NewEvent, NewRun, RunFinish};
+use crate::store::{new_run_id, NewClaim, NewEvent, NewHeartbeat, NewRun, RunFinish};
 use std::sync::Mutex;
 
 /// Max backoff cap for abnormal-exit retries (5 minutes).
@@ -48,6 +48,8 @@ struct RunSlot {
     /// SQLite run_id for this dispatch attempt. Used for finish_run / event writes.
     run_id: String,
     started_at: DateTime<Utc>,
+    /// SQLite claim_id from `insert_claim` at dispatch; released at finish.
+    claim_id: Option<i64>,
 }
 
 /// One pending retry. `continuation` retries do NOT count against `max_retries`.
@@ -211,7 +213,7 @@ impl Orchestrator {
             if let Some(handle) = slot.handle.take() {
                 handle.request_kill(KillReason::Reconcile);
             }
-            self.record_history(&slot.run_id, &slot.identifier, status, pid, note, None);
+            self.record_history(&slot.run_id, &slot.identifier, status, pid, note, None, slot.claim_id);
             // Not retried: terminal = done, missing/non-active = cancelled.
         }
     }
@@ -237,6 +239,7 @@ impl Orchestrator {
         for idx in finished.into_iter().rev() {
             let mut slot = self.slots.remove(idx);
             let pid = slot.handle.as_ref().map(|h| h.pid()).unwrap_or(0);
+            let claim_id = slot.claim_id;
             let handle = match slot.handle.take() {
                 Some(h) => h,
                 None => continue,
@@ -257,10 +260,22 @@ impl Orchestrator {
                     match state_now {
                         Some(ref st) if terminal.contains(st) => {
                             logging::ev(&id, "succeeded", "terminal after normal exit");
-                            self.record_history(&run_id, &id, RunStatus::Succeeded, pid, "terminal after normal exit", Some(0));
+                            self.record_history(&run_id, &id, RunStatus::Succeeded, pid, "terminal after normal exit", Some(0), claim_id);
                         }
                         Some(ref st) if active.contains(st) => {
                             logging::ev(&id, "continuation", "still active after exit 0; retry 1s");
+                            // Release the claim for this attempt; a new claim is
+                            // opened when the continuation attempt is dispatched.
+                            if let Some(cid) = claim_id {
+                                let _ = self.state.store.release_claim(cid, Utc::now());
+                            }
+                            let _ = self.state.store.insert_event(&NewEvent {
+                                run_id: Some(&run_id),
+                                issue_identifier: &id,
+                                kind: "lifecycle",
+                                payload: "continuation still active after exit 0; retry 1s",
+                                ts: Utc::now(),
+                            });
                             self.retries.push(Retry {
                                 identifier: id.clone(),
                                 attempt: slot.attempt, // continuation: not incremented
@@ -272,11 +287,11 @@ impl Orchestrator {
                         _ => {
                             // Missing or neither active nor terminal: succeed, no re-dispatch.
                             logging::ev(&id, "succeeded", "non-active after normal exit; releasing");
-                            self.record_history(&run_id, &id, RunStatus::Succeeded, pid, "non-active after normal exit", Some(0));
+                            self.record_history(&run_id, &id, RunStatus::Succeeded, pid, "non-active after normal exit", Some(0), claim_id);
                         }
                     }
                 }
-                ExitKind::Abnormal => {
+                ExitKind::Abnormal(exit_code) => {
                     // Step 8: backoff retry up to max_retries, else Failed.
                     if slot.attempt >= max_retries {
                         logging::ev(
@@ -284,7 +299,7 @@ impl Orchestrator {
                             "failed",
                             &format!("abnormal exit; retries exhausted ({}/{})", slot.attempt, max_retries),
                         );
-                        self.record_history(&run_id, &id, RunStatus::Failed, pid, "abnormal exit; retries exhausted", None);
+                        self.record_history(&run_id, &id, RunStatus::Failed, pid, "abnormal exit; retries exhausted", exit_code, claim_id);
                     } else {
                         let next = slot.attempt + 1;
                         let delay = backoff(self.cfg.orchestrator.retry_backoff_ms, next);
@@ -294,6 +309,18 @@ impl Orchestrator {
                             "retry_queued",
                             &format!("abnormal exit; attempt {next}/{max_retries} in {}ms", delay.as_millis()),
                         );
+                        // Release claim for this attempt; a new claim is opened
+                        // when the retry is dispatched.
+                        if let Some(cid) = claim_id {
+                            let _ = self.state.store.release_claim(cid, Utc::now());
+                        }
+                        let _ = self.state.store.insert_event(&NewEvent {
+                            run_id: Some(&run_id),
+                            issue_identifier: &id,
+                            kind: "lifecycle",
+                            payload: &format!("retry_queued attempt {next}/{max_retries} in {}ms", delay.as_millis()),
+                            ts: Utc::now(),
+                        });
                         self.retries.push(Retry {
                             identifier: id.clone(),
                             attempt: next,
@@ -410,11 +437,15 @@ impl Orchestrator {
         let prompt = match self.prompt.render(&issue) {
             Ok(p) => p,
             Err(e) => {
-                logging::ev(
-                    &issue.identifier,
-                    "render_error",
-                    &format!("WORKFLOW.md render failed: {e:#}"),
-                );
+                let msg = format!("WORKFLOW.md render failed: {e:#}");
+                logging::ev(&issue.identifier, "render_error", &msg);
+                let _ = self.state.store.insert_event(&NewEvent {
+                    run_id: None,
+                    issue_identifier: &issue.identifier,
+                    kind: "lifecycle",
+                    payload: &format!("render_error {msg}"),
+                    ts: Utc::now(),
+                });
                 self.schedule_backoff_after_render_failure(&issue, attempt, &format!("render error: {e}"));
                 return;
             }
@@ -424,22 +455,30 @@ impl Orchestrator {
         let ws_root = self.paths.workspace_root(&self.cfg.workspace);
         // Ensure the workspace root exists before issue_workspace canonicalizes.
         if let Err(e) = std::fs::create_dir_all(&ws_root) {
-            logging::ev(
-                &issue.identifier,
-                "workspace_error",
-                &format!("creating workspace root {}: {e}", ws_root.display()),
-            );
+            let msg = format!("creating workspace root {}: {e}", ws_root.display());
+            logging::ev(&issue.identifier, "workspace_error", &msg);
+            let _ = self.state.store.insert_event(&NewEvent {
+                run_id: None,
+                issue_identifier: &issue.identifier,
+                kind: "lifecycle",
+                payload: &format!("workspace_error {msg}"),
+                ts: Utc::now(),
+            });
             self.schedule_backoff_after_render_failure(&issue, attempt, "workspace root error");
             return;
         }
         let workspace = match issue_workspace(&ws_root, &issue.identifier) {
             Ok(w) => w,
             Err(e) => {
-                logging::ev(
-                    &issue.identifier,
-                    "workspace_error",
-                    &format!("{e:#}"),
-                );
+                let msg = format!("{e:#}");
+                logging::ev(&issue.identifier, "workspace_error", &msg);
+                let _ = self.state.store.insert_event(&NewEvent {
+                    run_id: None,
+                    issue_identifier: &issue.identifier,
+                    kind: "lifecycle",
+                    payload: &format!("workspace_error {msg}"),
+                    ts: Utc::now(),
+                });
                 self.schedule_backoff_after_render_failure(&issue, attempt, "workspace error");
                 return;
             }
@@ -480,6 +519,13 @@ impl Orchestrator {
                 }) {
                     tracing::warn!(issue = %issue.identifier, "insert_run SQLite write failed: {e:#}");
                 }
+                // Mirror claim into the claims table for tracking.
+                let claim_id = self.state.store.insert_claim(&NewClaim {
+                    run_id: &run_id,
+                    issue_identifier: &issue.identifier,
+                    worker_id: "orchestrator",
+                    claimed_at: started_at,
+                }).ok();
                 // Lifecycle event: dispatch.
                 let _ = self.state.store.insert_event(&NewEvent {
                     run_id: Some(&run_id),
@@ -496,10 +542,19 @@ impl Orchestrator {
                     attempt,
                     run_id,
                     started_at,
+                    claim_id,
                 });
             }
             Err(e) => {
-                logging::ev(&issue.identifier, "spawn_error", &format!("{e:#}"));
+                let msg = format!("{e:#}");
+                logging::ev(&issue.identifier, "spawn_error", &msg);
+                let _ = self.state.store.insert_event(&NewEvent {
+                    run_id: None,
+                    issue_identifier: &issue.identifier,
+                    kind: "lifecycle",
+                    payload: &format!("spawn_error {msg}"),
+                    ts: Utc::now(),
+                });
                 self.schedule_backoff_after_render_failure(&issue, attempt, "spawn error");
             }
         }
@@ -545,7 +600,8 @@ impl Orchestrator {
         }
     }
 
-    /// Record a finished run: update the in-memory history ring and the SQLite store.
+    /// Record a finished run: update the in-memory history ring, write outcome
+    /// to SQLite, release the claim, and persist a terminal lifecycle event.
     fn record_history(
         &self,
         run_id: &str,
@@ -554,6 +610,7 @@ impl Orchestrator {
         pid: u32,
         note: &str,
         exit_code: Option<i32>,
+        claim_id: Option<i64>,
     ) {
         let ended_at = Utc::now();
         self.state.history.push(HistoryEntry {
@@ -573,6 +630,18 @@ impl Orchestrator {
         ) {
             tracing::warn!(issue = %identifier, "finish_run SQLite write failed: {e:#}");
         }
+        if let Some(cid) = claim_id {
+            if let Err(e) = self.state.store.release_claim(cid, ended_at) {
+                tracing::warn!(issue = %identifier, "release_claim SQLite write failed: {e:#}");
+            }
+        }
+        let _ = self.state.store.insert_event(&NewEvent {
+            run_id: Some(run_id),
+            issue_identifier: identifier,
+            kind: "lifecycle",
+            payload: &format!("{:?} {note}", status),
+            ts: ended_at,
+        });
     }
 
     /// Request-kill every running child for the given reason.
@@ -605,13 +674,39 @@ impl Orchestrator {
                 ) {
                     tracing::warn!(issue = %slot.identifier, "finish_run (kill_all) SQLite write failed: {e:#}");
                 }
+                if let Some(cid) = slot.claim_id {
+                    if let Err(e) = self.state.store.release_claim(cid, ended_at) {
+                        tracing::warn!(issue = %slot.identifier, "release_claim (kill_all) SQLite write failed: {e:#}");
+                    }
+                }
+                let _ = self.state.store.insert_event(&NewEvent {
+                    run_id: Some(&slot.run_id),
+                    issue_identifier: &slot.identifier,
+                    kind: "lifecycle",
+                    payload: "Cancelled operator stop / shutdown",
+                    ts: ended_at,
+                });
             }
         }
     }
 
     /// Write the active-run, queue, and retry snapshots to `AppState` for the
-    /// dashboard.
+    /// dashboard. Also inserts one heartbeat row per actively-running slot so
+    /// the heartbeats table reflects in-process liveness each tick.
     async fn publish_snapshots(&self) {
+        // Heartbeat every live slot once per tick.
+        let now = Utc::now();
+        for slot in &self.slots {
+            if slot.handle.as_ref().map(|h| !h.is_finished()).unwrap_or(false) {
+                let _ = self.state.store.insert_heartbeat(&NewHeartbeat {
+                    run_id: &slot.run_id,
+                    issue_identifier: &slot.identifier,
+                    worker_id: "orchestrator",
+                    ts: now,
+                });
+            }
+        }
+
         // Active run (v0 max_concurrent typically 1; surface the first slot).
         let active = self.slots.first().map(|slot| {
             let last_event = self
