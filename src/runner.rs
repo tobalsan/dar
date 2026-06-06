@@ -26,6 +26,7 @@ use tokio::sync::oneshot;
 use crate::logging;
 use crate::paths::assert_contained;
 use crate::state::EventRing;
+use crate::store::{NewEvent, Store};
 
 /// Grace period between SIGTERM and SIGKILL of the child process group.
 const KILL_GRACE: Duration = Duration::from_secs(5);
@@ -53,8 +54,11 @@ pub struct SpawnParams<'a> {
     pub workspace_root: &'a Path,
     pub prompt: String,
     pub issue_id: String,
+    /// SQLite run_id for this dispatch attempt. Used to tag event rows.
+    pub run_id: String,
     pub max_run_timeout_ms: u64,
     pub events: Arc<EventRing>,
+    pub store: Arc<Store>,
     pub last_event_at: Arc<Mutex<DateTime<Utc>>>,
 }
 
@@ -159,8 +163,10 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
         spawn_line_pump(
             out,
             p.issue_id.clone(),
+            p.run_id.clone(),
             "stdout",
             Arc::clone(&p.events),
+            Arc::clone(&p.store),
             Arc::clone(&p.last_event_at),
         );
     }
@@ -168,8 +174,10 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
         spawn_line_pump(
             err,
             p.issue_id.clone(),
+            p.run_id.clone(),
             "stderr",
             Arc::clone(&p.events),
+            Arc::clone(&p.store),
             Arc::clone(&p.last_event_at),
         );
     }
@@ -245,13 +253,15 @@ async fn supervise(
     kind
 }
 
-/// Stream one byte source line-by-line into the event ring + log, updating
-/// `last_event_at` per line. Lines are prefixed `child[ID]:` per PRD.
+/// Stream one byte source line-by-line into the event ring + SQLite + log,
+/// updating `last_event_at` per line. Lines are prefixed `child[ID]:` per PRD.
 fn spawn_line_pump<R>(
     reader: R,
     issue_id: String,
+    run_id: String,
     stream: &'static str,
     events: Arc<EventRing>,
+    store: Arc<Store>,
     last_event_at: Arc<Mutex<DateTime<Utc>>>,
 ) where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -261,12 +271,21 @@ fn spawn_line_pump<R>(
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
+                    let ts = Utc::now();
                     let formatted = format!("child[{issue_id}]: {line}");
                     events.push(formatted.clone());
                     if let Ok(mut t) = last_event_at.lock() {
-                        *t = Utc::now();
+                        *t = ts;
                     }
                     logging::ev(&issue_id, stream, &line);
+                    // Best-effort SQLite write; don't stall the pump on failure.
+                    let _ = store.insert_event(&NewEvent {
+                        run_id: Some(&run_id),
+                        issue_identifier: &issue_id,
+                        kind: stream,
+                        payload: &line,
+                        ts,
+                    });
                 }
                 Ok(None) => break, // EOF
                 Err(e) => {

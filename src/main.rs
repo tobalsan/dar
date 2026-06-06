@@ -15,6 +15,7 @@ mod paths;
 mod prompt;
 mod runner;
 mod state;
+mod store;
 mod tracker;
 
 use std::sync::Arc;
@@ -74,13 +75,26 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     // Control channel: dashboard -> orchestrator.
     let (control_tx, control_rx) = mpsc::unbounded_channel();
 
+    // Open SQLite store under <root>/data/store.db; mark any crashed runs from
+    // a previous invocation, then seed the in-memory history ring from SQLite.
+    let store = Arc::new(
+        store::Store::open(&paths.store_db())
+            .context("opening SQLite persistence store")?,
+    );
+    if let Err(e) = store.mark_crashed_runs() {
+        tracing::warn!("mark_crashed_runs failed: {e:#}");
+    }
+    let history_seed = store
+        .load_recent_runs(state::HistoryRing::CAP)
+        .unwrap_or_default();
+
     let agent_info = AgentInfo {
         id: cfg.id.clone(),
         folder: paths.root.display().to_string(),
         tracker: cfg.tracker.use_.clone(),
         runner: cfg.runner.use_.clone(),
     };
-    let app_state = AppState::new(agent_info, control_tx, paths.history_file());
+    let app_state = AppState::new(agent_info, control_tx, Arc::clone(&store), history_seed);
 
     // Shutdown signal observed by both tasks.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

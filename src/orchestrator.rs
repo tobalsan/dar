@@ -29,7 +29,8 @@ use crate::logging;
 use crate::paths::{issue_workspace, AgentPaths};
 use crate::prompt::PromptRenderer;
 use crate::runner::{self, ExitKind, KillReason, RunnerHandle, SpawnParams};
-use crate::state::{ActiveRun, AppState, ControlMsg, QueueItem, RetryItem, RunStatus};
+use crate::state::{ActiveRun, AppState, ControlMsg, HistoryEntry, QueueItem, RetryItem, RunStatus};
+use crate::store::{new_run_id, NewEvent, NewRun, RunFinish};
 use std::sync::Mutex;
 
 /// Max backoff cap for abnormal-exit retries (5 minutes).
@@ -44,6 +45,9 @@ struct RunSlot {
     workspace: String,
     handle: Option<RunnerHandle>,
     attempt: u32,
+    /// SQLite run_id for this dispatch attempt. Used for finish_run / event writes.
+    run_id: String,
+    started_at: DateTime<Utc>,
 }
 
 /// One pending retry. `continuation` retries do NOT count against `max_retries`.
@@ -207,7 +211,7 @@ impl Orchestrator {
             if let Some(handle) = slot.handle.take() {
                 handle.request_kill(KillReason::Reconcile);
             }
-            self.record_history(&slot.identifier, status, pid, note);
+            self.record_history(&slot.run_id, &slot.identifier, status, pid, note, None);
             // Not retried: terminal = done, missing/non-active = cancelled.
         }
     }
@@ -239,6 +243,7 @@ impl Orchestrator {
             };
             let exit = handle.wait().await;
             let id = slot.identifier.clone();
+            let run_id = slot.run_id.clone();
 
             match exit {
                 ExitKind::Normal => {
@@ -252,7 +257,7 @@ impl Orchestrator {
                     match state_now {
                         Some(ref st) if terminal.contains(st) => {
                             logging::ev(&id, "succeeded", "terminal after normal exit");
-                            self.record_history(&id, RunStatus::Succeeded, pid, "terminal after normal exit");
+                            self.record_history(&run_id, &id, RunStatus::Succeeded, pid, "terminal after normal exit", Some(0));
                         }
                         Some(ref st) if active.contains(st) => {
                             logging::ev(&id, "continuation", "still active after exit 0; retry 1s");
@@ -267,7 +272,7 @@ impl Orchestrator {
                         _ => {
                             // Missing or neither active nor terminal: succeed, no re-dispatch.
                             logging::ev(&id, "succeeded", "non-active after normal exit; releasing");
-                            self.record_history(&id, RunStatus::Succeeded, pid, "non-active after normal exit");
+                            self.record_history(&run_id, &id, RunStatus::Succeeded, pid, "non-active after normal exit", Some(0));
                         }
                     }
                 }
@@ -279,7 +284,7 @@ impl Orchestrator {
                             "failed",
                             &format!("abnormal exit; retries exhausted ({}/{})", slot.attempt, max_retries),
                         );
-                        self.record_history(&id, RunStatus::Failed, pid, "abnormal exit; retries exhausted");
+                        self.record_history(&run_id, &id, RunStatus::Failed, pid, "abnormal exit; retries exhausted", None);
                     } else {
                         let next = slot.attempt + 1;
                         let delay = backoff(self.cfg.orchestrator.retry_backoff_ms, next);
@@ -440,26 +445,57 @@ impl Orchestrator {
             }
         };
 
-        let last_event_at = Arc::new(Mutex::new(Utc::now()));
+        let started_at = Utc::now();
+        let run_id = new_run_id(&issue.identifier, &started_at);
+
+        let last_event_at = Arc::new(Mutex::new(started_at));
         let params = SpawnParams {
             command: &self.cfg.runner.command,
             workspace: &workspace,
             workspace_root: &ws_root,
             prompt,
             issue_id: issue.identifier.clone(),
+            run_id: run_id.clone(),
             max_run_timeout_ms: self.cfg.runner.max_run_timeout_ms,
             events: Arc::clone(&self.state.events),
+            store: Arc::clone(&self.state.store),
             last_event_at: Arc::clone(&last_event_at),
         };
 
         match runner::spawn(params).await {
             Ok(handle) => {
+                let pid = handle.pid();
+                // Persist the new run to SQLite.
+                if let Err(e) = self.state.store.insert_run(&NewRun {
+                    run_id: &run_id,
+                    issue_id: &issue.id,
+                    issue_identifier: &issue.identifier,
+                    workspace: &workspace.display().to_string(),
+                    profile_json: None,
+                    workflow_path: Some(&self.paths.workflow_md().display().to_string()),
+                    workflow_sha: None,
+                    pid,
+                    worker_id: None,
+                    started_at,
+                }) {
+                    tracing::warn!(issue = %issue.identifier, "insert_run SQLite write failed: {e:#}");
+                }
+                // Lifecycle event: dispatch.
+                let _ = self.state.store.insert_event(&NewEvent {
+                    run_id: Some(&run_id),
+                    issue_identifier: &issue.identifier,
+                    kind: "lifecycle",
+                    payload: &format!("dispatch attempt={attempt} pid={pid}"),
+                    ts: started_at,
+                });
                 self.slots.push(RunSlot {
                     identifier: issue.identifier.clone(),
                     workspace: workspace.display().to_string(),
                     issue,
                     handle: Some(handle),
                     attempt,
+                    run_id,
+                    started_at,
                 });
             }
             Err(e) => {
@@ -509,15 +545,34 @@ impl Orchestrator {
         }
     }
 
-    /// Record a finished run in the dashboard history ring.
-    fn record_history(&self, identifier: &str, status: RunStatus, pid: u32, note: &str) {
-        self.state.history.push(crate::state::HistoryEntry {
+    /// Record a finished run: update the in-memory history ring and the SQLite store.
+    fn record_history(
+        &self,
+        run_id: &str,
+        identifier: &str,
+        status: RunStatus,
+        pid: u32,
+        note: &str,
+        exit_code: Option<i32>,
+    ) {
+        let ended_at = Utc::now();
+        self.state.history.push(HistoryEntry {
             identifier: identifier.to_string(),
             status,
             pid,
-            ended_at: Utc::now(),
+            ended_at,
             note: note.to_string(),
         });
+        if let Err(e) = self.state.store.finish_run(
+            run_id,
+            &RunFinish {
+                outcome: status,
+                exit_code,
+                finished_at: ended_at,
+            },
+        ) {
+            tracing::warn!(issue = %identifier, "finish_run SQLite write failed: {e:#}");
+        }
     }
 
     /// Request-kill every running child for the given reason.
@@ -532,13 +587,24 @@ impl Orchestrator {
             let pid = slot.handle.as_ref().map(|h| h.pid()).unwrap_or(0);
             if let Some(handle) = slot.handle.take() {
                 handle.request_kill(make(&reason));
-                self.state.history.push(crate::state::HistoryEntry {
+                let ended_at = Utc::now();
+                self.state.history.push(HistoryEntry {
                     identifier: slot.identifier.clone(),
                     status: RunStatus::Cancelled,
                     pid,
-                    ended_at: Utc::now(),
+                    ended_at,
                     note: "operator stop / shutdown".to_string(),
                 });
+                if let Err(e) = self.state.store.finish_run(
+                    &slot.run_id,
+                    &RunFinish {
+                        outcome: RunStatus::Cancelled,
+                        exit_code: None,
+                        finished_at: ended_at,
+                    },
+                ) {
+                    tracing::warn!(issue = %slot.identifier, "finish_run (kill_all) SQLite write failed: {e:#}");
+                }
             }
         }
     }
