@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agentropy</title>
+<style>
+  :root {
+    --bg: #0c0d10;
+    --bg-soft: #14161b;
+    --card: #16181f;
+    --card-border: #25283011;
+    --line: #2a2e38;
+    --text: #f4f5f7;
+    --muted: #9aa1ad;
+    --faint: #6b7280;
+    --accent: #6c5ce7;
+    --accent-soft: #6c5ce71a;
+    --accent-line: #6c5ce744;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 32px; }
+
+  /* HERO */
+  .hero {
+    padding: 96px 0 72px;
+    border-bottom: 1px solid var(--line);
+    background:
+      radial-gradient(900px 380px at 78% -8%, var(--accent-soft), transparent 60%),
+      var(--bg);
+  }
+  .badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-line);
+    padding: 6px 12px; border-radius: 999px;
+    margin-bottom: 28px;
+  }
+  .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  .hero h1 {
+    font-size: clamp(34px, 5.2vw, 58px);
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+    font-weight: 700;
+    max-width: 18ch;
+  }
+  .hero h1 .accent { color: var(--accent); }
+  .hero .lead {
+    margin-top: 24px;
+    font-size: clamp(17px, 2vw, 21px);
+    color: var(--muted);
+    max-width: 60ch;
+  }
+  .hero .sub {
+    margin-top: 22px;
+    font-size: 14px;
+    color: var(--faint);
+    letter-spacing: .02em;
+  }
+  .hero .sub strong { color: var(--text); font-weight: 600; }
+
+  /* SECTION */
+  section { padding: 72px 0; border-bottom: 1px solid var(--line); }
+  .eyebrow {
+    font-size: 12px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--accent); margin-bottom: 14px;
+  }
+  .section-title {
+    font-size: clamp(24px, 3.2vw, 32px);
+    letter-spacing: -0.01em; font-weight: 700; line-height: 1.2;
+    max-width: 22ch;
+  }
+  .section-sub { margin-top: 16px; color: var(--muted); font-size: 17px; max-width: 64ch; }
+  .section-sub code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--bg-soft); border: 1px solid var(--line);
+    padding: 2px 7px; border-radius: 6px; font-size: .9em; color: var(--text);
+  }
+
+  /* OUTCOME GRID */
+  .grid {
+    margin-top: 44px;
+    display: grid; gap: 18px;
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .card {
+    position: relative;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 26px 24px 24px;
+    transition: border-color .2s ease, transform .2s ease;
+  }
+  .card:hover { border-color: var(--accent-line); transform: translateY(-2px); }
+  .card .num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; border-radius: 9px;
+    background: var(--accent-soft); border: 1px solid var(--accent-line);
+    color: var(--accent); font-weight: 700; font-size: 14px;
+    margin-bottom: 16px;
+  }
+  .card h3 { font-size: 17px; font-weight: 650; letter-spacing: -0.01em; margin-bottom: 8px; }
+  .card p { font-size: 14.5px; color: var(--muted); line-height: 1.6; }
+
+  /* GUARANTEES STRIP */
+  .strip {
+    margin-top: 8px;
+    display: grid; gap: 1px;
+    grid-template-columns: repeat(4, 1fr);
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 16px; overflow: hidden;
+  }
+  .strip .cell { background: var(--bg-soft); padding: 26px 22px; }
+  .strip .cell .ico { color: var(--accent); margin-bottom: 14px; display: block; }
+  .strip .cell h4 { font-size: 15px; font-weight: 650; margin-bottom: 6px; letter-spacing: -0.01em; }
+  .strip .cell p { font-size: 13.5px; color: var(--muted); line-height: 1.55; }
+
+  /* FLOW */
+  .flow {
+    margin-top: 44px;
+    display: flex; align-items: stretch; gap: 0; flex-wrap: nowrap;
+  }
+  .node {
+    flex: 1;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 20px 16px;
+    text-align: center;
+    display: flex; flex-direction: column; align-items: center; gap: 10px;
+    min-width: 0;
+  }
+  .node.core { border-color: var(--accent-line); background: var(--accent-soft); }
+  .node .ni { color: var(--accent); }
+  .node .nt { font-size: 13.5px; font-weight: 650; letter-spacing: -0.01em; }
+  .node .nd { font-size: 12px; color: var(--muted); line-height: 1.4; }
+  .arrow {
+    flex: 0 0 38px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--faint);
+  }
+  .loop {
+    margin-top: 18px;
+    display: flex; align-items: center; gap: 14px;
+    background: var(--bg-soft);
+    border: 1px dashed var(--accent-line);
+    border-radius: 12px;
+    padding: 16px 20px;
+  }
+  .loop .li { color: var(--accent); flex: 0 0 auto; }
+  .loop p { font-size: 14px; color: var(--muted); }
+  .loop p strong { color: var(--text); font-weight: 650; }
+
+  /* CLOSING */
+  .closing { border-bottom: none; text-align: center; padding: 90px 0 100px; }
+  .closing .quote {
+    font-size: clamp(22px, 3.4vw, 34px);
+    line-height: 1.32; letter-spacing: -0.015em; font-weight: 600;
+    max-width: 26ch; margin: 0 auto;
+  }
+  .closing .quote .accent { color: var(--accent); }
+  .closing .tag { margin-top: 26px; font-size: 14px; color: var(--faint); letter-spacing: .04em; }
+
+  /* RESPONSIVE */
+  @media (max-width: 900px) {
+    .grid { grid-template-columns: repeat(2, 1fr); }
+    .strip { grid-template-columns: repeat(2, 1fr); }
+    .flow { flex-direction: column; }
+    .arrow { flex-basis: auto; transform: rotate(90deg); padding: 6px 0; }
+  }
+  @media (max-width: 560px) {
+    .wrap { padding: 0 22px; }
+    .hero { padding: 64px 0 52px; }
+    section { padding: 56px 0; }
+    .grid { grid-template-columns: 1fr; }
+    .strip { grid-template-columns: 1fr; }
+  }
+
+  /* PRINT */
+  @media print {
+    :root {
+      --bg: #fff; --bg-soft: #f7f7fa; --card: #fff; --line: #e1e3ea;
+      --text: #111; --muted: #444; --faint: #777;
+    }
+    body { background: #fff; color: #111; }
+    .hero, section { background: #fff !important; border-color: #e1e3ea; }
+    .card:hover { transform: none; }
+    .card, .node, .strip, .loop { break-inside: avoid; }
+    .flow { flex-direction: row; }
+    .arrow { transform: none; }
+    section { page-break-inside: avoid; padding: 36px 0; }
+  }
+</style>
+</head>
+<body>
+
+  <!-- HERO -->
+  <header class="hero">
+    <div class="wrap">
+      <span class="badge"><span class="dot"></span>Agentropy</span>
+      <h1>A folder that <span class="accent">works your Linear issues</span> on its own.</h1>
+      <p class="lead">Drop one small program into a project folder. Run it, and it autonomously works through your Linear issues using AI coding agents &mdash; with a live dashboard to watch and control it.</p>
+      <p class="sub">A self-contained AI work runner. <strong>One binary. One folder. No platform required.</strong></p>
+    </div>
+  </header>
+
+  <!-- THE SHIFT -->
+  <section>
+    <div class="wrap">
+      <p class="eyebrow">The shift</p>
+      <h2 class="section-title">From a big platform to a tiny program you own.</h2>
+      <p class="section-sub">Today this capability lives buried inside AIHub, our large centralized platform. We're extracting it into its own tiny standalone program. You <code>cd</code> into any project folder that has a <code>WORKFLOW.md</code> and type <code>agentropy run</code>. That folder <em>becomes</em> the agent &mdash; move the folder, move the agent. Nothing else to install except the AI tool it drives.</p>
+    </div>
+  </section>
+
+  <!-- WHAT IT DOES -->
+  <section>
+    <div class="wrap">
+      <p class="eyebrow">What exists when it's done</p>
+      <h2 class="section-title">Six things the finished product does.</h2>
+      <div class="grid">
+        <div class="card">
+          <span class="num">1</span>
+          <h3>Watches Linear</h3>
+          <p>Continuously checks your Linear project for issues that are ready to work &mdash; respecting Linear's limits, never hammering it.</p>
+        </div>
+        <div class="card">
+          <span class="num">2</span>
+          <h3>Dispatches AI agents</h3>
+          <p>For each ready issue it spins up an AI coding agent (Claude, Codex, Pi, or your own) in its own isolated workspace, with a prompt you control.</p>
+        </div>
+        <div class="card">
+          <span class="num">3</span>
+          <h3>Drives the real workflow</h3>
+          <p>The agent claims the issue, moves it to In Progress, does the work, opens a pull request, links it back, and moves it to In Review &mdash; all in plain-language instructions, not hardcoded.</p>
+        </div>
+        <div class="card">
+          <span class="num">4</span>
+          <h3>Self-heals &amp; stays safe</h3>
+          <p>Built-in retries, stall detection, and timeouts. If an agent gets stuck, it parks the issue as &ldquo;Needs Human,&rdquo; comments on Linear, and notifies you &mdash; never silently fails.</p>
+        </div>
+        <div class="card">
+          <span class="num">5</span>
+          <h3>Live dashboard</h3>
+          <p>A clean local web page shows active runs, history, per-run logs, the resolved workflow, and live status. Interrupt or kill any run with a click.</p>
+        </div>
+        <div class="card">
+          <span class="num">6</span>
+          <h3>Remembers everything</h3>
+          <p>Every run, event, and log is saved locally. Kill the program and restart &mdash; it picks up cleanly from the truth in Linear.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- GUARANTEES -->
+  <section>
+    <div class="wrap">
+      <p class="eyebrow">Key guarantees</p>
+      <h2 class="section-title">Simple on purpose. You stay in control.</h2>
+      <div class="strip" style="margin-top:32px;">
+        <div class="cell">
+          <span class="ico"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="3"/></svg></span>
+          <h4>Self-contained</h4>
+          <p>Single binary, single folder. Nothing else to stand up.</p>
+        </div>
+        <div class="cell">
+          <span class="ico"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M12 8v8M8 12h8"/></svg></span>
+          <h4>One project</h4>
+          <p>Focused by design. A tool, not another platform.</p>
+        </div>
+        <div class="cell">
+          <span class="ico"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6l7-3z"/></svg></span>
+          <h4>You're in control</h4>
+          <p>Pause, interrupt, or kill any run &mdash; with a human safety net.</p>
+        </div>
+        <div class="cell">
+          <span class="ico"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 13l4 4L19 7"/></svg></span>
+          <h4>Never silent</h4>
+          <p>Agents do the work; the runner only handles safety and parking.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FLOW -->
+  <section>
+    <div class="wrap">
+      <p class="eyebrow">The big picture</p>
+      <h2 class="section-title">From issue to reviewed pull request.</h2>
+
+      <div class="flow">
+        <div class="node">
+          <span class="ni"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h16M4 18h10"/></svg></span>
+          <span class="nt">Linear issues</span>
+          <span class="nd">Ready to work</span>
+        </div>
+        <div class="arrow"><svg width="22" height="14" viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 7h19M14 1l6 6-6 6"/></svg></div>
+        <div class="node core">
+          <span class="ni"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg></span>
+          <span class="nt">Agentropy</span>
+          <span class="nd">Polls, claims, dispatches</span>
+        </div>
+        <div class="arrow"><svg width="22" height="14" viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 7h19M14 1l6 6-6 6"/></svg></div>
+        <div class="node">
+          <span class="ni"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M7 9l3 2-3 2M13 13h4"/></svg></span>
+          <span class="nt">AI agent</span>
+          <span class="nd">Isolated workspace</span>
+        </div>
+        <div class="arrow"><svg width="22" height="14" viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 7h19M14 1l6 6-6 6"/></svg></div>
+        <div class="node">
+          <span class="ni"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M6 8.5v7M8.2 7.2L15.8 11M8.2 16.8L15.8 13"/></svg></span>
+          <span class="nt">PR + Linear</span>
+          <span class="nd">Opened &amp; updated</span>
+        </div>
+        <div class="arrow"><svg width="22" height="14" viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 7h19M14 1l6 6-6 6"/></svg></div>
+        <div class="node">
+          <span class="ni"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg></span>
+          <span class="nt">You</span>
+          <span class="nd">Watch the dashboard</span>
+        </div>
+      </div>
+
+      <div class="loop">
+        <span class="li"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5"/></svg></span>
+        <p><strong>Safety net.</strong> Retries, stall detection, and &ldquo;Needs Human&rdquo; parking feed back into Agentropy &mdash; so nothing gets stuck or lost.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- CLOSING -->
+  <section class="closing">
+    <div class="wrap">
+      <p class="eyebrow">The bottom line</p>
+      <p class="quote">A tiny, dependable program that turns a folder of Linear issues into <span class="accent">finished, reviewed pull requests</span> &mdash; autonomously, transparently, and under your control.</p>
+      <p class="tag">Agentropy &middot; one binary &middot; one folder</p>
+    </div>
+  </section>
+
+</body>
+</html>
