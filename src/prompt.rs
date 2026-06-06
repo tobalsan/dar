@@ -200,8 +200,10 @@ fn build_context_appendix(
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
 
+    // Display attempt as 1-based for readability.
+    let attempt_display = attempt + 1;
     lines.push(format!(
-        "\n\n---\n**Orchestrator context** — attempt {attempt} of {max_retries} for `{}`",
+        "\n\n---\n**Orchestrator context** — attempt {attempt_display} of {max_retries} for `{}`",
         issue.identifier
     ));
 
@@ -257,8 +259,8 @@ mod tests {
         let renderer = PromptRenderer::load(f.path()).unwrap();
         let out = renderer.render(&make_issue("PROJ-1"), 1, 3).unwrap();
         assert!(out.contains("Issue: PROJ-1 attempt=1"), "got: {out}");
-        // Orchestrator context appended.
-        assert!(out.contains("attempt 1 of 3"), "got: {out}");
+        // Orchestrator context appended (attempt is 1-based: attempt+1=2 of 3).
+        assert!(out.contains("attempt 2 of 3"), "got: {out}");
     }
 
     #[test]

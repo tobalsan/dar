@@ -167,18 +167,26 @@ impl Orchestrator {
     /// Re-read WORKFLOW.md if its mtime changed. On a successful reload:
     /// - Re-derive `effective_cfg` from the new frontmatter.
     /// - Rebuild the tracker if active/terminal states changed.
+    ///
+    /// When tracker state lists change but the tracker rebuild fails, the
+    /// effective_cfg state fields are kept at their current values so the
+    /// tracker's internal filter and effective_cfg.active/terminal_states
+    /// stay in sync.
+    ///
     /// On parse error: `maybe_reload` handles allow_stale internally; log only.
     fn maybe_reload_workflow(&mut self) {
         match self.prompt.maybe_reload() {
             Ok(false) => {}
             Ok(true) => {
-                let new_eff = EffectiveLoopConfig::merge(
+                let mut new_eff = EffectiveLoopConfig::merge(
                     &self.agent_cfg,
                     &self.prompt.snapshot().frontmatter,
                 );
 
                 // Rebuild the tracker when state lists change so poll_candidates
-                // uses the new active/terminal filters immediately.
+                // uses the new active/terminal filters immediately. If the
+                // rebuild fails, revert the state fields in new_eff so the
+                // tracker filter and effective_cfg remain in sync.
                 let states_changed = new_eff.active_states != self.effective_cfg.active_states
                     || new_eff.terminal_states != self.effective_cfg.terminal_states;
 
@@ -199,10 +207,19 @@ impl Orchestrator {
                             );
                         }
                         Err(e) => {
+                            // Keep old state lists so tracker and effective_cfg
+                            // stay consistent; other fields (poll interval,
+                            // runner, etc.) still get the new values.
+                            new_eff.active_states =
+                                self.effective_cfg.active_states.clone();
+                            new_eff.terminal_states =
+                                self.effective_cfg.terminal_states.clone();
                             logging::ev(
                                 "-",
                                 "workflow_reload",
-                                &format!("tracker rebuild failed: {e:#}; keeping old tracker"),
+                                &format!(
+                                    "tracker rebuild failed (state lists unchanged): {e:#}"
+                                ),
                             );
                         }
                     }
