@@ -456,6 +456,33 @@ impl Store {
         .context("insert_heartbeat")?;
         Ok(())
     }
+
+    #[cfg(test)]
+    pub(crate) fn claim_release_count_for_run(&self, run_id: &str) -> Result<(i64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        let total = conn.query_row(
+            "SELECT count(*) FROM claims WHERE run_id=?1",
+            params![run_id],
+            |r| r.get(0),
+        )?;
+        let released = conn.query_row(
+            "SELECT count(*) FROM claims WHERE run_id=?1 AND released_at IS NOT NULL",
+            params![run_id],
+            |r| r.get(0),
+        )?;
+        Ok((total, released))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn heartbeat_count_for_run(&self, run_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let total = conn.query_row(
+            "SELECT count(*) FROM heartbeats WHERE run_id=?1",
+            params![run_id],
+            |r| r.get(0),
+        )?;
+        Ok(total)
+    }
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────

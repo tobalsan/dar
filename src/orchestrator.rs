@@ -585,6 +585,7 @@ impl Orchestrator {
         match msg {
             ControlMsg::Stop => {
                 logging::ev("-", "control", "stop: cancelling active runs");
+                self.persist_system_event("control stop: cancelling active runs");
                 self.kill_all(KillReason::OperatorStop).await;
                 // Operator Stop => Cancelled, not retried. Drop the slots.
                 self.slots.clear();
@@ -592,12 +593,24 @@ impl Orchestrator {
             ControlMsg::Pause => {
                 self.state.paused.store(true, Ordering::SeqCst);
                 logging::ev("-", "control", "paused");
+                self.persist_system_event("control paused");
             }
             ControlMsg::Resume => {
                 self.state.paused.store(false, Ordering::SeqCst);
                 logging::ev("-", "control", "resumed");
+                self.persist_system_event("control resumed");
             }
         }
+    }
+
+    fn persist_system_event(&self, payload: &str) {
+        let _ = self.state.store.insert_event(&NewEvent {
+            run_id: None,
+            issue_identifier: "-",
+            kind: "lifecycle",
+            payload,
+            ts: Utc::now(),
+        });
     }
 
     /// Record a finished run: update the in-memory history ring, write outcome
@@ -839,6 +852,17 @@ pub(crate) fn backoff(retry_backoff_ms: u64, attempt: u32) -> Duration {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use std::net::{IpAddr, Ipv4Addr};
+    use tokio::sync::mpsc;
+
+    use crate::config::{
+        AgentConfig, DashboardConfig, OrchestratorConfig, RunnerConfig, TrackerConfig,
+        TrackerInner, WorkspaceConfig,
+    };
+    use crate::state::{AgentInfo, AppState};
+    use crate::store::Store;
+    use crate::tracker::FileTracker;
+    use tempfile::tempdir;
 
     fn issue(id: &str, prio: Option<i32>, created: Option<i64>) -> Issue {
         Issue {
@@ -878,5 +902,148 @@ mod tests {
         assert_eq!(backoff(1000, 30), BACKOFF_CAP);
         // No overflow panic at huge attempt.
         assert_eq!(backoff(u64::MAX, 64), BACKOFF_CAP);
+    }
+
+    fn test_config(command: String) -> AgentConfig {
+        AgentConfig {
+            id: "test-agent".to_string(),
+            name: "Test Agent".to_string(),
+            tracker: TrackerConfig {
+                use_: "files".to_string(),
+                config: TrackerInner {
+                    path: "issues".into(),
+                },
+                active_states: vec!["todo".to_string()],
+                terminal_states: vec!["done".to_string()],
+            },
+            runner: RunnerConfig {
+                use_: "claude-code".to_string(),
+                command,
+                max_run_timeout_ms: 30_000,
+            },
+            orchestrator: OrchestratorConfig {
+                poll_interval_ms: 10,
+                max_concurrent: 1,
+                max_retries: 1,
+                retry_backoff_ms: 10,
+            },
+            workspace: WorkspaceConfig {
+                root: "workspaces".into(),
+            },
+            dashboard: DashboardConfig {
+                bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port: 0,
+            },
+        }
+    }
+
+    fn test_state(store: Arc<Store>) -> (AppState, mpsc::UnboundedReceiver<ControlMsg>) {
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let state = AppState::new(
+            AgentInfo {
+                id: "test-agent".to_string(),
+                folder: "/tmp/test-agent".to_string(),
+                tracker: "files".to_string(),
+                runner: "claude-code".to_string(),
+            },
+            control_tx,
+            store,
+            Vec::new(),
+        );
+        (state, control_rx)
+    }
+
+    #[tokio::test]
+    async fn control_and_shutdown_lifecycle_events_are_queryable() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("store.db")).unwrap());
+        let (state, control_rx) = test_state(Arc::clone(&store));
+        let cfg = test_config("/usr/bin/true".to_string());
+        let root = dir.path().canonicalize().unwrap();
+        let paths = AgentPaths::new(root.clone());
+        let tracker = Arc::new(FileTracker::new(
+            root.join("issues"),
+            cfg.tracker.active_states.clone(),
+            cfg.tracker.terminal_states.clone(),
+        ));
+        std::fs::write(root.join("WORKFLOW.md"), "noop").unwrap();
+        let prompt = PromptRenderer::load(&root.join("WORKFLOW.md")).unwrap();
+        let mut orch = Orchestrator::new(cfg, paths, tracker, prompt, state, control_rx);
+
+        orch.handle_control(ControlMsg::Pause).await;
+        orch.handle_control(ControlMsg::Resume).await;
+        store
+            .insert_event(&NewEvent {
+                run_id: None,
+                issue_identifier: "-",
+                kind: "lifecycle",
+                payload: "shutdown signal received, stopping",
+                ts: Utc::now(),
+            })
+            .unwrap();
+
+        let events = store.list_events_since("-", 0, 10).unwrap();
+        let payloads: Vec<&str> = events.iter().map(|ev| ev.payload.as_str()).collect();
+        assert!(payloads.contains(&"control paused"));
+        assert!(payloads.contains(&"control resumed"));
+        assert!(payloads.contains(&"shutdown signal received, stopping"));
+    }
+
+    #[tokio::test]
+    async fn orchestrator_dispatch_heartbeats_and_releases_claim() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let issues = root.join("issues");
+        let workspaces = root.join("workspaces");
+        std::fs::create_dir_all(&issues).unwrap();
+        std::fs::create_dir_all(&workspaces).unwrap();
+        std::fs::write(
+            issues.join("ALG-173.md"),
+            "---\nid: alg-173\nidentifier: ALG-173\ntitle: SQLite persistence\nstate: todo\npriority: 1\n---\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("WORKFLOW.md"), "Work on {{ issue.identifier }}").unwrap();
+
+        let runner = root.join("sleep-runner.sh");
+        std::fs::write(&runner, "#!/bin/sh\nsleep 5\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&runner).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&runner, perms).unwrap();
+        }
+
+        let store = Arc::new(Store::open(&root.join("data/store.db")).unwrap());
+        let (state, control_rx) = test_state(Arc::clone(&store));
+        let cfg = test_config(runner.display().to_string());
+        let tracker = Arc::new(FileTracker::new(
+            issues.clone(),
+            cfg.tracker.active_states.clone(),
+            cfg.tracker.terminal_states.clone(),
+        ));
+        let prompt = PromptRenderer::load(&root.join("WORKFLOW.md")).unwrap();
+        let paths = AgentPaths::new(root.clone());
+        let mut orch = Orchestrator::new(cfg, paths, tracker, prompt, state, control_rx);
+
+        orch.tick().await;
+        let runs = store.list_runs_paged(0, 10).unwrap();
+        assert_eq!(runs.len(), 1);
+        let run_id = runs[0].run_id.clone();
+        assert!(
+            store.heartbeat_count_for_run(&run_id).unwrap() >= 1,
+            "dispatch tick should heartbeat the live run"
+        );
+
+        std::fs::write(
+            issues.join("ALG-173.md"),
+            "---\nid: alg-173\nidentifier: ALG-173\ntitle: SQLite persistence\nstate: done\npriority: 1\n---\nbody\n",
+        )
+        .unwrap();
+        orch.tick().await;
+
+        let (claims, released) = store.claim_release_count_for_run(&run_id).unwrap();
+        assert_eq!(claims, 1);
+        assert_eq!(released, 1);
     }
 }

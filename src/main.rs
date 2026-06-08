@@ -78,8 +78,7 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     // Open SQLite store under <root>/data/store.db; mark any crashed runs from
     // a previous invocation, then seed the in-memory history ring from SQLite.
     let store = Arc::new(
-        store::Store::open(&paths.store_db())
-            .context("opening SQLite persistence store")?,
+        store::Store::open(&paths.store_db()).context("opening SQLite persistence store")?,
     );
     if let Err(e) = store.mark_crashed_runs() {
         tracing::warn!("mark_crashed_runs failed: {e:#}");
@@ -127,6 +126,13 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     // Wait for ctrl_c or SIGTERM, then signal graceful shutdown.
     wait_for_signal().await?;
     logging::ev("-", "shutdown", "signal received, stopping");
+    let _ = store.insert_event(&store::NewEvent {
+        run_id: None,
+        issue_identifier: "-",
+        kind: "lifecycle",
+        payload: "shutdown signal received, stopping",
+        ts: chrono::Utc::now(),
+    });
     let _ = shutdown_tx.send(true);
 
     // Let both tasks wind down. Orchestrator kills the active child first.

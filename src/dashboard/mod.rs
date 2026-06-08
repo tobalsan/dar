@@ -9,16 +9,17 @@ pub mod view;
 
 use std::net::IpAddr;
 
+use askama::Template;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use askama::Template;
 use std::collections::HashMap;
 use tokio::sync::watch;
 
 use crate::state::{AppState, ControlMsg};
+use crate::store::{EventRow, Store};
 use view::DashboardTemplate;
 
 /// Embedded static assets (only `htmx.min.js` in v0).
@@ -41,6 +42,7 @@ pub async fn serve(
         .route("/assets/{*path}", get(asset))
         // Logs/Events API: paged run list and per-issue event cursor.
         .route("/api/runs", get(api_runs))
+        .route("/api/runs/{run_id}/logs", get(api_run_logs))
         .route("/api/events/{identifier}", get(api_events))
         .with_state(state);
 
@@ -104,7 +106,11 @@ async fn api_runs(
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let page: usize = params.get("page").and_then(|s| s.parse().ok()).unwrap_or(0);
-    let size: usize = params.get("size").and_then(|s| s.parse().ok()).unwrap_or(50).min(250);
+    let size: usize = params
+        .get("size")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50)
+        .min(250);
     match state.store.list_runs_paged(page, size) {
         Ok(rows) => Json(rows).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -119,10 +125,59 @@ async fn api_events(
     Path(identifier): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let since: i64 = params.get("since").and_then(|s| s.parse().ok()).unwrap_or(0);
-    let limit: usize = params.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100).min(500);
+    let since: i64 = params
+        .get("since")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let limit: usize = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100)
+        .min(500);
     match state.store.list_events_since(&identifier, since, limit) {
         Ok(rows) => Json(rows).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct EventsPage {
+    events: Vec<EventRow>,
+    next_cursor: Option<i64>,
+}
+
+fn events_page_for_run(
+    store: &Store,
+    run_id: &str,
+    since: i64,
+    limit: usize,
+) -> anyhow::Result<EventsPage> {
+    let events = store.list_events_for_run(run_id, since, limit)?;
+    let next_cursor = events.last().map(|row| row.event_id);
+    Ok(EventsPage {
+        events,
+        next_cursor,
+    })
+}
+
+/// `GET /api/runs/{run_id}/logs?since=N&limit=N` — events for one run since
+/// an `event_id` cursor. Returns `{ events, next_cursor }`.
+async fn api_run_logs(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let since: i64 = params
+        .get("since")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let limit: usize = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100)
+        .min(500);
+    match events_page_for_run(&state.store, &run_id, since, limit) {
+        Ok(page) => Json(page).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -139,5 +194,57 @@ async fn asset(Path(path): Path<String>) -> Response {
                 .into_response()
         }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use tempfile::tempdir;
+
+    use crate::store::{NewEvent, NewRun};
+
+    #[test]
+    fn run_logs_page_returns_events_and_cursor() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(&dir.path().join("store.db")).unwrap();
+        let now = Utc::now();
+        let run_id = crate::store::new_run_id("DASH-1", &now);
+
+        store
+            .insert_run(&NewRun {
+                run_id: &run_id,
+                issue_id: "dash-1",
+                issue_identifier: "DASH-1",
+                workspace: "/tmp/ws",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 100,
+                worker_id: None,
+                started_at: now,
+            })
+            .unwrap();
+
+        for payload in ["one", "two", "three"] {
+            store
+                .insert_event(&NewEvent {
+                    run_id: Some(&run_id),
+                    issue_identifier: "DASH-1",
+                    kind: "stdout",
+                    payload,
+                    ts: now,
+                })
+                .unwrap();
+        }
+
+        let page = events_page_for_run(&store, &run_id, 0, 2).unwrap();
+        assert_eq!(page.events.len(), 2);
+        assert_eq!(page.next_cursor, Some(page.events[1].event_id));
+
+        let next = events_page_for_run(&store, &run_id, page.next_cursor.unwrap(), 2).unwrap();
+        assert_eq!(next.events.len(), 1);
+        assert_eq!(next.events[0].payload, "three");
     }
 }
