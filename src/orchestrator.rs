@@ -371,7 +371,20 @@ impl Orchestrator {
                     }
                 }
                 ExitKind::Abnormal => {
-                    if slot.attempt >= max_retries {
+                    let state_now = self
+                        .tracker
+                        .fetch_one(&id)
+                        .ok()
+                        .flatten()
+                        .map(|i| i.state);
+                    if state_now.as_deref() == needs_human.as_deref() {
+                        logging::ev(
+                            &id,
+                            "needs_human",
+                            "needs-human after abnormal exit; releasing without retry",
+                        );
+                        self.record_history(&id, RunStatus::NeedsHuman, pid, "needs-human after abnormal exit");
+                    } else if slot.attempt >= max_retries {
                         logging::ev(
                             &id,
                             "failed",
@@ -754,7 +767,20 @@ pub(crate) fn backoff(retry_backoff_ms: u64, attempt: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{
+        AgentConfig, DashboardConfig, OrchestratorConfig, RunnerConfig, TrackerConfig,
+        TrackerInner, WorkspaceConfig,
+    };
+    use crate::paths::AgentPaths;
+    use crate::prompt::PromptRenderer;
+    use crate::state::{AgentInfo, AppState};
+    use crate::tracker::Tracker;
+    use crate::workflow_config::{EffectiveLoopConfig, WorkflowFrontmatter};
+    use anyhow::Result;
     use chrono::TimeZone;
+    use std::net::{IpAddr, Ipv4Addr};
+    use tempfile::TempDir;
+    use tokio::sync::mpsc;
 
     fn issue(id: &str, prio: Option<i32>, created: Option<i64>) -> Issue {
         Issue {
@@ -770,6 +796,125 @@ mod tests {
             created_at: created.map(|s| Utc.timestamp_opt(s, 0).unwrap()),
             updated_at: None,
         }
+    }
+
+    struct StaticTracker {
+        issue: Issue,
+    }
+
+    impl Tracker for StaticTracker {
+        fn poll_candidates(&self) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_states(&self, ids: &[String]) -> Result<Vec<Issue>> {
+            Ok(ids
+                .iter()
+                .filter(|id| id.as_str() == self.issue.identifier)
+                .map(|_| self.issue.clone())
+                .collect())
+        }
+
+        fn fetch_terminal(&self) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_one(&self, id: &str) -> Result<Option<Issue>> {
+            if id == self.issue.identifier {
+                Ok(Some(self.issue.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    fn test_agent_config() -> AgentConfig {
+        AgentConfig {
+            id: "test-agent".to_string(),
+            name: "Test Agent".to_string(),
+            tracker: TrackerConfig {
+                use_: "files".to_string(),
+                config: TrackerInner {
+                    path: "issues".into(),
+                },
+                active_states: vec!["todo".to_string()],
+                terminal_states: vec!["done".to_string()],
+            },
+            runner: RunnerConfig {
+                use_: "claude-code".to_string(),
+                command: "claude".to_string(),
+                max_run_timeout_ms: 1000,
+            },
+            orchestrator: OrchestratorConfig {
+                poll_interval_ms: 100,
+                max_concurrent: 1,
+                max_retries: 3,
+                retry_backoff_ms: 1000,
+            },
+            workspace: WorkspaceConfig {
+                root: "workspaces".into(),
+            },
+            dashboard: DashboardConfig {
+                bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port: 7878,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn abnormal_exit_with_needs_human_state_releases_without_retry() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("logs")).unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+
+        let mut needs_issue = issue("ISSUE-1", None, None);
+        needs_issue.state = "needs_human".to_string();
+        let tracker = Arc::new(StaticTracker {
+            issue: needs_issue.clone(),
+        });
+        let agent_cfg = test_agent_config();
+        let mut effective_cfg =
+            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        effective_cfg.needs_human = Some("needs_human".to_string());
+
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let state = AppState::new(
+            AgentInfo {
+                id: "test-agent".to_string(),
+                folder: temp.path().display().to_string(),
+                tracker: "files".to_string(),
+                runner: "claude-code".to_string(),
+            },
+            control_tx,
+            temp.path().join("logs/history.jsonl"),
+        );
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state.clone(),
+            control_rx,
+        );
+        orchestrator.slots.push(RunSlot {
+            identifier: needs_issue.identifier.clone(),
+            issue: needs_issue,
+            workspace: "workspace".to_string(),
+            handle: Some(RunnerHandle::finished_for_test(42, ExitKind::Abnormal)),
+            attempt: 1,
+        });
+        tokio::task::yield_now().await;
+
+        orchestrator.collect_finished().await;
+
+        assert!(orchestrator.retries.is_empty());
+        let history = state.history.snapshot();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].identifier, "ISSUE-1");
+        assert_eq!(history[0].status, RunStatus::NeedsHuman);
+        assert_eq!(history[0].note, "needs-human after abnormal exit");
     }
 
     #[test]
