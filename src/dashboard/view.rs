@@ -65,6 +65,7 @@ impl DashboardTemplate {
                     RunStatus::Succeeded => ("Completed", "completed"),
                     RunStatus::Failed => ("Failed", "failed"),
                     RunStatus::Cancelled => ("Interrupted", "interrupted"),
+                    RunStatus::Interrupted => ("Interrupted", "interrupted"),
                     RunStatus::RetryQueued => ("Retrying", "retrying"),
                     RunStatus::Running => ("Running", "running"),
                     RunStatus::Crashed => ("Crashed", "failed"),

@@ -135,15 +135,101 @@ async fn api_events(
         .unwrap_or(100)
         .min(500);
     match state.store.list_events_since(&identifier, since, limit) {
-        Ok(rows) => Json(rows).into_response(),
+        Ok(rows) => Json(
+            rows.into_iter()
+                .map(UiLogRow::from)
+                .collect::<Vec<UiLogRow>>(),
+        )
+        .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
 #[derive(Debug, serde::Serialize)]
 struct EventsPage {
-    events: Vec<EventRow>,
+    events: Vec<UiLogRow>,
     next_cursor: Option<i64>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct UiLogRow {
+    event_id: i64,
+    run_id: Option<String>,
+    issue_identifier: String,
+    kind: String,
+    payload: String,
+    ts: String,
+    row_type: String,
+    text: String,
+}
+
+impl From<EventRow> for UiLogRow {
+    fn from(row: EventRow) -> Self {
+        let (row_type, text) = normalized_log_fields(&row);
+        Self {
+            event_id: row.event_id,
+            run_id: row.run_id,
+            issue_identifier: row.issue_identifier,
+            kind: row.kind,
+            payload: row.payload,
+            ts: row.ts,
+            row_type,
+            text,
+        }
+    }
+}
+
+fn normalized_log_fields(row: &EventRow) -> (String, String) {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&row.payload) {
+        let row_type = value
+            .get("log_row")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| normalize_log_row(&row.kind, &row.payload))
+            .to_string();
+        let text = value
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&row.payload);
+        (row_type, strip_ansi(text))
+    } else {
+        let text = strip_ansi(&row.payload);
+        (normalize_log_row(&row.kind, &text).to_string(), text)
+    }
+}
+
+fn normalize_log_row(kind: &str, text: &str) -> &'static str {
+    let lower = text.to_ascii_lowercase();
+    if kind == "stderr" || lower.contains("error") || lower.contains("\"type\":\"error\"") {
+        "error"
+    } else if lower.contains("thinking") || lower.contains("thought") {
+        "thinking"
+    } else if lower.contains("tool_call") || lower.contains("tool use") {
+        "tool_call"
+    } else if lower.contains("tool_output") || lower.contains("tool result") {
+        "tool_output"
+    } else if lower.contains("\"role\":\"user\"") {
+        "user"
+    } else {
+        "assistant"
+    }
+}
+
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn events_page_for_run(
@@ -152,8 +238,9 @@ fn events_page_for_run(
     since: i64,
     limit: usize,
 ) -> anyhow::Result<EventsPage> {
-    let events = store.list_events_for_run(run_id, since, limit)?;
-    let next_cursor = events.last().map(|row| row.event_id);
+    let rows = store.list_events_for_run(run_id, since, limit)?;
+    let next_cursor = rows.last().map(|row| row.event_id);
+    let events = rows.into_iter().map(UiLogRow::from).collect();
     Ok(EventsPage {
         events,
         next_cursor,
@@ -233,7 +320,7 @@ mod tests {
             })
             .unwrap();
 
-        for payload in ["one", "two", "three"] {
+        for payload in ["one", "\u{1b}[31mtool_call\u{1b}[0m: run", "three"] {
             store
                 .insert_event(&NewEvent {
                     run_id: Some(&run_id),
@@ -248,6 +335,8 @@ mod tests {
         let page = events_page_for_run(&store, &run_id, 0, 2).unwrap();
         assert_eq!(page.events.len(), 2);
         assert_eq!(page.next_cursor, Some(page.events[1].event_id));
+        assert_eq!(page.events[1].row_type, "tool_call");
+        assert_eq!(page.events[1].text, "tool_call: run");
 
         let next = events_page_for_run(&store, &run_id, page.next_cursor.unwrap(), 2).unwrap();
         assert_eq!(next.events.len(), 1);
@@ -310,6 +399,8 @@ mod tests {
         let events = json["events"].as_array().unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0]["payload"], "three");
+        assert_eq!(events[0]["row_type"], "assistant");
+        assert_eq!(events[0]["text"], "three");
         assert_eq!(events[1]["payload"], "four");
         assert_eq!(json["next_cursor"], event_ids[3]);
 

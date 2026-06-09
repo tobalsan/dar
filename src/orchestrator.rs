@@ -37,7 +37,9 @@ use crate::logging;
 use crate::paths::{issue_workspace, AgentPaths};
 use crate::prompt::PromptRenderer;
 use crate::runner::{self, ExitKind, KillReason, RunnerHandle, SpawnParams};
-use crate::state::{ActiveRun, AppState, ControlMsg, HistoryEntry, QueueItem, RetryItem, RunStatus};
+use crate::state::{
+    ActiveRun, AppState, ControlMsg, HistoryEntry, QueueItem, RetryItem, RunStatus,
+};
 use crate::store::{new_run_id, NewClaim, NewEvent, NewHeartbeat, NewRun, RunFinish};
 use crate::tracker;
 use crate::workflow_config::EffectiveLoopConfig;
@@ -140,7 +142,11 @@ impl Orchestrator {
             }
         }
 
-        logging::ev("-", "shutdown", "orchestrator stopping; killing active runs");
+        logging::ev(
+            "-",
+            "shutdown",
+            "orchestrator stopping; killing active runs",
+        );
         self.kill_all(KillReason::OperatorStop).await;
         Ok(())
     }
@@ -216,16 +222,12 @@ impl Orchestrator {
                             // Keep old state lists so tracker and effective_cfg
                             // stay consistent; other fields (poll interval,
                             // runner, etc.) still get the new values.
-                            new_eff.active_states =
-                                self.effective_cfg.active_states.clone();
-                            new_eff.terminal_states =
-                                self.effective_cfg.terminal_states.clone();
+                            new_eff.active_states = self.effective_cfg.active_states.clone();
+                            new_eff.terminal_states = self.effective_cfg.terminal_states.clone();
                             logging::ev(
                                 "-",
                                 "workflow_reload",
-                                &format!(
-                                    "tracker rebuild failed (state lists unchanged): {e:#}"
-                                ),
+                                &format!("tracker rebuild failed (state lists unchanged): {e:#}"),
                             );
                         }
                     }
@@ -291,7 +293,11 @@ impl Orchestrator {
                     }
                 }
                 Ok(None) => {
-                    logging::ev(&slot.identifier, "reconcile", "issue file missing; cancelling");
+                    logging::ev(
+                        &slot.identifier,
+                        "reconcile",
+                        "issue file missing; cancelling",
+                    );
                     to_cancel.push((idx, RunStatus::Cancelled, "issue file missing"));
                 }
                 Err(e) => {
@@ -311,7 +317,15 @@ impl Orchestrator {
             if let Some(handle) = slot.handle.take() {
                 handle.request_kill(KillReason::Reconcile);
             }
-            self.record_history(&slot.run_id, &slot.identifier, status, pid, note, None, slot.claim_id);
+            self.record_history(
+                &slot.run_id,
+                &slot.identifier,
+                status,
+                pid,
+                note,
+                None,
+                slot.claim_id,
+            );
             // Not retried: terminal = done, missing/non-active = cancelled.
         }
     }
@@ -348,20 +362,35 @@ impl Orchestrator {
 
             match exit {
                 ExitKind::Normal => {
-                    let state_now = self
-                        .tracker
-                        .fetch_one(&id)
-                        .ok()
-                        .flatten()
-                        .map(|i| i.state);
+                    let state_now = self.tracker.fetch_one(&id).ok().flatten().map(|i| i.state);
                     match state_now {
                         Some(ref st) if terminal.contains(st) => {
                             logging::ev(&id, "succeeded", "terminal after normal exit");
-                            self.record_history(&run_id, &id, RunStatus::Succeeded, pid, "terminal after normal exit", Some(0), claim_id);
+                            self.record_history(
+                                &run_id,
+                                &id,
+                                RunStatus::Succeeded,
+                                pid,
+                                "terminal after normal exit",
+                                Some(0),
+                                claim_id,
+                            );
                         }
                         Some(ref st) if needs_human.as_deref() == Some(st.as_str()) => {
-                            logging::ev(&id, "needs_human", "needs-human state after normal exit; releasing without retry");
-                            self.record_history(&run_id, &id, RunStatus::NeedsHuman, pid, "needs-human after normal exit", Some(0), claim_id);
+                            logging::ev(
+                                &id,
+                                "needs_human",
+                                "needs-human state after normal exit; releasing without retry",
+                            );
+                            self.record_history(
+                                &run_id,
+                                &id,
+                                RunStatus::NeedsHuman,
+                                pid,
+                                "needs-human after normal exit",
+                                Some(0),
+                                claim_id,
+                            );
                         }
                         Some(ref st) if active.contains(st) => {
                             logging::ev(&id, "continuation", "still active after exit 0; retry 1s");
@@ -380,24 +409,44 @@ impl Orchestrator {
                             self.retries.push(Retry {
                                 identifier: id.clone(),
                                 attempt: slot.attempt,
-                                due_at: Utc::now() + chrono::Duration::from_std(CONTINUATION_DELAY).unwrap(),
+                                due_at: Utc::now()
+                                    + chrono::Duration::from_std(CONTINUATION_DELAY).unwrap(),
                                 last_error: String::new(),
                                 continuation: true,
                             });
                         }
                         _ => {
-                            logging::ev(&id, "succeeded", "non-active after normal exit; releasing");
-                            self.record_history(&run_id, &id, RunStatus::Succeeded, pid, "non-active after normal exit", Some(0), claim_id);
+                            logging::ev(
+                                &id,
+                                "succeeded",
+                                "non-active after normal exit; releasing",
+                            );
+                            self.record_history(
+                                &run_id,
+                                &id,
+                                RunStatus::Succeeded,
+                                pid,
+                                "non-active after normal exit",
+                                Some(0),
+                                claim_id,
+                            );
                         }
                     }
                 }
+                ExitKind::Interrupted { reason } => {
+                    logging::ev(&id, "interrupted", &format!("reason={reason}"));
+                    self.record_history(
+                        &run_id,
+                        &id,
+                        RunStatus::Interrupted,
+                        pid,
+                        reason,
+                        None,
+                        claim_id,
+                    );
+                }
                 ExitKind::Abnormal(exit_code) => {
-                    let state_now = self
-                        .tracker
-                        .fetch_one(&id)
-                        .ok()
-                        .flatten()
-                        .map(|i| i.state);
+                    let state_now = self.tracker.fetch_one(&id).ok().flatten().map(|i| i.state);
                     if matches!(
                         (state_now.as_deref(), needs_human.as_deref()),
                         (Some(st), Some(needs_human)) if st == needs_human
@@ -407,14 +456,33 @@ impl Orchestrator {
                             "needs_human",
                             "needs-human after abnormal exit; releasing without retry",
                         );
-                        self.record_history(&run_id, &id, RunStatus::NeedsHuman, pid, "needs-human after abnormal exit", exit_code, claim_id);
+                        self.record_history(
+                            &run_id,
+                            &id,
+                            RunStatus::NeedsHuman,
+                            pid,
+                            "needs-human after abnormal exit",
+                            exit_code,
+                            claim_id,
+                        );
                     } else if slot.attempt >= max_retries {
                         logging::ev(
                             &id,
                             "failed",
-                            &format!("abnormal exit; retries exhausted ({}/{})", slot.attempt, max_retries),
+                            &format!(
+                                "abnormal exit; retries exhausted ({}/{})",
+                                slot.attempt, max_retries
+                            ),
                         );
-                        self.record_history(&run_id, &id, RunStatus::Failed, pid, "abnormal exit; retries exhausted", exit_code, claim_id);
+                        self.record_history(
+                            &run_id,
+                            &id,
+                            RunStatus::Failed,
+                            pid,
+                            "abnormal exit; retries exhausted",
+                            exit_code,
+                            claim_id,
+                        );
                     } else {
                         let next = slot.attempt + 1;
                         let delay = backoff(self.effective_cfg.retry_backoff_ms, next);
@@ -422,7 +490,10 @@ impl Orchestrator {
                         logging::ev(
                             &id,
                             "retry_queued",
-                            &format!("abnormal exit; attempt {next}/{max_retries} in {}ms", delay.as_millis()),
+                            &format!(
+                                "abnormal exit; attempt {next}/{max_retries} in {}ms",
+                                delay.as_millis()
+                            ),
                         );
                         // Release claim for this attempt; a new claim is opened
                         // when the retry is dispatched.
@@ -433,7 +504,10 @@ impl Orchestrator {
                             run_id: Some(&run_id),
                             issue_identifier: &id,
                             kind: "lifecycle",
-                            payload: &format!("retry_queued attempt {next}/{max_retries} in {}ms", delay.as_millis()),
+                            payload: &format!(
+                                "retry_queued attempt {next}/{max_retries} in {}ms",
+                                delay.as_millis()
+                            ),
                             ts: Utc::now(),
                         });
                         self.retries.push(Retry {
@@ -456,11 +530,7 @@ impl Orchestrator {
             return;
         }
 
-        let busy: HashSet<String> = self
-            .slots
-            .iter()
-            .map(|s| s.identifier.clone())
-            .collect();
+        let busy: HashSet<String> = self.slots.iter().map(|s| s.identifier.clone()).collect();
 
         let now = Utc::now();
 
@@ -490,12 +560,24 @@ impl Orchestrator {
             }
             match self.tracker.fetch_one(&retry.identifier) {
                 Ok(Some(issue)) if self.effective_cfg.active_states.contains(&issue.state) => {
-                    let label = if retry.continuation { "continuation" } else { "retry" };
-                    logging::ev(&retry.identifier, "dispatch", &format!("from {label} attempt={}", retry.attempt));
+                    let label = if retry.continuation {
+                        "continuation"
+                    } else {
+                        "retry"
+                    };
+                    logging::ev(
+                        &retry.identifier,
+                        "dispatch",
+                        &format!("from {label} attempt={}", retry.attempt),
+                    );
                     self.try_dispatch(issue, retry.attempt).await;
                 }
                 _ => {
-                    logging::ev(&retry.identifier, "retry_drop", "no longer active; dropping retry");
+                    logging::ev(
+                        &retry.identifier,
+                        "retry_drop",
+                        "no longer active; dropping retry",
+                    );
                 }
             }
         }
@@ -512,7 +594,8 @@ impl Orchestrator {
             }
         };
 
-        let retry_ids: HashSet<String> = self.retries.iter().map(|r| r.identifier.clone()).collect();
+        let retry_ids: HashSet<String> =
+            self.retries.iter().map(|r| r.identifier.clone()).collect();
         candidates.retain(|i| {
             !busy.contains(&i.identifier)
                 && !busy.contains(&i.id)
@@ -551,7 +634,11 @@ impl Orchestrator {
                     payload: &format!("render_error {msg}"),
                     ts: Utc::now(),
                 });
-                self.schedule_backoff_after_render_failure(&issue, attempt, &format!("render error: {e}"));
+                self.schedule_backoff_after_render_failure(
+                    &issue,
+                    attempt,
+                    &format!("render error: {e}"),
+                );
                 return;
             }
         };
@@ -597,6 +684,7 @@ impl Orchestrator {
             model: self.effective_cfg.model.clone(),
             workspace: &workspace,
             workspace_root: &ws_root,
+            agent_root: &self.paths.root,
             prompt,
             issue_id: issue.identifier.clone(),
             run_id: run_id.clone(),
@@ -625,12 +713,16 @@ impl Orchestrator {
                     tracing::warn!(issue = %issue.identifier, "insert_run SQLite write failed: {e:#}");
                 }
                 // Mirror claim into the claims table for tracking.
-                let claim_id = self.state.store.insert_claim(&NewClaim {
-                    run_id: &run_id,
-                    issue_identifier: &issue.identifier,
-                    worker_id: "orchestrator",
-                    claimed_at: started_at,
-                }).ok();
+                let claim_id = self
+                    .state
+                    .store
+                    .insert_claim(&NewClaim {
+                        run_id: &run_id,
+                        issue_identifier: &issue.identifier,
+                        worker_id: "orchestrator",
+                        claimed_at: started_at,
+                    })
+                    .ok();
                 // Lifecycle event: dispatch.
                 let _ = self.state.store.insert_event(&NewEvent {
                     run_id: Some(&run_id),
@@ -670,7 +762,11 @@ impl Orchestrator {
     fn schedule_backoff_after_render_failure(&mut self, issue: &Issue, attempt: u32, err: &str) {
         let max = self.effective_cfg.max_retries;
         if attempt >= max {
-            logging::ev(&issue.identifier, "failed", &format!("{err}; retries exhausted"));
+            logging::ev(
+                &issue.identifier,
+                "failed",
+                &format!("{err}; retries exhausted"),
+            );
             return;
         }
         let next = attempt + 1;
@@ -719,6 +815,7 @@ impl Orchestrator {
 
     /// Record a finished run: update the in-memory history ring, write outcome
     /// to SQLite, release the claim, and persist a terminal lifecycle event.
+    #[allow(clippy::too_many_arguments)]
     fn record_history(
         &self,
         run_id: &str,
@@ -813,7 +910,12 @@ impl Orchestrator {
         // Heartbeat every live slot once per tick.
         let now = Utc::now();
         for slot in &self.slots {
-            if slot.handle.as_ref().map(|h| !h.is_finished()).unwrap_or(false) {
+            if slot
+                .handle
+                .as_ref()
+                .map(|h| !h.is_finished())
+                .unwrap_or(false)
+            {
                 let _ = self.state.store.insert_heartbeat(&NewHeartbeat {
                     run_id: &slot.run_id,
                     issue_identifier: &slot.identifier,
@@ -825,9 +927,7 @@ impl Orchestrator {
 
         // Active run (v0 max_concurrent typically 1; surface the first slot).
         let active = self.slots.first().map(|slot| {
-            let last_event = self
-                .last_event_line(&slot.identifier)
-                .unwrap_or_default();
+            let last_event = self.last_event_line(&slot.identifier).unwrap_or_default();
             ActiveRun {
                 identifier: slot.identifier.clone(),
                 state: slot.issue.state.clone(),
@@ -897,7 +997,7 @@ impl Orchestrator {
 
 /// Sort candidates: priority asc (null last), then `created_at` asc (null last),
 /// then identifier asc.
-pub(crate) fn sort_candidates(v: &mut Vec<Issue>) {
+pub(crate) fn sort_candidates(v: &mut [Issue]) {
     v.sort_by(|a, b| {
         let pa = a.priority;
         let pb = b.priority;
@@ -949,16 +1049,16 @@ mod tests {
     use crate::paths::AgentPaths;
     use crate::prompt::PromptRenderer;
     use crate::state::{AgentInfo, AppState};
+    use crate::store::Store;
+    use crate::tracker::FileTracker;
     use crate::tracker::Tracker;
     use crate::workflow_config::{EffectiveLoopConfig, WorkflowFrontmatter};
     use anyhow::Result;
     use chrono::TimeZone;
     use std::net::{IpAddr, Ipv4Addr};
-    use tokio::sync::mpsc;
-    use crate::store::Store;
-    use crate::tracker::FileTracker;
     use tempfile::tempdir;
     use tempfile::TempDir;
+    use tokio::sync::mpsc;
 
     fn issue(id: &str, prio: Option<i32>, created: Option<i64>) -> Issue {
         Issue {
@@ -1126,7 +1226,10 @@ mod tests {
             identifier: needs_issue.identifier.clone(),
             issue: needs_issue,
             workspace: "workspace".to_string(),
-            handle: Some(RunnerHandle::finished_for_test(42, ExitKind::Abnormal(Some(17)))),
+            handle: Some(RunnerHandle::finished_for_test(
+                42,
+                ExitKind::Abnormal(Some(17)),
+            )),
             attempt: 1,
             run_id: run_id.clone(),
             started_at,
@@ -1190,7 +1293,10 @@ mod tests {
             identifier: active_issue.identifier.clone(),
             issue: active_issue,
             workspace: "workspace".to_string(),
-            handle: Some(RunnerHandle::finished_for_test(42, ExitKind::Abnormal(None))),
+            handle: Some(RunnerHandle::finished_for_test(
+                42,
+                ExitKind::Abnormal(None),
+            )),
             attempt: 1,
             run_id,
             started_at,
@@ -1205,6 +1311,82 @@ mod tests {
         assert_eq!(orchestrator.retries[0].attempt, 2);
         assert!(!orchestrator.retries[0].continuation);
         assert!(state.history.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn turn_timeout_records_interrupted_without_retry() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("logs")).unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+
+        let active_issue = issue("ISSUE-1", None, None);
+        let tracker = Arc::new(MissingTracker);
+        let agent_cfg = test_agent_config();
+        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let state = AppState::new(
+            AgentInfo {
+                id: "test-agent".to_string(),
+                folder: temp.path().display().to_string(),
+                tracker: "files".to_string(),
+                runner: "claude".to_string(),
+            },
+            control_tx,
+            Arc::clone(&store),
+            Vec::new(),
+        );
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state.clone(),
+            control_rx,
+        );
+        let started_at = Utc::now();
+        let run_id = new_run_id(&active_issue.identifier, &started_at);
+        store
+            .insert_run(&NewRun {
+                run_id: &run_id,
+                issue_id: &active_issue.id,
+                issue_identifier: &active_issue.identifier,
+                workspace: "workspace",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 42,
+                worker_id: None,
+                started_at,
+            })
+            .unwrap();
+        orchestrator.slots.push(RunSlot {
+            identifier: active_issue.identifier.clone(),
+            issue: active_issue,
+            workspace: "workspace".to_string(),
+            handle: Some(RunnerHandle::finished_for_test(
+                42,
+                ExitKind::Interrupted {
+                    reason: "turn_timeout",
+                },
+            )),
+            attempt: 1,
+            run_id: run_id.clone(),
+            started_at,
+            claim_id: None,
+        });
+        tokio::task::yield_now().await;
+
+        orchestrator.collect_finished().await;
+
+        assert!(orchestrator.retries.is_empty());
+        let history = state.history.snapshot();
+        assert_eq!(history[0].status, RunStatus::Interrupted);
+        assert_eq!(history[0].note, "turn_timeout");
+        let runs = store.list_runs_paged(0, 10).unwrap();
+        assert_eq!(runs[0].outcome.as_deref(), Some("interrupted"));
     }
 
     #[tokio::test]
@@ -1251,7 +1433,10 @@ mod tests {
             identifier: active_issue.identifier.clone(),
             issue: active_issue,
             workspace: "workspace".to_string(),
-            handle: Some(RunnerHandle::finished_for_test(42, ExitKind::Abnormal(None))),
+            handle: Some(RunnerHandle::finished_for_test(
+                42,
+                ExitKind::Abnormal(None),
+            )),
             attempt: 1,
             run_id,
             started_at,
@@ -1355,7 +1540,15 @@ mod tests {
         std::fs::write(root.join("WORKFLOW.md"), "noop").unwrap();
         let prompt = PromptRenderer::load(&root.join("WORKFLOW.md")).unwrap();
         let effective_cfg = EffectiveLoopConfig::merge(&cfg, &prompt.snapshot().frontmatter);
-        let mut orch = Orchestrator::new(cfg, paths, tracker, prompt, effective_cfg, state, control_rx);
+        let mut orch = Orchestrator::new(
+            cfg,
+            paths,
+            tracker,
+            prompt,
+            effective_cfg,
+            state,
+            control_rx,
+        );
 
         orch.handle_control(ControlMsg::Pause).await;
         orch.handle_control(ControlMsg::Resume).await;
@@ -1412,7 +1605,15 @@ mod tests {
         let prompt = PromptRenderer::load(&root.join("WORKFLOW.md")).unwrap();
         let paths = AgentPaths::new(root.clone());
         let effective_cfg = EffectiveLoopConfig::merge(&cfg, &prompt.snapshot().frontmatter);
-        let mut orch = Orchestrator::new(cfg, paths, tracker, prompt, effective_cfg, state, control_rx);
+        let mut orch = Orchestrator::new(
+            cfg,
+            paths,
+            tracker,
+            prompt,
+            effective_cfg,
+            state,
+            control_rx,
+        );
 
         orch.tick().await;
         let runs = store.list_runs_paged(0, 10).unwrap();

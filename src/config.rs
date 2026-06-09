@@ -36,8 +36,18 @@ pub struct TrackerInner {
 pub struct RunnerConfig {
     #[serde(rename = "use")]
     pub use_: String,
+    #[serde(default)]
     pub command: String,
+    #[serde(
+        default = "default_turn_timeout_ms",
+        alias = "turn_timeout_ms",
+        alias = "max_run_timeout_ms"
+    )]
     pub max_run_timeout_ms: u64,
+}
+
+fn default_turn_timeout_ms() -> u64 {
+    60 * 60 * 1000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -79,9 +89,12 @@ impl AgentConfig {
                 self.tracker.use_
             );
         }
-        if self.runner.use_ != "claude-code" {
+        if !matches!(
+            self.runner.use_.as_str(),
+            "pi" | "claude" | "claude-code" | "codex" | "cli" | "fake"
+        ) {
             bail!(
-                "runner.use must be \"claude-code\" in v0 (got {:?})",
+                "runner.use must be one of pi, claude, codex, cli, fake (got {:?})",
                 self.runner.use_
             );
         }

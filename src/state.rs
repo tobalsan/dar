@@ -23,6 +23,8 @@ pub enum RunStatus {
     Cancelled,
     Failed,
     Succeeded,
+    /// Run was interrupted by an expected orchestrator condition.
+    Interrupted,
     /// Run was in-progress when the gateway process exited without a clean
     /// shutdown; marked at startup via `Store::mark_crashed_runs`.
     Crashed,

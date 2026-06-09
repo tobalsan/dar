@@ -94,8 +94,8 @@ pub struct WfWorkspaceConfig {
 
 /// Runner / model overrides from WORKFLOW.md.
 ///
-/// `sdk` is the canonical field name for the runner kind;
-/// `runner` is accepted as a legacy alias.
+/// `runner`/`kind` are the canonical runner-kind overrides; `sdk` is accepted
+/// for compatibility with agent.yaml-era configs.
 /// Falls back to agent.yaml `runner.use` / `runner.command`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WfAgentConfig {
@@ -103,18 +103,23 @@ pub struct WfAgentConfig {
     pub sdk: Option<String>,
     /// Runner kind override (alias for `sdk`).
     pub runner: Option<String>,
+    pub kind: Option<String>,
     /// Runner command override. Equivalent to agent.yaml `runner.command`.
     pub command: Option<String>,
     /// Model identifier (not present in v0 agent.yaml; new in WORKFLOW.md).
     pub model: Option<String>,
     /// Per-attempt timeout override (ms).
     pub max_run_timeout_ms: Option<u64>,
+    pub turn_timeout_ms: Option<u64>,
 }
 
 impl WfAgentConfig {
-    /// `sdk` takes precedence over the `runner` alias.
+    /// WORKFLOW.md runner/kind overrides win over agent.yaml sdk/use fallback.
     pub fn effective_runner(&self) -> Option<&str> {
-        self.sdk.as_deref().or(self.runner.as_deref())
+        self.runner
+            .as_deref()
+            .or(self.kind.as_deref())
+            .or(self.sdk.as_deref())
     }
 }
 
@@ -161,9 +166,7 @@ pub struct WorkflowSnapshot {
 pub fn parse_workflow_md(raw: &str) -> Result<WorkflowSnapshot> {
     let (fm_raw, body) = split_frontmatter(raw);
     let frontmatter: WorkflowFrontmatter = match fm_raw {
-        Some(fm) => {
-            serde_yaml::from_str(fm).context("parsing WORKFLOW.md frontmatter YAML")?
-        }
+        Some(fm) => serde_yaml::from_str(fm).context("parsing WORKFLOW.md frontmatter YAML")?,
         None => WorkflowFrontmatter::default(),
     };
     Ok(WorkflowSnapshot {
@@ -234,6 +237,7 @@ pub struct EffectiveLoopConfig {
     pub max_retries: u32,
     pub retry_backoff_ms: u64,
     /// Whether a WORKFLOW.md parse error on live-reload keeps the stale snapshot.
+    #[allow(dead_code)]
     pub allow_stale: bool,
     // Workspace (relative to agent root)
     pub workspace_root: PathBuf,
@@ -285,17 +289,23 @@ impl EffectiveLoopConfig {
 
         // --- Runner / model ---
         let a = wf.agent.as_ref();
-        let runner_kind = a
-            .and_then(|a| a.effective_runner())
+        let runner_override = a.and_then(|a| a.effective_runner());
+        let runner_kind = runner_override
             .map(str::to_string)
-            .unwrap_or_else(|| base.runner.use_.clone());
+            .unwrap_or_else(|| normalize_runner_kind(&base.runner.use_));
         let runner_command = a
             .and_then(|a| a.command.as_deref())
             .map(str::to_string)
-            .unwrap_or_else(|| base.runner.command.clone());
+            .unwrap_or_else(|| {
+                if runner_override.is_some() {
+                    default_runner_command(&runner_kind).to_string()
+                } else {
+                    base.runner.command.clone()
+                }
+            });
         let model = a.and_then(|a| a.model.clone());
         let max_run_timeout_ms = a
-            .and_then(|a| a.max_run_timeout_ms)
+            .and_then(|a| a.turn_timeout_ms.or(a.max_run_timeout_ms))
             .unwrap_or(base.runner.max_run_timeout_ms);
 
         // --- Dashboard ---
@@ -329,6 +339,23 @@ impl EffectiveLoopConfig {
             hooks: wf.hooks.clone().unwrap_or_default(),
             linear: wf.linear.clone().unwrap_or_default(),
         }
+    }
+}
+
+fn normalize_runner_kind(kind: &str) -> String {
+    match kind {
+        "claude-code" => "claude".to_string(),
+        "" => "pi".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn default_runner_command(kind: &str) -> &'static str {
+    match kind {
+        "claude" | "claude-code" => "claude",
+        "codex" => "codex",
+        "cli" | "fake" => "sh",
+        _ => "pi",
     }
 }
 
@@ -495,10 +522,7 @@ body"#;
             fm.workspace.as_ref().unwrap().root,
             Some(PathBuf::from("./ws"))
         );
-        assert_eq!(
-            fm.agent.as_ref().unwrap().sdk,
-            Some("claude-code".into())
-        );
+        assert_eq!(fm.agent.as_ref().unwrap().sdk, Some("claude-code".into()));
         assert_eq!(
             fm.agent.as_ref().unwrap().model,
             Some("claude-opus-4-6".into())
@@ -526,10 +550,10 @@ body"#;
         assert_eq!(eff.terminal_states, vec!["done"]);
         assert_eq!(eff.needs_human, None);
         assert_eq!(eff.poll_interval_ms, 10_000);
-        assert_eq!(eff.runner_kind, "claude-code");
+        assert_eq!(eff.runner_kind, "claude");
         assert_eq!(eff.runner_command, "claude");
         assert_eq!(eff.model, None);
-        assert_eq!(eff.allow_stale, true);
+        assert!(eff.allow_stale);
     }
 
     #[test]
@@ -590,12 +614,24 @@ body"#;
     fn merge_runner_alias_falls_back() {
         let base = base_config();
         // `runner` alias (no sdk) should be picked up.
-        let raw = "---\nagent:\n  runner: other-runner\n---";
+        let raw = "---\nagent:\n  runner: cli\n---";
         let snap = parse_workflow_md(raw).unwrap();
         let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
-        assert_eq!(eff.runner_kind, "other-runner");
-        // command falls back to base.
-        assert_eq!(eff.runner_command, "claude");
+        assert_eq!(eff.runner_kind, "cli");
+        // Runner override uses that runner's default command instead of the
+        // base runner command.
+        assert_eq!(eff.runner_command, "sh");
+    }
+
+    #[test]
+    fn merge_runner_kind_beats_sdk_and_turn_timeout_alias_wins() {
+        let base = base_config();
+        let raw = "---\nagent:\n  sdk: claude\n  kind: codex\n  turn_timeout_ms: 2500\n  max_run_timeout_ms: 9000\n---";
+        let snap = parse_workflow_md(raw).unwrap();
+        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        assert_eq!(eff.runner_kind, "codex");
+        assert_eq!(eff.runner_command, "codex");
+        assert_eq!(eff.max_run_timeout_ms, 2500);
     }
 
     #[test]
@@ -625,7 +661,10 @@ body"#;
         let raw = "---\npolling:\n  allowStale: false\n---";
         let snap = parse_workflow_md(raw).unwrap();
         let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
-        assert!(!eff.allow_stale, "allowStale camelCase should map to allow_stale=false");
+        assert!(
+            !eff.allow_stale,
+            "allowStale camelCase should map to allow_stale=false"
+        );
     }
 
     #[test]
