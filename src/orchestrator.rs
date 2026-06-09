@@ -377,7 +377,10 @@ impl Orchestrator {
                         .ok()
                         .flatten()
                         .map(|i| i.state);
-                    if state_now.as_deref() == needs_human.as_deref() {
+                    if matches!(
+                        (state_now.as_deref(), needs_human.as_deref()),
+                        (Some(st), Some(needs_human)) if st == needs_human
+                    ) {
                         logging::ev(
                             &id,
                             "needs_human",
@@ -828,6 +831,26 @@ mod tests {
         }
     }
 
+    struct MissingTracker;
+
+    impl Tracker for MissingTracker {
+        fn poll_candidates(&self) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_states(&self, _ids: &[String]) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_terminal(&self) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_one(&self, _id: &str) -> Result<Option<Issue>> {
+            Ok(None)
+        }
+    }
+
     fn test_agent_config() -> AgentConfig {
         AgentConfig {
             id: "test-agent".to_string(),
@@ -915,6 +938,112 @@ mod tests {
         assert_eq!(history[0].identifier, "ISSUE-1");
         assert_eq!(history[0].status, RunStatus::NeedsHuman);
         assert_eq!(history[0].note, "needs-human after abnormal exit");
+    }
+
+    #[tokio::test]
+    async fn abnormal_exit_without_needs_human_config_and_missing_tracker_state_retries() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("logs")).unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+
+        let active_issue = issue("ISSUE-1", None, None);
+        let tracker = Arc::new(MissingTracker);
+        let agent_cfg = test_agent_config();
+        let mut effective_cfg =
+            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        effective_cfg.needs_human = None;
+
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let state = AppState::new(
+            AgentInfo {
+                id: "test-agent".to_string(),
+                folder: temp.path().display().to_string(),
+                tracker: "files".to_string(),
+                runner: "claude-code".to_string(),
+            },
+            control_tx,
+            temp.path().join("logs/history.jsonl"),
+        );
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state.clone(),
+            control_rx,
+        );
+        orchestrator.slots.push(RunSlot {
+            identifier: active_issue.identifier.clone(),
+            issue: active_issue,
+            workspace: "workspace".to_string(),
+            handle: Some(RunnerHandle::finished_for_test(42, ExitKind::Abnormal)),
+            attempt: 1,
+        });
+        tokio::task::yield_now().await;
+
+        orchestrator.collect_finished().await;
+
+        assert_eq!(orchestrator.retries.len(), 1);
+        assert_eq!(orchestrator.retries[0].identifier, "ISSUE-1");
+        assert_eq!(orchestrator.retries[0].attempt, 2);
+        assert!(!orchestrator.retries[0].continuation);
+        assert!(state.history.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn abnormal_exit_with_needs_human_config_and_different_tracker_state_retries() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("logs")).unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+
+        let active_issue = issue("ISSUE-1", None, None);
+        let tracker = Arc::new(StaticTracker {
+            issue: active_issue.clone(),
+        });
+        let agent_cfg = test_agent_config();
+        let mut effective_cfg =
+            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        effective_cfg.needs_human = Some("stuck".to_string());
+
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let state = AppState::new(
+            AgentInfo {
+                id: "test-agent".to_string(),
+                folder: temp.path().display().to_string(),
+                tracker: "files".to_string(),
+                runner: "claude-code".to_string(),
+            },
+            control_tx,
+            temp.path().join("logs/history.jsonl"),
+        );
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state.clone(),
+            control_rx,
+        );
+        orchestrator.slots.push(RunSlot {
+            identifier: active_issue.identifier.clone(),
+            issue: active_issue,
+            workspace: "workspace".to_string(),
+            handle: Some(RunnerHandle::finished_for_test(42, ExitKind::Abnormal)),
+            attempt: 1,
+        });
+        tokio::task::yield_now().await;
+
+        orchestrator.collect_finished().await;
+
+        assert_eq!(orchestrator.retries.len(), 1);
+        assert_eq!(orchestrator.retries[0].identifier, "ISSUE-1");
+        assert_eq!(orchestrator.retries[0].attempt, 2);
+        assert!(!orchestrator.retries[0].continuation);
+        assert!(state.history.snapshot().is_empty());
     }
 
     #[test]
