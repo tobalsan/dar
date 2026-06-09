@@ -67,6 +67,7 @@ impl DashboardTemplate {
                     RunStatus::Cancelled => ("Interrupted", "interrupted"),
                     RunStatus::RetryQueued => ("Retrying", "retrying"),
                     RunStatus::Running => ("Running", "running"),
+                    RunStatus::NeedsHuman => ("Needs Human", "needs-human"),
                 };
                 HistoryRow {
                     status: label.to_string(),

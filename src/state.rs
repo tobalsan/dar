@@ -22,6 +22,8 @@ pub enum RunStatus {
     Cancelled,
     Failed,
     Succeeded,
+    /// Issue was moved to the configured needs-human state; released without retry.
+    NeedsHuman,
 }
 
 /// Snapshot of the currently-active run for the dashboard.
