@@ -26,6 +26,7 @@ impl AgentPaths {
     }
 
     /// `<root>/agent.yaml`.
+    #[allow(dead_code)]
     pub fn agent_yaml(&self) -> PathBuf {
         self.root.join("agent.yaml")
     }
@@ -51,13 +52,19 @@ impl AgentPaths {
         self.logs_dir().join("agent.log")
     }
 
-    /// `<root>/logs/history.jsonl` — persisted run history.
-    pub fn history_file(&self) -> PathBuf {
-        self.logs_dir().join("history.jsonl")
+    /// `<root>/data` — persistent process data dir (SQLite store, etc.).
+    pub fn data_dir(&self) -> PathBuf {
+        self.root.join("data")
+    }
+
+    /// `<root>/data/store.db` — SQLite persistence store.
+    pub fn store_db(&self) -> PathBuf {
+        self.data_dir().join("store.db")
     }
 
     /// Workspace root, resolved against the configured `workspace.root`
     /// (relative to the agent root).
+    #[allow(dead_code)]
     pub fn workspace_root(&self, cfg: &WorkspaceConfig) -> PathBuf {
         self.root.join(&cfg.root)
     }

@@ -7,12 +7,13 @@
 //! the `paused` flag). Dashboard handlers take read locks for rendering.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, RwLock};
+
+use crate::store::Store;
 
 /// Run state: the orchestrator's in-memory view of one dispatch attempt.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -22,6 +23,9 @@ pub enum RunStatus {
     Cancelled,
     Failed,
     Succeeded,
+    /// Run was in-progress when the gateway process exited without a clean
+    /// shutdown; marked at startup via `Store::mark_crashed_runs`.
+    Crashed,
     /// Issue was moved to the configured needs-human state; released without retry.
     NeedsHuman,
 }
@@ -67,72 +71,43 @@ pub struct HistoryEntry {
     pub note: String,
 }
 
-/// Fixed-capacity ring of finished runs, newest-first. Optionally persisted to a
-/// JSONL file (one entry per line, appended on push, loaded on startup).
+/// Fixed-capacity ring of finished runs, newest-first. The in-memory ring feeds
+/// the dashboard; durable persistence is handled by `Store` (SQLite). Startup
+/// seeds the ring from `Store::load_recent_runs` instead of a JSONL file.
 pub struct HistoryRing {
     inner: Mutex<VecDeque<HistoryEntry>>,
-    path: Option<PathBuf>,
 }
 
 impl HistoryRing {
-    const CAP: usize = 50;
+    pub const CAP: usize = 50;
 
+    /// Create an empty ring.
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(VecDeque::with_capacity(Self::CAP)),
-            path: None,
         }
     }
 
-    /// Open a ring backed by `path`, loading any existing entries (newest-first,
-    /// capped). Subsequent `push`es append to the file. A missing file is fine
-    /// (starts empty); malformed lines are skipped.
-    pub fn with_persistence(path: PathBuf) -> Self {
-        let mut entries: VecDeque<HistoryEntry> = VecDeque::with_capacity(Self::CAP);
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            // File is append-order (oldest first). Parse all valid lines, then
-            // take the last CAP and reverse into newest-first order.
-            let parsed: Vec<HistoryEntry> = contents
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .filter_map(|l| serde_json::from_str(l).ok())
-                .collect();
-            let start = parsed.len().saturating_sub(Self::CAP);
-            for e in parsed[start..].iter().rev().cloned() {
-                entries.push_back(e);
-            }
+    /// Create a ring pre-seeded from the given entries (newest-first, capped).
+    /// Used at startup after loading recent runs from SQLite.
+    pub fn from_seed(seed: Vec<HistoryEntry>) -> Self {
+        let mut q: VecDeque<HistoryEntry> = VecDeque::with_capacity(Self::CAP);
+        for e in seed.into_iter().take(Self::CAP) {
+            q.push_back(e);
         }
         Self {
-            inner: Mutex::new(entries),
-            path: Some(path),
+            inner: Mutex::new(q),
         }
     }
 
-    /// Record a finished run at the front; evict the oldest if full. If the ring
-    /// is persisted, append the entry as one JSON line to the backing file.
+    /// Record a finished run at the front; evict the oldest if full.
+    /// Durable write to SQLite is the caller's responsibility (orchestrator).
     pub fn push(&self, entry: HistoryEntry) {
-        if let Some(path) = &self.path {
-            if let Err(e) = Self::append_line(path, &entry) {
-                tracing::warn!("history persist failed: {e:#}");
-            }
-        }
         let mut q = self.inner.lock().unwrap();
         if q.len() == Self::CAP {
             q.pop_back();
         }
         q.push_front(entry);
-    }
-
-    /// Append one `HistoryEntry` as a JSON line to `path`, creating it if needed.
-    fn append_line(path: &std::path::Path, entry: &HistoryEntry) -> std::io::Result<()> {
-        use std::io::Write;
-        let line = serde_json::to_string(entry)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        writeln!(f, "{line}")
     }
 
     /// Newest-to-oldest copy of the current ring contents.
@@ -213,15 +188,20 @@ pub struct AppState {
     pub retry: Arc<RwLock<Vec<RetryItem>>>,
     pub events: Arc<EventRing>,
     pub history: Arc<HistoryRing>,
+    /// SQLite persistence store (runs, events, claims, heartbeats).
+    pub store: Arc<Store>,
     /// Dashboard -> orchestrator control channel.
     pub control_tx: mpsc::UnboundedSender<ControlMsg>,
 }
 
 impl AppState {
+    /// Create shared state. `history_seed` is the recent run history loaded from
+    /// SQLite at startup; it seeds the in-memory `HistoryRing`.
     pub fn new(
         agent: AgentInfo,
         control_tx: mpsc::UnboundedSender<ControlMsg>,
-        history_path: std::path::PathBuf,
+        store: Arc<Store>,
+        history_seed: Vec<HistoryEntry>,
     ) -> Self {
         Self {
             agent,
@@ -230,7 +210,8 @@ impl AppState {
             queue: Arc::new(RwLock::new(Vec::new())),
             retry: Arc::new(RwLock::new(Vec::new())),
             events: Arc::new(EventRing::new()),
-            history: Arc::new(HistoryRing::with_persistence(history_path)),
+            history: Arc::new(HistoryRing::from_seed(history_seed)),
+            store,
             control_tx,
         }
     }

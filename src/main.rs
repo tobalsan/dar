@@ -15,6 +15,7 @@ mod paths;
 mod prompt;
 mod runner;
 mod state;
+mod store;
 mod tracker;
 mod workflow_config;
 
@@ -81,6 +82,18 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
 
     let (control_tx, control_rx) = mpsc::unbounded_channel();
 
+    // Open SQLite store under <root>/data/store.db; mark any crashed runs from
+    // a previous invocation, then seed the in-memory history ring from SQLite.
+    let store = Arc::new(
+        store::Store::open(&paths.store_db()).context("opening SQLite persistence store")?,
+    );
+    if let Err(e) = store.mark_crashed_runs() {
+        tracing::warn!("mark_crashed_runs failed: {e:#}");
+    }
+    let history_seed = store
+        .load_recent_runs(state::HistoryRing::CAP)
+        .unwrap_or_default();
+
     // Dashboard displays the agent identity from agent.yaml (stable, display-only).
     let agent_info = AgentInfo {
         id: agent_cfg.id.clone(),
@@ -88,7 +101,7 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
         tracker: agent_cfg.tracker.use_.clone(),
         runner: effective_cfg.runner_kind.clone(),
     };
-    let app_state = AppState::new(agent_info, control_tx, paths.history_file());
+    let app_state = AppState::new(agent_info, control_tx, Arc::clone(&store), history_seed);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -120,6 +133,13 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
 
     wait_for_signal().await?;
     logging::ev("-", "shutdown", "signal received, stopping");
+    let _ = store.insert_event(&store::NewEvent {
+        run_id: None,
+        issue_identifier: "-",
+        kind: "lifecycle",
+        payload: "shutdown signal received, stopping",
+        ts: chrono::Utc::now(),
+    });
     let _ = shutdown_tx.send(true);
 
     let _ = orch_task.await;

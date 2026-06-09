@@ -247,7 +247,9 @@ pub struct EffectiveLoopConfig {
     pub dashboard_bind: IpAddr,
     pub dashboard_port: u16,
     // Extension points (parsed; not yet acted on in v0)
+    #[allow(dead_code)]
     pub hooks: WfHooksConfig,
+    #[allow(dead_code)]
     pub linear: WfLinearConfig,
 }
 

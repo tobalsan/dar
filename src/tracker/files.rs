@@ -17,6 +17,7 @@ use crate::domain::Issue;
 pub struct FileTracker {
     issues_dir: PathBuf,
     active: Vec<String>,
+    #[allow(dead_code)]
     terminal: Vec<String>,
 }
 

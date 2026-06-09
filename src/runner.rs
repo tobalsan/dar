@@ -4,7 +4,7 @@
 //! whole subtree), cwd = the per-issue workspace (containment asserted first),
 //! pipes the rendered prompt to the child's stdin then closes it, and streams
 //! the child's stdout+stderr line-by-line into the log and the recent-events
-//! ring (prefixed `child[ID]:`). Tracks pid/started_at/last_event_at.
+//! ring (prefixed `child[ID]:`). Tracks pid and last_event_at.
 //!
 //! `spawn` returns a `RunnerHandle` the orchestrator awaits and can signal-kill.
 //! On timeout or operator/reconcile kill the child's process group is sent
@@ -27,6 +27,7 @@ use tokio::sync::oneshot;
 use crate::logging;
 use crate::paths::assert_contained;
 use crate::state::EventRing;
+use crate::store::{NewEvent, Store};
 
 /// Grace period between SIGTERM and SIGKILL of the child process group.
 const KILL_GRACE: Duration = Duration::from_secs(5);
@@ -36,12 +37,15 @@ const KILL_GRACE: Duration = Duration::from_secs(5);
 pub enum ExitKind {
     /// Process exited with code 0.
     Normal,
-    /// Non-zero exit, killed by signal, or timed out.
-    Abnormal,
+    /// Non-zero exit, killed by signal, or timed out. Carries the OS exit code
+    /// when the process exited on its own (non-zero status), or `None` when
+    /// killed by signal, timed out, or the wait call failed.
+    Abnormal(Option<i32>),
 }
 
 /// Why the orchestrator asked to kill a running child.
 pub enum KillReason {
+    #[allow(dead_code)]
     Timeout,
     OperatorStop,
     Reconcile,
@@ -58,8 +62,11 @@ pub struct SpawnParams<'a> {
     pub workspace_root: &'a Path,
     pub prompt: String,
     pub issue_id: String,
+    /// SQLite run_id for this dispatch attempt. Used to tag event rows.
+    pub run_id: String,
     pub max_run_timeout_ms: u64,
     pub events: Arc<EventRing>,
+    pub store: Arc<Store>,
     pub last_event_at: Arc<Mutex<DateTime<Utc>>>,
 }
 
@@ -68,7 +75,6 @@ pub struct SpawnParams<'a> {
 /// stores it via `Option::take`.
 pub struct RunnerHandle {
     pub pid: u32,
-    pub started_at: DateTime<Utc>,
     kill_tx: oneshot::Sender<KillReason>,
     done: tokio::task::JoinHandle<ExitKind>,
 }
@@ -88,7 +94,7 @@ impl RunnerHandle {
     pub async fn wait(self) -> ExitKind {
         // The supervising task always resolves to an ExitKind; a JoinError
         // (panic/cancel) is treated as abnormal.
-        self.done.await.unwrap_or(ExitKind::Abnormal)
+        self.done.await.unwrap_or(ExitKind::Abnormal(None))
     }
 
     /// Ask the supervising task to terminate the child for the given reason.
@@ -108,7 +114,6 @@ impl RunnerHandle {
         let done = tokio::spawn(async move { kind });
         Self {
             pid,
-            started_at: Utc::now(),
             kill_tx,
             done,
         }
@@ -166,8 +171,6 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     let pid = child
         .id()
         .context("child has no pid immediately after spawn")?;
-    let started_at = Utc::now();
-
     logging::ev(
         &p.issue_id,
         "spawn",
@@ -193,8 +196,10 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
         spawn_line_pump(
             out,
             p.issue_id.clone(),
+            p.run_id.clone(),
             "stdout",
             Arc::clone(&p.events),
+            Arc::clone(&p.store),
             Arc::clone(&p.last_event_at),
         );
     }
@@ -202,8 +207,10 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
         spawn_line_pump(
             err,
             p.issue_id.clone(),
+            p.run_id.clone(),
             "stderr",
             Arc::clone(&p.events),
+            Arc::clone(&p.store),
             Arc::clone(&p.last_event_at),
         );
     }
@@ -219,7 +226,6 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
 
     Ok(RunnerHandle {
         pid,
-        started_at,
         kill_tx,
         done,
     })
@@ -244,19 +250,20 @@ async fn supervise(
                     return ExitKind::Normal;
                 }
                 Ok(s) => {
+                    let code = s.code();
                     logging::ev(&issue_id, "exit", &format!("status={s} (abnormal)"));
-                    return ExitKind::Abnormal;
+                    return ExitKind::Abnormal(code);
                 }
                 Err(e) => {
                     logging::ev(&issue_id, "exit", &format!("wait error: {e} (abnormal)"));
-                    return ExitKind::Abnormal;
+                    return ExitKind::Abnormal(None);
                 }
             }
         }
         // Per-attempt timeout.
         _ = tokio::time::sleep(timeout) => {
             logging::ev(&issue_id, "timeout", "max_run_timeout_ms exceeded; killing");
-            ExitKind::Abnormal
+            ExitKind::Abnormal(None)
         }
         // Operator stop / reconcile / timeout-from-orchestrator.
         reason = kill_rx => {
@@ -268,7 +275,7 @@ async fn supervise(
                 // through and just ensure the child is gone.
                 Err(_) => logging::ev(&issue_id, "kill", "handle dropped"),
             }
-            ExitKind::Abnormal
+            ExitKind::Abnormal(None)
         }
     };
 
@@ -279,13 +286,15 @@ async fn supervise(
     kind
 }
 
-/// Stream one byte source line-by-line into the event ring + log, updating
-/// `last_event_at` per line. Lines are prefixed `child[ID]:` per PRD.
+/// Stream one byte source line-by-line into the event ring + SQLite + log,
+/// updating `last_event_at` per line. Lines are prefixed `child[ID]:` per PRD.
 fn spawn_line_pump<R>(
     reader: R,
     issue_id: String,
+    run_id: String,
     stream: &'static str,
     events: Arc<EventRing>,
+    store: Arc<Store>,
     last_event_at: Arc<Mutex<DateTime<Utc>>>,
 ) where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -295,12 +304,21 @@ fn spawn_line_pump<R>(
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
+                    let ts = Utc::now();
                     let formatted = format!("child[{issue_id}]: {line}");
                     events.push(formatted.clone());
                     if let Ok(mut t) = last_event_at.lock() {
-                        *t = Utc::now();
+                        *t = ts;
                     }
                     logging::ev(&issue_id, stream, &line);
+                    // Best-effort SQLite write; don't stall the pump on failure.
+                    let _ = store.insert_event(&NewEvent {
+                        run_id: Some(&run_id),
+                        issue_identifier: &issue_id,
+                        kind: stream,
+                        payload: &line,
+                        ts,
+                    });
                 }
                 Ok(None) => break, // EOF
                 Err(e) => {
@@ -333,7 +351,9 @@ pub fn term_then_kill(pid: u32, grace: std::time::Duration) {
 mod tests {
     use super::*;
     use crate::state::EventRing;
+    use crate::store::Store;
     use chrono::Utc;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
     fn params<'a>(
@@ -350,8 +370,10 @@ mod tests {
             workspace_root,
             prompt: String::new(),
             issue_id: "ISSUE-1".to_string(),
+            run_id: "ISSUE-1-test".to_string(),
             max_run_timeout_ms: 1000,
             events: Arc::new(EventRing::new()),
+            store: Arc::new(Store::open(&PathBuf::from(":memory:")).unwrap()),
             last_event_at: Arc::new(Mutex::new(Utc::now())),
         }
     }
