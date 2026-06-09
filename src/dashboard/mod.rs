@@ -200,9 +200,15 @@ async fn asset(Path(path): Path<String>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
-    use tempfile::tempdir;
+    use std::sync::Arc;
 
+    use axum::body;
+    use chrono::Utc;
+    use serde_json::Value;
+    use tempfile::tempdir;
+    use tokio::sync::mpsc;
+
+    use crate::state::AgentInfo;
     use crate::store::{NewEvent, NewRun};
 
     #[test]
@@ -246,5 +252,98 @@ mod tests {
         let next = events_page_for_run(&store, &run_id, page.next_cursor.unwrap(), 2).unwrap();
         assert_eq!(next.events.len(), 1);
         assert_eq!(next.events[0].payload, "three");
+    }
+
+    #[tokio::test]
+    async fn api_run_logs_handler_returns_events_and_cursor() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("store.db")).unwrap());
+        let now = Utc::now();
+        let run_id = crate::store::new_run_id("DASH-2", &now);
+
+        store
+            .insert_run(&NewRun {
+                run_id: &run_id,
+                issue_id: "dash-2",
+                issue_identifier: "DASH-2",
+                workspace: "/tmp/ws",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 101,
+                worker_id: None,
+                started_at: now,
+            })
+            .unwrap();
+
+        let mut event_ids = Vec::new();
+        for payload in ["one", "two", "three", "four"] {
+            let event_id = store
+                .insert_event(&NewEvent {
+                    run_id: Some(&run_id),
+                    issue_identifier: "DASH-2",
+                    kind: "stdout",
+                    payload,
+                    ts: now,
+                })
+                .unwrap();
+            event_ids.push(event_id);
+        }
+
+        let state = test_state(Arc::clone(&store));
+        let response = api_run_logs(
+            State(state.clone()),
+            Path(run_id.clone()),
+            Query(HashMap::from([
+                ("since".to_string(), event_ids[1].to_string()),
+                ("limit".to_string(), "2".to_string()),
+            ])),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+
+        let events = json["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["payload"], "three");
+        assert_eq!(events[1]["payload"], "four");
+        assert_eq!(json["next_cursor"], event_ids[3]);
+
+        let missing = api_run_logs(
+            State(state),
+            Path("missing-run".to_string()),
+            Query(HashMap::from([
+                ("since".to_string(), "0".to_string()),
+                ("limit".to_string(), "2".to_string()),
+            ])),
+        )
+        .await;
+
+        assert_eq!(missing.status(), StatusCode::OK);
+        let body = body::to_bytes(missing.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["events"].as_array().unwrap().len(), 0);
+        assert!(json["next_cursor"].is_null());
+    }
+
+    fn test_state(store: Arc<Store>) -> AppState {
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        AppState::new(
+            AgentInfo {
+                id: "test-agent".to_string(),
+                folder: "/tmp/agent".to_string(),
+                tracker: "file".to_string(),
+                runner: "claude".to_string(),
+            },
+            control_tx,
+            store,
+            Vec::new(),
+        )
     }
 }
