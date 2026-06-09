@@ -26,6 +26,8 @@ pub enum RunStatus {
     /// Run was in-progress when the gateway process exited without a clean
     /// shutdown; marked at startup via `Store::mark_crashed_runs`.
     Crashed,
+    /// Issue was moved to the configured needs-human state; released without retry.
+    NeedsHuman,
 }
 
 /// Snapshot of the currently-active run for the dashboard.

@@ -26,6 +26,7 @@ impl AgentPaths {
     }
 
     /// `<root>/agent.yaml`.
+    #[allow(dead_code)]
     pub fn agent_yaml(&self) -> PathBuf {
         self.root.join("agent.yaml")
     }
@@ -63,6 +64,7 @@ impl AgentPaths {
 
     /// Workspace root, resolved against the configured `workspace.root`
     /// (relative to the agent root).
+    #[allow(dead_code)]
     pub fn workspace_root(&self, cfg: &WorkspaceConfig) -> PathBuf {
         self.root.join(&cfg.root)
     }

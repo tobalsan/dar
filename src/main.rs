@@ -17,6 +17,7 @@ mod runner;
 mod state;
 mod store;
 mod tracker;
+mod workflow_config;
 
 use std::sync::Arc;
 
@@ -27,6 +28,7 @@ use tokio::sync::{mpsc, watch};
 use cli::{Cli, Command};
 use paths::AgentPaths;
 use state::{AgentInfo, AppState};
+use workflow_config::EffectiveLoopConfig;
 
 fn main() {
     if let Err(e) = main_inner() {
@@ -46,7 +48,6 @@ async fn main_inner() -> Result<()> {
         }
         Command::Doctor(args) => {
             let root = args.resolve_root()?;
-            // doctor sets up no file logging; findings go to stderr.
             let code = doctor::run(&root)?;
             std::process::exit(code);
         }
@@ -59,20 +60,26 @@ async fn main_inner() -> Result<()> {
 async fn run(root: std::path::PathBuf) -> Result<()> {
     let paths = AgentPaths::new(root);
 
-    // Ensure logs/ exists before the appender opens the file.
     std::fs::create_dir_all(paths.logs_dir())
         .with_context(|| format!("creating logs dir {}", paths.logs_dir().display()))?;
 
-    // WorkerGuard must live for the whole process or buffered logs are dropped.
     let _log_guard = logging::init(&paths.log_file())?;
 
-    let cfg = config::load(&paths.root)?;
-    cfg.validate().context("invalid agent.yaml")?;
+    // Load agent definition (remains the fallback base for all loop config).
+    let agent_cfg = config::load(&paths.root)?;
+    agent_cfg.validate().context("invalid agent.yaml")?;
 
-    let tracker = tracker::build(&cfg.tracker, &paths)?;
+    // Load WORKFLOW.md; parse frontmatter to derive effective loop config.
     let prompt = prompt::PromptRenderer::load(&paths.workflow_md())?;
+    let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &prompt.snapshot().frontmatter);
 
-    // Control channel: dashboard -> orchestrator.
+    // Build tracker using effective active/terminal states (WORKFLOW.md wins,
+    // falls back to agent.yaml when absent).
+    let mut tracker_cfg = agent_cfg.tracker.clone();
+    tracker_cfg.active_states = effective_cfg.active_states.clone();
+    tracker_cfg.terminal_states = effective_cfg.terminal_states.clone();
+    let tracker = tracker::build(&tracker_cfg, &paths)?;
+
     let (control_tx, control_rx) = mpsc::unbounded_channel();
 
     // Open SQLite store under <root>/data/store.db; mark any crashed runs from
@@ -87,22 +94,23 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
         .load_recent_runs(state::HistoryRing::CAP)
         .unwrap_or_default();
 
+    // Dashboard displays the agent identity from agent.yaml (stable, display-only).
     let agent_info = AgentInfo {
-        id: cfg.id.clone(),
+        id: agent_cfg.id.clone(),
         folder: paths.root.display().to_string(),
-        tracker: cfg.tracker.use_.clone(),
-        runner: cfg.runner.use_.clone(),
+        tracker: agent_cfg.tracker.use_.clone(),
+        runner: effective_cfg.runner_kind.clone(),
     };
     let app_state = AppState::new(agent_info, control_tx, Arc::clone(&store), history_seed);
 
-    // Shutdown signal observed by both tasks.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let orchestrator = orchestrator::Orchestrator::new(
-        cfg.clone(),
+        agent_cfg.clone(),
         paths.clone(),
         Arc::clone(&tracker),
         prompt,
+        effective_cfg.clone(),
         app_state.clone(),
         control_rx,
     );
@@ -110,8 +118,8 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     let orch_shutdown = shutdown_rx.clone();
     let orch_task = tokio::spawn(async move { orchestrator.run(orch_shutdown).await });
 
-    let bind = cfg.dashboard.bind;
-    let port = cfg.dashboard.port;
+    let bind = effective_cfg.dashboard_bind;
+    let port = effective_cfg.dashboard_port;
     let dash_state = app_state.clone();
     let dash_shutdown = shutdown_rx.clone();
     let dash_task =
@@ -123,7 +131,6 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
         &format!("agentropy running; dashboard on http://{bind}:{port}/"),
     );
 
-    // Wait for ctrl_c or SIGTERM, then signal graceful shutdown.
     wait_for_signal().await?;
     logging::ev("-", "shutdown", "signal received, stopping");
     let _ = store.insert_event(&store::NewEvent {
@@ -135,7 +142,6 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     });
     let _ = shutdown_tx.send(true);
 
-    // Let both tasks wind down. Orchestrator kills the active child first.
     let _ = orch_task.await;
     let _ = dash_task.await;
 

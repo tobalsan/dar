@@ -21,8 +21,10 @@ pub trait Tracker: Send + Sync {
     fn poll_candidates(&self) -> Result<Vec<Issue>>;
     /// Current state of the given issue ids (by id or identifier). Missing ids
     /// are simply omitted from the result.
+    #[allow(dead_code)]
     fn fetch_states(&self, ids: &[String]) -> Result<Vec<Issue>>;
     /// All issues whose state is in `terminal_states`.
+    #[allow(dead_code)]
     fn fetch_terminal(&self) -> Result<Vec<Issue>>;
     /// One issue by id or identifier; `None` if not found.
     fn fetch_one(&self, id: &str) -> Result<Option<Issue>>;

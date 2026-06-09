@@ -495,6 +495,7 @@ fn run_status_to_str(s: RunStatus) -> &'static str {
         RunStatus::Failed => "Failed",
         RunStatus::Succeeded => "Succeeded",
         RunStatus::Crashed => "interrupted_gateway_restart",
+        RunStatus::NeedsHuman => "NeedsHuman",
     }
 }
 
@@ -506,6 +507,7 @@ fn str_to_run_status(s: &str) -> Option<RunStatus> {
         "Failed" => Some(RunStatus::Failed),
         "Succeeded" => Some(RunStatus::Succeeded),
         "Crashed" | "interrupted_gateway_restart" => Some(RunStatus::Crashed),
+        "NeedsHuman" => Some(RunStatus::NeedsHuman),
         _ => None,
     }
 }

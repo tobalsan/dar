@@ -17,6 +17,7 @@ use crate::domain::Issue;
 pub struct FileTracker {
     issues_dir: PathBuf,
     active: Vec<String>,
+    #[allow(dead_code)]
     terminal: Vec<String>,
 }
 
@@ -168,6 +169,7 @@ fn parse_issue_file(path: &Path) -> Result<Issue> {
         identifier,
         title,
         description,
+        url: None,
         state: fm.state.unwrap_or_default(),
         priority: fm.priority,
         assignees: fm.assignees,

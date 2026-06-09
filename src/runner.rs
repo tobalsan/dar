@@ -4,12 +4,13 @@
 //! whole subtree), cwd = the per-issue workspace (containment asserted first),
 //! pipes the rendered prompt to the child's stdin then closes it, and streams
 //! the child's stdout+stderr line-by-line into the log and the recent-events
-//! ring (prefixed `child[ID]:`). Tracks pid/started_at/last_event_at.
+//! ring (prefixed `child[ID]:`). Tracks pid and last_event_at.
 //!
 //! `spawn` returns a `RunnerHandle` the orchestrator awaits and can signal-kill.
 //! On timeout or operator/reconcile kill the child's process group is sent
 //! SIGTERM, granted a 5s grace, then SIGKILL.
 
+use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -44,14 +45,19 @@ pub enum ExitKind {
 
 /// Why the orchestrator asked to kill a running child.
 pub enum KillReason {
+    #[allow(dead_code)]
     Timeout,
     OperatorStop,
     Reconcile,
 }
 
-/// Parameters for spawning one Claude Code run.
+/// Parameters for spawning one agent run.
 pub struct SpawnParams<'a> {
     pub command: &'a str,
+    /// Runner kind (e.g. "claude-code"). Determines which CLI flags are added.
+    pub runner_kind: &'a str,
+    /// Model override; passed as `--model <model>` for claude-code runners.
+    pub model: Option<String>,
     pub workspace: &'a Path,
     pub workspace_root: &'a Path,
     pub prompt: String,
@@ -69,7 +75,6 @@ pub struct SpawnParams<'a> {
 /// stores it via `Option::take`.
 pub struct RunnerHandle {
     pub pid: u32,
-    pub started_at: DateTime<Utc>,
     kill_tx: oneshot::Sender<KillReason>,
     done: tokio::task::JoinHandle<ExitKind>,
 }
@@ -102,6 +107,41 @@ impl RunnerHandle {
         // consumes the handle per the contract, so we drop `done` here.
         drop(self.done);
     }
+
+    #[cfg(test)]
+    pub(crate) fn finished_for_test(pid: u32, kind: ExitKind) -> Self {
+        let (kill_tx, _kill_rx) = oneshot::channel::<KillReason>();
+        let done = tokio::spawn(async move { kind });
+        Self {
+            pid,
+            kill_tx,
+            done,
+        }
+    }
+}
+
+fn build_command_args(p: &SpawnParams<'_>) -> Vec<OsString> {
+    let mut args = Vec::new();
+    if p.runner_kind == "claude-code" {
+        // Autonomous runner: no human is present to answer Claude's permission
+        // prompts, and the workflow needs the child to edit its issue file, which
+        // lives outside the workspace cwd (under the agent folder). Bypass the
+        // permission sandbox and widen the allowed dirs to the agent folder
+        // (parent of the workspace root). See PRD open question on Claude flags.
+        let agent_dir = p.workspace_root.parent().unwrap_or(p.workspace_root);
+        args.extend([
+            OsString::from("-p"),
+            OsString::from("--permission-mode"),
+            OsString::from("bypassPermissions"),
+            OsString::from("--add-dir"),
+            agent_dir.as_os_str().to_os_string(),
+        ]);
+        if let Some(ref model) = p.model {
+            args.push(OsString::from("--model"));
+            args.push(OsString::from(model));
+        }
+    }
+    args
 }
 
 /// Spawn `claude -p` for one issue. Asserts workspace containment, sets up its
@@ -112,19 +152,12 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     assert_contained(p.workspace_root, p.workspace)
         .context("workspace containment check failed; refusing to spawn child")?;
 
-    // Autonomous runner: no human is present to answer Claude's permission
-    // prompts, and the workflow needs the child to edit its issue file, which
-    // lives outside the workspace cwd (under the agent folder). Bypass the
-    // permission sandbox and widen the allowed dirs to the agent folder
-    // (parent of the workspace root). See PRD open question on Claude flags.
-    let agent_dir = p.workspace_root.parent().unwrap_or(p.workspace_root);
     let mut cmd = Command::new(p.command);
-    cmd.arg("-p")
-        .arg("--permission-mode")
-        .arg("bypassPermissions")
-        .arg("--add-dir")
-        .arg(agent_dir)
-        .current_dir(p.workspace)
+    for arg in build_command_args(&p) {
+        cmd.arg(arg);
+    }
+
+    cmd.current_dir(p.workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -138,8 +171,6 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     let pid = child
         .id()
         .context("child has no pid immediately after spawn")?;
-    let started_at = Utc::now();
-
     logging::ev(
         &p.issue_id,
         "spawn",
@@ -195,7 +226,6 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
 
     Ok(RunnerHandle {
         pid,
-        started_at,
         kill_tx,
         done,
     })
@@ -315,4 +345,86 @@ pub fn term_then_kill(pid: u32, grace: std::time::Duration) {
         std::thread::sleep(grace);
         let _ = kill(pgid, Signal::SIGKILL);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::EventRing;
+    use crate::store::Store;
+    use chrono::Utc;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    fn params<'a>(
+        runner_kind: &'a str,
+        model: Option<String>,
+        workspace: &'a Path,
+        workspace_root: &'a Path,
+    ) -> SpawnParams<'a> {
+        SpawnParams {
+            command: "runner",
+            runner_kind,
+            model,
+            workspace,
+            workspace_root,
+            prompt: String::new(),
+            issue_id: "ISSUE-1".to_string(),
+            run_id: "ISSUE-1-test".to_string(),
+            max_run_timeout_ms: 1000,
+            events: Arc::new(EventRing::new()),
+            store: Arc::new(Store::open(&PathBuf::from(":memory:")).unwrap()),
+            last_event_at: Arc::new(Mutex::new(Utc::now())),
+        }
+    }
+
+    fn arg_strings(args: Vec<OsString>) -> Vec<String> {
+        args.into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn claude_code_model_is_passed_to_spawn_args() {
+        let workspace_root = Path::new("/tmp/agent/workspaces");
+        let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
+        let p = params(
+            "claude-code",
+            Some("claude-opus-4-6".to_string()),
+            workspace,
+            workspace_root,
+        );
+
+        let args = arg_strings(build_command_args(&p));
+
+        assert_eq!(
+            args,
+            vec![
+                "-p",
+                "--permission-mode",
+                "bypassPermissions",
+                "--add-dir",
+                "/tmp/agent",
+                "--model",
+                "claude-opus-4-6"
+            ]
+        );
+    }
+
+    #[test]
+    fn non_claude_runner_does_not_get_claude_spawn_args() {
+        let workspace_root = Path::new("/tmp/agent/workspaces");
+        let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
+        let p = params("gemini-code", None, workspace, workspace_root);
+
+        let args = arg_strings(build_command_args(&p));
+
+        assert!(!args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "-p" | "--permission-mode" | "bypassPermissions" | "--add-dir" | "--model"
+            )
+        }));
+        assert!(args.is_empty());
+    }
 }

@@ -11,6 +11,7 @@ pub struct Issue {
     pub identifier: String,
     pub title: String,
     pub description: Option<String>,
+    pub url: Option<String>,
     pub state: String,
     pub priority: Option<i32>,
     pub assignees: Vec<String>,

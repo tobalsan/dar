@@ -9,6 +9,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentConfig {
     pub id: String,
+    #[allow(dead_code)]
     pub name: String,
     pub tracker: TrackerConfig,
     pub runner: RunnerConfig,
