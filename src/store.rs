@@ -376,6 +376,41 @@ impl Store {
         Ok(out)
     }
 
+    pub fn list_runs(&self, limit: usize) -> Result<Vec<RunRow>> {
+        self.list_runs_paged(0, limit)
+    }
+
+    pub fn get_run(&self, run_id: &str) -> Result<Option<RunRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT run_id, issue_id, issue_identifier, workspace,
+                    profile_json, workflow_path, workflow_sha,
+                    pid, worker_id, started_at, finished_at,
+                    outcome, exit_code, process_alive
+             FROM runs
+             WHERE run_id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![run_id], |row| {
+            Ok(RunRow {
+                run_id: row.get(0)?,
+                issue_id: row.get(1)?,
+                issue_identifier: row.get(2)?,
+                workspace: row.get(3)?,
+                profile_json: row.get(4)?,
+                workflow_path: row.get(5)?,
+                workflow_sha: row.get(6)?,
+                pid: row.get::<_, i64>(7).unwrap_or(0) as u32,
+                worker_id: row.get(8)?,
+                started_at: row.get(9)?,
+                finished_at: row.get(10)?,
+                outcome: row.get(11)?,
+                exit_code: row.get(12)?,
+                process_alive: row.get::<_, i64>(13).unwrap_or(0) != 0,
+            })
+        })?;
+        rows.next().transpose().context("get_run")
+    }
+
     /// Count consecutive completed runs where the worker exited cleanly while
     /// the issue remained active. Stops at any other finished outcome,
     /// including terminal/non-active successful completions.
@@ -460,6 +495,33 @@ impl Store {
              LIMIT ?3",
         )?;
         let rows = stmt.query_map(params![issue_identifier, since, limit as i64], |row| {
+            Ok(EventRow {
+                event_id: row.get(0)?,
+                run_id: row.get(1)?,
+                issue_identifier: row.get(2)?,
+                kind: row.get(3)?,
+                payload: row.get(4)?,
+                ts: row.get(5)?,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_all_events_since(&self, since: i64, limit: usize) -> Result<Vec<EventRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT event_id, run_id, issue_identifier, kind, payload, ts
+             FROM events
+             WHERE event_id > ?1
+             ORDER BY event_id ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since, limit as i64], |row| {
             Ok(EventRow {
                 event_id: row.get(0)?,
                 run_id: row.get(1)?,
