@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use tokio::sync::{oneshot, watch};
 
 use crate::config::AgentConfig;
+use crate::export;
+use crate::paths::AgentPaths;
 use crate::state::{AppState, ControlMsg, ControlReply};
 use crate::store::{EventRow, Store};
 use crate::workflow_config::EffectiveLoopConfig;
@@ -33,6 +35,7 @@ struct Assets;
 /// Build the router and serve until `shutdown` flips to `true`.
 pub async fn serve(
     state: AppState,
+    paths: AgentPaths,
     agent_cfg: AgentConfig,
     effective_cfg: EffectiveLoopConfig,
     bind: IpAddr,
@@ -41,6 +44,7 @@ pub async fn serve(
 ) -> anyhow::Result<()> {
     let api_state = ApiState {
         state,
+        paths,
         workflow: resolved_workflow_json(&agent_cfg, &effective_cfg),
     };
     let app = Router::new()
@@ -48,6 +52,7 @@ pub async fn serve(
         .route("/health", get(api_health))
         .route("/project", get(api_project))
         .route("/workflow", get(api_project))
+        .route("/export", get(api_export))
         .route("/runs", get(api_runs))
         .route("/runs/{run_id}", get(api_run_detail))
         .route("/runs/{run_id}/logs", get(api_run_logs))
@@ -90,6 +95,7 @@ pub async fn serve(
 #[derive(Clone)]
 struct ApiState {
     state: AppState,
+    paths: AgentPaths,
     workflow: serde_json::Value,
 }
 
@@ -161,6 +167,13 @@ async fn api_health() -> Json<serde_json::Value> {
 
 async fn api_project(State(api): State<ApiState>) -> Json<serde_json::Value> {
     Json(api.workflow.clone())
+}
+
+async fn api_export(State(api): State<ApiState>) -> Response {
+    match export::export_linear_project_from_paths(&api.paths) {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 async fn api_run_detail(State(api): State<ApiState>, Path(run_id): Path<String>) -> Response {
@@ -649,8 +662,11 @@ mod tests {
     }
 
     fn test_api_state(store: Arc<Store>) -> ApiState {
+        let dir = tempdir().unwrap();
+        let paths = AgentPaths::new(dir.path().canonicalize().unwrap());
         ApiState {
             state: test_state(store),
+            paths,
             workflow: serde_json::json!({}),
         }
     }

@@ -4,6 +4,7 @@
 //!   agentropy run           [--dir PATH]   # default cwd; long-running
 //!   agentropy doctor        [--dir PATH]   # preflight; exit code only
 //!   agentropy init-workflow [--dir PATH]   # scaffold WORKFLOW.md
+//!   agentropy export        [--dir PATH]   # dump Linear project/issues
 //!
 //! Root resolution (canonical, absolute) is the CLI's job; downstream code in
 //! `AgentPaths` only does path arithmetic on top of the resolved root.
@@ -29,6 +30,8 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Scaffold the default WORKFLOW.md prompt in the agent folder.
     InitWorkflow(InitWorkflowArgs),
+    /// Export the configured Linear project and issues under the data dir.
+    Export(ExportArgs),
 }
 
 #[derive(Debug, Args)]
@@ -53,6 +56,22 @@ pub struct InitWorkflowArgs {
     /// Overwrite an existing WORKFLOW.md.
     #[arg(long)]
     pub force: bool,
+    /// Seed WORKFLOW.md frontmatter for a Linear project slug.
+    #[arg(long = "linear-project-slug")]
+    pub linear_project_slug: Option<String>,
+    /// Optional display name for the Linear project in WORKFLOW.md frontmatter.
+    #[arg(long = "linear-project")]
+    pub linear_project: Option<String>,
+    /// Expose the optional linear_graphql worker tool.
+    #[arg(long)]
+    pub expose_graphql_tool: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ExportArgs {
+    /// Agent folder to export from (defaults to the current directory).
+    #[arg(long)]
+    pub dir: Option<PathBuf>,
 }
 
 impl RunArgs {
@@ -70,6 +89,13 @@ impl DoctorArgs {
 }
 
 impl InitWorkflowArgs {
+    /// Resolve the agent root to a canonical, absolute path.
+    pub fn resolve_root(&self) -> Result<PathBuf> {
+        resolve_root(self.dir.as_deref())
+    }
+}
+
+impl ExportArgs {
     /// Resolve the agent root to a canonical, absolute path.
     pub fn resolve_root(&self) -> Result<PathBuf> {
         resolve_root(self.dir.as_deref())
@@ -136,6 +162,16 @@ Validate the change before handoff. When the task is complete, leave the issue o
 ///
 /// Errors if the file already exists and `force` is false.
 pub(crate) fn init_workflow(root: &Path, force: bool) -> Result<()> {
+    init_workflow_with_options(root, force, None, None, false)
+}
+
+pub(crate) fn init_workflow_with_options(
+    root: &Path,
+    force: bool,
+    linear_project_slug: Option<&str>,
+    linear_project: Option<&str>,
+    expose_graphql_tool: bool,
+) -> Result<()> {
     let path = root.join("WORKFLOW.md");
     if path.exists() && !force {
         bail!(
@@ -143,10 +179,48 @@ pub(crate) fn init_workflow(root: &Path, force: bool) -> Result<()> {
             path.display()
         );
     }
-    std::fs::write(&path, format!("{DEFAULT_WORKFLOW_MD_BODY}\n"))
-        .with_context(|| format!("writing {}", path.display()))?;
+    let body =
+        workflow_body_with_frontmatter(linear_project_slug, linear_project, expose_graphql_tool);
+    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
     println!("wrote {}", path.display());
     Ok(())
+}
+
+fn workflow_body_with_frontmatter(
+    linear_project_slug: Option<&str>,
+    linear_project: Option<&str>,
+    expose_graphql_tool: bool,
+) -> String {
+    if linear_project_slug.is_none() && linear_project.is_none() && !expose_graphql_tool {
+        return format!("{DEFAULT_WORKFLOW_MD_BODY}\n");
+    }
+
+    let mut out = String::from("---\n");
+    if let Some(slug) = linear_project_slug {
+        out.push_str("tracker:\n");
+        out.push_str("  kind: linear\n");
+        out.push_str(&format!("  project_slug: {}\n", yaml_string(slug)));
+    }
+    if linear_project.is_some() || expose_graphql_tool {
+        out.push_str("linear:\n");
+        if let Some(project) = linear_project {
+            out.push_str(&format!("  project: {}\n", yaml_string(project)));
+        }
+        if expose_graphql_tool {
+            out.push_str("  exposeGraphqlTool: true\n");
+        }
+    }
+    out.push_str("---\n\n");
+    out.push_str(DEFAULT_WORKFLOW_MD_BODY);
+    out.push('\n');
+    out
+}
+
+fn yaml_string(value: &str) -> String {
+    serde_yaml::to_string(value)
+        .unwrap_or_else(|_| format!("{value:?}"))
+        .trim()
+        .to_string()
 }
 
 /// Resolve `--dir` (or cwd when absent) into a canonical, absolute path.
@@ -161,7 +235,7 @@ fn resolve_root(dir: Option<&std::path::Path>) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{init_workflow, DEFAULT_WORKFLOW_MD_BODY};
+    use super::{init_workflow, init_workflow_with_options, DEFAULT_WORKFLOW_MD_BODY};
 
     #[test]
     fn default_workflow_body_contains_standard_worker_procedure() {
@@ -222,5 +296,23 @@ mod tests {
         init_workflow(dir.path(), true).unwrap();
         let written = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
         assert!(written.contains("prompt-level worker guidance"));
+    }
+
+    #[test]
+    fn init_workflow_can_seed_linear_frontmatter_without_agent_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        init_workflow_with_options(
+            dir.path(),
+            false,
+            Some("abc123"),
+            Some("Agentropy Test"),
+            true,
+        )
+        .unwrap();
+
+        let written = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
+        assert!(written.contains("tracker:\n  kind: linear\n  project_slug: abc123"));
+        assert!(written.contains("linear:\n  project: Agentropy Test\n  exposeGraphqlTool: true"));
+        assert!(!dir.path().join("agent.yaml").exists());
     }
 }

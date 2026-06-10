@@ -78,6 +78,8 @@ pub struct SpawnParams<'a> {
     /// SQLite run_id for this dispatch attempt. Used to tag event rows.
     pub run_id: String,
     pub max_run_timeout_ms: u64,
+    /// Expose the optional Linear GraphQL worker tool to compatible protocol runners.
+    pub expose_linear_graphql_tool: bool,
     pub events: Arc<EventRing>,
     pub store: Arc<Store>,
     pub last_event_at: Arc<Mutex<DateTime<Utc>>>,
@@ -189,6 +191,12 @@ fn common_env(p: &SpawnParams<'_>) -> Vec<(OsString, OsString)> {
     if let Some(model) = &p.model {
         env.push((OsString::from("AIHUB_MODEL"), OsString::from(model)));
         env.push((OsString::from("AIHUB_WORKER_MODEL"), OsString::from(model)));
+    }
+    if p.expose_linear_graphql_tool {
+        env.push((
+            OsString::from("AIHUB_LINEAR_GRAPHQL_TOOL"),
+            OsString::from("1"),
+        ));
     }
     env
 }
@@ -378,6 +386,7 @@ fn pi_turn_request(p: &SpawnParams<'_>) -> String {
             "issue_identifier": p.issue_id,
             "run_id": p.run_id,
             "model": p.model,
+            "tools": worker_tools(p),
         }
     })
     .to_string()
@@ -394,10 +403,36 @@ fn codex_turn_request(p: &SpawnParams<'_>) -> String {
             "issue_identifier": p.issue_id,
             "run_id": p.run_id,
             "model": p.model,
+            "tools": worker_tools(p),
         }
     })
     .to_string()
         + "\n"
+}
+
+fn worker_tools(p: &SpawnParams<'_>) -> Vec<serde_json::Value> {
+    if p.expose_linear_graphql_tool {
+        vec![serde_json::json!({
+            "name": "linear_graphql",
+            "description": "Execute a Linear GraphQL operation against the configured Linear API endpoint.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "GraphQL query or mutation document."
+                    },
+                    "variables": {
+                        "type": "object",
+                        "description": "GraphQL variables object."
+                    }
+                },
+                "required": ["query"]
+            }
+        })]
+    } else {
+        Vec::new()
+    }
 }
 
 fn claude_args(p: &SpawnParams<'_>) -> Vec<OsString> {
@@ -862,6 +897,7 @@ mod tests {
             issue_id: "ISSUE-1".to_string(),
             run_id: "ISSUE-1-test".to_string(),
             max_run_timeout_ms: 1000,
+            expose_linear_graphql_tool: false,
             events: Arc::new(EventRing::new()),
             store: Arc::new(Store::open(&PathBuf::from(":memory:")).unwrap()),
             last_event_at: Arc::new(Mutex::new(Utc::now())),
@@ -948,6 +984,20 @@ mod tests {
             claude_spec.session_dir().unwrap(),
             PathBuf::from("/tmp/agent/claude-sessions/ISSUE-1")
         );
+    }
+
+    #[test]
+    fn linear_graphql_tool_is_gated_in_turn_request() {
+        let workspace_root = Path::new("/tmp/agent/workspaces");
+        let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
+        let mut p = params("pi", None, workspace, workspace_root);
+
+        let without_tool: serde_json::Value = serde_json::from_str(&pi_turn_request(&p)).unwrap();
+        assert_eq!(without_tool["params"]["tools"].as_array().unwrap().len(), 0);
+
+        p.expose_linear_graphql_tool = true;
+        let with_tool: serde_json::Value = serde_json::from_str(&pi_turn_request(&p)).unwrap();
+        assert_eq!(with_tool["params"]["tools"][0]["name"], "linear_graphql");
     }
 
     #[test]
