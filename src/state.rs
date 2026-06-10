@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::store::Store;
 
@@ -184,6 +184,47 @@ pub enum ControlMsg {
     Stop,
     Pause,
     Resume,
+    Tick {
+        reply: oneshot::Sender<ControlReply>,
+    },
+    Claim {
+        identifier: String,
+        reply: oneshot::Sender<ControlReply>,
+    },
+    Release {
+        run_id: String,
+        reply: oneshot::Sender<ControlReply>,
+    },
+    Interrupt {
+        run_id: String,
+        reply: oneshot::Sender<ControlReply>,
+    },
+    Kill {
+        run_id: String,
+        reply: oneshot::Sender<ControlReply>,
+    },
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ControlReply {
+    pub ok: bool,
+    pub message: String,
+}
+
+impl ControlReply {
+    pub fn ok(message: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            message: message.into(),
+        }
+    }
+
+    pub fn err(message: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            message: message.into(),
+        }
+    }
 }
 
 /// Cheap-to-clone shared state (all fields are `Arc`). Held owned by the

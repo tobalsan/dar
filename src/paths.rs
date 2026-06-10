@@ -93,7 +93,10 @@ pub fn sanitize_identifier(id: &str) -> String {
 pub fn issue_workspace(workspace_root: &Path, identifier: &str) -> Result<PathBuf> {
     let safe = sanitize_identifier(identifier);
     if safe.is_empty() {
-        bail!("issue identifier {:?} sanitizes to empty path component", identifier);
+        bail!(
+            "issue identifier {:?} sanitizes to empty path component",
+            identifier
+        );
     }
     let ws = workspace_root.join(&safe);
 

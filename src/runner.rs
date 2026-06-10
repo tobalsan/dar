@@ -539,6 +539,12 @@ impl RunnerHandle {
         drop(self.done);
     }
 
+    pub async fn request_kill_and_wait(self, why: KillReason) -> ExitKind {
+        let Self { kill_tx, done, .. } = self;
+        let _ = kill_tx.send(why);
+        done.await.unwrap_or(ExitKind::Abnormal(None))
+    }
+
     #[cfg(test)]
     pub(crate) fn finished_for_test(pid: u32, kind: ExitKind) -> Self {
         let (kill_tx, _kill_rx) = oneshot::channel::<KillReason>();

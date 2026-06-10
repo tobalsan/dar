@@ -139,6 +139,7 @@ pub struct WfHooksConfig {
     pub after_success: Option<String>,
     pub after_failure: Option<String>,
     pub on_needs_human: Option<String>,
+    pub before_remove: Option<String>,
 }
 
 /// Dashboard / HTTP server overrides from WORKFLOW.md.

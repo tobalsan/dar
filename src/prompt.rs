@@ -26,7 +26,9 @@ use anyhow::{Context, Result};
 use minijinja::{Environment, UndefinedBehavior};
 
 use crate::domain::Issue;
-use crate::workflow_config::{parse_workflow_md, WfLinearConfig, WfTrackerConfig, WorkflowSnapshot};
+use crate::workflow_config::{
+    parse_workflow_md, WfLinearConfig, WfTrackerConfig, WorkflowSnapshot,
+};
 
 /// Renders the WORKFLOW.md prompt template for one issue attempt.
 ///
@@ -271,7 +273,11 @@ mod tests {
     fn render_basic_no_frontmatter() {
         use std::io::Write;
         let mut f = NamedTempFile::new().unwrap();
-        writeln!(f, "Issue: {{{{ issue.identifier }}}} attempt={{{{ attempt }}}}").unwrap();
+        writeln!(
+            f,
+            "Issue: {{{{ issue.identifier }}}} attempt={{{{ attempt }}}}"
+        )
+        .unwrap();
         let renderer = PromptRenderer::load(f.path()).unwrap();
         let out = renderer.render(&make_issue("PROJ-1"), 1, 3).unwrap();
         assert!(out.contains("Issue: PROJ-1 attempt=1"), "got: {out}");
@@ -291,7 +297,10 @@ mod tests {
         let renderer = PromptRenderer::load(f.path()).unwrap();
         let out = renderer.render(&make_issue("T-1"), 2, 3).unwrap();
         assert!(out.contains("Do Test issue"), "got: {out}");
-        assert!(out.contains("stuck"), "needs_human state in appendix; got: {out}");
+        assert!(
+            out.contains("stuck"),
+            "needs_human state in appendix; got: {out}"
+        );
     }
 
     #[test]
@@ -388,7 +397,10 @@ mod tests {
         let mut issue = make_issue("ALG-2");
         issue.url = Some("https://linear.app/org/issue/ALG-2".to_string());
         let out = renderer.render(&issue, 0, 3).unwrap();
-        assert!(out.contains("**URL:** https://linear.app/org/issue/ALG-2"), "got: {out}");
+        assert!(
+            out.contains("**URL:** https://linear.app/org/issue/ALG-2"),
+            "got: {out}"
+        );
     }
 
     #[test]
@@ -398,13 +410,16 @@ mod tests {
         writeln!(f, "body").unwrap();
         let renderer = PromptRenderer::load(f.path()).unwrap();
         let out = renderer.render(&make_issue("ALG-3"), 0, 3).unwrap();
-        assert!(!out.contains("**URL:**"), "URL line should be absent; got: {out}");
+        assert!(
+            !out.contains("**URL:**"),
+            "URL line should be absent; got: {out}"
+        );
     }
 
     #[test]
     fn default_workflow_body_parses_and_renders_strict() {
-        use std::io::Write;
         use crate::cli::DEFAULT_WORKFLOW_MD_BODY;
+        use std::io::Write;
 
         let mut f = NamedTempFile::new().unwrap();
         write!(f, "{DEFAULT_WORKFLOW_MD_BODY}").unwrap();
@@ -413,9 +428,18 @@ mod tests {
         let out = renderer.render(&issue, 0, 3).unwrap();
         // The body contains {{ issue.identifier }} and {{ issue.title }} —
         // verify they were substituted (strict mode would error on unknowns).
-        assert!(out.contains("ALG-176"), "identifier not substituted; got: {out}");
-        assert!(out.contains("Test issue"), "title not substituted; got: {out}");
-        assert!(out.contains("Orchestrator context"), "appendix missing; got: {out}");
+        assert!(
+            out.contains("ALG-176"),
+            "identifier not substituted; got: {out}"
+        );
+        assert!(
+            out.contains("Test issue"),
+            "title not substituted; got: {out}"
+        );
+        assert!(
+            out.contains("Orchestrator context"),
+            "appendix missing; got: {out}"
+        );
     }
 
     #[test]
@@ -438,6 +462,9 @@ mod tests {
 
         // allowStale=false (via camelCase alias) means parse errors must surface.
         let result = renderer.maybe_reload();
-        assert!(result.is_err(), "allowStale=false should surface parse errors; got Ok");
+        assert!(
+            result.is_err(),
+            "allowStale=false should surface parse errors; got Ok"
+        );
     }
 }

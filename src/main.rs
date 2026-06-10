@@ -127,9 +127,20 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     let bind = effective_cfg.dashboard_bind;
     let port = effective_cfg.dashboard_port;
     let dash_state = app_state.clone();
+    let dash_agent_cfg = agent_cfg.clone();
+    let dash_effective_cfg = effective_cfg.clone();
     let dash_shutdown = shutdown_rx.clone();
-    let dash_task =
-        tokio::spawn(async move { dashboard::serve(dash_state, bind, port, dash_shutdown).await });
+    let dash_task = tokio::spawn(async move {
+        dashboard::serve(
+            dash_state,
+            dash_agent_cfg,
+            dash_effective_cfg,
+            bind,
+            port,
+            dash_shutdown,
+        )
+        .await
+    });
 
     logging::ev(
         "-",

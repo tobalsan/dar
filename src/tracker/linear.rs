@@ -128,9 +128,12 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
         let body = json!({ "query": query, "variables": vars });
         let response = self.send_with_rate_limit_async(body).await?;
 
-        let project_node = response
-            .pointer("/data/projects/nodes/0")
-            .ok_or_else(|| anyhow!("project {:?} not found in Linear response", self.project_slug))?;
+        let project_node = response.pointer("/data/projects/nodes/0").ok_or_else(|| {
+            anyhow!(
+                "project {:?} not found in Linear response",
+                self.project_slug
+            )
+        })?;
 
         let project_name = project_node["name"].as_str().map(String::from);
         let project_slug = project_node["slugId"].as_str().map(String::from);
@@ -148,10 +151,7 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
             .and_then(Value::as_str)
             .map(String::from);
 
-        let nodes = issues_obj["nodes"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let nodes = issues_obj["nodes"].as_array().cloned().unwrap_or_default();
 
         let mut issues = Vec::with_capacity(nodes.len());
         for node in nodes {
@@ -214,14 +214,19 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
                 .await
                 .context("sending Linear GraphQL request (retry after 429)")?;
 
-            self.process_rate_limit_headers(&resp2.headers().clone()).await;
+            self.process_rate_limit_headers(&resp2.headers().clone())
+                .await;
             let status = resp2.status();
             let text = resp2
                 .text()
                 .await
                 .context("reading Linear response body (retry)")?;
             if !status.is_success() {
-                bail!("Linear API returned HTTP {} after retry: {}", status, &text[..text.len().min(200)]);
+                bail!(
+                    "Linear API returned HTTP {} after retry: {}",
+                    status,
+                    &text[..text.len().min(200)]
+                );
             }
             return parse_graphql_body(&text);
         }
@@ -229,15 +234,16 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
         // Capture headers before consuming the response body.
         let headers = resp.headers().clone();
         let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .context("reading Linear response body")?;
+        let text = resp.text().await.context("reading Linear response body")?;
 
         self.process_rate_limit_headers(&headers).await;
 
         if !status.is_success() {
-            bail!("Linear API returned HTTP {}: {}", status, &text[..text.len().min(200)]);
+            bail!(
+                "Linear API returned HTTP {}: {}",
+                status,
+                &text[..text.len().min(200)]
+            );
         }
         parse_graphql_body(&text)
     }
@@ -281,9 +287,7 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
     where
         F: std::future::Future<Output = Result<T>>,
     {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(fut)
-        })
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
     }
 
     fn poll_candidates_inner(&self) -> Result<Vec<Issue>> {
