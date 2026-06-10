@@ -261,7 +261,8 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
 
             if r <= 0 {
                 let wait_secs = reset_ts
-                    .map(|ts| (ts - Utc::now().timestamp() + 1).max(0) as u64)
+                    // Linear returns epoch milliseconds; convert to seconds before diffing.
+                    .map(|ts_ms| (ts_ms / 1000 - Utc::now().timestamp() + 1).max(0) as u64)
                     .unwrap_or(60);
                 if wait_secs > 0 {
                     tracing::warn!(
@@ -388,7 +389,7 @@ fn raw_to_issue(r: &RawIssue) -> Issue {
         labels: r.labels.nodes.iter().map(|l| l.name.clone()).collect(),
         created_at: r.created_at,
         updated_at: r.updated_at,
-        parent_id: r.parent.as_ref().map(|p| p.identifier.clone()),
+        parent_id: r.parent.as_ref().map(|p| p.id.clone()),
         blocked_by: r
             .blocked_by
             .nodes
