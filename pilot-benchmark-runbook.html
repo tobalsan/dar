@@ -1,0 +1,1199 @@
+<!-- Agentropy — Pilot Benchmark Runbook -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentropy — Pilot Benchmark Runbook</title>
+<style>
+  :root {
+    --ivory: #FAF9F5;
+    --slate: #141413;
+    --clay: #D97757;
+    --oat: #E3DACC;
+    --olive: #788C5D;
+    --rust: #B04A3F;
+    --gray-100: #F0EEE6;
+    --gray-300: #D1CFC5;
+    --gray-500: #87867F;
+    --gray-700: #3D3D3A;
+    --white: #FFFFFF;
+
+    --serif: ui-serif, Georgia, serif;
+    --sans: system-ui, -apple-system, sans-serif;
+    --mono: ui-monospace, 'SF Mono', Menlo, monospace;
+
+    --radius-panel: 12px;
+    --radius-row: 8px;
+    --border: 1.5px solid var(--gray-300);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 56px 24px 120px;
+    background: var(--ivory);
+    color: var(--slate);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 900px;
+    margin: 0 auto;
+  }
+
+  /* ---------- Header ---------- */
+  header {
+    margin-bottom: 40px;
+  }
+  .header-top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 36px;
+    letter-spacing: -0.01em;
+    margin: 0;
+  }
+  .auto-pill {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--gray-500);
+    background: var(--gray-100);
+    border: var(--border);
+    border-radius: 999px;
+    padding: 5px 11px;
+    white-space: nowrap;
+  }
+  .subtitle {
+    color: var(--gray-500);
+    font-size: 14px;
+  }
+  .subtitle .repo {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--gray-700);
+  }
+
+  /* ---------- Sections ---------- */
+  section {
+    margin-bottom: 52px;
+  }
+  h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 24px;
+    letter-spacing: -0.01em;
+    margin: 0 0 6px;
+  }
+  hr.rule {
+    border: none;
+    border-top: 1px solid var(--gray-300);
+    margin: 0 0 22px;
+  }
+  p {
+    margin: 0 0 14px;
+    color: var(--gray-700);
+  }
+
+  /* ---------- Summary band ---------- */
+  .summary-band {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+  }
+  @media (max-width: 720px) {
+    .summary-band { grid-template-columns: repeat(2, 1fr); }
+  }
+  .stat-card {
+    background: var(--white);
+    border: var(--border);
+    border-radius: var(--radius-panel);
+    padding: 20px 22px 18px;
+  }
+  .stat-card.accent {
+    border-left: 4px solid var(--clay);
+    padding-left: 19px;
+  }
+  .stat-num {
+    font-family: var(--serif);
+    font-size: 44px;
+    font-weight: 500;
+    line-height: 1;
+    color: var(--slate);
+    margin-bottom: 8px;
+  }
+  .stat-label {
+    font-family: var(--sans);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--gray-500);
+  }
+  .stat-delta {
+    font-family: var(--mono);
+    font-size: 11px;
+    margin-top: 6px;
+  }
+  .stat-delta.up { color: var(--olive); }
+  .stat-delta.flat { color: var(--gray-500); }
+
+  /* ---------- Highlights ---------- */
+  .highlights {
+    list-style: none;
+    margin: 0 0 14px;
+    padding: 0;
+  }
+  .highlights li {
+    position: relative;
+    padding: 0 0 14px 26px;
+    font-size: 15px;
+    color: var(--gray-700);
+  }
+  .highlights li::before {
+    content: "";
+    position: absolute;
+    left: 6px;
+    top: 8px;
+    width: 7px;
+    height: 7px;
+    border-radius: 2px;
+    background: var(--clay);
+  }
+  .highlights li strong {
+    color: var(--slate);
+    font-weight: 600;
+  }
+
+  /* ---------- Shipped table ---------- */
+  table.shipped {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    background: var(--white);
+    border: var(--border);
+    border-radius: var(--radius-panel);
+    overflow: hidden;
+  }
+  table.shipped thead th {
+    text-align: left;
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--gray-500);
+    background: var(--gray-100);
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--gray-300);
+  }
+  table.shipped tbody td {
+    padding: 13px 16px;
+    border-bottom: 1px solid var(--gray-100);
+    font-size: 14px;
+    vertical-align: top;
+  }
+  table.shipped tbody tr:last-child td {
+    border-bottom: none;
+  }
+  table.shipped tbody tr:hover {
+    background: var(--ivory);
+  }
+  .mono-cell {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--gray-700);
+  }
+  .risk {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--gray-500);
+  }
+  .risk-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .risk-dot.low { background: var(--olive); }
+  .risk-dot.med { background: var(--clay); }
+  .risk-dot.high { background: var(--rust); }
+
+  /* ---------- Carryover (open issues) ---------- */
+  .carryover {
+    background: var(--oat);
+    border-radius: var(--radius-panel);
+    padding: 20px 22px;
+  }
+  .carry-item {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    padding: 10px 0;
+  }
+  .carry-item + .carry-item {
+    border-top: 1px solid rgba(20, 20, 19, 0.08);
+  }
+  .carry-tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--gray-700);
+    background: var(--ivory);
+    border-radius: 4px;
+    padding: 3px 7px;
+    flex-shrink: 0;
+  }
+  .carry-tag.med { color: var(--clay); border: 1px solid var(--clay); }
+  .carry-tag.low { color: var(--gray-500); border: 1px solid var(--gray-300); }
+  .carry-body {
+    font-size: 14px;
+    color: var(--gray-700);
+  }
+  .carry-body .ref {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--gray-500);
+  }
+
+  /* ---------- Numbered steps ---------- */
+  .steps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .step {
+    display: flex;
+    gap: 18px;
+    margin-bottom: 28px;
+    align-items: flex-start;
+  }
+  .step-num {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--clay);
+    color: var(--white);
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .step-body {
+    flex: 1;
+  }
+  .step-body h3 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 17px;
+    margin: 0 0 8px;
+  }
+  .step-body p {
+    margin: 0 0 10px;
+  }
+
+  /* ---------- Code blocks ---------- */
+  pre {
+    background: var(--slate);
+    color: var(--ivory);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.55;
+    border-radius: 8px;
+    padding: 16px 20px;
+    overflow-x: auto;
+    margin: 10px 0 14px;
+    white-space: pre;
+  }
+  code {
+    font-family: var(--mono);
+    font-size: 13px;
+    background: var(--gray-100);
+    border-radius: 4px;
+    padding: 2px 5px;
+  }
+  pre code {
+    background: transparent;
+    padding: 0;
+    border-radius: 0;
+    font-size: inherit;
+  }
+
+  /* ---------- Mono pills ---------- */
+  .pill {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--gray-700);
+    background: var(--gray-100);
+    border: var(--border);
+    border-radius: 999px;
+    padding: 3px 8px;
+    white-space: nowrap;
+  }
+  .pill.olive { background: #EBF0E2; color: var(--olive); border-color: #C5D2A9; }
+  .pill.rust  { background: #F5E8E7; color: var(--rust);  border-color: #DDA89F; }
+  .pill.clay  { background: #FAF0EC; color: var(--clay);  border-color: #E8BAA5; }
+
+  /* ---------- Acceptance / checkbox rows ---------- */
+  table.acceptance {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    background: var(--white);
+    border: var(--border);
+    border-radius: var(--radius-panel);
+    overflow: hidden;
+    margin-bottom: 18px;
+  }
+  table.acceptance thead th {
+    text-align: left;
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--gray-500);
+    background: var(--gray-100);
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--gray-300);
+  }
+  table.acceptance tbody td {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--gray-100);
+    font-size: 14px;
+    vertical-align: middle;
+  }
+  table.acceptance tbody tr:last-child td {
+    border-bottom: none;
+  }
+  .cb {
+    display: inline-block;
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--gray-300);
+    border-radius: 4px;
+    vertical-align: middle;
+    flex-shrink: 0;
+  }
+  .cb.checked {
+    background: var(--olive);
+    border-color: var(--olive);
+    position: relative;
+  }
+  .cb.checked::after {
+    content: "✓";
+    position: absolute;
+    top: -1px;
+    left: 2px;
+    color: white;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .measured-val {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--gray-500);
+    font-style: italic;
+  }
+
+  /* ---------- Footer ---------- */
+  footer {
+    margin-top: 64px;
+    padding-top: 20px;
+    border-top: 1px solid var(--gray-300);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--gray-500);
+  }
+
+  /* ---------- Print ---------- */
+  @media print {
+    body { padding: 24px; }
+    pre { white-space: pre-wrap; }
+    .step-num { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <div class="header-top">
+      <h1>Agentropy &mdash; Pilot Benchmark Runbook</h1>
+      <span class="auto-pill">ALG-186</span>
+    </div>
+    <div class="subtitle">
+      ALG-186 footprint gate &nbsp;&middot;&nbsp; feature + performance pilot &nbsp;&middot;&nbsp;
+      <span class="repo">tobalsan/dar @ main</span>
+    </div>
+  </header>
+
+  <!-- ── 1. Summary band ── -->
+  <section>
+    <div class="summary-band">
+      <div class="stat-card accent">
+        <div class="stat-num">14</div>
+        <div class="stat-label">PRs merged</div>
+        <div class="stat-delta flat">PR #1&ndash;14 · ALG-172&hellip;185 Done</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">105</div>
+        <div class="stat-label">Tests passing</div>
+        <div class="stat-delta up">cargo test --release</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">8.2</div>
+        <div class="stat-label">MB release binary</div>
+        <div class="stat-delta flat">stripped, aarch64-apple-darwin</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">9</div>
+        <div class="stat-label">Footprint fixes</div>
+        <div class="stat-delta up">applied pre-benchmark</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 2. Review verdict ── -->
+  <section>
+    <h2>Review verdict</h2>
+    <hr class="rule">
+    <p>
+      A multi-agent review of PRs #1&ndash;14 against <code>PRD-EXTRACTION.md</code> found functional
+      parity essentially complete. All 15 Linear slices (ALG-172&ndash;185 plus the gate itself)
+      have been implemented; the PRD &sect;16 checklist reads green on every dimension except
+      ALG-186 itself, which is the benchmark being conducted here.
+    </p>
+    <p>
+      However, the footprint gate <strong>would have failed as-is</strong>. Six blocker classes were
+      identified and patched before this benchmark run (see next section). A handful of
+      lower-priority correctness issues remain open for follow-up triage (section 3).
+    </p>
+    <ul class="highlights">
+      <li>
+        <strong>All 15 PRD slices implemented.</strong> Tracker, runner, orchestrator loop,
+        retry / backoff, stall detection, HITL notifier, park barrier, Linear integration,
+        webhook, dashboard, and export are all present and passing tests.
+      </li>
+      <li>
+        <strong>Footprint gate blocked by 6 classes of issues</strong> &mdash; Linear poll called
+        twice per tick, per-slot full project scans, 1&nbsp;Hz WebSocket polling, excessive Tokio
+        thread count, unbounded SQLite growth, and over-featured Tokio dependency. All patched.
+      </li>
+      <li>
+        <strong>8 correctness items remain open</strong> (section 3), none blocking the benchmark;
+        tagged LOW / MED for triage post-pilot.
+      </li>
+    </ul>
+  </section>
+
+  <!-- ── 3. Footprint fixes ── -->
+  <section>
+    <h2>Footprint fixes applied</h2>
+    <hr class="rule">
+    <table class="shipped">
+      <thead>
+        <tr>
+          <th style="width:130px;">Area</th>
+          <th style="width:220px;">Problem</th>
+          <th>Fix</th>
+          <th style="width:200px;">Files</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="pill clay">Linear polling</span></td>
+          <td><code>poll_candidates()</code> called twice per tick — once inside <code>dispatch()</code>, once inside <code>publish_snapshots()</code>.</td>
+          <td>Single poll per tick; result shared between both callers.</td>
+          <td class="mono-cell">src/orchestrator.rs</td>
+        </tr>
+        <tr>
+          <td><span class="pill clay">fetch_one</span></td>
+          <td>Full paginated project scan executed per running slot per tick to re-read a single issue.</td>
+          <td>Replaced with a targeted <code>issue(id:)</code> GraphQL query — the Linear API accepts an identifier string directly.</td>
+          <td class="mono-cell">src/tracker/linear.rs</td>
+        </tr>
+        <tr>
+          <td><span class="pill clay">WebSocket</span></td>
+          <td>Dashboard pushed state to each connected client on a fixed 1&nbsp;Hz SQLite poll, regardless of whether anything changed.</td>
+          <td>Event-driven push via a <code>tokio::sync::watch</code> channel bumped by <code>publish_snapshots()</code>; 5&nbsp;s slow-client send timeout prevents a stalled browser from blocking the writer.</td>
+          <td class="mono-cell">src/dashboard/mod.rs · src/state.rs</td>
+        </tr>
+        <tr>
+          <td><span class="pill clay">Tokio runtime</span></td>
+          <td>Default Tokio runtime creates one worker thread per logical CPU, which is excessive for an I/O-bound daemon.</td>
+          <td><code>worker_threads = 2</code> set explicitly on the runtime builder.</td>
+          <td class="mono-cell">src/main.rs</td>
+        </tr>
+        <tr>
+          <td><span class="pill clay">SQLite growth</span></td>
+          <td>Three unbounded growth vectors: heartbeat rows accumulate forever for finished runs; <code>consecutive_completed_runs</code> scans the entire table; <code>events</code> table had no <code>run_id</code> index.</td>
+          <td>Heartbeats pruned for finished runs at startup and per tick; <code>consecutive_completed_runs</code> query capped with <code>LIMIT max+1</code>; <code>CREATE INDEX IF NOT EXISTS events_run_id ON events(run_id, event_id)</code> added to schema.</td>
+          <td class="mono-cell">src/store.rs</td>
+        </tr>
+        <tr>
+          <td><span class="pill clay">Deps</span></td>
+          <td><code>tokio = { features = ["full"] }</code> compiled every Tokio subsystem (fs, net, io-std, etc.) including ones the binary does not use.</td>
+          <td>Replaced with exact feature list: <code>rt-multi-thread, macros, process, signal, sync, time, io-util, net</code>.</td>
+          <td class="mono-cell">Cargo.toml</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ── 4. Open issues ── -->
+  <section>
+    <h2>Known open issues (triage later)</h2>
+    <hr class="rule">
+    <div class="carryover">
+      <div class="carry-item">
+        <span class="carry-tag med">MED</span>
+        <div class="carry-body">
+          <strong>Env-var prefix mismatch in hooks.</strong> The <code>before_remove</code> kill-path exports
+          <code>AGENTROPY_*</code> variables; all other hook execution paths export <code>AIHUB_*</code>
+          (per PRD &sect;5). Hook scripts that reference <code>AIHUB_WORKSPACE</code> on the remove path will
+          silently receive an empty value.
+          <div class="ref">orchestrator.rs:1651</div>
+        </div>
+      </div>
+      <div class="carry-item">
+        <span class="carry-tag med">MED</span>
+        <div class="carry-body">
+          <strong>Missing <code>runs</code> row on certain failure paths.</strong> When dispatch fails due to
+          a hook error or a prompt render error, no row is inserted into the <code>runs</code> table. Those
+          failures are invisible in dashboard history and are not counted by the park barrier.
+          <div class="ref">orchestrator.rs:888</div>
+        </div>
+      </div>
+      <div class="carry-item">
+        <span class="carry-tag med">MED</span>
+        <div class="carry-body">
+          <strong>Webhook rejects missing <code>webhookTimestamp</code> with HTTP 401.</strong>
+          Additionally, issue-create events are filtered as irrelevant, so a newly created Todo issue
+          does not trigger an immediate tick — the operator must wait for the next poll cycle.
+          <div class="ref">dashboard/mod.rs:434</div>
+        </div>
+      </div>
+      <div class="carry-item">
+        <span class="carry-tag low">LOW</span>
+        <div class="carry-body">
+          <strong>Dashboard run-state buckets diverge from PRD &sect;8.4.</strong> Stalled and
+          <code>needs_human</code> runs surface as "Failed" instead of "Interrupted"; terminal and released
+          runs surface as "Completed" instead of "Other".
+        </div>
+      </div>
+      <div class="carry-item">
+        <span class="carry-tag low">LOW</span>
+        <div class="carry-body">
+          <strong>Fragile park-barrier log-string coupling.</strong> The park barrier count is derived from
+          an exact log-string literal shared between <code>orchestrator.rs</code> and a SQL pattern in
+          <code>store.rs</code>. Any phrasing change to one side silently breaks the other.
+        </div>
+      </div>
+      <div class="carry-item">
+        <span class="carry-tag low">LOW</span>
+        <div class="carry-body">
+          <strong>Only request-rate headers tracked.</strong> Linear complexity headers are ignored. Per
+          PRD &sect;2, both rate dimensions should be monitored.
+        </div>
+      </div>
+      <div class="carry-item">
+        <span class="carry-tag low">LOW</span>
+        <div class="carry-body">
+          <strong>Startup stale-PID kill is fire-and-forget.</strong> <code>mark_crashed_runs()</code>
+          runs before the kill is confirmed complete, so a slow-dying process might still be alive when
+          the orchestrator resumes its slot.
+        </div>
+      </div>
+      <div class="carry-item">
+        <span class="carry-tag low">LOW</span>
+        <div class="carry-body">
+          <strong>Several codex / README gaps.</strong> The codex runner lacks <code>approvalPolicy</code>
+          flags; thinking, effort, and provider config are absent; backoff exponent is
+          <code>2^(attempt-1)</code> while PRD specifies <code>2^attempt</code>; README still describes
+          the v0 feature set.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── 5. Part A — Feature pilot ── -->
+  <section>
+    <h2>Part A &mdash; Feature pilot</h2>
+    <hr class="rule">
+    <p>
+      Work through the steps below in order. Steps A0 and A1 require no API spend and should be
+      completed before any real-runner runs.
+    </p>
+
+    <ol class="steps">
+      <!-- A0 -->
+      <li class="step">
+        <div class="step-num">A0</div>
+        <div class="step-body">
+          <h3>Pre-flight</h3>
+          <p>Build the release binary and run the doctor check against the bundled fixture.
+          Then reset the fixture so the run starts clean.</p>
+<pre>cargo build --release
+./target/release/agentropy doctor --dir ./example-agent</pre>
+          <p>Reset the fixture (do this before every run to avoid stale state):</p>
+<pre># 1. Reset all issues to todo
+for f in ./example-agent/issues/*.md; do
+  sed -i '' 's/^state: .*/state: todo/' "$f"
+done
+
+# 2. Clear workspaces (keep .gitkeep)
+find ./example-agent/workspaces -mindepth 1 -not -name '.gitkeep' -delete
+
+# 3. Delete the SQLite database
+rm -f ./example-agent/data/store.db
+
+# 4. (Optional) truncate the log
+truncate -s 0 ./example-agent/logs/agent.log 2>/dev/null || true</pre>
+          <p>
+            The SQLite database lives at <code>&lt;agent-folder&gt;/data/store.db</code>.
+            The binary is at <code>./target/release/agentropy</code>.
+            Dashboard default port is <strong>7878</strong> (configured via <code>dashboard.port</code>
+            in <code>agent.yaml</code>).
+          </p>
+        </div>
+      </li>
+
+      <!-- A1 -->
+      <li class="step">
+        <div class="step-num">A1</div>
+        <div class="step-body">
+          <h3>Zero-cost smoke with the fake runner</h3>
+          <p>
+            Copy <code>example-agent</code> to a scratch folder and switch the runner to <code>fake</code>.
+            The fake runner is a built-in test shim that runs <code>sh -c 'printf "%s\n" "$AIHUB_PROMPT"'</code>
+            — it immediately exits zero after printing the rendered prompt. No Claude CLI, no API spend.
+          </p>
+<pre># Create scratch agent folder
+cp -r ./example-agent ./scratch-agent
+
+# Switch runner to fake in agent.yaml:
+#   runner:
+#     use: fake
+sed -i '' 's/^  use: .*/  use: fake/' ./scratch-agent/agent.yaml
+
+# Start the orchestrator
+./target/release/agentropy run --dir ./scratch-agent</pre>
+          <p>
+            Open the dashboard at <a href="http://127.0.0.1:7878/">http://127.0.0.1:7878/</a> and
+            observe dispatch events appearing in real time. The fake runner completes each attempt
+            with exit 0, but the issue file is <em>not</em> updated (the shim doesn't write it),
+            so the orchestrator will classify the exit as a continuation retry (still-active issue
+            after clean exit) and re-dispatch after 1&nbsp;s. To stop the loop, set an issue's
+            <code>state:</code> to <code>done</code> manually, or press Ctrl-C.
+          </p>
+          <p>Verify data in SQLite while the agent runs:</p>
+<pre>sqlite3 ./scratch-agent/data/store.db \
+  "SELECT run_id, issue_identifier, outcome, started_at FROM runs ORDER BY started_at DESC LIMIT 10;"
+
+sqlite3 ./scratch-agent/data/store.db \
+  "SELECT event_id, run_id, issue_identifier, kind, payload FROM events ORDER BY event_id DESC LIMIT 20;"
+
+sqlite3 ./scratch-agent/data/store.db \
+  "SELECT claim_id, run_id, issue_identifier, claimed_at, released_at FROM claims ORDER BY claim_id DESC LIMIT 10;"</pre>
+          <p>
+            Confirm: run rows land in the <code>runs</code> table; event rows accumulate in
+            <code>events</code>; each claim has a <code>released_at</code> timestamp after the
+            run completes; outcomes are recorded correctly.
+          </p>
+        </div>
+      </li>
+
+      <!-- A2 -->
+      <li class="step">
+        <div class="step-num">A2</div>
+        <div class="step-body">
+          <h3>Real-runner single-issue run</h3>
+          <p>
+            <strong>Warning: this step spends API budget.</strong> Ensure the Claude CLI is installed
+            and authenticated (<code>claude --version</code>) before proceeding. Use
+            <code>example-agent</code> with its default <code>claude-code</code> runner.
+          </p>
+<pre>./target/release/agentropy run --dir ./example-agent</pre>
+          <p>Verify the following:</p>
+          <ul class="highlights">
+            <li>The issue file transitions <code>state: todo</code> → <code>state: in_progress</code> →
+              <code>state: done</code> as the agent works.</li>
+            <li>The dashboard at <code>http://127.0.0.1:7878/</code> shows live run state updates
+              (active run, elapsed time, last event).</li>
+            <li>After the run completes, kill the orchestrator (Ctrl-C) and relaunch. The dashboard
+              history panel should show the completed run — confirming SQLite persistence survives
+              restarts.</li>
+          </ul>
+        </div>
+      </li>
+
+      <!-- A3 -->
+      <li class="step">
+        <div class="step-num">A3</div>
+        <div class="step-body">
+          <h3>Linear tracker pilot (optional but recommended)</h3>
+          <p>
+            Create a scratch Linear project and initialize a WORKFLOW.md seeded with its frontmatter.
+            Requires a valid <code>LINEAR_API_KEY</code> in the environment.
+          </p>
+<pre>export LINEAR_API_KEY=lin_api_XXXXXXXXXXXX
+
+# Scaffold WORKFLOW.md with Linear frontmatter
+./target/release/agentropy init-workflow \
+  --dir ./linear-agent \
+  --linear-project-slug YOUR_PROJECT_SLUG \
+  --linear-project "Your Project Name" \
+  --expose-graphql-tool
+
+# Validate the config
+./target/release/agentropy doctor --dir ./linear-agent
+
+# Run
+./target/release/agentropy run --dir ./linear-agent</pre>
+          <p>
+            The <code>init-workflow</code> command writes a WORKFLOW.md frontmatter block with
+            <code>tracker.kind: linear</code>, <code>tracker.project_slug: &lt;slug&gt;</code>, and
+            <code>linear.exposeGraphqlTool: true</code>. Polling is controlled by
+            <code>orchestrator.poll_interval_ms</code> in <code>agent.yaml</code>.
+          </p>
+          <p><strong>Simulate a stall.</strong> Set <code>runner.stall_timeout_ms</code> to a short
+          value (e.g. 5000&nbsp;ms) in <code>agent.yaml</code> and use <code>use: fake</code> so the
+          runner never writes a terminal state. The orchestrator will detect the stall via the
+          <code>stall_timeout_ms</code> threshold, move the issue to the <code>Needs Human</code>
+          state, and emit a HITL notification to stdout (default notifier).</p>
+<pre># Test webhook delivery with HMAC signature (replace SECRET and BODY as needed)
+BODY='{"action":"update","data":{"id":"ISSUE-1"}}'
+SECRET="your-webhook-secret"
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')
+curl -s -X POST http://127.0.0.1:7878/webhook/linear \
+  -H "Content-Type: application/json" \
+  -H "Linear-Signature: $SIG" \
+  -H "Linear-Delivery: test-$(date +%s)" \
+  -d "$BODY"
+
+# Trigger a Linear export
+curl -s http://127.0.0.1:7878/export | jq .</pre>
+        </div>
+      </li>
+    </ol>
+
+    <h3 style="font-family: var(--serif); font-weight: 500; margin: 0 0 14px;">Feature acceptance checklist</h3>
+    <table class="acceptance">
+      <thead>
+        <tr>
+          <th style="width:40px;">Pass</th>
+          <th>Feature</th>
+          <th>How verified</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="cb"></span></td>
+          <td>Retry / exponential backoff on abnormal exit</td>
+          <td>Kill the child process mid-run; confirm retry counter increments and delay grows as <code>min(retry_backoff_ms &middot; 2^(n-1), 5&nbsp;min)</code>.</td>
+        </tr>
+        <tr>
+          <td><span class="cb"></span></td>
+          <td>Stall detection &rarr; Needs Human + HITL comment</td>
+          <td>Set <code>stall_timeout_ms</code> low + fake runner; confirm HITL notification prints to stdout.</td>
+        </tr>
+        <tr>
+          <td><span class="cb"></span></td>
+          <td>Turn timeout (max_run_timeout_ms)</td>
+          <td>Set <code>max_run_timeout_ms</code> to 2000&nbsp;ms; verify child is killed after ~2&nbsp;s and retry is queued.</td>
+        </tr>
+        <tr>
+          <td><span class="cb"></span></td>
+          <td>Park barrier blocks over-dispatching</td>
+          <td>Bring multiple issues to <code>needs_human</code> state; verify the orchestrator parks and does not re-dispatch past the barrier limit.</td>
+        </tr>
+        <tr>
+          <td><span class="cb"></span></td>
+          <td>Interrupt / kill via dashboard</td>
+          <td>Click Stop in the dashboard (or <code>curl -X POST …/control/stop</code>); verify child receives SIGTERM and run state transitions to Cancelled.</td>
+        </tr>
+        <tr>
+          <td><span class="cb"></span></td>
+          <td>Claims survive restart + marked correctly</td>
+          <td>Kill orchestrator during an active run; relaunch; verify the open claim in <code>claims</code> table has a null <code>released_at</code> and the run is marked crashed in the dashboard history.</td>
+        </tr>
+        <tr>
+          <td><span class="cb"></span></td>
+          <td>HITL burst buffer (60&nbsp;s window, 5 items)</td>
+          <td>Trigger multiple <code>needs_human</code> events in rapid succession; confirm the notifier batches them within the 60&nbsp;s window and emits at most 5 items per burst.</td>
+        </tr>
+        <tr>
+          <td><span class="cb"></span></td>
+          <td>Workflow API keys redacted in logs</td>
+          <td>Confirm <code>LINEAR_API_KEY</code> and any secrets do not appear in <code>logs/agent.log</code> or dashboard event output.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ── 6. Part B — Performance benchmark ── -->
+  <section>
+    <h2>Part B &mdash; Performance benchmark (ALG-186)</h2>
+    <hr class="rule">
+    <p>
+      All steps use the <code>fake</code> runner unless stated otherwise. No API spend required for
+      the benchmark itself. Record all measurements in the table at the end of this section.
+    </p>
+
+    <ol class="steps">
+      <!-- B1 -->
+      <li class="step">
+        <div class="step-num">B1</div>
+        <div class="step-body">
+          <h3>Single-instance idle baseline</h3>
+          <p>
+            Launch one agentropy instance with no Todo issues (so it is polling but never dispatching).
+            Sample resource usage every 30&nbsp;seconds for at least 10&nbsp;minutes and write to a log file.
+          </p>
+<pre># Set all example-agent issues to done so the orchestrator idles
+for f in ./example-agent/issues/*.md; do
+  sed -i '' 's/^state: .*/state: done/' "$f"
+done
+sed -i '' 's/^  use: .*/  use: fake/' ./example-agent/agent.yaml
+
+# Launch in background
+./target/release/agentropy run --dir ./example-agent &gt; ./example-agent/logs/agent.log 2&gt;&amp;1 &
+AGENT_PID=$!
+
+# Sample every 30s for 10+ min (20 samples = 10 min)
+for i in $(seq 1 20); do
+  ps -o pid=,rss=,%cpu=,etime= -p "$(pgrep -d, agentropy)" 2&gt;/dev/null \
+    | awk -v ts="$(date +%s)" '{print ts, $0}' | tee -a footprint-b1.log
+  sleep 30
+done
+
+kill $AGENT_PID 2&gt;/dev/null</pre>
+          <p>
+            <strong>Expected results:</strong> RSS in the tens of MB; %CPU ≈ 0 between ticks;
+            no growth trend over the 10-minute window.
+          </p>
+          <p>
+            <strong>Reference measurement</strong> (post-fix smoke run, June 10 2026, idle fake-runner
+            instance, 60&nbsp;s uptime): RSS <strong>14.9&nbsp;MB</strong>, CPU <strong>0.0%</strong>,
+            <strong>5 threads</strong>, clean SIGTERM shutdown. Extrapolated fleet of 10 ≈ 150&nbsp;MB
+            total — comfortably inside the 8&nbsp;GB gate.
+          </p>
+        </div>
+      </li>
+
+      <!-- B2 -->
+      <li class="step">
+        <div class="step-num">B2</div>
+        <div class="step-body">
+          <h3>10-instance fleet baseline</h3>
+          <p>
+            Stamp out 10 agent folders from a template, each with a distinct dashboard port, and
+            launch them all. The dashboard port is configured via the <code>dashboard.port</code>
+            field in <code>agent.yaml</code>.
+          </p>
+<pre># Create 10 agent folders with ports 7879..7888
+for i in $(seq 1 10); do
+  PORT=$((7878 + i))
+  DIR="./fleet/agent-$i"
+  cp -r ./example-agent "$DIR"
+
+  # Switch to fake runner and set all issues to done (idle fleet)
+  sed -i '' 's/^  use: .*/  use: fake/' "$DIR/agent.yaml"
+  for f in "$DIR/issues/"*.md; do
+    sed -i '' 's/^state: .*/state: done/' "$f"
+  done
+
+  # Set distinct dashboard port
+  sed -i '' "s/^  port: .*/  port: $PORT/" "$DIR/agent.yaml"
+
+  # Launch
+  ./target/release/agentropy run --dir "$DIR" \
+    &gt; "$DIR/logs/agent.log" 2&gt;&amp;1 &
+  echo "Launched agent-$i on port $PORT (PID $!)"
+done
+
+# Sample fleet RSS + CPU every 60s for 60+ min (61 samples)
+for i in $(seq 1 61); do
+  PIDS=$(pgrep -d, agentropy 2&gt;/dev/null)
+  [ -z "$PIDS" ] &amp;&amp; echo "No agentropy processes found" &amp;&amp; break
+  ps -o pid=,rss=,%cpu=,etime= -p "$PIDS" 2&gt;/dev/null \
+    | awk -v ts="$(date +%s)" '{print ts, $0}' | tee -a footprint-b2.log
+  sleep 60
+done
+
+# Shut down fleet
+pkill agentropy 2&gt;/dev/null || true</pre>
+          <p>
+            <strong>Pass criteria:</strong> Total RSS across all 10 processes leaves comfortable
+            headroom on an 8&nbsp;GB machine; per-process idle RSS is in the tens of MB; %CPU ≈ 0
+            across the fleet.
+          </p>
+        </div>
+      </li>
+
+      <!-- B3 -->
+      <li class="step">
+        <div class="step-num">B3</div>
+        <div class="step-body">
+          <h3>Memory flatness under churn</h3>
+          <p>
+            Run the fleet with the fake runner and a feeder loop that continuously re-adds Todo issues,
+            so the orchestrator cycles through dispatch → completion → re-dispatch without stopping.
+            Compare RSS at t=0 vs t+1h to confirm memory is flat (no leak).
+          </p>
+<pre># Feeder loop: reset one issue to todo every 5s so the agent always has work
+FEEDER_DIR="./fleet/agent-1"
+while true; do
+  ISSUE=$(ls "$FEEDER_DIR/issues/"*.md | head -1)
+  sed -i '' 's/^state: .*/state: todo/' "$ISSUE"
+  sleep 5
+done &amp;
+FEEDER_PID=$!
+
+# Record RSS at start
+T0_RSS=$(ps -o rss= -p "$(pgrep -d, agentropy)" 2&gt;/dev/null | awk '{s+=$1} END {print s}')
+echo "t0 total RSS: ${T0_RSS} kB" | tee churn.log
+
+# Wait 1 hour
+sleep 3600
+
+# Record RSS at end
+T1_RSS=$(ps -o rss= -p "$(pgrep -d, agentropy)" 2&gt;/dev/null | awk '{s+=$1} END {print s}')
+echo "t+1h total RSS: ${T1_RSS} kB" | tee -a churn.log
+
+kill $FEEDER_PID 2&gt;/dev/null
+
+# Check SQLite to confirm heartbeat pruning is working
+sqlite3 "$FEEDER_DIR/data/store.db" \
+  "SELECT COUNT(*) AS heartbeats FROM heartbeats;"
+sqlite3 "$FEEDER_DIR/data/store.db" \
+  "SELECT COUNT(*) AS events FROM events;"
+sqlite3 "$FEEDER_DIR/data/store.db" \
+  "SELECT COUNT(*) AS runs FROM runs;"
+
+# Check DB file size
+du -h "$FEEDER_DIR/data/store.db"</pre>
+          <p>
+            <strong>Pass criteria:</strong> RSS at t+1h is within a few MB of t=0. Heartbeat row
+            count stays bounded (pruning active). Event row count grows proportionally with run
+            output — not unboundedly.
+          </p>
+        </div>
+      </li>
+
+      <!-- B4 -->
+      <li class="step">
+        <div class="step-num">B4</div>
+        <div class="step-body">
+          <h3>Capture results</h3>
+          <p>
+            Extract the key metrics from your log files and fill in the results table below.
+          </p>
+<pre># Summarize RSS from B1 log (kB → MB)
+awk '{print $3}' footprint-b1.log | awk '{s+=$1; n++; if($1&lt;min||min=="")min=$1; if($1&gt;max)max=$1} END {printf "min=%.1f MB  median=~%.1f MB  max=%.1f MB\n", min/1024, s/n/1024, max/1024}'
+
+# Total fleet RSS from B2 log at a representative sample
+awk '{print $3}' footprint-b2.log | awk 'NR%10==0 {s+=$1} END {printf "total fleet RSS ~%.0f MB\n", s/1024}'</pre>
+        </div>
+      </li>
+    </ol>
+
+    <h3 style="font-family: var(--serif); font-weight: 500; margin: 0 0 14px;">Results table</h3>
+    <table class="shipped">
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th>Target</th>
+          <th>Measured value</th>
+          <th style="width:80px;">Pass</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Per-instance idle RSS (min)</td>
+          <td>Tens of MB</td>
+          <td class="measured-val">— fill in —</td>
+          <td><span class="cb"></span></td>
+        </tr>
+        <tr>
+          <td>Per-instance idle RSS (median)</td>
+          <td>Tens of MB</td>
+          <td class="measured-val">— fill in —</td>
+          <td><span class="cb"></span></td>
+        </tr>
+        <tr>
+          <td>Per-instance idle RSS (max)</td>
+          <td>Tens of MB</td>
+          <td class="measured-val">— fill in —</td>
+          <td><span class="cb"></span></td>
+        </tr>
+        <tr>
+          <td>Total fleet RSS (10 instances)</td>
+          <td>Comfortable on 8&nbsp;GB</td>
+          <td class="measured-val">— fill in —</td>
+          <td><span class="cb"></span></td>
+        </tr>
+        <tr>
+          <td>Idle %CPU (per instance)</td>
+          <td>~0% (no busy-wait)</td>
+          <td class="measured-val">— fill in —</td>
+          <td><span class="cb"></span></td>
+        </tr>
+        <tr>
+          <td>RSS delta over 1h churn (t+1h − t0)</td>
+          <td>&lt; 5 MB (flat)</td>
+          <td class="measured-val">— fill in —</td>
+          <td><span class="cb"></span></td>
+        </tr>
+        <tr>
+          <td>DB size after 1h churn</td>
+          <td>Bounded / not growing unboundedly</td>
+          <td class="measured-val">— fill in —</td>
+          <td><span class="cb"></span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3 style="font-family: var(--serif); font-weight: 500; margin: 24px 0 14px;">ALG-186 acceptance criteria</h3>
+    <table class="acceptance">
+      <thead>
+        <tr>
+          <th style="width:40px;">Pass</th>
+          <th>Criterion</th>
+          <th>Measured value</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="cb"></span></td>
+          <td>Idle CPU ≈ 0% — no busy-wait between ticks</td>
+          <td class="measured-val">— fill in —</td>
+        </tr>
+        <tr>
+          <td><span class="cb"></span></td>
+          <td>Memory flat over uptime and run count (ring capped, logs streamed to SQLite, paged history)</td>
+          <td class="measured-val">— fill in —</td>
+        </tr>
+        <tr>
+          <td><span class="cb"></span></td>
+          <td>Tokio / threadpool conservative and lean deps (worker_threads=2, exact Tokio feature set)</td>
+          <td class="measured-val">Confirmed by code review</td>
+        </tr>
+        <tr>
+          <td><span class="cb"></span></td>
+          <td>10+ instances comfortable on 8&nbsp;GB machine; per-process RSS in tens of MB</td>
+          <td class="measured-val">— fill in —</td>
+        </tr>
+        <tr>
+          <td><span class="cb"></span></td>
+          <td>Human sign-off recorded on ALG-186 in Linear</td>
+          <td class="measured-val">— reviewer name + date —</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ── 7. Part C — Closing ALG-186 ── -->
+  <section>
+    <h2>Part C &mdash; Closing ALG-186</h2>
+    <hr class="rule">
+    <p>
+      ALG-186 is a human-in-the-loop gate. Do not let the orchestrator auto-dispatch it;
+      the review and sign-off are themselves the human task. Follow the steps below in order.
+    </p>
+    <ol class="steps">
+      <li class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <h3>Move ALG-186 to Todo in Linear</h3>
+          <p>
+            From the Linear UI (or via the API), move ALG-186 from Backlog to Todo. If your
+            orchestrator is configured to pick up Todo issues in the ALG project, pause it first
+            (<code>curl -X POST http://127.0.0.1:7878/control/pause</code>) so the daemon does not
+            auto-dispatch the issue.
+          </p>
+        </div>
+      </li>
+      <li class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <h3>Run Part B and fill in the results table</h3>
+          <p>
+            Complete all four steps of Part B (B1&ndash;B4). Record measured values in both the
+            results table in this document and in the Linear comment template below.
+          </p>
+        </div>
+      </li>
+      <li class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <h3>Post measured numbers as a Linear comment</h3>
+          <p>Copy the template below, fill in your measured values, and post it as a comment on ALG-186.</p>
+<pre>## ALG-186 benchmark results
+
+| Metric | Value |
+|--------|-------|
+| Per-instance idle RSS (min / median / max) | — / — / — MB |
+| Total fleet RSS (10 instances) | — MB |
+| Idle %CPU (per instance) | —% |
+| RSS delta over 1h churn | — MB |
+| DB size after 1h churn | — MB |
+| Binary size (release) | 8.2 MB |
+| Tests passing | 105 |
+
+**Acceptance criteria:** all passed / [list any failures]
+
+**Footprint fixes applied:** 6 (Linear double-poll, fetch_one scan, WS poll,
+Tokio threads, SQLite growth, Tokio features)
+
+**Open items triaged:** 8 (8 LOW/MED items filed for follow-up, none blocking)
+
+**Reviewer:** [name]
+**Date:** [YYYY-MM-DD]</pre>
+        </div>
+      </li>
+      <li class="step">
+        <div class="step-num">4</div>
+        <div class="step-body">
+          <h3>Record human sign-off and mark Done</h3>
+          <p>
+            The reviewer signs off in the Linear comment (name + date). Once sign-off is recorded,
+            move ALG-186 to Done in Linear. The project Definition of Done is then complete:
+            all 15 slices (ALG-172&ndash;186) are Done.
+          </p>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <footer>
+    Sources: multi-agent review of PRs #1&ndash;14 vs PRD-EXTRACTION.md &nbsp;&middot;&nbsp;
+    <code>cargo test --release</code> (105 passing) &nbsp;&middot;&nbsp;
+    Linear ALG-186 &nbsp;&mdash;&nbsp; generated June 10, 2026
+  </footer>
+
+</div>
+</body>
+</html>
