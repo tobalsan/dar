@@ -34,6 +34,7 @@ use tokio::sync::watch;
 
 use crate::config::AgentConfig;
 use crate::domain::Issue;
+use crate::hitl::{HitlNotification, HitlNotify, NoopHitlNotifier};
 use crate::logging;
 use crate::paths::{issue_workspace, issue_workspace_path, resolve_workspace_root, AgentPaths};
 use crate::prompt::PromptRenderer;
@@ -48,8 +49,8 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
 
-/// Max backoff cap for abnormal-exit retries (5 minutes).
-const BACKOFF_CAP: Duration = Duration::from_secs(300);
+/// Max backoff cap for dispatch/abnormal-exit retries (30 minutes).
+const BACKOFF_CAP: Duration = Duration::from_secs(30 * 60);
 /// Short continuation retry delay for normal-exit-but-still-active (1s).
 const CONTINUATION_DELAY: Duration = Duration::from_secs(1);
 
@@ -89,6 +90,7 @@ pub struct Orchestrator {
     effective_cfg: EffectiveLoopConfig,
     state: AppState,
     control_rx: UnboundedReceiver<ControlMsg>,
+    hitl: Arc<dyn HitlNotify>,
 
     // In-memory run registry.
     slots: Vec<RunSlot>,
@@ -97,6 +99,7 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
+    #[allow(dead_code)]
     pub fn new(
         agent_cfg: AgentConfig,
         paths: AgentPaths,
@@ -106,6 +109,29 @@ impl Orchestrator {
         state: AppState,
         control_rx: UnboundedReceiver<ControlMsg>,
     ) -> Self {
+        Self::with_hitl_notifier(
+            agent_cfg,
+            paths,
+            tracker,
+            prompt,
+            effective_cfg,
+            state,
+            control_rx,
+            Arc::new(NoopHitlNotifier),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_hitl_notifier(
+        agent_cfg: AgentConfig,
+        paths: AgentPaths,
+        tracker: Arc<dyn crate::tracker::Tracker>,
+        prompt: PromptRenderer,
+        effective_cfg: EffectiveLoopConfig,
+        state: AppState,
+        control_rx: UnboundedReceiver<ControlMsg>,
+        hitl: Arc<dyn HitlNotify>,
+    ) -> Self {
         Self {
             agent_cfg,
             paths,
@@ -114,6 +140,7 @@ impl Orchestrator {
             effective_cfg,
             state,
             control_rx,
+            hitl,
             slots: Vec::new(),
             claims: HashSet::new(),
             retries: Vec::new(),
@@ -153,6 +180,7 @@ impl Orchestrator {
             "orchestrator stopping; killing active runs",
         );
         self.kill_all(KillReason::OperatorStop).await;
+        self.hitl.stop();
         Ok(())
     }
 
@@ -314,7 +342,7 @@ impl Orchestrator {
                 .signed_duration_since(last_event_at)
                 .to_std()
                 .unwrap_or_default();
-            if stale_for > Duration::from_millis(self.effective_cfg.max_run_timeout_ms) {
+            if stale_for > Duration::from_millis(self.effective_cfg.stall_timeout_ms) {
                 logging::ev(
                     &slot.identifier,
                     "stalled",
@@ -396,6 +424,11 @@ impl Orchestrator {
                 handle.request_kill(kill_reason);
             }
             if matches!(status, RunStatus::Stalled) {
+                self.hitl.notify(HitlNotification::new(
+                    "stall",
+                    slot.identifier.clone(),
+                    note,
+                ));
                 self.park_issue_for_safety(&slot.issue, note);
             }
             self.record_history(
@@ -1170,6 +1203,11 @@ impl Orchestrator {
         match self.tracker.park_issue_needs_human(issue, &comment) {
             Ok(()) => {
                 logging::ev(&issue.identifier, "parked", reason);
+                self.hitl.notify(HitlNotification::new(
+                    "park",
+                    issue.identifier.clone(),
+                    reason.to_string(),
+                ));
                 let _ = self.state.store.insert_event(&NewEvent {
                     run_id: None,
                     issue_identifier: &issue.identifier,
@@ -1573,7 +1611,7 @@ pub(crate) fn sort_candidates(v: &mut [Issue]) {
     });
 }
 
-/// Backoff for abnormal-exit retries: `min(retry_backoff_ms * 2^(attempt-1), 5min)`.
+/// Backoff for dispatch retries: `min(retry_backoff_ms * 2^(attempt-1), 30min)`.
 /// `attempt` is 1-based.
 pub(crate) fn backoff(retry_backoff_ms: u64, attempt: u32) -> Duration {
     let shift = attempt.saturating_sub(1);
@@ -1612,7 +1650,7 @@ fn run_before_remove(
 mod tests {
     use super::*;
     use crate::config::{
-        AgentConfig, DashboardConfig, OrchestratorConfig, RunnerConfig, TrackerConfig,
+        AgentConfig, DashboardConfig, HitlConfig, OrchestratorConfig, RunnerConfig, TrackerConfig,
         TrackerInner, WorkspaceConfig,
     };
     use crate::paths::AgentPaths;
@@ -1767,6 +1805,7 @@ mod tests {
                 command: "claude".to_string(),
                 model: None,
                 max_run_timeout_ms: 1000,
+                stall_timeout_ms: 300_000,
             },
             orchestrator: OrchestratorConfig {
                 poll_interval_ms: 100,
@@ -1775,12 +1814,14 @@ mod tests {
                 max_retries: 3,
                 retry_backoff_ms: 1000,
             },
+            hitl: HitlConfig::default(),
             workspace: WorkspaceConfig {
                 root: "workspaces".into(),
             },
             dashboard: DashboardConfig {
                 bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: 7878,
+                webhook_secret: None,
             },
         }
     }
@@ -2113,7 +2154,7 @@ mod tests {
         let agent_cfg = test_agent_config();
         let mut effective_cfg =
             EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
-        effective_cfg.max_run_timeout_ms = 1;
+        effective_cfg.stall_timeout_ms = 1;
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
         let state = AppState::new(
@@ -2539,10 +2580,10 @@ mod tests {
 
     #[test]
     fn backoff_grows_then_caps() {
-        assert_eq!(backoff(1000, 1), Duration::from_millis(1000));
-        assert_eq!(backoff(1000, 2), Duration::from_millis(2000));
-        assert_eq!(backoff(1000, 3), Duration::from_millis(4000));
-        assert_eq!(backoff(1000, 30), BACKOFF_CAP);
+        assert_eq!(backoff(30_000, 1), Duration::from_secs(30));
+        assert_eq!(backoff(30_000, 2), Duration::from_secs(60));
+        assert_eq!(backoff(30_000, 3), Duration::from_secs(120));
+        assert_eq!(backoff(30_000, 7), Duration::from_secs(30 * 60));
         assert_eq!(backoff(u64::MAX, 64), BACKOFF_CAP);
     }
 
@@ -2566,6 +2607,7 @@ mod tests {
                 command,
                 model: None,
                 max_run_timeout_ms: 30_000,
+                stall_timeout_ms: 300_000,
             },
             orchestrator: OrchestratorConfig {
                 poll_interval_ms: 10,
@@ -2574,12 +2616,14 @@ mod tests {
                 max_retries: 1,
                 retry_backoff_ms: 10,
             },
+            hitl: HitlConfig::default(),
             workspace: WorkspaceConfig {
                 root: "workspaces".into(),
             },
             dashboard: DashboardConfig {
                 bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: 0,
+                webhook_secret: None,
             },
         }
     }

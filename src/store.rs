@@ -264,6 +264,30 @@ impl Store {
         Ok(n)
     }
 
+    /// Return PIDs for persisted runs that were still open when the previous
+    /// gateway process exited. Startup uses this to terminate stale worker
+    /// process groups before marking those rows interrupted.
+    pub fn open_run_pids(&self) -> Result<Vec<u32>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT pid FROM runs
+                 WHERE process_alive=1 AND finished_at IS NULL AND pid > 0",
+            )
+            .context("prepare open_run_pids")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, i64>(0))
+            .context("query open_run_pids")?;
+        let mut out = Vec::new();
+        for row in rows {
+            let pid = row?;
+            if pid > 0 && pid <= u32::MAX as i64 {
+                out.push(pid as u32);
+            }
+        }
+        Ok(out)
+    }
+
     /// Load the `limit` most recent finished runs, newest-first. Used to seed
     /// the in-memory `HistoryRing` on startup (replaces history.jsonl reload).
     pub fn load_recent_runs(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
@@ -842,6 +866,46 @@ mod tests {
         let row = pages.iter().find(|r| r.run_id == run_id).unwrap();
         assert_eq!(row.exit_code, Some(2), "non-zero exit code must be stored");
         assert_eq!(row.outcome.as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn open_run_pids_returns_only_unfinished_alive_pids() {
+        let store = open_tmp();
+        let now = Utc::now();
+        for (run_id, pid, finish) in [
+            ("alive", 1234, false),
+            ("pid-zero", 0, false),
+            ("finished", 5678, true),
+        ] {
+            store
+                .insert_run(&NewRun {
+                    run_id,
+                    issue_id: run_id,
+                    issue_identifier: run_id,
+                    workspace: "/tmp/ws",
+                    profile_json: None,
+                    workflow_path: None,
+                    workflow_sha: None,
+                    pid,
+                    worker_id: None,
+                    started_at: now,
+                })
+                .unwrap();
+            if finish {
+                store
+                    .finish_run(
+                        run_id,
+                        &RunFinish {
+                            outcome: RunStatus::Succeeded,
+                            exit_code: Some(0),
+                            finished_at: now,
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+
+        assert_eq!(store.open_run_pids().unwrap(), vec![1234]);
     }
 
     #[test]

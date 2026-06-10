@@ -123,6 +123,7 @@ pub struct WfAgentConfig {
     /// Per-attempt timeout override (ms).
     pub max_run_timeout_ms: Option<u64>,
     pub turn_timeout_ms: Option<u64>,
+    pub stall_timeout_ms: Option<u64>,
     pub max_active_runs: Option<u32>,
 }
 
@@ -167,6 +168,8 @@ pub struct WfLinearConfig {
     /// Enable the linear_graphql worker tool when the child runs.
     #[serde(alias = "exposeGraphqlTool")]
     pub worker_tool: Option<bool>,
+    /// HMAC-SHA256 secret used to verify Linear webhook requests.
+    pub webhook_secret: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -275,9 +278,11 @@ pub struct EffectiveLoopConfig {
     /// Model identifier passed to the runner (None = runner default).
     pub model: Option<String>,
     pub max_run_timeout_ms: u64,
+    pub stall_timeout_ms: u64,
     // Dashboard
     pub dashboard_bind: IpAddr,
     pub dashboard_port: u16,
+    pub webhook_secret: Option<String>,
     // Extension points (parsed; not yet acted on in v0)
     #[allow(dead_code)]
     pub hooks: WfHooksConfig,
@@ -371,6 +376,9 @@ impl EffectiveLoopConfig {
         let max_run_timeout_ms = a
             .and_then(|a| a.turn_timeout_ms.or(a.max_run_timeout_ms))
             .unwrap_or(base.runner.max_run_timeout_ms);
+        let stall_timeout_ms = a
+            .and_then(|a| a.stall_timeout_ms)
+            .unwrap_or(base.runner.stall_timeout_ms);
 
         // --- Dashboard ---
         let dashboard_bind = wf
@@ -383,6 +391,11 @@ impl EffectiveLoopConfig {
             .as_ref()
             .and_then(|s| s.port)
             .unwrap_or(base.dashboard.port);
+        let webhook_secret = wf
+            .linear
+            .as_ref()
+            .and_then(|l| l.webhook_secret.clone())
+            .or_else(|| base.dashboard.webhook_secret.clone());
 
         Self {
             tracker_kind,
@@ -405,8 +418,10 @@ impl EffectiveLoopConfig {
             runner_command,
             model,
             max_run_timeout_ms,
+            stall_timeout_ms,
             dashboard_bind,
             dashboard_port,
+            webhook_secret,
             hooks: wf.hooks.clone().unwrap_or_default(),
             linear: wf.linear.clone().unwrap_or_default(),
         }
@@ -482,7 +497,7 @@ fn resolve_tracker(
 mod tests {
     use super::*;
     use crate::config::{
-        AgentConfig, DashboardConfig, OrchestratorConfig, RunnerConfig, TrackerConfig,
+        AgentConfig, DashboardConfig, HitlConfig, OrchestratorConfig, RunnerConfig, TrackerConfig,
         TrackerInner, WorkspaceConfig,
     };
     use std::net::Ipv4Addr;
@@ -507,6 +522,7 @@ mod tests {
                 command: "claude".into(),
                 model: None,
                 max_run_timeout_ms: 1_800_000,
+                stall_timeout_ms: 300_000,
             },
             orchestrator: OrchestratorConfig {
                 poll_interval_ms: 10_000,
@@ -515,12 +531,14 @@ mod tests {
                 max_retries: 3,
                 retry_backoff_ms: 10_000,
             },
+            hitl: HitlConfig::default(),
             workspace: WorkspaceConfig {
                 root: "./workspaces".into(),
             },
             dashboard: DashboardConfig {
                 bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: 7878,
+                webhook_secret: None,
             },
         }
     }
@@ -670,6 +688,29 @@ body"#;
         assert!(eff.allow_stale);
         assert!(eff.workspace_reuse);
         assert!(!eff.cleanup_on_terminal);
+        assert_eq!(eff.webhook_secret, None);
+    }
+
+    #[test]
+    fn merge_webhook_secret_falls_back_to_agent_yaml() {
+        let mut base = base_config();
+        base.dashboard.webhook_secret = Some("agent-secret".to_string());
+
+        let eff = EffectiveLoopConfig::merge(&base, &WorkflowFrontmatter::default());
+
+        assert_eq!(eff.webhook_secret, Some("agent-secret".to_string()));
+    }
+
+    #[test]
+    fn merge_webhook_secret_frontmatter_overrides_agent_yaml() {
+        let mut base = base_config();
+        base.dashboard.webhook_secret = Some("agent-secret".to_string());
+        let raw = "---\nlinear:\n  webhook_secret: workflow-secret\n---";
+        let snap = parse_workflow_md(raw).unwrap();
+
+        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+
+        assert_eq!(eff.webhook_secret, Some("workflow-secret".to_string()));
     }
 
     #[test]
@@ -772,6 +813,16 @@ body"#;
         assert_eq!(eff.runner_kind, "codex");
         assert_eq!(eff.runner_command, "codex");
         assert_eq!(eff.max_run_timeout_ms, 2500);
+        assert_eq!(eff.stall_timeout_ms, 300_000);
+    }
+
+    #[test]
+    fn merge_agent_stall_timeout_overrides_base() {
+        let base = base_config();
+        let raw = "---\nagent:\n  stall_timeout_ms: 12345\n---";
+        let snap = parse_workflow_md(raw).unwrap();
+        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        assert_eq!(eff.stall_timeout_ms, 12_345);
     }
 
     #[test]
@@ -842,6 +893,7 @@ body"#;
             command: String::new(),
             model: None,
             max_run_timeout_ms: 3_600_000,
+            stall_timeout_ms: 300_000,
         };
         // sdk field in agent.yaml should map to runner kind via the `use_` alias
         let wf = WorkflowFrontmatter::default();

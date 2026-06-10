@@ -10,13 +10,17 @@ pub mod view;
 use std::net::IpAddr;
 
 use askama::Template;
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::collections::HashMap;
+use subtle::ConstantTimeEq;
 use tokio::sync::{oneshot, watch};
 
 use crate::config::AgentConfig;
@@ -46,6 +50,7 @@ pub async fn serve(
         state,
         paths,
         workflow: resolved_workflow_json(&agent_cfg, &effective_cfg),
+        webhook_secret: effective_cfg.webhook_secret.clone(),
     };
     let app = Router::new()
         .route("/", get(index))
@@ -61,6 +66,7 @@ pub async fn serve(
         .route("/runs/{run_id}/kill", post(api_kill))
         .route("/claim", post(api_claim))
         .route("/tick", post(api_tick))
+        .route("/webhook", post(api_webhook))
         .route("/ws", get(api_ws))
         .route("/control/stop", post(control_stop))
         .route("/control/pause", post(control_pause))
@@ -97,6 +103,7 @@ struct ApiState {
     state: AppState,
     paths: AgentPaths,
     workflow: serde_json::Value,
+    webhook_secret: Option<String>,
 }
 
 /// `GET /` — render the dashboard page from the current state snapshot.
@@ -352,6 +359,30 @@ async fn api_tick(State(api): State<ApiState>) -> Response {
     control_request(&api.state, |reply| ControlMsg::Tick { reply }).await
 }
 
+async fn api_webhook(State(api): State<ApiState>, headers: HeaderMap, body: Bytes) -> Response {
+    let Some(secret) = api.webhook_secret.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "webhook secret is not configured",
+        )
+            .into_response();
+    };
+    if !verify_webhook_signature(secret, &headers, &body) {
+        return (StatusCode::UNAUTHORIZED, "invalid webhook signature").into_response();
+    }
+    let payload: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid json").into_response(),
+    };
+    if !is_webhook_timestamp_current(&payload, chrono::Utc::now().timestamp_millis()) {
+        return (StatusCode::UNAUTHORIZED, "stale webhook timestamp").into_response();
+    }
+    if !is_relevant_linear_webhook(&payload) {
+        return Json(serde_json::json!({ "ok": true, "enqueued": false })).into_response();
+    }
+    control_request(&api.state, |reply| ControlMsg::Tick { reply }).await
+}
+
 async fn api_claim(State(api): State<ApiState>, Json(body): Json<serde_json::Value>) -> Response {
     let identifier = body
         .get("identifier")
@@ -364,6 +395,70 @@ async fn api_claim(State(api): State<ApiState>, Json(body): Json<serde_json::Val
         return (StatusCode::BAD_REQUEST, "identifier is required").into_response();
     }
     control_request(&api.state, |reply| ControlMsg::Claim { identifier, reply }).await
+}
+
+type HmacSha256 = Hmac<Sha256>;
+
+fn verify_webhook_signature(secret: &str, headers: &HeaderMap, body: &[u8]) -> bool {
+    let Some(signature) = webhook_signature_header(headers) else {
+        return false;
+    };
+    let signature = signature.strip_prefix("sha256=").unwrap_or(signature);
+    let Ok(provided) = hex::decode(signature) else {
+        return false;
+    };
+    let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(body);
+    let expected = mac.finalize().into_bytes();
+    provided.len() == expected.len() && provided.ct_eq(expected.as_slice()).into()
+}
+
+fn webhook_signature_header(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("linear-signature")
+        .and_then(|value| value.to_str().ok())
+}
+
+fn is_webhook_timestamp_current(payload: &serde_json::Value, now_ms: i64) -> bool {
+    const WEBHOOK_TIMESTAMP_TOLERANCE_MS: i64 = 60_000;
+    payload
+        .get("webhookTimestamp")
+        .and_then(|value| value.as_i64())
+        .is_some_and(|timestamp| {
+            timestamp.abs_diff(now_ms) <= WEBHOOK_TIMESTAMP_TOLERANCE_MS as u64
+        })
+}
+
+fn is_relevant_linear_webhook(payload: &serde_json::Value) -> bool {
+    let Some(data) = payload.get("data") else {
+        return false;
+    };
+    if !has_issueish_field(data) {
+        return false;
+    }
+    let type_action = format!(
+        "{} {}",
+        payload.get("type").and_then(|v| v.as_str()).unwrap_or(""),
+        payload.get("action").and_then(|v| v.as_str()).unwrap_or("")
+    )
+    .to_ascii_lowercase();
+    let issue_update_or_state = type_action.contains("issue")
+        && (type_action.contains("update") || type_action.contains("state"))
+        || data.get("state").is_some()
+        || payload.get("state").is_some();
+    let comment = type_action.contains("comment")
+        || data.get("comment").is_some()
+        || payload.get("comment").is_some();
+    issue_update_or_state || comment
+}
+
+fn has_issueish_field(data: &serde_json::Value) -> bool {
+    data.get("issue").is_some()
+        || data.get("issueId").is_some()
+        || data.get("identifier").is_some()
+        || data.get("id").is_some()
 }
 
 async fn control_request<F>(state: &AppState, build: F) -> Response
@@ -661,18 +756,272 @@ mod tests {
         assert_eq!(value["items"][0]["api_key"], "[REDACTED]");
     }
 
-    fn test_api_state(store: Arc<Store>) -> ApiState {
+    #[test]
+    fn webhook_signature_rejects_invalid_signature() {
+        let body = br#"{"type":"Issue","action":"update","data":{"id":"issue-id"}}"#;
+        let mut headers = HeaderMap::new();
+        headers.insert("linear-signature", "deadbeef".parse().unwrap());
+
+        assert!(!verify_webhook_signature("secret", &headers, body));
+
+        let signature = webhook_signature("secret", body);
+        headers.insert("linear-signature", signature.parse().unwrap());
+        assert!(verify_webhook_signature("secret", &headers, body));
+    }
+
+    #[test]
+    fn webhook_timestamp_must_be_current() {
+        let now = 1_700_000_000_000_i64;
+
+        assert!(is_webhook_timestamp_current(
+            &serde_json::json!({ "webhookTimestamp": now }),
+            now
+        ));
+        assert!(is_webhook_timestamp_current(
+            &serde_json::json!({ "webhookTimestamp": now - 60_000 }),
+            now
+        ));
+        assert!(!is_webhook_timestamp_current(
+            &serde_json::json!({ "webhookTimestamp": now - 60_001 }),
+            now
+        ));
+        assert!(!is_webhook_timestamp_current(
+            &serde_json::json!({ "webhookTimestamp": "not-a-number" }),
+            now
+        ));
+        assert!(!is_webhook_timestamp_current(&serde_json::json!({}), now));
+    }
+
+    #[test]
+    fn relevance_filter_matches_issue_state_and_comments_only_with_issueish_field() {
+        assert!(is_relevant_linear_webhook(&serde_json::json!({
+            "type": "Issue",
+            "action": "update",
+            "data": { "identifier": "ALG-183" }
+        })));
+        assert!(is_relevant_linear_webhook(&serde_json::json!({
+            "type": "Issue",
+            "action": "stateChanged",
+            "data": { "issueId": "issue-id" }
+        })));
+        assert!(is_relevant_linear_webhook(&serde_json::json!({
+            "type": "Comment",
+            "action": "create",
+            "data": { "issue": { "id": "issue-id" }, "comment": { "id": "comment-id" } }
+        })));
+        assert!(is_relevant_linear_webhook(&serde_json::json!({
+            "type": "SomethingElse",
+            "data": { "id": "issue-id", "state": { "name": "Done" } }
+        })));
+
+        assert!(!is_relevant_linear_webhook(&serde_json::json!({
+            "type": "Issue",
+            "action": "update",
+            "identifier": "ALG-183"
+        })));
+        assert!(!is_relevant_linear_webhook(&serde_json::json!({
+            "type": "Issue",
+            "action": "update",
+            "data": { "team": { "id": "team-id" } }
+        })));
+        assert!(!is_relevant_linear_webhook(&serde_json::json!({
+            "type": "Project",
+            "action": "update",
+            "data": { "id": "project-id" }
+        })));
+    }
+
+    #[tokio::test]
+    async fn webhook_enqueues_tick_for_relevant_signed_payload() {
         let dir = tempdir().unwrap();
-        let paths = AgentPaths::new(dir.path().canonicalize().unwrap());
+        let store = Arc::new(Store::open(&dir.path().join("store.db")).unwrap());
+        let (state, mut control_rx) = test_state_with_rx(store);
+        let api = ApiState {
+            state,
+            paths: test_paths(),
+            workflow: serde_json::json!({}),
+            webhook_secret: Some("secret".to_string()),
+        };
+        let body = signed_webhook_body(serde_json::json!({
+            "type": "Issue",
+            "action": "update",
+            "data": { "identifier": "ALG-183" }
+        }));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "linear-signature",
+            webhook_signature("secret", &body).parse().unwrap(),
+        );
+
+        let responder = tokio::spawn(async move {
+            match control_rx.recv().await.unwrap() {
+                ControlMsg::Tick { reply } => {
+                    reply.send(ControlReply::ok("tick complete")).unwrap();
+                }
+                _ => panic!("expected tick control message"),
+            }
+        });
+
+        let response = api_webhook(State(api), headers, body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn webhook_rejects_missing_secret_bad_signature_and_invalid_json() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("store.db")).unwrap());
+        let body = signed_webhook_body(serde_json::json!({
+            "type": "Issue",
+            "action": "update",
+            "data": { "identifier": "ALG-183" }
+        }));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "linear-signature",
+            webhook_signature("secret", &body).parse().unwrap(),
+        );
+
+        let response = api_webhook(
+            State(ApiState {
+                state: test_state(Arc::clone(&store)),
+                paths: test_paths(),
+                workflow: serde_json::json!({}),
+                webhook_secret: None,
+            }),
+            headers.clone(),
+            body.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        headers.insert("linear-signature", "deadbeef".parse().unwrap());
+        let response = api_webhook(
+            State(ApiState {
+                state: test_state(Arc::clone(&store)),
+                paths: test_paths(),
+                workflow: serde_json::json!({}),
+                webhook_secret: Some("secret".to_string()),
+            }),
+            headers.clone(),
+            body,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let invalid = Bytes::from_static(b"not json");
+        headers.insert(
+            "linear-signature",
+            webhook_signature("secret", &invalid).parse().unwrap(),
+        );
+        let response = api_webhook(
+            State(ApiState {
+                state: test_state(store),
+                paths: test_paths(),
+                workflow: serde_json::json!({}),
+                webhook_secret: Some("secret".to_string()),
+            }),
+            headers,
+            invalid,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn webhook_rejects_stale_signed_payload() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("store.db")).unwrap());
+        let body = Bytes::from(
+            serde_json::json!({
+                "type": "Issue",
+                "action": "update",
+                "data": { "identifier": "ALG-183" },
+                "webhookTimestamp": chrono::Utc::now().timestamp_millis() - 60_001
+            })
+            .to_string(),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "linear-signature",
+            webhook_signature("secret", &body).parse().unwrap(),
+        );
+
+        let response = api_webhook(
+            State(ApiState {
+                state: test_state(store),
+                paths: test_paths(),
+                workflow: serde_json::json!({}),
+                webhook_secret: Some("secret".to_string()),
+            }),
+            headers,
+            body,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn webhook_ignores_irrelevant_signed_payload_without_tick() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("store.db")).unwrap());
+        let (state, mut control_rx) = test_state_with_rx(store);
+        let api = ApiState {
+            state,
+            paths: test_paths(),
+            workflow: serde_json::json!({}),
+            webhook_secret: Some("secret".to_string()),
+        };
+        let body = signed_webhook_body(serde_json::json!({
+            "type": "Project",
+            "action": "update",
+            "data": { "id": "project-id" }
+        }));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "linear-signature",
+            webhook_signature("secret", &body).parse().unwrap(),
+        );
+
+        let response = api_webhook(State(api), headers, body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(control_rx.try_recv().is_err());
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["enqueued"], false);
+    }
+
+    fn test_api_state(store: Arc<Store>) -> ApiState {
         ApiState {
             state: test_state(store),
-            paths,
+            paths: test_paths(),
             workflow: serde_json::json!({}),
+            webhook_secret: None,
         }
+    }
+
+    fn test_paths() -> AgentPaths {
+        let dir = tempdir().unwrap();
+        AgentPaths::new(dir.path().canonicalize().unwrap())
     }
 
     fn test_state(store: Arc<Store>) -> AppState {
         let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        test_state_with_tx(store, control_tx)
+    }
+
+    fn test_state_with_rx(store: Arc<Store>) -> (AppState, mpsc::UnboundedReceiver<ControlMsg>) {
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        (test_state_with_tx(store, control_tx), control_rx)
+    }
+
+    fn test_state_with_tx(
+        store: Arc<Store>,
+        control_tx: mpsc::UnboundedSender<ControlMsg>,
+    ) -> AppState {
         AppState::new(
             AgentInfo {
                 id: "test-agent".to_string(),
@@ -684,5 +1033,17 @@ mod tests {
             store,
             Vec::new(),
         )
+    }
+
+    fn webhook_signature(secret: &str, body: &[u8]) -> String {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn signed_webhook_body(mut payload: serde_json::Value) -> Bytes {
+        payload["webhookTimestamp"] =
+            serde_json::Value::from(chrono::Utc::now().timestamp_millis());
+        Bytes::from(payload.to_string())
     }
 }

@@ -118,6 +118,7 @@ mod tests {
                 command: "sh".to_string(),
                 model: None,
                 max_run_timeout_ms: 1000,
+                stall_timeout_ms: 1000,
             },
             orchestrator: crate::config::OrchestratorConfig {
                 poll_interval_ms: 1000,
@@ -126,12 +127,14 @@ mod tests {
                 max_retries: 1,
                 retry_backoff_ms: 1000,
             },
+            hitl: crate::config::HitlConfig::default(),
             workspace: crate::config::WorkspaceConfig {
                 root: "workspaces".into(),
             },
             dashboard: crate::config::DashboardConfig {
                 bind: "127.0.0.1".parse().unwrap(),
                 port: 7878,
+                webhook_secret: None,
             },
         };
         let snapshot = LinearExport {
