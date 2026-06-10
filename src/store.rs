@@ -17,6 +17,22 @@ use rusqlite::{params, Connection};
 
 use crate::state::{HistoryEntry, RunStatus};
 
+// ─── shared constants ─────────────────────────────────────────────────────────
+
+/// Note string passed to `record_history` when a run finishes with exit 0 but
+/// the issue is still active (continuation queued).  `record_history` prefixes
+/// this with the `RunStatus` debug name, so the stored lifecycle-event payload
+/// becomes `"Succeeded still active after normal exit; continuation queued"`.
+pub(crate) const ACTIVE_CONTINUATION_MARKER: &str =
+    "still active after normal exit; continuation queued";
+
+/// Full lifecycle-event `payload` value stored by `record_history` for an
+/// active-continuation run.  The park-barrier SQL query matches against this
+/// exact string; it is derived from `ACTIVE_CONTINUATION_MARKER` so the two
+/// stay in sync automatically.
+pub(crate) const ACTIVE_CONTINUATION_EVENT: &str =
+    "Succeeded still active after normal exit; continuation queued";
+
 // ─── public row/param types ───────────────────────────────────────────────────
 
 /// Parameters for inserting a new run row at dispatch time.
@@ -479,9 +495,9 @@ impl Store {
                         SELECT 1 FROM events
                         WHERE run_id=?1
                           AND kind='lifecycle'
-                          AND payload='Succeeded still active after normal exit; continuation queued'
+                          AND payload=?2
                      )",
-                    params![run_id],
+                    params![run_id, ACTIVE_CONTINUATION_EVENT],
                     |row| row.get(0),
                 )
                 .context("query active completion marker")?;
@@ -821,7 +837,7 @@ mod tests {
                         run_id: Some(&run_id),
                         issue_identifier: "TEST-1",
                         kind: "lifecycle",
-                        payload: "Succeeded still active after normal exit; continuation queued",
+                        payload: ACTIVE_CONTINUATION_EVENT,
                         ts: started_at,
                     })
                     .unwrap();

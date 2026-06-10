@@ -42,7 +42,9 @@ use crate::runner::{self, ExitKind, KillReason, RunnerHandle, SpawnParams};
 use crate::state::{
     ActiveRun, AppState, ControlMsg, ControlReply, HistoryEntry, QueueItem, RetryItem, RunStatus,
 };
-use crate::store::{new_run_id, NewClaim, NewEvent, NewHeartbeat, NewRun, RunFinish};
+use crate::store::{
+    new_run_id, NewClaim, NewEvent, NewHeartbeat, NewRun, RunFinish, ACTIVE_CONTINUATION_MARKER,
+};
 use crate::tracker;
 use crate::workflow_config::EffectiveLoopConfig;
 use std::path::Path;
@@ -534,7 +536,9 @@ impl Orchestrator {
                                 Path::new(&slot.workspace),
                                 RunStatus::Succeeded,
                                 pid,
-                                "still active after normal exit; continuation queued",
+                                // record_history stores "{:?} {note}"; the resulting payload
+                                // must equal ACTIVE_CONTINUATION_EVENT for the park barrier.
+                                ACTIVE_CONTINUATION_MARKER,
                                 Some(0),
                                 claim_id,
                             );
@@ -1686,7 +1690,7 @@ mod tests {
     use crate::paths::AgentPaths;
     use crate::prompt::PromptRenderer;
     use crate::state::{AgentInfo, AppState};
-    use crate::store::Store;
+    use crate::store::{Store, ACTIVE_CONTINUATION_EVENT};
     use crate::tracker::FileTracker;
     use crate::tracker::Tracker;
     use crate::workflow_config::{EffectiveLoopConfig, WorkflowFrontmatter};
@@ -2463,7 +2467,7 @@ mod tests {
                     run_id: Some(&run_id),
                     issue_identifier: &active_issue.identifier,
                     kind: "lifecycle",
-                    payload: "Succeeded still active after normal exit; continuation queued",
+                    payload: ACTIVE_CONTINUATION_EVENT,
                     ts: started_at,
                 })
                 .unwrap();
@@ -2554,7 +2558,7 @@ mod tests {
                 run_id: Some("ISSUE-1-completed"),
                 issue_identifier: &active_issue.identifier,
                 kind: "lifecycle",
-                payload: "Succeeded still active after normal exit; continuation queued",
+                payload: ACTIVE_CONTINUATION_EVENT,
                 ts: started_at,
             })
             .unwrap();
