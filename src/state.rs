@@ -30,6 +30,14 @@ pub enum RunStatus {
     Crashed,
     /// Issue was moved to the configured needs-human state; released without retry.
     NeedsHuman,
+    Stalled,
+    Terminal,
+    HookFailed,
+    DispatchFailed,
+    Released,
+    Orphaned,
+    ParkBarrier,
+    Killed,
 }
 
 /// Snapshot of the currently-active run for the dashboard.

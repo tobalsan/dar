@@ -87,6 +87,7 @@ pub struct EventRow {
 /// Parameters for inserting a claim record.
 pub struct NewClaim<'a> {
     pub run_id: &'a str,
+    pub issue_id: &'a str,
     pub issue_identifier: &'a str,
     pub worker_id: &'a str,
     pub claimed_at: DateTime<Utc>,
@@ -165,13 +166,13 @@ impl Store {
             CREATE TABLE IF NOT EXISTS claims (
                 claim_id        INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id          TEXT    NOT NULL,
+                issue_id        TEXT    NOT NULL DEFAULT '',
                 issue_identifier TEXT   NOT NULL,
                 worker_id       TEXT    NOT NULL,
                 claimed_at      TEXT    NOT NULL,
                 released_at     TEXT
             );
             CREATE INDEX IF NOT EXISTS claims_run_id ON claims(run_id);
-
             CREATE TABLE IF NOT EXISTS heartbeats (
                 heartbeat_id    INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id          TEXT    NOT NULL,
@@ -182,7 +183,27 @@ impl Store {
             CREATE INDEX IF NOT EXISTS heartbeats_run_id ON heartbeats(run_id);
             ",
         )
-        .context("initializing SQLite schema")
+        .context("initializing SQLite schema")?;
+        let has_issue_id = conn
+            .prepare("PRAGMA table_info(claims)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .iter()
+            .any(|name| name == "issue_id");
+        if !has_issue_id {
+            conn.execute(
+                "ALTER TABLE claims ADD COLUMN issue_id TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .context("adding claims.issue_id")?;
+        }
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS claims_active_issue_id
+             ON claims(issue_id) WHERE released_at IS NULL AND issue_id <> ''",
+            [],
+        )
+        .context("creating active claim unique index")?;
+        Ok(())
     }
 
     // ── Runs ──────────────────────────────────────────────────────────────────
@@ -416,10 +437,11 @@ impl Store {
     pub fn insert_claim(&self, c: &NewClaim<'_>) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO claims (run_id, issue_identifier, worker_id, claimed_at)
-             VALUES (?1,?2,?3,?4)",
+            "INSERT INTO claims (run_id, issue_id, issue_identifier, worker_id, claimed_at)
+             VALUES (?1,?2,?3,?4,?5)",
             params![
                 c.run_id,
+                c.issue_id,
                 c.issue_identifier,
                 c.worker_id,
                 c.claimed_at.to_rfc3339()
@@ -493,12 +515,20 @@ fn run_status_to_str(s: RunStatus) -> &'static str {
     match s {
         RunStatus::Running => "Running",
         RunStatus::RetryQueued => "RetryQueued",
-        RunStatus::Cancelled => "Cancelled",
-        RunStatus::Failed => "Failed",
-        RunStatus::Succeeded => "Succeeded",
+        RunStatus::Cancelled => "interrupted",
+        RunStatus::Failed => "error",
+        RunStatus::Succeeded => "completed",
         RunStatus::Interrupted => "interrupted",
         RunStatus::Crashed => "interrupted_gateway_restart",
-        RunStatus::NeedsHuman => "NeedsHuman",
+        RunStatus::NeedsHuman => "needs_human",
+        RunStatus::Stalled => "stalled",
+        RunStatus::Terminal => "terminal",
+        RunStatus::HookFailed => "hook_failed",
+        RunStatus::DispatchFailed => "dispatch_failed",
+        RunStatus::Released => "released",
+        RunStatus::Orphaned => "orphaned",
+        RunStatus::ParkBarrier => "park_barrier",
+        RunStatus::Killed => "killed",
     }
 }
 
@@ -507,11 +537,19 @@ fn str_to_run_status(s: &str) -> Option<RunStatus> {
         "Running" => Some(RunStatus::Running),
         "RetryQueued" => Some(RunStatus::RetryQueued),
         "Cancelled" => Some(RunStatus::Cancelled),
-        "Failed" => Some(RunStatus::Failed),
-        "Succeeded" => Some(RunStatus::Succeeded),
+        "Failed" | "error" => Some(RunStatus::Failed),
+        "Succeeded" | "completed" => Some(RunStatus::Succeeded),
         "Interrupted" | "interrupted" => Some(RunStatus::Interrupted),
         "Crashed" | "interrupted_gateway_restart" => Some(RunStatus::Crashed),
-        "NeedsHuman" => Some(RunStatus::NeedsHuman),
+        "NeedsHuman" | "needs_human" => Some(RunStatus::NeedsHuman),
+        "stalled" => Some(RunStatus::Stalled),
+        "terminal" => Some(RunStatus::Terminal),
+        "hook_failed" => Some(RunStatus::HookFailed),
+        "dispatch_failed" => Some(RunStatus::DispatchFailed),
+        "released" => Some(RunStatus::Released),
+        "orphaned" => Some(RunStatus::Orphaned),
+        "park_barrier" => Some(RunStatus::ParkBarrier),
+        "killed" => Some(RunStatus::Killed),
         _ => None,
     }
 }
@@ -648,7 +686,7 @@ mod tests {
         let pages = store.list_runs_paged(0, 10).unwrap();
         let row = pages.iter().find(|r| r.run_id == run_id).unwrap();
         assert_eq!(row.exit_code, Some(2), "non-zero exit code must be stored");
-        assert_eq!(row.outcome.as_deref(), Some("Failed"));
+        assert_eq!(row.outcome.as_deref(), Some("error"));
     }
 
     #[test]
@@ -772,6 +810,7 @@ mod tests {
         let cid = store
             .insert_claim(&NewClaim {
                 run_id: "r1",
+                issue_id: "id4",
                 issue_identifier: "TEST-4",
                 worker_id: "w1",
                 claimed_at: now,
@@ -787,5 +826,78 @@ mod tests {
                 ts: now,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn active_claims_are_unique_by_issue_id_until_release() {
+        let store = open_tmp();
+        let now = Utc::now();
+        let first = store
+            .insert_claim(&NewClaim {
+                run_id: "r1",
+                issue_id: "issue-1",
+                issue_identifier: "ALG-1",
+                worker_id: "w1",
+                claimed_at: now,
+            })
+            .unwrap();
+
+        let duplicate = store.insert_claim(&NewClaim {
+            run_id: "r2",
+            issue_id: "issue-1",
+            issue_identifier: "ALG-1",
+            worker_id: "w2",
+            claimed_at: now,
+        });
+        assert!(duplicate.is_err());
+
+        store.release_claim(first, Utc::now()).unwrap();
+        store
+            .insert_claim(&NewClaim {
+                run_id: "r3",
+                issue_id: "issue-1",
+                issue_identifier: "ALG-1",
+                worker_id: "w3",
+                claimed_at: now,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn legacy_claim_schema_migrates_with_multiple_active_claims() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("store.db");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "
+                CREATE TABLE claims (
+                    claim_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id          TEXT    NOT NULL,
+                    issue_identifier TEXT   NOT NULL,
+                    worker_id       TEXT    NOT NULL,
+                    claimed_at      TEXT    NOT NULL,
+                    released_at     TEXT
+                );
+                INSERT INTO claims (run_id, issue_identifier, worker_id, claimed_at)
+                VALUES ('r1', 'ALG-1', 'w1', '2026-01-01T00:00:00Z');
+                INSERT INTO claims (run_id, issue_identifier, worker_id, claimed_at)
+                VALUES ('r2', 'ALG-2', 'w2', '2026-01-01T00:00:01Z');
+                ",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&db).unwrap();
+        let cid = store
+            .insert_claim(&NewClaim {
+                run_id: "r3",
+                issue_id: "issue-3",
+                issue_identifier: "ALG-3",
+                worker_id: "w3",
+                claimed_at: Utc::now(),
+            })
+            .unwrap();
+        store.release_claim(cid, Utc::now()).unwrap();
     }
 }

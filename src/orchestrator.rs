@@ -62,6 +62,7 @@ struct RunSlot {
     started_at: DateTime<Utc>,
     /// SQLite claim_id from `insert_claim` at dispatch; released at finish.
     claim_id: Option<i64>,
+    last_event_at: Arc<Mutex<DateTime<Utc>>>,
 }
 
 /// One pending retry. `continuation` retries do NOT count against `max_retries`.
@@ -88,6 +89,7 @@ pub struct Orchestrator {
 
     // In-memory run registry.
     slots: Vec<RunSlot>,
+    claims: HashSet<String>,
     retries: Vec<Retry>,
 }
 
@@ -110,6 +112,7 @@ impl Orchestrator {
             state,
             control_rx,
             slots: Vec::new(),
+            claims: HashSet::new(),
             retries: Vec::new(),
         }
     }
@@ -118,10 +121,9 @@ impl Orchestrator {
     /// first.
     pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
         loop {
-            let poll = Duration::from_millis(self.effective_cfg.poll_interval_ms);
-
             // One full tick of the loop.
             self.tick().await;
+            let poll = self.next_poll_delay();
 
             // Inter-tick sleep, but stay responsive to control + shutdown.
             let mut pending: Option<ControlMsg> = None;
@@ -158,22 +160,41 @@ impl Orchestrator {
             self.handle_control(msg).await;
         }
 
-        // Check for WORKFLOW.md changes and refresh effective config.
-        self.maybe_reload_workflow();
+        // Step 1: heartbeat / lastTickAt for currently-live runs.
+        self.heartbeat_active_runs();
 
-        // Step 2: reconcile running runs.
+        // Step 2: detect stalled/released runs before observing child exits.
         self.reconcile().await;
 
-        // Steps 7/8: classify finished slots (continuation/backoff/succeed/fail).
+        // Step 3: observe child completions.
         self.collect_finished().await;
 
-        // Steps 4-6: dispatch, unless paused.
+        // Step 4: load WORKFLOW.md.
+        self.maybe_reload_workflow();
+
+        // Steps 5-9: poll tracker, release/skip/backoff, respect concurrency,
+        // and dispatch unless paused.
         if !self.state.paused.load(Ordering::SeqCst) {
             self.dispatch().await;
         }
 
         // Refresh dashboard snapshots last so they reflect post-tick reality.
         self.publish_snapshots().await;
+    }
+
+    fn next_poll_delay(&self) -> Duration {
+        let base = self.effective_cfg.poll_interval_ms;
+        let jitter = self.effective_cfg.poll_jitter_ms;
+        if jitter == 0 {
+            return Duration::from_millis(base);
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as u64;
+        let span = jitter.saturating_mul(2).saturating_add(1);
+        let offset = (now % span) as i128 - jitter as i128;
+        Duration::from_millis(base.saturating_add_signed(offset as i64))
     }
 
     /// Re-read WORKFLOW.md if its mtime changed. On a successful reload:
@@ -238,7 +259,9 @@ impl Orchestrator {
                             logging::ev(
                                 "-",
                                 "workflow_reload",
-                                &format!("tracker rebuild failed (tracker config unchanged): {e:#}"),
+                                &format!(
+                                    "tracker rebuild failed (tracker config unchanged): {e:#}"
+                                ),
                             );
                         }
                     }
@@ -273,7 +296,7 @@ impl Orchestrator {
         let terminal = &self.effective_cfg.terminal_states;
         let needs_human = self.effective_cfg.needs_human.as_deref();
 
-        let mut to_cancel: Vec<(usize, RunStatus, &'static str)> = Vec::new();
+        let mut to_cancel: Vec<(usize, RunStatus, &'static str, KillReason)> = Vec::new();
 
         for (idx, slot) in self.slots.iter().enumerate() {
             match &slot.handle {
@@ -281,26 +304,64 @@ impl Orchestrator {
                 Some(h) if h.is_finished() => continue,
                 Some(_) => {}
             }
+            let last_event_at = slot
+                .last_event_at
+                .lock()
+                .map(|t| *t)
+                .unwrap_or(slot.started_at);
+            let stale_for = Utc::now()
+                .signed_duration_since(last_event_at)
+                .to_std()
+                .unwrap_or_default();
+            if stale_for > Duration::from_millis(self.effective_cfg.max_run_timeout_ms) {
+                logging::ev(
+                    &slot.identifier,
+                    "stalled",
+                    "no runner events before timeout; killing",
+                );
+                to_cancel.push((
+                    idx,
+                    RunStatus::Stalled,
+                    "stalled no runner events",
+                    KillReason::Timeout,
+                ));
+                continue;
+            }
             match self.tracker.fetch_one(&slot.identifier) {
                 Ok(Some(issue)) => {
                     let st = &issue.state;
                     if terminal.contains(st) {
                         logging::ev(&slot.identifier, "reconcile", "issue terminal; finishing");
-                        to_cancel.push((idx, RunStatus::Succeeded, "terminal at reconcile"));
+                        to_cancel.push((
+                            idx,
+                            RunStatus::Terminal,
+                            "terminal at reconcile",
+                            KillReason::Reconcile,
+                        ));
                     } else if needs_human == Some(st.as_str()) {
                         logging::ev(
                             &slot.identifier,
                             "reconcile",
                             &format!("issue state {st:?} is needs-human; releasing without retry"),
                         );
-                        to_cancel.push((idx, RunStatus::NeedsHuman, "needs-human at reconcile"));
+                        to_cancel.push((
+                            idx,
+                            RunStatus::NeedsHuman,
+                            "needs-human at reconcile",
+                            KillReason::Reconcile,
+                        ));
                     } else if !active.contains(st) {
                         logging::ev(
                             &slot.identifier,
                             "reconcile",
                             &format!("issue state {st:?} neither active nor terminal; cancelling"),
                         );
-                        to_cancel.push((idx, RunStatus::Cancelled, "non-active at reconcile"));
+                        to_cancel.push((
+                            idx,
+                            RunStatus::Released,
+                            "non-active at reconcile",
+                            KillReason::Reconcile,
+                        ));
                     }
                 }
                 Ok(None) => {
@@ -309,7 +370,12 @@ impl Orchestrator {
                         "reconcile",
                         "issue file missing; cancelling",
                     );
-                    to_cancel.push((idx, RunStatus::Cancelled, "issue file missing"));
+                    to_cancel.push((
+                        idx,
+                        RunStatus::Orphaned,
+                        "issue file missing",
+                        KillReason::Reconcile,
+                    ));
                 }
                 Err(e) => {
                     logging::ev(
@@ -321,16 +387,17 @@ impl Orchestrator {
             }
         }
 
-        to_cancel.sort_unstable_by_key(|(idx, _, _)| *idx);
-        for (idx, status, note) in to_cancel.into_iter().rev() {
+        to_cancel.sort_unstable_by_key(|(idx, _, _, _)| *idx);
+        for (idx, status, note, kill_reason) in to_cancel.into_iter().rev() {
             let mut slot = self.slots.remove(idx);
             let pid = slot.handle.as_ref().map(|h| h.pid()).unwrap_or(0);
             if let Some(handle) = slot.handle.take() {
-                handle.request_kill(KillReason::Reconcile);
+                handle.request_kill(kill_reason);
             }
             self.record_history(
                 &slot.run_id,
                 &slot.identifier,
+                &slot.issue.id,
                 status,
                 pid,
                 note,
@@ -380,6 +447,7 @@ impl Orchestrator {
                             self.record_history(
                                 &run_id,
                                 &id,
+                                &slot.issue.id,
                                 RunStatus::Succeeded,
                                 pid,
                                 "terminal after normal exit",
@@ -396,6 +464,7 @@ impl Orchestrator {
                             self.record_history(
                                 &run_id,
                                 &id,
+                                &slot.issue.id,
                                 RunStatus::NeedsHuman,
                                 pid,
                                 "needs-human after normal exit",
@@ -410,6 +479,7 @@ impl Orchestrator {
                             if let Some(cid) = claim_id {
                                 let _ = self.state.store.release_claim(cid, Utc::now());
                             }
+                            self.claims.remove(&slot.issue.id);
                             let _ = self.state.store.insert_event(&NewEvent {
                                 run_id: Some(&run_id),
                                 issue_identifier: &id,
@@ -435,6 +505,7 @@ impl Orchestrator {
                             self.record_history(
                                 &run_id,
                                 &id,
+                                &slot.issue.id,
                                 RunStatus::Succeeded,
                                 pid,
                                 "non-active after normal exit",
@@ -449,6 +520,7 @@ impl Orchestrator {
                     self.record_history(
                         &run_id,
                         &id,
+                        &slot.issue.id,
                         RunStatus::Interrupted,
                         pid,
                         reason,
@@ -470,6 +542,7 @@ impl Orchestrator {
                         self.record_history(
                             &run_id,
                             &id,
+                            &slot.issue.id,
                             RunStatus::NeedsHuman,
                             pid,
                             "needs-human after abnormal exit",
@@ -488,6 +561,7 @@ impl Orchestrator {
                         self.record_history(
                             &run_id,
                             &id,
+                            &slot.issue.id,
                             RunStatus::Failed,
                             pid,
                             "abnormal exit; retries exhausted",
@@ -511,6 +585,7 @@ impl Orchestrator {
                         if let Some(cid) = claim_id {
                             let _ = self.state.store.release_claim(cid, Utc::now());
                         }
+                        self.claims.remove(&slot.issue.id);
                         let _ = self.state.store.insert_event(&NewEvent {
                             run_id: Some(&run_id),
                             issue_identifier: &id,
@@ -541,7 +616,9 @@ impl Orchestrator {
             return;
         }
 
-        let busy: HashSet<String> = self.slots.iter().map(|s| s.identifier.clone()).collect();
+        let busy: HashSet<String> = self.slots.iter().map(|s| s.issue.id.clone()).collect();
+        let busy_identifiers: HashSet<String> =
+            self.slots.iter().map(|s| s.identifier.clone()).collect();
 
         let now = Utc::now();
 
@@ -550,7 +627,7 @@ impl Orchestrator {
             .retries
             .iter()
             .enumerate()
-            .filter(|(_, r)| r.due_at <= now && !busy.contains(&r.identifier))
+            .filter(|(_, r)| r.due_at <= now && !busy_identifiers.contains(&r.identifier))
             .map(|(i, _)| i)
             .collect();
         due_idx.sort_unstable();
@@ -571,6 +648,10 @@ impl Orchestrator {
             }
             match self.tracker.fetch_one(&retry.identifier) {
                 Ok(Some(issue)) if self.effective_cfg.active_states.contains(&issue.state) => {
+                    if self.claims.contains(&issue.id) {
+                        self.retries.push(retry);
+                        continue;
+                    }
                     let label = if retry.continuation {
                         "continuation"
                     } else {
@@ -608,19 +689,21 @@ impl Orchestrator {
         let retry_ids: HashSet<String> =
             self.retries.iter().map(|r| r.identifier.clone()).collect();
         candidates.retain(|i| {
-            !busy.contains(&i.identifier)
-                && !busy.contains(&i.id)
+            !busy.contains(&i.id)
                 && !retry_ids.contains(&i.identifier)
                 && !retry_ids.contains(&i.id)
+                && !self.claims.contains(&i.id)
         });
 
-        sort_candidates(&mut candidates);
+        if self.tracker.sort_candidates_locally() {
+            sort_candidates(&mut candidates);
+        }
 
         for issue in candidates {
             if self.slots.len() >= max {
                 break;
             }
-            if self.slots.iter().any(|s| s.identifier == issue.identifier) {
+            if self.claims.contains(&issue.id) {
                 continue;
             }
             logging::ev(&issue.identifier, "dispatch", "fresh candidate");
@@ -632,6 +715,10 @@ impl Orchestrator {
     /// On render failure (strict-undefined) the child is NOT spawned; the
     /// attempt is treated as abnormal and scheduled for backoff retry.
     async fn try_dispatch(&mut self, issue: Issue, attempt: u32) {
+        if !self.claims.insert(issue.id.clone()) {
+            logging::ev(&issue.identifier, "claim_skip", "issue already claimed");
+            return;
+        }
         let max_retries = self.effective_cfg.max_retries;
         let prompt = match self.prompt.render(&issue, attempt, max_retries) {
             Ok(p) => p,
@@ -650,6 +737,7 @@ impl Orchestrator {
                     attempt,
                     &format!("render error: {e}"),
                 );
+                self.claims.remove(&issue.id);
                 return;
             }
         };
@@ -666,6 +754,7 @@ impl Orchestrator {
                 ts: Utc::now(),
             });
             self.schedule_backoff_after_render_failure(&issue, attempt, "workspace root error");
+            self.claims.remove(&issue.id);
             return;
         }
         let workspace = match issue_workspace(&ws_root, &issue.identifier) {
@@ -681,6 +770,7 @@ impl Orchestrator {
                     ts: Utc::now(),
                 });
                 self.schedule_backoff_after_render_failure(&issue, attempt, "workspace error");
+                self.claims.remove(&issue.id);
                 return;
             }
         };
@@ -724,16 +814,36 @@ impl Orchestrator {
                     tracing::warn!(issue = %issue.identifier, "insert_run SQLite write failed: {e:#}");
                 }
                 // Mirror claim into the claims table for tracking.
-                let claim_id = self
-                    .state
-                    .store
-                    .insert_claim(&NewClaim {
-                        run_id: &run_id,
-                        issue_identifier: &issue.identifier,
-                        worker_id: "orchestrator",
-                        claimed_at: started_at,
-                    })
-                    .ok();
+                let claim_id = match self.state.store.insert_claim(&NewClaim {
+                    run_id: &run_id,
+                    issue_id: &issue.id,
+                    issue_identifier: &issue.identifier,
+                    worker_id: "orchestrator",
+                    claimed_at: started_at,
+                }) {
+                    Ok(claim_id) => Some(claim_id),
+                    Err(e) => {
+                        tracing::warn!(issue = %issue.identifier, "insert_claim SQLite write failed: {e:#}");
+                        handle.request_kill(KillReason::Reconcile);
+                        self.state.history.push(HistoryEntry {
+                            identifier: issue.identifier.clone(),
+                            status: RunStatus::DispatchFailed,
+                            pid,
+                            ended_at: Utc::now(),
+                            note: "persisted claim rejected".to_string(),
+                        });
+                        let _ = self.state.store.finish_run(
+                            &run_id,
+                            &RunFinish {
+                                outcome: RunStatus::DispatchFailed,
+                                exit_code: None,
+                                finished_at: Utc::now(),
+                            },
+                        );
+                        self.claims.remove(&issue.id);
+                        return;
+                    }
+                };
                 // Lifecycle event: dispatch.
                 let _ = self.state.store.insert_event(&NewEvent {
                     run_id: Some(&run_id),
@@ -751,6 +861,7 @@ impl Orchestrator {
                     run_id,
                     started_at,
                     claim_id,
+                    last_event_at,
                 });
             }
             Err(e) => {
@@ -764,6 +875,7 @@ impl Orchestrator {
                     ts: Utc::now(),
                 });
                 self.schedule_backoff_after_render_failure(&issue, attempt, "spawn error");
+                self.claims.remove(&issue.id);
             }
         }
     }
@@ -828,9 +940,10 @@ impl Orchestrator {
     /// to SQLite, release the claim, and persist a terminal lifecycle event.
     #[allow(clippy::too_many_arguments)]
     fn record_history(
-        &self,
+        &mut self,
         run_id: &str,
         identifier: &str,
+        issue_id: &str,
         status: RunStatus,
         pid: u32,
         note: &str,
@@ -860,6 +973,7 @@ impl Orchestrator {
                 tracing::warn!(issue = %identifier, "release_claim SQLite write failed: {e:#}");
             }
         }
+        self.claims.remove(issue_id);
         let _ = self.state.store.insert_event(&NewEvent {
             run_id: Some(run_id),
             issue_identifier: identifier,
@@ -883,7 +997,7 @@ impl Orchestrator {
                 let ended_at = Utc::now();
                 self.state.history.push(HistoryEntry {
                     identifier: slot.identifier.clone(),
-                    status: RunStatus::Cancelled,
+                    status: RunStatus::Killed,
                     pid,
                     ended_at,
                     note: "operator stop / shutdown".to_string(),
@@ -891,7 +1005,7 @@ impl Orchestrator {
                 if let Err(e) = self.state.store.finish_run(
                     &slot.run_id,
                     &RunFinish {
-                        outcome: RunStatus::Cancelled,
+                        outcome: RunStatus::Killed,
                         exit_code: None,
                         finished_at: ended_at,
                     },
@@ -903,22 +1017,19 @@ impl Orchestrator {
                         tracing::warn!(issue = %slot.identifier, "release_claim (kill_all) SQLite write failed: {e:#}");
                     }
                 }
+                self.claims.remove(&slot.issue.id);
                 let _ = self.state.store.insert_event(&NewEvent {
                     run_id: Some(&slot.run_id),
                     issue_identifier: &slot.identifier,
                     kind: "lifecycle",
-                    payload: "Cancelled operator stop / shutdown",
+                    payload: "Killed operator stop / shutdown",
                     ts: ended_at,
                 });
             }
         }
     }
 
-    /// Write the active-run, queue, and retry snapshots to `AppState` for the
-    /// dashboard. Also inserts one heartbeat row per actively-running slot so
-    /// the heartbeats table reflects in-process liveness each tick.
-    async fn publish_snapshots(&self) {
-        // Heartbeat every live slot once per tick.
+    fn heartbeat_active_runs(&self) {
         let now = Utc::now();
         for slot in &self.slots {
             if slot
@@ -935,7 +1046,11 @@ impl Orchestrator {
                 });
             }
         }
+    }
 
+    /// Write the active-run, queue, and retry snapshots to `AppState` for the
+    /// dashboard.
+    async fn publish_snapshots(&self) {
         // Active run (v0 max_concurrent typically 1; surface the first slot).
         let active = self.slots.first().map(|slot| {
             let last_event = self.last_event_line(&slot.identifier).unwrap_or_default();
@@ -960,7 +1075,9 @@ impl Orchestrator {
         let mut queue_items: Vec<QueueItem> = match self.tracker.poll_candidates() {
             Ok(mut v) => {
                 v.retain(|i| !busy.contains(&i.identifier) && !retry_ids.contains(&i.identifier));
-                sort_candidates(&mut v);
+                if self.tracker.sort_candidates_locally() {
+                    sort_candidates(&mut v);
+                }
                 v.into_iter()
                     .map(|i| QueueItem {
                         identifier: i.identifier,
@@ -1243,6 +1360,7 @@ mod tests {
         let claim_id = store
             .insert_claim(&NewClaim {
                 run_id: &run_id,
+                issue_id: &needs_issue.id,
                 issue_identifier: &needs_issue.identifier,
                 worker_id: "orchestrator",
                 claimed_at: started_at,
@@ -1260,6 +1378,7 @@ mod tests {
             run_id: run_id.clone(),
             started_at,
             claim_id,
+            last_event_at: Arc::new(Mutex::new(started_at)),
         });
         tokio::task::yield_now().await;
 
@@ -1273,7 +1392,7 @@ mod tests {
         assert_eq!(history[0].note, "needs-human after abnormal exit");
         assert_eq!(store.claim_release_count_for_run(&run_id).unwrap(), (1, 1));
         let runs = store.list_runs_paged(0, 10).unwrap();
-        assert_eq!(runs[0].outcome.as_deref(), Some("NeedsHuman"));
+        assert_eq!(runs[0].outcome.as_deref(), Some("needs_human"));
         assert_eq!(runs[0].exit_code, Some(17));
     }
 
@@ -1327,6 +1446,7 @@ mod tests {
             run_id,
             started_at,
             claim_id: None,
+            last_event_at: Arc::new(Mutex::new(started_at)),
         });
         tokio::task::yield_now().await;
 
@@ -1402,6 +1522,7 @@ mod tests {
             run_id: run_id.clone(),
             started_at,
             claim_id: None,
+            last_event_at: Arc::new(Mutex::new(started_at)),
         });
         tokio::task::yield_now().await;
 
@@ -1413,6 +1534,94 @@ mod tests {
         assert_eq!(history[0].note, "turn_timeout");
         let runs = store.list_runs_paged(0, 10).unwrap();
         assert_eq!(runs[0].outcome.as_deref(), Some("interrupted"));
+    }
+
+    #[tokio::test]
+    async fn stale_last_event_records_stalled_and_releases_claim() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+
+        let active_issue = issue("ISSUE-1", None, None);
+        let tracker = Arc::new(StaticTracker {
+            issue: active_issue.clone(),
+        });
+        let agent_cfg = test_agent_config();
+        let mut effective_cfg =
+            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        effective_cfg.max_run_timeout_ms = 1;
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let state = AppState::new(
+            AgentInfo {
+                id: "test-agent".to_string(),
+                folder: temp.path().display().to_string(),
+                tracker: "files".to_string(),
+                runner: "claude-code".to_string(),
+            },
+            control_tx,
+            Arc::clone(&store),
+            Vec::new(),
+        );
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state.clone(),
+            control_rx,
+        );
+        let started_at = Utc::now();
+        let stale_at = started_at - chrono::Duration::seconds(10);
+        let run_id = new_run_id(&active_issue.identifier, &started_at);
+        store
+            .insert_run(&NewRun {
+                run_id: &run_id,
+                issue_id: &active_issue.id,
+                issue_identifier: &active_issue.identifier,
+                workspace: "workspace",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 42,
+                worker_id: None,
+                started_at,
+            })
+            .unwrap();
+        let claim_id = store
+            .insert_claim(&NewClaim {
+                run_id: &run_id,
+                issue_id: &active_issue.id,
+                issue_identifier: &active_issue.identifier,
+                worker_id: "orchestrator",
+                claimed_at: started_at,
+            })
+            .ok();
+        orchestrator.claims.insert(active_issue.id.clone());
+        orchestrator.slots.push(RunSlot {
+            identifier: active_issue.identifier.clone(),
+            issue: active_issue,
+            workspace: "workspace".to_string(),
+            handle: Some(RunnerHandle::pending_for_test(
+                42,
+                ExitKind::Interrupted { reason: "stalled" },
+            )),
+            attempt: 0,
+            run_id: run_id.clone(),
+            started_at,
+            claim_id,
+            last_event_at: Arc::new(Mutex::new(stale_at)),
+        });
+
+        orchestrator.reconcile().await;
+
+        let history = state.history.snapshot();
+        assert_eq!(history[0].status, RunStatus::Stalled);
+        assert!(orchestrator.claims.is_empty());
+        assert_eq!(store.claim_release_count_for_run(&run_id).unwrap(), (1, 1));
+        let runs = store.list_runs_paged(0, 10).unwrap();
+        assert_eq!(runs[0].outcome.as_deref(), Some("stalled"));
     }
 
     #[tokio::test]
@@ -1467,6 +1676,7 @@ mod tests {
             run_id,
             started_at,
             claim_id: None,
+            last_event_at: Arc::new(Mutex::new(started_at)),
         });
         tokio::task::yield_now().await;
 
@@ -1648,9 +1858,10 @@ mod tests {
         let runs = store.list_runs_paged(0, 10).unwrap();
         assert_eq!(runs.len(), 1);
         let run_id = runs[0].run_id.clone();
+        orch.tick().await;
         assert!(
             store.heartbeat_count_for_run(&run_id).unwrap() >= 1,
-            "dispatch tick should heartbeat the live run"
+            "the next tick should heartbeat the live run before reconciliation"
         );
 
         std::fs::write(
