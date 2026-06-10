@@ -384,7 +384,9 @@ async fn api_webhook(State(api): State<ApiState>, headers: HeaderMap, body: Byte
         Ok(payload) => payload,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid json").into_response(),
     };
-    if !is_webhook_timestamp_current(&payload, chrono::Utc::now().timestamp_millis()) {
+    if let Some(false) =
+        is_webhook_timestamp_current(&payload, chrono::Utc::now().timestamp_millis())
+    {
         return (StatusCode::UNAUTHORIZED, "stale webhook timestamp").into_response();
     }
     if !is_relevant_linear_webhook(&payload) {
@@ -431,14 +433,15 @@ fn webhook_signature_header(headers: &HeaderMap) -> Option<&str> {
         .and_then(|value| value.to_str().ok())
 }
 
-fn is_webhook_timestamp_current(payload: &serde_json::Value, now_ms: i64) -> bool {
+/// Returns `None` when `webhookTimestamp` is absent (no replay check),
+/// `Some(true)` when present and within tolerance, `Some(false)` when stale/invalid.
+fn is_webhook_timestamp_current(payload: &serde_json::Value, now_ms: i64) -> Option<bool> {
     const WEBHOOK_TIMESTAMP_TOLERANCE_MS: i64 = 60_000;
-    payload
-        .get("webhookTimestamp")
-        .and_then(|value| value.as_i64())
-        .is_some_and(|timestamp| {
-            timestamp.abs_diff(now_ms) <= WEBHOOK_TIMESTAMP_TOLERANCE_MS as u64
-        })
+    let ts = payload.get("webhookTimestamp")?;
+    Some(
+        ts.as_i64()
+            .is_some_and(|timestamp| timestamp.abs_diff(now_ms) <= WEBHOOK_TIMESTAMP_TOLERANCE_MS as u64),
+    )
 }
 
 fn is_relevant_linear_webhook(payload: &serde_json::Value) -> bool {
@@ -455,7 +458,9 @@ fn is_relevant_linear_webhook(payload: &serde_json::Value) -> bool {
     )
     .to_ascii_lowercase();
     let issue_update_or_state = type_action.contains("issue")
-        && (type_action.contains("update") || type_action.contains("state"))
+        && (type_action.contains("update")
+            || type_action.contains("state")
+            || type_action.contains("create"))
         || data.get("state").is_some()
         || payload.get("state").is_some();
     let comment = type_action.contains("comment")
@@ -877,23 +882,36 @@ mod tests {
     fn webhook_timestamp_must_be_current() {
         let now = 1_700_000_000_000_i64;
 
-        assert!(is_webhook_timestamp_current(
-            &serde_json::json!({ "webhookTimestamp": now }),
-            now
-        ));
-        assert!(is_webhook_timestamp_current(
-            &serde_json::json!({ "webhookTimestamp": now - 60_000 }),
-            now
-        ));
-        assert!(!is_webhook_timestamp_current(
-            &serde_json::json!({ "webhookTimestamp": now - 60_001 }),
-            now
-        ));
-        assert!(!is_webhook_timestamp_current(
-            &serde_json::json!({ "webhookTimestamp": "not-a-number" }),
-            now
-        ));
-        assert!(!is_webhook_timestamp_current(&serde_json::json!({}), now));
+        assert_eq!(
+            is_webhook_timestamp_current(&serde_json::json!({ "webhookTimestamp": now }), now),
+            Some(true)
+        );
+        assert_eq!(
+            is_webhook_timestamp_current(
+                &serde_json::json!({ "webhookTimestamp": now - 60_000 }),
+                now
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            is_webhook_timestamp_current(
+                &serde_json::json!({ "webhookTimestamp": now - 60_001 }),
+                now
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            is_webhook_timestamp_current(
+                &serde_json::json!({ "webhookTimestamp": "not-a-number" }),
+                now
+            ),
+            Some(false)
+        );
+        // absent field → None (no replay check)
+        assert_eq!(
+            is_webhook_timestamp_current(&serde_json::json!({}), now),
+            None
+        );
     }
 
     #[test]
@@ -933,6 +951,55 @@ mod tests {
             "action": "update",
             "data": { "id": "project-id" }
         })));
+    }
+
+    #[test]
+    fn issue_create_action_is_relevant() {
+        assert!(is_relevant_linear_webhook(&serde_json::json!({
+            "type": "Issue",
+            "action": "create",
+            "data": { "identifier": "ALG-200" }
+        })));
+    }
+
+    #[tokio::test]
+    async fn webhook_accepted_when_valid_signature_and_no_timestamp() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("store.db")).unwrap());
+        let (state, mut control_rx) = test_state_with_rx(store);
+        let api = ApiState {
+            state,
+            paths: test_paths(),
+            workflow: serde_json::json!({}),
+            webhook_secret: Some("secret".to_string()),
+        };
+        // Payload with no webhookTimestamp — should pass with valid signature.
+        let body = Bytes::from(
+            serde_json::json!({
+                "type": "Issue",
+                "action": "update",
+                "data": { "identifier": "ALG-201" }
+            })
+            .to_string(),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "linear-signature",
+            webhook_signature("secret", &body).parse().unwrap(),
+        );
+
+        let responder = tokio::spawn(async move {
+            match control_rx.recv().await.unwrap() {
+                ControlMsg::Tick { reply } => {
+                    reply.send(ControlReply::ok("tick complete")).unwrap();
+                }
+                _ => panic!("expected tick control message"),
+            }
+        });
+
+        let response = api_webhook(State(api), headers, body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        responder.await.unwrap();
     }
 
     #[tokio::test]
