@@ -170,6 +170,7 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     let app_state = AppState::new(agent_info, control_tx, Arc::clone(&store), history_seed);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let dash_workflow_snapshot = prompt.snapshot().clone();
 
     let orchestrator = orchestrator::Orchestrator::with_hitl_notifier(
         agent_cfg.clone(),
@@ -189,16 +190,20 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     let port = effective_cfg.dashboard_port;
     let dash_state = app_state.clone();
     let dash_agent_cfg = agent_cfg.clone();
+    let dash_paths = paths.clone();
     let dash_effective_cfg = effective_cfg.clone();
     let dash_shutdown = shutdown_rx.clone();
     let mut dash_task = tokio::spawn(async move {
         dashboard::serve(
             dash_state,
-            paths.clone(),
-            dash_agent_cfg,
-            dash_effective_cfg,
-            bind,
-            port,
+            dashboard::ServeConfig {
+                agent_cfg: dash_agent_cfg,
+                paths: dash_paths,
+                workflow_snapshot: dash_workflow_snapshot,
+                effective_cfg: dash_effective_cfg,
+                bind,
+                port,
+            },
             dash_shutdown,
         )
         .await

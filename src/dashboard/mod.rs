@@ -28,7 +28,7 @@ use crate::export;
 use crate::paths::AgentPaths;
 use crate::state::{AppState, ControlMsg, ControlReply};
 use crate::store::{EventRow, Store};
-use crate::workflow_config::EffectiveLoopConfig;
+use crate::workflow_config::{EffectiveLoopConfig, WorkflowSnapshot};
 use view::DashboardTemplate;
 
 /// Embedded static assets (only `htmx.min.js` in v0).
@@ -36,21 +36,31 @@ use view::DashboardTemplate;
 #[folder = "assets/"]
 struct Assets;
 
+pub struct ServeConfig {
+    pub agent_cfg: AgentConfig,
+    pub paths: AgentPaths,
+    pub workflow_snapshot: WorkflowSnapshot,
+    pub effective_cfg: EffectiveLoopConfig,
+    pub bind: IpAddr,
+    pub port: u16,
+}
+
 /// Build the router and serve until `shutdown` flips to `true`.
 pub async fn serve(
     state: AppState,
-    paths: AgentPaths,
-    agent_cfg: AgentConfig,
-    effective_cfg: EffectiveLoopConfig,
-    bind: IpAddr,
-    port: u16,
+    cfg: ServeConfig,
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let api_state = ApiState {
         state,
-        paths,
-        workflow: resolved_workflow_json(&agent_cfg, &effective_cfg),
-        webhook_secret: effective_cfg.webhook_secret.clone(),
+        paths: cfg.paths.clone(),
+        workflow: resolved_workflow_json(
+            &cfg.agent_cfg,
+            &cfg.paths,
+            &cfg.workflow_snapshot,
+            &cfg.effective_cfg,
+        ),
+        webhook_secret: cfg.effective_cfg.webhook_secret.clone(),
     };
     let app = Router::new()
         .route("/", get(index))
@@ -79,9 +89,9 @@ pub async fn serve(
         .route("/api/events/{identifier}", get(api_events))
         .with_state(api_state);
 
-    let listener = tokio::net::TcpListener::bind((bind, port))
+    let listener = tokio::net::TcpListener::bind((cfg.bind, cfg.port))
         .await
-        .map_err(|e| anyhow::anyhow!("binding dashboard on {bind}:{port}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("binding dashboard on {}:{}: {e}", cfg.bind, cfg.port))?;
 
     axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(async move {
@@ -486,10 +496,21 @@ async fn api_ws(State(api): State<ApiState>, ws: WebSocketUpgrade) -> Response {
 async fn websocket_loop(mut socket: WebSocket, api: ApiState) {
     let mut since = 0_i64;
     loop {
-        let active = api.state.active.read().await.clone();
+        let active = api.state.active_runs.read().await.clone();
         let queue = api.state.queue.read().await.clone();
         let retry = api.state.retry.read().await.clone();
         let runs = api.state.store.list_runs(50).unwrap_or_default();
+        let rate_limit_min_remaining = {
+            let value = api
+                .state
+                .rate_limit_min_remaining
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if value == i64::MAX {
+                None
+            } else {
+                Some(value)
+            }
+        };
         let events = api
             .state
             .store
@@ -505,6 +526,8 @@ async fn websocket_loop(mut socket: WebSocket, api: ApiState) {
             "retry": retry,
             "runs": runs,
             "events": events,
+            "last_tick": api.state.last_tick_at.read().await.map(|ts| ts.to_rfc3339()),
+            "rate_limit_min_remaining": rate_limit_min_remaining,
         });
         if socket
             .send(Message::Text(payload.to_string().into()))
@@ -519,9 +542,18 @@ async fn websocket_loop(mut socket: WebSocket, api: ApiState) {
 
 fn resolved_workflow_json(
     agent_cfg: &AgentConfig,
+    paths: &AgentPaths,
+    workflow_snapshot: &WorkflowSnapshot,
     effective_cfg: &EffectiveLoopConfig,
 ) -> serde_json::Value {
+    let frontmatter =
+        serde_yaml::to_value(&workflow_snapshot.frontmatter).unwrap_or(serde_yaml::Value::Null);
     let mut value = serde_json::json!({
+        "path": paths.workflow_md(),
+        "projectPath": paths.root,
+        "sha": serde_json::Value::Null,
+        "frontmatter": frontmatter,
+        "body": workflow_snapshot.body,
         "agent": {
             "id": agent_cfg.id,
             "name": agent_cfg.name,
@@ -563,7 +595,51 @@ fn resolved_workflow_json(
             "project": effective_cfg.linear.project,
             "team": effective_cfg.linear.team,
             "worker_tool": effective_cfg.linear.worker_tool
-        }
+        },
+        "config": {
+            "tracker": {
+                "kind": effective_cfg.tracker_kind,
+                "active_states": effective_cfg.active_states,
+                "terminal_states": effective_cfg.terminal_states,
+                "needs_human": effective_cfg.needs_human,
+                "project_slug": effective_cfg.tracker_project_slug,
+                "endpoint": effective_cfg.tracker_endpoint
+            },
+            "polling": {
+                "interval_ms": effective_cfg.poll_interval_ms,
+                "jitter_ms": effective_cfg.poll_jitter_ms,
+                "max_concurrent": effective_cfg.max_concurrent,
+                "max_retries": effective_cfg.max_retries,
+                "retry_backoff_ms": effective_cfg.retry_backoff_ms
+            },
+            "workspace": {
+                "root": effective_cfg.workspace_root,
+                "reuse": effective_cfg.workspace_reuse,
+                "cleanup_on_terminal": effective_cfg.cleanup_on_terminal
+            },
+            "runner": {
+                "kind": effective_cfg.runner_kind,
+                "command": effective_cfg.runner_command,
+                "model": effective_cfg.model,
+                "turn_timeout_ms": effective_cfg.max_run_timeout_ms
+            },
+            "server": {
+                "bind": effective_cfg.dashboard_bind.to_string(),
+                "port": effective_cfg.dashboard_port
+            },
+            "hooks": {
+                "before_dispatch": effective_cfg.hooks.before_dispatch,
+                "after_success": effective_cfg.hooks.after_success,
+                "after_failure": effective_cfg.hooks.after_failure,
+                "on_needs_human": effective_cfg.hooks.on_needs_human,
+                "before_remove": effective_cfg.hooks.before_remove
+            },
+            "linear": {
+                "project": effective_cfg.linear.project,
+                "team": effective_cfg.linear.team,
+                "worker_tool": effective_cfg.linear.worker_tool
+            }
+        },
     });
     redact_api_keys(&mut value);
     value
@@ -573,7 +649,7 @@ fn redact_api_keys(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
             for (key, child) in map.iter_mut() {
-                if key.eq_ignore_ascii_case("api_key") {
+                if is_secret_key(key) {
                     *child = serde_json::Value::String("[REDACTED]".to_string());
                 } else {
                     redact_api_keys(child);
@@ -587,6 +663,10 @@ fn redact_api_keys(value: &mut serde_json::Value) {
         }
         _ => {}
     }
+}
+
+fn is_secret_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("api_key") || key.eq_ignore_ascii_case("webhook_secret")
 }
 
 /// `GET /assets/{*path}` — serve an embedded static asset.
@@ -747,13 +827,16 @@ mod tests {
     fn redact_api_keys_replaces_nested_values() {
         let mut value = serde_json::json!({
             "api_key": "root-secret",
+            "webhook_secret": "root-webhook-secret",
             "nested": { "API_KEY": "nested-secret" },
-            "items": [{ "api_key": "array-secret" }]
+            "items": [{ "api_key": "array-secret", "webhook_secret": "array-webhook-secret" }]
         });
         redact_api_keys(&mut value);
         assert_eq!(value["api_key"], "[REDACTED]");
+        assert_eq!(value["webhook_secret"], "[REDACTED]");
         assert_eq!(value["nested"]["API_KEY"], "[REDACTED]");
         assert_eq!(value["items"][0]["api_key"], "[REDACTED]");
+        assert_eq!(value["items"][0]["webhook_secret"], "[REDACTED]");
     }
 
     #[test]

@@ -3,193 +3,259 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>agentropy — {{ agent.id }}</title>
+  <title>agentropy - {{ agent.id }}</title>
   <script src="/assets/htmx.min.js"></script>
   <style>
     :root {
-      --bg: #0f1115; --panel: #181b22; --border: #262b35;
-      --fg: #e6e8ec; --muted: #9aa3b2; --accent: #6ea8fe;
-      --ok: #4ade80; --warn: #fbbf24; --bad: #f87171;
+      --bg: #111317; --panel: #1b1f26; --panel-2: #202630; --border: #303844;
+      --fg: #eceff3; --muted: #9ba6b5; --accent: #62b3b0; --ok: #57c785;
+      --warn: #f2b84b; --bad: #f26d6d; --info: #7aa2f7;
     }
     * { box-sizing: border-box; }
     body {
-      margin: 0; padding: 1.5rem;
-      background: var(--bg); color: var(--fg);
-      font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      margin: 0; background: var(--bg); color: var(--fg);
+      font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
-    h1 { font-size: 1.1rem; margin: 0; }
-    h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em;
-         color: var(--muted); margin: 0 0 .6rem; }
-    .bar { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
-    .badge { padding: .15rem .55rem; border-radius: 999px; font-size: .75rem;
-             font-weight: 600; }
-    .badge.running { background: rgba(74,222,128,.15); color: var(--ok); }
-    .badge.paused  { background: rgba(251,191,36,.15); color: var(--warn); }
-    .controls { margin-left: auto; display: flex; gap: .5rem; }
-    button {
-      background: var(--panel); color: var(--fg); border: 1px solid var(--border);
-      border-radius: 6px; padding: .35rem .8rem; cursor: pointer; font: inherit;
+    button, select {
+      border: 1px solid var(--border); background: var(--panel-2); color: var(--fg);
+      border-radius: 6px; padding: .45rem .7rem; font: inherit; cursor: pointer;
     }
-    button:hover { border-color: var(--accent); }
-    button.stop:hover { border-color: var(--bad); color: var(--bad); }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-    .panel {
-      background: var(--panel); border: 1px solid var(--border);
-      border-radius: 8px; padding: 1rem;
+    button:hover, select:hover { border-color: var(--accent); }
+    button.danger:hover { border-color: var(--bad); color: var(--bad); }
+    header { padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); background: #15181d; }
+    .top { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }
+    h1 { font-size: 1.05rem; margin: 0 .4rem 0 0; }
+    .stat { color: var(--muted); padding: .2rem .45rem; border: 1px solid var(--border); border-radius: 6px; }
+    .stat strong { color: var(--fg); font-weight: 700; }
+    .spacer { flex: 1; }
+    .folder { color: var(--muted); margin-top: .55rem; word-break: break-all; }
+    main { padding: 1rem 1.25rem; display: grid; grid-template-columns: minmax(18rem, .8fr) 1.2fr; gap: 1rem; }
+    section { min-width: 0; }
+    h2 { font-size: .76rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin: 0 0 .65rem; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: .9rem; }
+    .stack { display: grid; gap: 1rem; align-content: start; }
+    .empty { color: var(--muted); font-style: italic; margin: .3rem 0; }
+    .run-list { display: grid; gap: .45rem; }
+    .run-row {
+      width: 100%; text-align: left; display: grid; grid-template-columns: 1fr auto; gap: .35rem .75rem;
+      padding: .6rem; background: #171b21; border: 1px solid var(--border); border-radius: 6px;
     }
-    .panel.wide { grid-column: 1 / -1; }
+    .run-row:hover { border-color: var(--accent); }
+    .run-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .meta { color: var(--muted); font-size: .78rem; overflow-wrap: anywhere; }
+    .pill { border-radius: 999px; padding: .12rem .45rem; font-size: .72rem; font-weight: 700; }
+    .completed { background: rgba(87,199,133,.15); color: var(--ok); }
+    .failed { background: rgba(242,109,109,.15); color: var(--bad); }
+    .interrupted { background: rgba(242,184,75,.15); color: var(--warn); }
+    .other { background: rgba(155,166,181,.15); color: var(--muted); }
+    .live { background: rgba(122,162,247,.15); color: var(--info); }
+    .buckets { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .65rem; }
+    .drawer {
+      position: fixed; inset: 0 0 0 auto; width: min(58rem, 100vw); background: var(--bg);
+      border-left: 1px solid var(--border); transform: translateX(100%); transition: transform .16s ease;
+      z-index: 20; display: grid; grid-template-rows: auto auto 1fr;
+    }
+    .drawer.open { transform: translateX(0); }
+    .drawer-head { padding: .9rem; border-bottom: 1px solid var(--border); display: flex; gap: .6rem; align-items: center; }
+    .drawer-title { min-width: 0; flex: 1; }
+    .drawer-title strong, .drawer-title span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tabs { display: flex; gap: .4rem; padding: .65rem .9rem; border-bottom: 1px solid var(--border); }
+    .tab.active { border-color: var(--accent); color: var(--accent); }
+    .drawer-body { min-height: 0; overflow: auto; padding: .9rem; }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
     table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid var(--border);
-             vertical-align: top; }
-    th { color: var(--muted); font-weight: 600; font-size: .72rem;
-         text-transform: uppercase; letter-spacing: .05em; }
-    tr:last-child td { border-bottom: none; }
-    dl { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1rem; margin: 0; }
-    dt { color: var(--muted); }
-    dd { margin: 0; word-break: break-all; }
-    .empty { color: var(--muted); font-style: italic; }
-    .events { margin: 0; padding: 0; list-style: none; max-height: 22rem; overflow-y: auto; }
-    .events li { padding: .15rem 0; border-bottom: 1px solid var(--border);
-                 white-space: pre-wrap; word-break: break-all; }
-    .events li:last-child { border-bottom: none; }
-    .rbadge { padding: .1rem .5rem; border-radius: 999px; font-size: .72rem; font-weight: 600; }
-    .rbadge.completed { background: rgba(74,222,128,.15); color: var(--ok); }
-    .rbadge.failed { background: rgba(248,113,113,.15); color: var(--bad); }
-    .rbadge.interrupted { background: rgba(251,191,36,.15); color: var(--warn); }
-    .rbadge.retrying { background: rgba(110,168,254,.15); color: var(--accent); }
-    .rbadge.running { background: rgba(110,168,254,.15); color: var(--accent); }
-    td.muted { color: var(--muted); }
+    th, td { text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); padding: .35rem .45rem; }
+    th { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; }
+    .log-line { border-bottom: 1px solid var(--border); padding: .32rem 0; }
+    .log-line .kind { color: var(--accent); margin-right: .5rem; }
+    @media (max-width: 760px) {
+      header, main { padding-left: .8rem; padding-right: .8rem; }
+      main { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
-  <div id="content" hx-get="/" hx-trigger="every 2s" hx-select="#content" hx-swap="outerHTML">
-  <div class="bar">
-    <h1>agentropy</h1>
-    {% if paused %}
-    <span class="badge paused">paused</span>
-    {% else %}
-    <span class="badge running">running</span>
-    {% endif %}
-    <div class="controls">
-      <button class="stop" hx-post="/control/stop" hx-swap="none">Stop child</button>
-      <button hx-post="/control/pause" hx-swap="none">Pause</button>
-      <button hx-post="/control/resume" hx-swap="none">Resume</button>
+  <header>
+    <div class="top">
+      <h1>agentropy</h1>
+      <span class="stat">Active <strong id="active-count">{{ active_count }}</strong></span>
+      <span class="stat">Recent <strong id="recent-count">{{ recent_count }}</strong></span>
+      <span class="stat">Last tick <strong id="last-tick">{{ last_tick }}</strong></span>
+      <span class="stat">Rate limit <strong id="rate-limit">{% match rate_limit_min_remaining %}{% when Some with (r) %}{{ r }}{% when None %}n/a{% endmatch %}</strong></span>
+      <span class="spacer"></span>
+      <button id="refresh">Refresh</button>
     </div>
-  </div>
+    <div class="folder">{{ agent.id }} · {{ agent.folder }}</div>
+  </header>
 
-  <div class="grid">
-    <section class="panel">
-      <h2>Agent</h2>
-      <dl>
-        <dt>id</dt><dd>{{ agent.id }}</dd>
-        <dt>folder</dt><dd>{{ agent.folder }}</dd>
-        <dt>polling</dt><dd>{% if paused %}paused{% else %}running{% endif %}</dd>
-        <dt>tracker</dt><dd>{{ agent.tracker }}</dd>
-        <dt>runner</dt><dd>{{ agent.runner }}</dd>
-        {% match rate_limit_min_remaining %}
-        {% when Some with (r) %}
-        <dt>rate limit</dt><dd>{{ r }} req remaining (min)</dd>
-        {% when None %}
-        {% endmatch %}
-      </dl>
-    </section>
-
-    <section class="panel">
-      <h2>Active run</h2>
-      {% match active %}
-      {% when Some with (a) %}
-      <dl>
-        <dt>issue</dt><dd>{{ a.identifier }}</dd>
-        <dt>state</dt><dd>{{ a.state }}</dd>
-        <dt>status</dt><dd>{{ active_status }}</dd>
-        <dt>workspace</dt><dd>{{ a.workspace }}</dd>
-        <dt>pid</dt><dd>{{ a.pid }}</dd>
-        <dt>started</dt><dd>{{ a.started_at }}</dd>
-        <dt>elapsed</dt><dd>{{ elapsed_secs }}s</dd>
-        <dt>last event</dt><dd>{{ a.last_event }}</dd>
-      </dl>
-      {% when None %}
-      <p class="empty">No active run.</p>
-      {% endmatch %}
-    </section>
-
-    <section class="panel">
-      <h2>Queue</h2>
-      {% if queue.is_empty() %}
-      <p class="empty">Queue empty.</p>
-      {% else %}
-      <table>
-        <thead><tr><th>Issue</th><th>Title</th><th>State</th><th>Prio</th><th>Created</th></tr></thead>
-        <tbody>
-          {% for q in queue %}
-          <tr>
-            <td>{{ q.identifier }}</td>
-            <td>{{ q.title }}</td>
-            <td>{{ q.state }}</td>
-            <td>{% match q.priority %}{% when Some with (p) %}{{ p }}{% when None %}—{% endmatch %}</td>
-            <td>{% match q.created_at %}{% when Some with (c) %}{{ c }}{% when None %}—{% endmatch %}</td>
-          </tr>
+  <main>
+    <div class="stack">
+      <section class="panel">
+        <h2>Active runs</h2>
+        <div id="active-runs" class="run-list">
+          {% if active_runs.is_empty() %}
+          <p class="empty">Idle, nothing running.</p>
+          {% else %}
+          {% for a in active_runs %}
+          <button class="run-row" data-run-id="{{ a.run_id }}" data-issue="{{ a.identifier }}">
+            <span class="run-title">{{ a.identifier }}</span>
+            <span class="pill live">Live</span>
+            <span class="meta">{{ a.workspace }}</span>
+            <span class="meta">pid {{ a.pid }}</span>
+          </button>
           {% endfor %}
-        </tbody>
-      </table>
-      {% endif %}
-    </section>
+          {% endif %}
+        </div>
+      </section>
+    </div>
 
     <section class="panel">
-      <h2>Retry queue</h2>
-      {% if retry.is_empty() %}
-      <p class="empty">No retries pending.</p>
-      {% else %}
-      <table>
-        <thead><tr><th>Issue</th><th>Attempt</th><th>Due</th><th>Last error</th></tr></thead>
-        <tbody>
-          {% for r in retry %}
-          <tr>
-            <td>{{ r.identifier }}</td>
-            <td>{{ r.attempt }}</td>
-            <td>{{ r.due_at }}</td>
-            <td>{{ r.last_error }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% endif %}
-    </section>
-
-    <section class="panel wide">
-      <h2>Recent events</h2>
-      {% if events.is_empty() %}
-      <p class="empty">No events yet.</p>
-      {% else %}
-      <ul class="events">
-        {% for line in events %}
-        <li>{{ line }}</li>
+      <h2>Recent runs</h2>
+      <div class="buckets" id="buckets"></div>
+      <div id="recent-runs" class="run-list">
+        {% if history.is_empty() %}
+        <p class="empty">No recent runs yet.</p>
+        {% else %}
+        {% for h in history %}
+        <button class="run-row" data-run-id="{{ h.run_id }}">
+          <span class="run-title">{{ h.identifier }}</span>
+          <span class="pill {{ h.status_class }}">{{ h.status }}</span>
+          <span class="meta">{{ h.run }}</span>
+          <span class="meta">{{ h.age }}</span>
+        </button>
         {% endfor %}
-      </ul>
-      {% endif %}
+        {% endif %}
+      </div>
     </section>
+  </main>
 
-    <section class="panel wide">
-      <h2>Run history</h2>
-      {% if history.is_empty() %}
-      <p class="empty">No finished runs yet.</p>
-      {% else %}
-      <table>
-        <thead><tr><th>Status</th><th>Issue</th><th>Run</th><th>Age</th></tr></thead>
-        <tbody>
-          {% for h in history %}
-          <tr>
-            <td><span class="rbadge {{ h.status_class }}">{{ h.status }}</span></td>
-            <td>{{ h.identifier }}</td>
-            <td class="muted">{{ h.run }}</td>
-            <td>{{ h.age }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% endif %}
-    </section>
-  </div>
-  </div>
+  <aside id="drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div class="drawer-title">
+        <strong id="drawer-issue">No run selected</strong>
+        <span id="drawer-run" class="meta"></span>
+      </div>
+      <button id="interrupt" class="danger">Interrupt</button>
+      <button id="kill" class="danger">Kill</button>
+      <button id="close-drawer">Close</button>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="logs">Logs</button>
+      <button class="tab" data-tab="events">Events</button>
+      <button class="tab" data-tab="workflow">Workflow</button>
+    </div>
+    <div id="drawer-body" class="drawer-body"><p class="empty">Select a run.</p></div>
+  </aside>
+
+  <script>
+    const state = { runs: [], active: [], selected: null, tab: 'logs', cursors: { logs: 0, events: 0 }, pages: { logs: [], events: [] }, workflow: null };
+    const limit = 50;
+    const qs = (s, root = document) => root.querySelector(s);
+    const qsa = (s, root = document) => [...root.querySelectorAll(s)];
+    const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const bucketFor = (run) => {
+      if (run.process_alive || !run.finished_at || !run.outcome) return 'Live';
+      const o = String(run.outcome).toLowerCase();
+      if (o === 'completed' || o === 'terminal' || o === 'released') return 'Completed';
+      if (['error', 'failed', 'stalled', 'hook_failed', 'dispatch_failed', 'needs_human'].includes(o)) return 'Failed';
+      if (o.includes('interrupt') || ['killed', 'orphaned'].includes(o)) return 'Interrupted';
+      return 'Other';
+    };
+    const pillClass = (bucket) => bucket.toLowerCase();
+    async function json(url, opts) {
+      const res = await fetch(url, opts);
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+    async function refresh() {
+      const [runs, workflow] = await Promise.all([json(`/runs?limit=${limit}`), state.workflow ? state.workflow : json('/workflow')]);
+      state.workflow = workflow;
+      state.runs = runs.filter(r => String(r.outcome || '').toLowerCase() !== 'park_barrier');
+      state.active = state.runs.filter(r => r.process_alive || !r.finished_at);
+      renderLists();
+      if (state.selected) renderDrawer();
+    }
+    function renderLists() {
+      qs('#active-count').textContent = state.active.length;
+      qs('#recent-count').textContent = state.runs.length;
+      const activeEl = qs('#active-runs');
+      activeEl.innerHTML = state.active.length ? state.active.map(runButton).join('') : '<p class="empty">Idle, nothing running.</p>';
+      const buckets = { Completed: 0, Failed: 0, Interrupted: 0, Other: 0, Live: 0 };
+      state.runs.forEach(r => buckets[bucketFor(r)]++);
+      qs('#buckets').innerHTML = Object.entries(buckets).map(([k,v]) => `<span class="pill ${pillClass(k)}">${k} ${v}</span>`).join('');
+      const recentEl = qs('#recent-runs');
+      recentEl.innerHTML = state.runs.length ? state.runs.map(runButton).join('') : '<p class="empty">No recent runs yet.</p>';
+      qsa('.run-row').forEach(btn => btn.addEventListener('click', () => openRun(btn.dataset.runId)));
+    }
+    function runButton(run) {
+      const bucket = bucketFor(run);
+      return `<button class="run-row" data-run-id="${esc(run.run_id)}">
+        <span class="run-title">${esc(run.issue_identifier)}</span>
+        <span class="pill ${pillClass(bucket)}">${bucket}</span>
+        <span class="meta">${esc(run.run_id)}</span>
+        <span class="meta">${esc(run.started_at)}</span>
+      </button>`;
+    }
+    async function openRun(runId) {
+      if (!runId) return;
+      state.selected = await json(`/runs/${encodeURIComponent(runId)}`);
+      state.cursors = { logs: 0, events: 0 };
+      state.pages = { logs: [], events: [] };
+      qs('#drawer').classList.add('open');
+      qs('#drawer').setAttribute('aria-hidden', 'false');
+      renderDrawer();
+    }
+    async function renderDrawer() {
+      const run = state.selected;
+      if (!run) return;
+      qs('#drawer-issue').textContent = run.issue_identifier;
+      qs('#drawer-run').textContent = run.run_id;
+      qsa('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === state.tab));
+      qs('#interrupt').disabled = !run.process_alive;
+      qs('#kill').disabled = !run.process_alive;
+      if (state.tab === 'workflow') {
+        qs('#drawer-body').innerHTML = `<pre>${esc(JSON.stringify(state.workflow, null, 2))}</pre>`;
+        return;
+      }
+      const since = state.cursors[state.tab] || 0;
+      const page = await json(`/runs/${encodeURIComponent(run.run_id)}/logs?since=${since}&limit=100`);
+      state.pages[state.tab].push(...page.events);
+      if (state.tab === 'logs') {
+        qs('#drawer-body').innerHTML = state.pages.logs.length ? state.pages.logs.map(e => `<div class="log-line"><span class="kind">${esc(e.row_type)}</span>${esc(e.text)}</div>`).join('') : '<p class="empty">No logs yet.</p>';
+      } else {
+        qs('#drawer-body').innerHTML = state.pages.events.length ? `<table><thead><tr><th>id</th><th>kind</th><th>time</th><th>payload</th></tr></thead><tbody>${state.pages.events.map(e => `<tr><td>${e.event_id}</td><td>${esc(e.kind)}</td><td>${esc(e.ts)}</td><td><pre>${esc(e.payload)}</pre></td></tr>`).join('')}</tbody></table>` : '<p class="empty">No events yet.</p>';
+      }
+      state.cursors[state.tab] = page.next_cursor || state.cursors[state.tab];
+    }
+    async function control(action) {
+      if (!state.selected) return;
+      await json(`/runs/${encodeURIComponent(state.selected.run_id)}/${action}`, { method: 'POST' });
+      await refresh();
+      state.selected = await json(`/runs/${encodeURIComponent(state.selected.run_id)}`).catch(() => state.selected);
+      renderDrawer();
+    }
+    qs('#refresh').addEventListener('click', refresh);
+    qs('#close-drawer').addEventListener('click', () => qs('#drawer').classList.remove('open'));
+    qs('#interrupt').addEventListener('click', () => control('interrupt'));
+    qs('#kill').addEventListener('click', () => control('kill'));
+    qsa('.tab').forEach(t => t.addEventListener('click', () => { state.tab = t.dataset.tab; renderDrawer(); }));
+    refresh().catch(err => console.error(err));
+    setInterval(() => refresh().catch(err => console.error(err)), 2500);
+    try {
+      const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'snapshot') {
+          if (msg.last_tick) qs('#last-tick').textContent = msg.last_tick;
+          qs('#rate-limit').textContent = msg.rate_limit_min_remaining ?? 'n/a';
+          if (Array.isArray(msg.runs)) {
+            state.runs = msg.runs.filter(r => String(r.outcome || '').toLowerCase() !== 'park_barrier');
+            state.active = state.runs.filter(r => r.process_alive || !r.finished_at);
+            renderLists();
+          }
+        }
+      };
+    } catch (_) {}
+  </script>
 </body>
 </html>
