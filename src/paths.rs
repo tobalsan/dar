@@ -74,7 +74,7 @@ impl AgentPaths {
 }
 
 /// Resolve `workspace.root`: relative values are relative to the agent/project
-/// folder, `~` expands to HOME, and `$AIHUB_HOME` expands to the agent root.
+/// folder, `~` expands to HOME, and `$AGENT_HOME` expands to the agent root.
 pub fn resolve_workspace_root(agent_root: &Path, raw: &Path) -> PathBuf {
     let raw = raw.to_string_lossy();
     let expanded = expand_workspace_root_vars(&raw, agent_root);
@@ -89,8 +89,8 @@ pub fn resolve_workspace_root(agent_root: &Path, raw: &Path) -> PathBuf {
 fn expand_workspace_root_vars(raw: &str, agent_root: &Path) -> String {
     let mut out = raw.to_string();
     let agent_root_s = agent_root.to_string_lossy();
-    out = out.replace("${AIHUB_HOME}", &agent_root_s);
-    out = out.replace("$AIHUB_HOME", &agent_root_s);
+    out = out.replace("${AGENT_HOME}", &agent_root_s);
+    out = out.replace("$AGENT_HOME", &agent_root_s);
     if let Some(home) = std::env::var_os("HOME") {
         let home = home.to_string_lossy();
         if out == "~" {
@@ -183,14 +183,14 @@ mod tests {
     }
 
     #[test]
-    fn resolves_aihub_home_workspace_root_against_agent_root() {
+    fn resolves_agent_home_workspace_root_against_agent_root() {
         let root = Path::new("/tmp/agent");
         assert_eq!(
-            resolve_workspace_root(root, Path::new("$AIHUB_HOME/ws")),
+            resolve_workspace_root(root, Path::new("$AGENT_HOME/ws")),
             PathBuf::from("/tmp/agent/ws")
         );
         assert_eq!(
-            resolve_workspace_root(root, Path::new("${AIHUB_HOME}/ws")),
+            resolve_workspace_root(root, Path::new("${AGENT_HOME}/ws")),
             PathBuf::from("/tmp/agent/ws")
         );
     }

@@ -1506,10 +1506,10 @@ impl Orchestrator {
             .arg("-c")
             .arg(script)
             .current_dir(workspace)
-            .env("AIHUB_PROJECT_ID", project_id)
-            .env("AIHUB_ISSUE_ID", &issue.id)
-            .env("AIHUB_ISSUE_IDENTIFIER", &issue.identifier)
-            .env("AIHUB_WORKSPACE", workspace)
+            .env("AGENT_PROJECT_ID", project_id)
+            .env("AGENT_ISSUE_ID", &issue.id)
+            .env("AGENT_ISSUE_IDENTIFIER", &issue.identifier)
+            .env("AGENT_WORKSPACE", workspace)
             .env_remove("LINEAR_API_KEY")
             .status()
             .with_context(|| format!("running {name} hook"))?;
@@ -1769,9 +1769,9 @@ fn run_before_remove(
     let status = std::process::Command::new("sh")
         .arg("-c")
         .arg(command)
-        .env("AGENTROPY_WORKSPACE", workspace)
-        .env("AGENTROPY_ISSUE", identifier)
-        .env("AGENTROPY_RUN_ID", run_id)
+        .env("AGENT_WORKSPACE", workspace)
+        .env("AGENT_ISSUE_IDENTIFIER", identifier)
+        .env("AGENT_RUN_ID", run_id)
         .status()
         .map_err(|e| anyhow::anyhow!("running before_remove hook: {e}"))?;
     if status.success() {

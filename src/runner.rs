@@ -9,8 +9,8 @@
 //!   - `PiRunner`    — JSON-RPC over stdio with a per-issue session dir
 //!   - `ClaudeRunner`— Claude Code CLI (`-p --permission-mode bypassPermissions --add-dir`)
 //!   - `CodexRunner` — `codex app-server` + JSON-RPC turn request
-//!   - `CliRunner`   — arbitrary command with `AIHUB_*` env
-//!   - `FakeRunner`  — test shim (echo $AIHUB_PROMPT)
+//!   - `CliRunner`   — arbitrary command with `AGENT_*` env
+//!   - `FakeRunner`  — test shim (echo $AGENT_PROMPT)
 //!
 //! `spawn` returns a `RunnerHandle` the orchestrator awaits and can kill.
 //! On timeout or operator/reconcile kill the child's process group is sent
@@ -164,43 +164,57 @@ fn effective_command(p: &SpawnParams<'_>, kind: &RunnerKind) -> OsString {
     }
 }
 
-/// `AIHUB_*` env vars that every runner receives.
+/// `AGENT_*` env vars that every runner receives.
+///
+/// Full list:
+///   - `AGENT_ISSUE_IDENTIFIER` — issue identifier (e.g. `PROJ-42`)
+///   - `AGENT_ISSUE_ID`         — same value (alias for back-compat with scripts)
+///   - `AGENT_RUN_ID`           — unique run attempt ID
+///   - `AGENT_PROJECT_ID`       — project/agent ID
+///   - `AGENT_WORKSPACE`        — absolute path to the per-issue workspace dir
+///   - `AGENT_WORKSPACE_ROOT`   — absolute path to the shared workspaces root
+///   - `AGENT_PROMPT`           — rendered prompt text
+///   - `AGENT_WORKER_PROMPT`    — same as `AGENT_PROMPT` (alias)
+///   - `AGENT_MODEL`            — model name (only when configured)
+///   - `AGENT_WORKER_MODEL`     — same as `AGENT_MODEL` (alias, only when configured)
+///   - `AGENT_LINEAR_GRAPHQL_TOOL` — set to `1` when the Linear GraphQL tool is enabled
+///   - `AGENT_SESSION_DIR`      — path to the per-issue session directory (Pi runner only)
 fn common_env(p: &SpawnParams<'_>) -> Vec<(OsString, OsString)> {
     let mut env = vec![
         (
-            OsString::from("AIHUB_ISSUE_IDENTIFIER"),
+            OsString::from("AGENT_ISSUE_IDENTIFIER"),
             OsString::from(&p.issue_id),
         ),
         (
-            OsString::from("AIHUB_ISSUE_ID"),
+            OsString::from("AGENT_ISSUE_ID"),
             OsString::from(&p.issue_id),
         ),
-        (OsString::from("AIHUB_RUN_ID"), OsString::from(&p.run_id)),
+        (OsString::from("AGENT_RUN_ID"), OsString::from(&p.run_id)),
         (
-            OsString::from("AIHUB_PROJECT_ID"),
+            OsString::from("AGENT_PROJECT_ID"),
             OsString::from(&p.issue_id),
         ),
         (
-            OsString::from("AIHUB_WORKSPACE"),
+            OsString::from("AGENT_WORKSPACE"),
             p.workspace.as_os_str().to_os_string(),
         ),
         (
-            OsString::from("AIHUB_WORKSPACE_ROOT"),
+            OsString::from("AGENT_WORKSPACE_ROOT"),
             p.workspace_root.as_os_str().to_os_string(),
         ),
-        (OsString::from("AIHUB_PROMPT"), OsString::from(&p.prompt)),
+        (OsString::from("AGENT_PROMPT"), OsString::from(&p.prompt)),
         (
-            OsString::from("AIHUB_WORKER_PROMPT"),
+            OsString::from("AGENT_WORKER_PROMPT"),
             OsString::from(&p.prompt),
         ),
     ];
     if let Some(model) = &p.model {
-        env.push((OsString::from("AIHUB_MODEL"), OsString::from(model)));
-        env.push((OsString::from("AIHUB_WORKER_MODEL"), OsString::from(model)));
+        env.push((OsString::from("AGENT_MODEL"), OsString::from(model)));
+        env.push((OsString::from("AGENT_WORKER_MODEL"), OsString::from(model)));
     }
     if p.expose_linear_graphql_tool {
         env.push((
-            OsString::from("AIHUB_LINEAR_GRAPHQL_TOOL"),
+            OsString::from("AGENT_LINEAR_GRAPHQL_TOOL"),
             OsString::from("1"),
         ));
     }
@@ -212,7 +226,7 @@ fn env_with_session_dir(
     session_dir: &Path,
 ) -> Vec<(OsString, OsString)> {
     env.push((
-        OsString::from("AIHUB_SESSION_DIR"),
+        OsString::from("AGENT_SESSION_DIR"),
         session_dir.as_os_str().to_os_string(),
     ));
     env
@@ -341,7 +355,7 @@ impl RunnerSpec for FakeRunner<'_> {
     fn args(&self) -> Vec<OsString> {
         vec![
             OsString::from("-c"),
-            OsString::from("printf '%s\\n' \"$AIHUB_PROMPT\""),
+            OsString::from("printf '%s\\n' \"$AGENT_PROMPT\""),
         ]
     }
     fn stdin_payload(&self) -> Option<Vec<u8>> {
@@ -1137,10 +1151,10 @@ mod tests {
                 )
             })
             .collect();
-        assert!(env.contains(&("AIHUB_ISSUE_IDENTIFIER".into(), "ISSUE-1".into())));
-        assert!(env.contains(&("AIHUB_MODEL".into(), "model-a".into())));
-        assert!(env.contains(&("AIHUB_WORKER_MODEL".into(), "model-a".into())));
-        assert!(env.iter().any(|(k, _)| k == "AIHUB_WORKER_PROMPT"));
+        assert!(env.contains(&("AGENT_ISSUE_IDENTIFIER".into(), "ISSUE-1".into())));
+        assert!(env.contains(&("AGENT_MODEL".into(), "model-a".into())));
+        assert!(env.contains(&("AGENT_WORKER_MODEL".into(), "model-a".into())));
+        assert!(env.iter().any(|(k, _)| k == "AGENT_WORKER_PROMPT"));
     }
 
     #[test]
