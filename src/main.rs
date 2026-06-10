@@ -51,6 +51,10 @@ async fn main_inner() -> Result<()> {
             let code = doctor::run(&root)?;
             std::process::exit(code);
         }
+        Command::InitWorkflow(args) => {
+            let root = args.resolve_root()?;
+            cli::init_workflow(&root, args.force)
+        }
     }
 }
 

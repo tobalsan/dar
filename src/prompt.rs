@@ -398,6 +398,23 @@ mod tests {
     }
 
     #[test]
+    fn default_workflow_body_parses_and_renders_strict() {
+        use std::io::Write;
+        use crate::cli::DEFAULT_WORKFLOW_MD_BODY;
+
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "{DEFAULT_WORKFLOW_MD_BODY}").unwrap();
+        let renderer = PromptRenderer::load(f.path()).unwrap();
+        let issue = make_issue("ALG-176");
+        let out = renderer.render(&issue, 0, 3).unwrap();
+        // The body contains {{ issue.identifier }} and {{ issue.title }} —
+        // verify they were substituted (strict mode would error on unknowns).
+        assert!(out.contains("ALG-176"), "identifier not substituted; got: {out}");
+        assert!(out.contains("Test issue"), "title not substituted; got: {out}");
+        assert!(out.contains("Orchestrator context"), "appendix missing; got: {out}");
+    }
+
+    #[test]
     fn maybe_reload_allow_stale_camel_case_false_surfaces_error() {
         use std::io::Write;
         let mut f = NamedTempFile::new().unwrap();

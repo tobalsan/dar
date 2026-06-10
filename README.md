@@ -74,6 +74,10 @@ host. Agentropy does not bundle, install, or auth it.
 ## CLI
 
 ```bash
+# Scaffold the default WORKFLOW.md prompt in an agent folder.
+agentropy init-workflow --dir ./my-agent
+agentropy init-workflow --dir ./my-agent --force   # overwrite existing
+
 # Validate a folder's agent.yaml + WORKFLOW.md + tracker. Exit code only.
 agentropy doctor --dir ./my-agent
 
@@ -145,6 +149,15 @@ Create a file `hello.md` in this workspace with the text "hello from agentropy".
 Markdown body rendered per issue with `minijinja` (strict — an unknown variable
 fails the attempt) against `{{ issue.* }}`. It must tell the agent to **transition
 the issue itself** when done — the orchestrator won't.
+
+Use `agentropy init-workflow` to scaffold the canonical default body, which
+encodes the full worker procedure: claim the Linear issue, move to In Progress,
+keep one comment updated, work in the issue workspace, use a git worktree for
+code changes, spawn a reviewer subagent, commit only after a clean review, create
+or update a PR with `gh`, link it to Linear, move to In Review, and move to
+Needs Human when blocked.
+
+Minimal example:
 
 ```markdown
 You are working on issue {{ issue.identifier }}: {{ issue.title }}
