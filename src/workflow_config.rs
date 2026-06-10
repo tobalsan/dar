@@ -481,7 +481,7 @@ fn resolve_tracker(
 mod tests {
     use super::*;
     use crate::config::{
-        AgentConfig, DashboardConfig, OrchestratorConfig, RunnerConfig, TrackerConfig,
+        AgentConfig, DashboardConfig, HitlConfig, OrchestratorConfig, RunnerConfig, TrackerConfig,
         TrackerInner, WorkspaceConfig,
     };
     use std::net::Ipv4Addr;
@@ -514,6 +514,7 @@ mod tests {
                 max_retries: 3,
                 retry_backoff_ms: 10_000,
             },
+            hitl: HitlConfig::default(),
             workspace: WorkspaceConfig {
                 root: "./workspaces".into(),
             },
