@@ -411,6 +411,52 @@ impl Store {
         rows.next().transpose().context("get_run")
     }
 
+    /// Count consecutive completed runs where the worker exited cleanly while
+    /// the issue remained active. Stops at any other finished outcome,
+    /// including terminal/non-active successful completions.
+    pub fn consecutive_completed_runs(&self, issue_id: &str) -> Result<u32> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT run_id, outcome FROM runs
+                 WHERE issue_id=?1
+                   AND finished_at IS NOT NULL
+                   AND outcome IS NOT NULL
+                 ORDER BY finished_at DESC",
+            )
+            .context("prepare consecutive completed runs query")?;
+        let rows = stmt
+            .query_map(params![issue_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .context("query consecutive completed runs")?;
+
+        let mut count = 0u32;
+        for row in rows {
+            let (run_id, outcome) = row?;
+            if outcome != "completed" {
+                break;
+            }
+            let active_completion: bool = conn
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM events
+                        WHERE run_id=?1
+                          AND kind='lifecycle'
+                          AND payload='Succeeded still active after normal exit; continuation queued'
+                     )",
+                    params![run_id],
+                    |row| row.get(0),
+                )
+                .context("query active completion marker")?;
+            if !active_completion {
+                break;
+            }
+            count = count.saturating_add(1);
+        }
+        Ok(count)
+    }
+
     // ── Events ────────────────────────────────────────────────────────────────
 
     /// Insert one event. Returns the assigned `event_id` (auto-increment),
@@ -686,6 +732,53 @@ mod tests {
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].identifier, "TEST-1");
         assert!(matches!(recent[0].status, RunStatus::Succeeded));
+    }
+
+    #[test]
+    fn consecutive_completed_runs_counts_only_still_active_completions() {
+        let store = open_tmp();
+        let issue_id = "abc123";
+        for (idx, active_marker) in [(0, true), (1, true), (2, false)] {
+            let started_at = Utc::now() + chrono::Duration::seconds(idx);
+            let run_id = format!("TEST-1-{idx}");
+            store
+                .insert_run(&NewRun {
+                    run_id: &run_id,
+                    issue_id,
+                    issue_identifier: "TEST-1",
+                    workspace: "/tmp/ws",
+                    profile_json: None,
+                    workflow_path: None,
+                    workflow_sha: None,
+                    pid: 9999,
+                    worker_id: None,
+                    started_at,
+                })
+                .unwrap();
+            store
+                .finish_run(
+                    &run_id,
+                    &RunFinish {
+                        outcome: RunStatus::Succeeded,
+                        exit_code: Some(0),
+                        finished_at: started_at,
+                    },
+                )
+                .unwrap();
+            if active_marker {
+                store
+                    .insert_event(&NewEvent {
+                        run_id: Some(&run_id),
+                        issue_identifier: "TEST-1",
+                        kind: "lifecycle",
+                        payload: "Succeeded still active after normal exit; continuation queued",
+                        ts: started_at,
+                    })
+                    .unwrap();
+            }
+        }
+
+        assert_eq!(store.consecutive_completed_runs(issue_id).unwrap(), 0);
     }
 
     #[test]

@@ -33,6 +33,9 @@ pub struct TrackerConfig {
     /// Linear GraphQL endpoint override (default `https://api.linear.app/graphql`).
     #[serde(default)]
     pub endpoint: Option<String>,
+    /// State name used by orchestrator safety/parking writes.
+    #[serde(default)]
+    pub needs_human: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -67,11 +70,17 @@ pub struct OrchestratorConfig {
     pub poll_interval_ms: u64,
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
+    #[serde(default = "default_max_active_runs")]
+    pub max_active_runs: u32,
     pub max_retries: u32,
     pub retry_backoff_ms: u64,
 }
 
 fn default_max_concurrent() -> usize {
+    3
+}
+
+fn default_max_active_runs() -> u32 {
     3
 }
 

@@ -32,6 +32,8 @@ use serde::Deserialize;
 
 use crate::config::AgentConfig;
 
+const DEFAULT_NEEDS_HUMAN_STATE: &str = "Needs Human";
+
 // ---------------------------------------------------------------------------
 // Frontmatter structs
 // ---------------------------------------------------------------------------
@@ -98,6 +100,8 @@ pub struct WfPollingConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct WfWorkspaceConfig {
     pub root: Option<PathBuf>,
+    pub reuse: Option<bool>,
+    pub cleanup_on_terminal: Option<bool>,
 }
 
 /// Runner / model overrides from WORKFLOW.md.
@@ -119,6 +123,7 @@ pub struct WfAgentConfig {
     /// Per-attempt timeout override (ms).
     pub max_run_timeout_ms: Option<u64>,
     pub turn_timeout_ms: Option<u64>,
+    pub max_active_runs: Option<u32>,
 }
 
 impl WfAgentConfig {
@@ -131,15 +136,19 @@ impl WfAgentConfig {
     }
 }
 
-/// Lifecycle hook scripts from WORKFLOW.md (parsed; execution is a future concern).
+/// Lifecycle hook scripts from WORKFLOW.md.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct WfHooksConfig {
+    pub after_create: Option<String>,
+    pub before_run: Option<String>,
+    pub after_run: Option<String>,
+    pub before_remove: Option<String>,
+    // Legacy names retained as parsed no-ops for backwards compatibility.
     pub before_dispatch: Option<String>,
     pub after_success: Option<String>,
     pub after_failure: Option<String>,
     pub on_needs_human: Option<String>,
-    pub before_remove: Option<String>,
 }
 
 /// Dashboard / HTTP server overrides from WORKFLOW.md.
@@ -249,6 +258,7 @@ pub struct EffectiveLoopConfig {
     pub poll_interval_ms: u64,
     pub poll_jitter_ms: u64,
     pub max_concurrent: usize,
+    pub max_active_runs: u32,
     pub max_retries: u32,
     pub retry_backoff_ms: u64,
     /// Whether a WORKFLOW.md parse error on live-reload keeps the stale snapshot.
@@ -256,6 +266,8 @@ pub struct EffectiveLoopConfig {
     pub allow_stale: bool,
     // Workspace (relative to agent root)
     pub workspace_root: PathBuf,
+    pub workspace_reuse: bool,
+    pub cleanup_on_terminal: bool,
     // Runner / model
     pub runner_kind: String,
     pub runner_command: String,
@@ -305,6 +317,11 @@ impl EffectiveLoopConfig {
         let max_concurrent = p
             .and_then(|p| p.max_concurrent)
             .unwrap_or(base.orchestrator.max_concurrent);
+        let max_active_runs = wf
+            .agent
+            .as_ref()
+            .and_then(|a| a.max_active_runs)
+            .unwrap_or(base.orchestrator.max_active_runs);
         let max_retries = p
             .and_then(|p| p.max_retries)
             .unwrap_or(base.orchestrator.max_retries);
@@ -319,6 +336,12 @@ impl EffectiveLoopConfig {
             .as_ref()
             .and_then(|w| w.root.clone())
             .unwrap_or_else(|| base.workspace.root.clone());
+        let workspace_reuse = wf.workspace.as_ref().and_then(|w| w.reuse).unwrap_or(true);
+        let cleanup_on_terminal = wf
+            .workspace
+            .as_ref()
+            .and_then(|w| w.cleanup_on_terminal)
+            .unwrap_or(false);
 
         // --- Runner / model ---
         let a = wf.agent.as_ref();
@@ -370,10 +393,13 @@ impl EffectiveLoopConfig {
             poll_interval_ms,
             poll_jitter_ms,
             max_concurrent,
+            max_active_runs,
             max_retries,
             retry_backoff_ms,
             allow_stale,
             workspace_root,
+            workspace_reuse,
+            cleanup_on_terminal,
             runner_kind,
             runner_command,
             model,
@@ -416,7 +442,10 @@ fn resolve_tracker(
         None => (
             base.tracker.active_states.clone(),
             base.tracker.terminal_states.clone(),
-            None,
+            base.tracker
+                .needs_human
+                .clone()
+                .or_else(|| Some(DEFAULT_NEEDS_HUMAN_STATE.to_string())),
         ),
         Some(tc) => {
             // Flat fields beat the legacy nested form.
@@ -435,7 +464,9 @@ fn resolve_tracker(
             let needs_human = tc
                 .needs_human
                 .clone()
-                .or_else(|| tc.states.as_ref().and_then(|s| s.needs_human.clone()));
+                .or_else(|| tc.states.as_ref().and_then(|s| s.needs_human.clone()))
+                .or_else(|| base.tracker.needs_human.clone())
+                .or_else(|| Some(DEFAULT_NEEDS_HUMAN_STATE.to_string()));
 
             (active, terminal, needs_human)
         }
@@ -468,6 +499,7 @@ mod tests {
                 terminal_states: vec!["done".into()],
                 project_slug: None,
                 endpoint: None,
+                needs_human: None,
             },
             runner: RunnerConfig {
                 use_: "claude-code".into(),
@@ -478,6 +510,7 @@ mod tests {
             orchestrator: OrchestratorConfig {
                 poll_interval_ms: 10_000,
                 max_concurrent: 1,
+                max_active_runs: 3,
                 max_retries: 3,
                 retry_backoff_ms: 10_000,
             },
@@ -545,14 +578,18 @@ polling:
   allow_stale: false
 workspace:
   root: ./ws
+  reuse: false
+  cleanup_on_terminal: true
 agent:
   sdk: claude-code
   command: claude
   model: claude-opus-4-6
   max_run_timeout_ms: 900000
 hooks:
-  before_dispatch: ./pre.sh
-  after_success: ./post.sh
+  after_create: ./after-create.sh
+  before_run: ./before-run.sh
+  after_run: ./after-run.sh
+  before_remove: ./before-remove.sh
 server:
   port: 9090
 linear:
@@ -574,14 +611,31 @@ body"#;
             fm.workspace.as_ref().unwrap().root,
             Some(PathBuf::from("./ws"))
         );
+        assert_eq!(fm.workspace.as_ref().unwrap().reuse, Some(false));
+        assert_eq!(
+            fm.workspace.as_ref().unwrap().cleanup_on_terminal,
+            Some(true)
+        );
         assert_eq!(fm.agent.as_ref().unwrap().sdk, Some("claude-code".into()));
         assert_eq!(
             fm.agent.as_ref().unwrap().model,
             Some("claude-opus-4-6".into())
         );
         assert_eq!(
-            fm.hooks.as_ref().unwrap().before_dispatch,
-            Some("./pre.sh".into())
+            fm.hooks.as_ref().unwrap().after_create,
+            Some("./after-create.sh".into())
+        );
+        assert_eq!(
+            fm.hooks.as_ref().unwrap().before_run,
+            Some("./before-run.sh".into())
+        );
+        assert_eq!(
+            fm.hooks.as_ref().unwrap().after_run,
+            Some("./after-run.sh".into())
+        );
+        assert_eq!(
+            fm.hooks.as_ref().unwrap().before_remove,
+            Some("./before-remove.sh".into())
         );
         assert_eq!(fm.server.as_ref().unwrap().port, Some(9090));
         assert_eq!(
@@ -600,13 +654,27 @@ body"#;
         let eff = EffectiveLoopConfig::merge(&base, &wf);
         assert_eq!(eff.active_states, vec!["todo"]);
         assert_eq!(eff.terminal_states, vec!["done"]);
-        assert_eq!(eff.needs_human, None);
+        assert_eq!(eff.needs_human, Some("Needs Human".into()));
         assert_eq!(eff.poll_interval_ms, 10_000);
         assert_eq!(eff.poll_jitter_ms, 0);
         assert_eq!(eff.runner_kind, "claude");
         assert_eq!(eff.runner_command, "claude");
         assert_eq!(eff.model, None);
         assert!(eff.allow_stale);
+        assert!(eff.workspace_reuse);
+        assert!(!eff.cleanup_on_terminal);
+    }
+
+    #[test]
+    fn merge_workspace_policy_overrides_defaults() {
+        let base = base_config();
+        let raw =
+            "---\nworkspace:\n  root: ./custom\n  reuse: false\n  cleanup_on_terminal: true\n---";
+        let snap = parse_workflow_md(raw).unwrap();
+        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        assert_eq!(eff.workspace_root, PathBuf::from("./custom"));
+        assert!(!eff.workspace_reuse);
+        assert!(eff.cleanup_on_terminal);
     }
 
     #[test]
@@ -751,11 +819,11 @@ body"#;
     }
 
     #[test]
-    fn merge_needs_human_absent_is_none() {
+    fn merge_needs_human_absent_defaults_to_needs_human() {
         let base = base_config();
         let wf = WorkflowFrontmatter::default();
         let eff = EffectiveLoopConfig::merge(&base, &wf);
-        assert_eq!(eff.needs_human, None);
+        assert_eq!(eff.needs_human, Some("Needs Human".into()));
     }
 
     #[test]

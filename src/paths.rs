@@ -69,8 +69,37 @@ impl AgentPaths {
     /// (relative to the agent root).
     #[allow(dead_code)]
     pub fn workspace_root(&self, cfg: &WorkspaceConfig) -> PathBuf {
-        self.root.join(&cfg.root)
+        resolve_workspace_root(&self.root, &cfg.root)
     }
+}
+
+/// Resolve `workspace.root`: relative values are relative to the agent/project
+/// folder, `~` expands to HOME, and `$AIHUB_HOME` expands to the agent root.
+pub fn resolve_workspace_root(agent_root: &Path, raw: &Path) -> PathBuf {
+    let raw = raw.to_string_lossy();
+    let expanded = expand_workspace_root_vars(&raw, agent_root);
+    let path = PathBuf::from(expanded);
+    if path.is_absolute() {
+        path
+    } else {
+        agent_root.join(path)
+    }
+}
+
+fn expand_workspace_root_vars(raw: &str, agent_root: &Path) -> String {
+    let mut out = raw.to_string();
+    let agent_root_s = agent_root.to_string_lossy();
+    out = out.replace("${AIHUB_HOME}", &agent_root_s);
+    out = out.replace("$AIHUB_HOME", &agent_root_s);
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = home.to_string_lossy();
+        if out == "~" {
+            out = home.to_string();
+        } else if let Some(rest) = out.strip_prefix("~/") {
+            out = format!("{home}/{rest}");
+        }
+    }
+    out
 }
 
 /// Replace any char outside `[A-Za-z0-9._-]` with `_` so an issue identifier is
@@ -91,13 +120,7 @@ pub fn sanitize_identifier(id: &str) -> String {
 /// `<workspace_root>/<sanitized(identifier)>/`, then assert it is contained
 /// within `workspace_root`.
 pub fn issue_workspace(workspace_root: &Path, identifier: &str) -> Result<PathBuf> {
-    let safe = sanitize_identifier(identifier);
-    if safe.is_empty() {
-        bail!(
-            "issue identifier {:?} sanitizes to empty path component",
-            identifier
-        );
-    }
+    let safe = safe_issue_component(identifier)?;
     let ws = workspace_root.join(&safe);
 
     // Ensure the workspace root and the per-issue dir exist before the
@@ -107,6 +130,23 @@ pub fn issue_workspace(workspace_root: &Path, identifier: &str) -> Result<PathBu
 
     assert_contained(workspace_root, &ws)?;
     Ok(ws)
+}
+
+/// Return the per-issue workspace path without creating it.
+pub fn issue_workspace_path(workspace_root: &Path, identifier: &str) -> Result<PathBuf> {
+    let safe = safe_issue_component(identifier)?;
+    Ok(workspace_root.join(safe))
+}
+
+fn safe_issue_component(identifier: &str) -> Result<String> {
+    let safe = sanitize_identifier(identifier);
+    if safe.is_empty() || safe == "." || safe == ".." {
+        bail!(
+            "issue identifier {:?} sanitizes to empty path component",
+            identifier
+        );
+    }
+    Ok(safe)
 }
 
 /// Reject any `child` path that escapes `root`. Both are canonicalized so that
@@ -127,4 +167,54 @@ pub fn assert_contained(root: &Path, child: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_relative_workspace_root_against_agent_root() {
+        let root = Path::new("/tmp/agent");
+        assert_eq!(
+            resolve_workspace_root(root, Path::new("workspaces")),
+            PathBuf::from("/tmp/agent/workspaces")
+        );
+    }
+
+    #[test]
+    fn resolves_aihub_home_workspace_root_against_agent_root() {
+        let root = Path::new("/tmp/agent");
+        assert_eq!(
+            resolve_workspace_root(root, Path::new("$AIHUB_HOME/ws")),
+            PathBuf::from("/tmp/agent/ws")
+        );
+        assert_eq!(
+            resolve_workspace_root(root, Path::new("${AIHUB_HOME}/ws")),
+            PathBuf::from("/tmp/agent/ws")
+        );
+    }
+
+    #[test]
+    fn resolves_tilde_workspace_root_against_home() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        assert_eq!(
+            resolve_workspace_root(Path::new("/tmp/agent"), Path::new("~/ws")),
+            PathBuf::from(home).join("ws")
+        );
+    }
+
+    #[test]
+    fn issue_workspace_path_uses_sanitized_single_component() {
+        let path = issue_workspace_path(Path::new("/tmp/ws"), "ALG/179..x").unwrap();
+        assert_eq!(path, PathBuf::from("/tmp/ws/ALG_179..x"));
+    }
+
+    #[test]
+    fn issue_workspace_path_rejects_dot_components() {
+        assert!(issue_workspace_path(Path::new("/tmp/ws"), ".").is_err());
+        assert!(issue_workspace_path(Path::new("/tmp/ws"), "..").is_err());
+    }
 }

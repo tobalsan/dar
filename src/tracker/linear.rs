@@ -35,6 +35,7 @@ pub struct LinearTrackerConfig {
     pub project_slug: String,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
+    pub needs_human: Option<String>,
 }
 
 pub struct LinearTracker {
@@ -44,6 +45,7 @@ pub struct LinearTracker {
     project_slug: String,
     active: Vec<String>,
     terminal: Vec<String>,
+    needs_human: Option<String>,
     /// Minimum `x-ratelimit-requests-remaining` observed across all requests.
     min_remaining: Arc<AtomicI64>,
 }
@@ -65,6 +67,7 @@ impl LinearTracker {
             project_slug: cfg.project_slug,
             active: cfg.active_states,
             terminal: cfg.terminal_states,
+            needs_human: cfg.needs_human,
             min_remaining: Arc::new(AtomicI64::new(UNSET_MIN)),
         })
     }
@@ -328,6 +331,78 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
             Ok(raw.iter().map(raw_to_issue).collect())
         })
     }
+
+    fn park_issue_needs_human_inner(&self, issue: &Issue, comment: &str) -> Result<()> {
+        let needs_human = self
+            .needs_human
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("tracker.needs_human is not configured"))?;
+        self.run_async(self.do_park_issue_needs_human(issue, needs_human, comment))
+    }
+
+    async fn do_park_issue_needs_human(
+        &self,
+        issue: &Issue,
+        needs_human: &str,
+        comment: &str,
+    ) -> Result<()> {
+        let state_id = self
+            .fetch_issue_team_state_id(&issue.id, needs_human)
+            .await
+            .with_context(|| {
+                format!(
+                    "resolving Linear state {needs_human:?} for issue {}",
+                    issue.identifier
+                )
+            })?;
+
+        let mutation = r#"
+mutation AgentropyParkIssue($issueId: String!, $stateId: String!, $body: String!) {
+  issueUpdate(id: $issueId, input: { stateId: $stateId }) {
+    success
+  }
+  commentCreate(input: { issueId: $issueId, body: $body }) {
+    success
+  }
+}
+"#;
+        let vars = json!({
+            "issueId": issue.id,
+            "stateId": state_id,
+            "body": comment,
+        });
+        let body = json!({ "query": mutation, "variables": vars });
+        let response = self.send_with_rate_limit_async(body).await?;
+        ensure_success(&response, "/data/issueUpdate/success", "issueUpdate")?;
+        ensure_success(&response, "/data/commentCreate/success", "commentCreate")?;
+        Ok(())
+    }
+
+    async fn fetch_issue_team_state_id(&self, issue_id: &str, state_name: &str) -> Result<String> {
+        let query = r#"
+query AgentropyNeedsHumanState($issueId: String!, $stateName: String!) {
+  issue(id: $issueId) {
+    team {
+      states(filter: { name: { eq: $stateName } }, first: 1) {
+        nodes { id name }
+      }
+    }
+  }
+}
+"#;
+        let vars = json!({
+            "issueId": issue_id,
+            "stateName": state_name,
+        });
+        let body = json!({ "query": query, "variables": vars });
+        let response = self.send_with_rate_limit_async(body).await?;
+        response
+            .pointer("/data/issue/team/states/nodes/0/id")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| anyhow!("Linear state {state_name:?} not found on issue team"))
+    }
 }
 
 impl Tracker for LinearTracker {
@@ -356,6 +431,10 @@ impl Tracker for LinearTracker {
         Ok(all.into_iter().find(|i| i.id == id || i.identifier == id))
     }
 
+    fn park_issue_needs_human(&self, issue: &Issue, comment: &str) -> Result<()> {
+        self.park_issue_needs_human_inner(issue, comment)
+    }
+
     fn rate_limit_remaining(&self) -> Option<i64> {
         let v = self.min_remaining.load(Ordering::SeqCst);
         if v == UNSET_MIN {
@@ -378,6 +457,14 @@ fn parse_graphql_body(text: &str) -> Result<Value> {
         }
     }
     Ok(v)
+}
+
+fn ensure_success(response: &Value, pointer: &str, label: &str) -> Result<()> {
+    if response.pointer(pointer).and_then(Value::as_bool) == Some(true) {
+        Ok(())
+    } else {
+        bail!("Linear {label} mutation did not return success=true")
+    }
 }
 
 fn raw_to_issue(r: &RawIssue) -> Issue {

@@ -84,6 +84,7 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     tracker_cfg.terminal_states = effective_cfg.terminal_states.clone();
     tracker_cfg.project_slug = effective_cfg.tracker_project_slug.clone();
     tracker_cfg.endpoint = Some(effective_cfg.tracker_endpoint.clone());
+    tracker_cfg.needs_human = effective_cfg.needs_human.clone();
     let tracker = tracker::build(&tracker_cfg, &paths)?;
 
     let (control_tx, control_rx) = mpsc::unbounded_channel();
