@@ -9,6 +9,7 @@ mod config;
 mod dashboard;
 mod doctor;
 mod domain;
+mod export;
 mod hitl;
 mod logging;
 mod orchestrator;
@@ -56,9 +57,37 @@ async fn main_inner() -> Result<()> {
         }
         Command::InitWorkflow(args) => {
             let root = args.resolve_root()?;
-            cli::init_workflow(&root, args.force)
+            if args.linear_project_slug.is_none()
+                && args.linear_project.is_none()
+                && !args.expose_graphql_tool
+            {
+                cli::init_workflow(&root, args.force)
+            } else {
+                cli::init_workflow_with_options(
+                    &root,
+                    args.force,
+                    args.linear_project_slug.as_deref(),
+                    args.linear_project.as_deref(),
+                    args.expose_graphql_tool,
+                )
+            }
+        }
+        Command::Export(args) => {
+            let root = args.resolve_root()?;
+            export_command(root)
         }
     }
+}
+
+fn export_command(root: std::path::PathBuf) -> Result<()> {
+    let paths = AgentPaths::new(root);
+    let result = export::export_linear_project_from_paths(&paths)?;
+    println!(
+        "exported {} issues to {}",
+        result.issue_count,
+        result.dir.display()
+    );
+    Ok(())
 }
 
 /// The long-running `agentropy run` command. Wires up logging, config, tracker,
@@ -165,6 +194,7 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     let mut dash_task = tokio::spawn(async move {
         dashboard::serve(
             dash_state,
+            paths.clone(),
             dash_agent_cfg,
             dash_effective_cfg,
             bind,

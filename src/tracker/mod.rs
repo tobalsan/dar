@@ -2,7 +2,7 @@
 //! deliberately narrow write surface for safety/parking only.
 
 mod files;
-mod linear;
+pub mod linear;
 
 use std::sync::Arc;
 

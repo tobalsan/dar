@@ -159,13 +159,14 @@ pub struct WfServerConfig {
     pub port: Option<u16>,
 }
 
-/// Linear integration settings from WORKFLOW.md (parsed; active use is a future concern).
+/// Linear integration settings from WORKFLOW.md.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct WfLinearConfig {
     pub project: Option<String>,
     pub team: Option<String>,
     /// Enable the linear_graphql worker tool when the child runs.
+    #[serde(alias = "exposeGraphqlTool")]
     pub worker_tool: Option<bool>,
     /// HMAC-SHA256 secret used to verify Linear webhook requests.
     pub webhook_secret: Option<String>,
@@ -661,6 +662,12 @@ body"#;
             Some("my-project".into())
         );
         assert_eq!(snap.body, "body");
+    }
+
+    #[test]
+    fn parse_linear_expose_graphql_tool_alias() {
+        let snap = parse_workflow_md("---\nlinear:\n  exposeGraphqlTool: true\n---\nbody").unwrap();
+        assert_eq!(snap.frontmatter.linear.unwrap().worker_tool, Some(true));
     }
 
     // --- EffectiveLoopConfig::merge ---

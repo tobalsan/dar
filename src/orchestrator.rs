@@ -919,6 +919,7 @@ impl Orchestrator {
             issue_id: issue.identifier.clone(),
             run_id: run_id.clone(),
             max_run_timeout_ms: self.effective_cfg.max_run_timeout_ms,
+            expose_linear_graphql_tool: self.effective_cfg.linear.worker_tool.unwrap_or(false),
             events: Arc::clone(&self.state.events),
             store: Arc::clone(&self.state.store),
             last_event_at: Arc::clone(&last_event_at),
