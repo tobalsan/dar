@@ -21,6 +21,11 @@ minijinja = "2.5"        # runtime WORKFLOW.md prompt rendering, strict undefine
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"       # PRD-pinned (0.9.34, deprecated upstream but functional)
 serde_json = "1"
+# webhook signature verification
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2"
+hex = "0.4"
 # time
 chrono = { version = "0.4", features = ["serde"] }
 # cli
