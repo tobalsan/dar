@@ -431,6 +431,56 @@ mutation AgentropyParkIssue($issueId: String!, $stateId: String!, $body: String!
         Ok(())
     }
 
+    /// Fetch a single issue by UUID or identifier (e.g. "ALG-123") using the
+    /// targeted `issue(id:)` query instead of a full paginated project scan.
+    async fn fetch_one_issue_async(&self, id: &str) -> Result<Option<Issue>> {
+        let query = r#"
+query AgentropyFetchOne($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    title
+    description
+    url
+    priority
+    createdAt
+    updatedAt
+    state { name type }
+    labels { nodes { name } }
+    parent { id identifier }
+    blockedBy { nodes { id identifier } }
+    project { name slugId }
+  }
+}
+"#;
+        let vars = json!({ "id": id });
+        let body = json!({ "query": query, "variables": vars });
+        let response = self.send_with_rate_limit_async(body).await?;
+
+        // Linear returns `"issue": null` when not found — treat as Ok(None).
+        let node = match response.pointer("/data/issue") {
+            None | Some(Value::Null) => return Ok(None),
+            Some(n) => n.clone(),
+        };
+
+        // Extract project fields before consuming the node into RawIssue
+        // (they are #[serde(skip)] on RawIssue and must be injected manually).
+        let project_name = node
+            .pointer("/project/name")
+            .and_then(Value::as_str)
+            .map(String::from);
+        let project_slug = node
+            .pointer("/project/slugId")
+            .and_then(Value::as_str)
+            .map(String::from);
+
+        let mut raw: RawIssue = serde_json::from_value(node)
+            .context("parsing Linear issue node in fetch_one")?;
+        raw.project_name = project_name;
+        raw.project_slug = project_slug;
+        Ok(Some(raw_to_issue(&raw)))
+    }
+
     async fn fetch_issue_team_state_id(&self, issue_id: &str, state_name: &str) -> Result<String> {
         let query = r#"
 query AgentropyNeedsHumanState($issueId: String!, $stateName: String!) {
@@ -479,8 +529,7 @@ impl Tracker for LinearTracker {
     }
 
     fn fetch_one(&self, id: &str) -> Result<Option<Issue>> {
-        let all = self.fetch_all_inner()?;
-        Ok(all.into_iter().find(|i| i.id == id || i.identifier == id))
+        self.run_async(self.fetch_one_issue_async(id))
     }
 
     fn park_issue_needs_human(&self, issue: &Issue, comment: &str) -> Result<()> {
