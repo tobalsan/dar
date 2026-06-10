@@ -9,6 +9,7 @@ mod config;
 mod dashboard;
 mod doctor;
 mod domain;
+mod hitl;
 mod logging;
 mod orchestrator;
 mod paths;
@@ -20,12 +21,14 @@ mod tracker;
 mod workflow_config;
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use tokio::sync::{mpsc, watch};
 
 use cli::{Cli, Command};
+use hitl::{BurstHitlNotifier, HitlNotification, HitlNotify};
 use paths::AgentPaths;
 use state::{AgentInfo, AppState};
 use workflow_config::EffectiveLoopConfig;
@@ -72,9 +75,16 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     // Load agent definition (remains the fallback base for all loop config).
     let agent_cfg = config::load(&paths.root)?;
     agent_cfg.validate().context("invalid agent.yaml")?;
+    let hitl = BurstHitlNotifier::from_config(&agent_cfg.hitl.notifier)?;
 
     // Load WORKFLOW.md; parse frontmatter to derive effective loop config.
-    let prompt = prompt::PromptRenderer::load(&paths.workflow_md())?;
+    let prompt = match prompt::PromptRenderer::load(&paths.workflow_md()) {
+        Ok(prompt) => prompt,
+        Err(e) => {
+            notify_startup_error(&hitl, &format!("loading WORKFLOW.md failed: {e:#}"));
+            return Err(e);
+        }
+    };
     let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &prompt.snapshot().frontmatter);
 
     // Build tracker using effective config (WORKFLOW.md wins, falls back to agent.yaml).
@@ -85,14 +95,26 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     tracker_cfg.project_slug = effective_cfg.tracker_project_slug.clone();
     tracker_cfg.endpoint = Some(effective_cfg.tracker_endpoint.clone());
     tracker_cfg.needs_human = effective_cfg.needs_human.clone();
-    let tracker = tracker::build(&tracker_cfg, &paths)?;
+    let tracker = match tracker::build(&tracker_cfg, &paths) {
+        Ok(tracker) => tracker,
+        Err(e) => {
+            notify_startup_error(&hitl, &format!("building tracker failed: {e:#}"));
+            return Err(e);
+        }
+    };
 
     let (control_tx, control_rx) = mpsc::unbounded_channel();
 
     // Open SQLite store under <root>/data/store.db; mark any crashed runs from
     // a previous invocation, then seed the in-memory history ring from SQLite.
     let store = Arc::new(
-        store::Store::open(&paths.store_db()).context("opening SQLite persistence store")?,
+        match store::Store::open(&paths.store_db()).context("opening SQLite persistence store") {
+            Ok(store) => store,
+            Err(e) => {
+                notify_startup_error(&hitl, &format!("{e:#}"));
+                return Err(e);
+            }
+        },
     );
     match store.open_run_pids() {
         Ok(pids) => {
@@ -120,7 +142,7 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let orchestrator = orchestrator::Orchestrator::new(
+    let orchestrator = orchestrator::Orchestrator::with_hitl_notifier(
         agent_cfg.clone(),
         paths.clone(),
         Arc::clone(&tracker),
@@ -128,10 +150,11 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
         effective_cfg.clone(),
         app_state.clone(),
         control_rx,
+        Arc::clone(&hitl),
     );
 
     let orch_shutdown = shutdown_rx.clone();
-    let orch_task = tokio::spawn(async move { orchestrator.run(orch_shutdown).await });
+    let mut orch_task = tokio::spawn(async move { orchestrator.run(orch_shutdown).await });
 
     let bind = effective_cfg.dashboard_bind;
     let port = effective_cfg.dashboard_port;
@@ -139,7 +162,7 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     let dash_agent_cfg = agent_cfg.clone();
     let dash_effective_cfg = effective_cfg.clone();
     let dash_shutdown = shutdown_rx.clone();
-    let dash_task = tokio::spawn(async move {
+    let mut dash_task = tokio::spawn(async move {
         dashboard::serve(
             dash_state,
             dash_agent_cfg,
@@ -150,6 +173,24 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
         )
         .await
     });
+
+    tokio::select! {
+        result = &mut dash_task => {
+            let err = startup_task_error("dashboard", result);
+            notify_startup_error(&hitl, &format!("{err:#}"));
+            let _ = shutdown_tx.send(true);
+            let _ = orch_task.await;
+            return Err(err);
+        }
+        result = &mut orch_task => {
+            let err = startup_task_error("orchestrator", result);
+            notify_startup_error(&hitl, &format!("{err:#}"));
+            let _ = shutdown_tx.send(true);
+            let _ = dash_task.await;
+            return Err(err);
+        }
+        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+    }
 
     logging::ev(
         "-",
@@ -170,8 +211,25 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
 
     let _ = orch_task.await;
     let _ = dash_task.await;
+    hitl.stop();
 
     Ok(())
+}
+
+fn notify_startup_error(hitl: &Arc<dyn HitlNotify>, message: &str) {
+    hitl.notify(HitlNotification::new("startup-error", "-", message));
+    hitl.stop();
+}
+
+fn startup_task_error(
+    name: &str,
+    result: std::result::Result<Result<()>, tokio::task::JoinError>,
+) -> anyhow::Error {
+    match result {
+        Ok(Ok(())) => anyhow!("{name} exited during startup"),
+        Ok(Err(e)) => e.context(format!("{name} startup failed")),
+        Err(e) => anyhow!("{name} task failed during startup: {e}"),
+    }
 }
 
 /// Resolves when the process receives SIGINT (ctrl-c) or SIGTERM.

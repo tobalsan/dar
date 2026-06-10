@@ -34,6 +34,7 @@ use tokio::sync::watch;
 
 use crate::config::AgentConfig;
 use crate::domain::Issue;
+use crate::hitl::{HitlNotification, HitlNotify, NoopHitlNotifier};
 use crate::logging;
 use crate::paths::{issue_workspace, issue_workspace_path, resolve_workspace_root, AgentPaths};
 use crate::prompt::PromptRenderer;
@@ -89,6 +90,7 @@ pub struct Orchestrator {
     effective_cfg: EffectiveLoopConfig,
     state: AppState,
     control_rx: UnboundedReceiver<ControlMsg>,
+    hitl: Arc<dyn HitlNotify>,
 
     // In-memory run registry.
     slots: Vec<RunSlot>,
@@ -97,6 +99,7 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
+    #[allow(dead_code)]
     pub fn new(
         agent_cfg: AgentConfig,
         paths: AgentPaths,
@@ -106,6 +109,29 @@ impl Orchestrator {
         state: AppState,
         control_rx: UnboundedReceiver<ControlMsg>,
     ) -> Self {
+        Self::with_hitl_notifier(
+            agent_cfg,
+            paths,
+            tracker,
+            prompt,
+            effective_cfg,
+            state,
+            control_rx,
+            Arc::new(NoopHitlNotifier),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_hitl_notifier(
+        agent_cfg: AgentConfig,
+        paths: AgentPaths,
+        tracker: Arc<dyn crate::tracker::Tracker>,
+        prompt: PromptRenderer,
+        effective_cfg: EffectiveLoopConfig,
+        state: AppState,
+        control_rx: UnboundedReceiver<ControlMsg>,
+        hitl: Arc<dyn HitlNotify>,
+    ) -> Self {
         Self {
             agent_cfg,
             paths,
@@ -114,6 +140,7 @@ impl Orchestrator {
             effective_cfg,
             state,
             control_rx,
+            hitl,
             slots: Vec::new(),
             claims: HashSet::new(),
             retries: Vec::new(),
@@ -153,6 +180,7 @@ impl Orchestrator {
             "orchestrator stopping; killing active runs",
         );
         self.kill_all(KillReason::OperatorStop).await;
+        self.hitl.stop();
         Ok(())
     }
 
@@ -396,6 +424,11 @@ impl Orchestrator {
                 handle.request_kill(kill_reason);
             }
             if matches!(status, RunStatus::Stalled) {
+                self.hitl.notify(HitlNotification::new(
+                    "stall",
+                    slot.identifier.clone(),
+                    note,
+                ));
                 self.park_issue_for_safety(&slot.issue, note);
             }
             self.record_history(
@@ -1169,6 +1202,11 @@ impl Orchestrator {
         match self.tracker.park_issue_needs_human(issue, &comment) {
             Ok(()) => {
                 logging::ev(&issue.identifier, "parked", reason);
+                self.hitl.notify(HitlNotification::new(
+                    "park",
+                    issue.identifier.clone(),
+                    reason.to_string(),
+                ));
                 let _ = self.state.store.insert_event(&NewEvent {
                     run_id: None,
                     issue_identifier: &issue.identifier,
@@ -1611,7 +1649,7 @@ fn run_before_remove(
 mod tests {
     use super::*;
     use crate::config::{
-        AgentConfig, DashboardConfig, OrchestratorConfig, RunnerConfig, TrackerConfig,
+        AgentConfig, DashboardConfig, HitlConfig, OrchestratorConfig, RunnerConfig, TrackerConfig,
         TrackerInner, WorkspaceConfig,
     };
     use crate::paths::AgentPaths;
@@ -1775,6 +1813,7 @@ mod tests {
                 max_retries: 3,
                 retry_backoff_ms: 1000,
             },
+            hitl: HitlConfig::default(),
             workspace: WorkspaceConfig {
                 root: "workspaces".into(),
             },
@@ -2575,6 +2614,7 @@ mod tests {
                 max_retries: 1,
                 retry_backoff_ms: 10,
             },
+            hitl: HitlConfig::default(),
             workspace: WorkspaceConfig {
                 root: "workspaces".into(),
             },
