@@ -113,12 +113,87 @@ fn history_bucket(run: &crate::store::RunRow) -> (&'static str, &'static str) {
     }
     match run.outcome.as_deref().unwrap_or_default() {
         "completed" | "terminal" | "released" => ("Completed", "completed"),
-        "error" | "failed" | "stalled" | "hook_failed" | "dispatch_failed" | "needs_human" => {
-            ("Failed", "failed")
-        }
-        "interrupted" | "interrupted_gateway_restart" | "killed" | "orphaned" => {
-            ("Interrupted", "interrupted")
-        }
+        "error" | "failed" | "hook_failed" | "dispatch_failed" => ("Failed", "failed"),
+        "interrupted"
+        | "interrupted_gateway_restart"
+        | "killed"
+        | "orphaned"
+        | "stalled"
+        | "needs_human" => ("Interrupted", "interrupted"),
         _ => ("Other", "other"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::RunRow;
+
+    fn run_with_outcome(outcome: &str) -> RunRow {
+        RunRow {
+            run_id: "r1".to_string(),
+            issue_id: "i1".to_string(),
+            issue_identifier: "TST-1".to_string(),
+            workspace: "/tmp/w".to_string(),
+            profile_json: None,
+            workflow_path: None,
+            workflow_sha: None,
+            pid: 0,
+            worker_id: None,
+            started_at: "2024-01-01T00:00:00Z".to_string(),
+            finished_at: Some("2024-01-01T00:01:00Z".to_string()),
+            outcome: Some(outcome.to_string()),
+            exit_code: None,
+            process_alive: false,
+        }
+    }
+
+    #[test]
+    fn stalled_maps_to_interrupted() {
+        assert_eq!(history_bucket(&run_with_outcome("stalled")), ("Interrupted", "interrupted"));
+    }
+
+    #[test]
+    fn needs_human_maps_to_interrupted() {
+        assert_eq!(
+            history_bucket(&run_with_outcome("needs_human")),
+            ("Interrupted", "interrupted")
+        );
+    }
+
+    #[test]
+    fn error_maps_to_failed() {
+        assert_eq!(history_bucket(&run_with_outcome("error")), ("Failed", "failed"));
+    }
+
+    #[test]
+    fn hook_failed_maps_to_failed() {
+        assert_eq!(history_bucket(&run_with_outcome("hook_failed")), ("Failed", "failed"));
+    }
+
+    #[test]
+    fn completed_maps_to_completed() {
+        assert_eq!(history_bucket(&run_with_outcome("completed")), ("Completed", "completed"));
+    }
+
+    #[test]
+    fn terminal_maps_to_completed() {
+        assert_eq!(history_bucket(&run_with_outcome("terminal")), ("Completed", "completed"));
+    }
+
+    #[test]
+    fn interrupted_maps_to_interrupted() {
+        assert_eq!(
+            history_bucket(&run_with_outcome("interrupted")),
+            ("Interrupted", "interrupted")
+        );
+    }
+
+    #[test]
+    fn interrupted_gateway_restart_maps_to_interrupted() {
+        assert_eq!(
+            history_bucket(&run_with_outcome("interrupted_gateway_restart")),
+            ("Interrupted", "interrupted")
+        );
     }
 }
