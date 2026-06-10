@@ -785,6 +785,9 @@ impl Orchestrator {
             logging::ev(&issue.identifier, "claim_skip", "issue already claimed");
             return;
         }
+        // Generate run_id early so pre-spawn failures can persist a runs row.
+        let started_at = Utc::now();
+        let run_id = new_run_id(&issue.identifier, &started_at);
         let max_retries = self.effective_cfg.max_retries;
         let prompt = match self.prompt.render(&issue, attempt, max_retries) {
             Ok(p) => p,
@@ -792,15 +795,17 @@ impl Orchestrator {
                 let msg = format!("WORKFLOW.md render failed: {e:#}");
                 logging::ev(&issue.identifier, "render_error", &msg);
                 let _ = self.state.store.insert_event(&NewEvent {
-                    run_id: None,
+                    run_id: Some(&run_id),
                     issue_identifier: &issue.identifier,
                     kind: "lifecycle",
                     payload: &format!("render_error {msg}"),
-                    ts: Utc::now(),
+                    ts: started_at,
                 });
                 self.schedule_backoff_after_render_failure(
                     &issue,
                     attempt,
+                    &run_id,
+                    started_at,
                     &format!("render error: {e}"),
                 );
                 self.claims.remove(&issue.id);
@@ -813,13 +818,19 @@ impl Orchestrator {
             let msg = format!("creating workspace root {}: {e}", ws_root.display());
             logging::ev(&issue.identifier, "workspace_error", &msg);
             let _ = self.state.store.insert_event(&NewEvent {
-                run_id: None,
+                run_id: Some(&run_id),
                 issue_identifier: &issue.identifier,
                 kind: "lifecycle",
                 payload: &format!("workspace_error {msg}"),
-                ts: Utc::now(),
+                ts: started_at,
             });
-            self.schedule_backoff_after_render_failure(&issue, attempt, "workspace root error");
+            self.schedule_backoff_after_render_failure(
+                &issue,
+                attempt,
+                &run_id,
+                started_at,
+                "workspace root error",
+            );
             self.claims.remove(&issue.id);
             return;
         }
@@ -829,13 +840,19 @@ impl Orchestrator {
                 let msg = format!("{e:#}");
                 logging::ev(&issue.identifier, "workspace_error", &msg);
                 let _ = self.state.store.insert_event(&NewEvent {
-                    run_id: None,
+                    run_id: Some(&run_id),
                     issue_identifier: &issue.identifier,
                     kind: "lifecycle",
                     payload: &format!("workspace_error {msg}"),
-                    ts: Utc::now(),
+                    ts: started_at,
                 });
-                self.schedule_backoff_after_render_failure(&issue, attempt, "workspace error");
+                self.schedule_backoff_after_render_failure(
+                    &issue,
+                    attempt,
+                    &run_id,
+                    started_at,
+                    "workspace error",
+                );
                 self.claims.remove(&issue.id);
                 return;
             }
@@ -848,15 +865,17 @@ impl Orchestrator {
                 );
                 logging::ev(&issue.identifier, "workspace_error", &msg);
                 let _ = self.state.store.insert_event(&NewEvent {
-                    run_id: None,
+                    run_id: Some(&run_id),
                     issue_identifier: &issue.identifier,
                     kind: "lifecycle",
                     payload: &format!("workspace_error {msg}"),
-                    ts: Utc::now(),
+                    ts: started_at,
                 });
                 self.schedule_backoff_after_render_failure(
                     &issue,
                     attempt,
+                    &run_id,
+                    started_at,
                     "workspace reuse error",
                 );
                 self.claims.remove(&issue.id);
@@ -870,13 +889,19 @@ impl Orchestrator {
                 let msg = format!("{e:#}");
                 logging::ev(&issue.identifier, "workspace_error", &msg);
                 let _ = self.state.store.insert_event(&NewEvent {
-                    run_id: None,
+                    run_id: Some(&run_id),
                     issue_identifier: &issue.identifier,
                     kind: "lifecycle",
                     payload: &format!("workspace_error {msg}"),
-                    ts: Utc::now(),
+                    ts: started_at,
                 });
-                self.schedule_backoff_after_render_failure(&issue, attempt, "workspace error");
+                self.schedule_backoff_after_render_failure(
+                    &issue,
+                    attempt,
+                    &run_id,
+                    started_at,
+                    "workspace error",
+                );
                 self.claims.remove(&issue.id);
                 return;
             }
@@ -891,25 +916,47 @@ impl Orchestrator {
             }
         }
 
-        let started_at = Utc::now();
-        let run_id = new_run_id(&issue.identifier, &started_at);
-
         if let Err(e) = self.run_lifecycle_hook("before_run", &issue, &workspace) {
             let msg = format!("before_run failed: {e:#}");
+            let ended_at = Utc::now();
             logging::ev(&issue.identifier, "hook_failed", &msg);
+            // Persist a runs row so this failure is visible in dashboard history
+            // and counted by the park barrier.
+            if let Err(e) = self.state.store.insert_run(&NewRun {
+                run_id: &run_id,
+                issue_id: &issue.id,
+                issue_identifier: &issue.identifier,
+                workspace: &workspace.display().to_string(),
+                profile_json: None,
+                workflow_path: Some(&self.paths.workflow_md().display().to_string()),
+                workflow_sha: None,
+                pid: 0,
+                worker_id: Some("orchestrator"),
+                started_at,
+            }) {
+                tracing::warn!(issue = %issue.identifier, "insert_run (hook_failed) SQLite write failed: {e:#}");
+            }
+            let _ = self.state.store.finish_run(
+                &run_id,
+                &RunFinish {
+                    outcome: RunStatus::HookFailed,
+                    exit_code: None,
+                    finished_at: ended_at,
+                },
+            );
             self.state.history.push(HistoryEntry {
                 identifier: issue.identifier.clone(),
                 status: RunStatus::HookFailed,
                 pid: 0,
-                ended_at: Utc::now(),
+                ended_at,
                 note: msg.clone(),
             });
             let _ = self.state.store.insert_event(&NewEvent {
-                run_id: None,
+                run_id: Some(&run_id),
                 issue_identifier: &issue.identifier,
                 kind: "lifecycle",
-                payload: &format!("hook_failed {msg}"),
-                ts: Utc::now(),
+                payload: &format!("HookFailed {msg}"),
+                ts: ended_at,
             });
             self.cleanup_workspace_if_needed(&issue, &workspace, RunStatus::HookFailed);
             self.claims.remove(&issue.id);
@@ -1012,22 +1059,74 @@ impl Orchestrator {
                 let msg = format!("{e:#}");
                 logging::ev(&issue.identifier, "spawn_error", &msg);
                 let _ = self.state.store.insert_event(&NewEvent {
-                    run_id: None,
+                    run_id: Some(&run_id),
                     issue_identifier: &issue.identifier,
                     kind: "lifecycle",
                     payload: &format!("spawn_error {msg}"),
-                    ts: Utc::now(),
+                    ts: started_at,
                 });
-                self.schedule_backoff_after_render_failure(&issue, attempt, "spawn error");
+                self.schedule_backoff_after_render_failure(
+                    &issue,
+                    attempt,
+                    &run_id,
+                    started_at,
+                    "spawn error",
+                );
                 self.claims.remove(&issue.id);
             }
         }
     }
 
-    /// A pre-spawn failure (render/workspace/spawn) is an abnormal attempt:
-    /// schedule a backoff retry up to max_retries, else log Failed.
-    fn schedule_backoff_after_render_failure(&mut self, issue: &Issue, attempt: u32, err: &str) {
+    /// A pre-spawn failure (render/workspace/spawn) is an abnormal attempt.
+    /// Persists a runs row so the failure is visible in dashboard history and
+    /// counted by the park barrier, then schedules a backoff retry up to
+    /// max_retries (or logs Failed + parks the issue when retries are exhausted).
+    fn schedule_backoff_after_render_failure(
+        &mut self,
+        issue: &Issue,
+        attempt: u32,
+        run_id: &str,
+        started_at: DateTime<Utc>,
+        err: &str,
+    ) {
+        let ended_at = Utc::now();
         let max = self.effective_cfg.max_retries;
+        let outcome = if attempt >= max {
+            RunStatus::Failed
+        } else {
+            RunStatus::DispatchFailed
+        };
+        // Insert the run row so this attempt is visible in history and
+        // counted by consecutive_completed_runs (park barrier).
+        if let Err(e) = self.state.store.insert_run(&NewRun {
+            run_id,
+            issue_id: &issue.id,
+            issue_identifier: &issue.identifier,
+            workspace: "",
+            profile_json: None,
+            workflow_path: Some(&self.paths.workflow_md().display().to_string()),
+            workflow_sha: None,
+            pid: 0,
+            worker_id: Some("orchestrator"),
+            started_at,
+        }) {
+            tracing::warn!(issue = %issue.identifier, "insert_run (dispatch_failed) SQLite write failed: {e:#}");
+        }
+        let _ = self.state.store.finish_run(
+            run_id,
+            &RunFinish {
+                outcome,
+                exit_code: None,
+                finished_at: ended_at,
+            },
+        );
+        self.state.history.push(HistoryEntry {
+            identifier: issue.identifier.clone(),
+            status: outcome,
+            pid: 0,
+            ended_at,
+            note: err.to_string(),
+        });
         if attempt >= max {
             logging::ev(
                 &issue.identifier,
@@ -2864,5 +2963,68 @@ mod tests {
             2,
             "poll_candidates must be called exactly once per tick (second tick)"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // render failure inserts a runs row
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn render_failure_inserts_runs_row_with_dispatch_failed_outcome() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("logs")).unwrap();
+        // Template with undefined variable — minijinja strict mode will fail.
+        std::fs::write(
+            temp.path().join("WORKFLOW.md"),
+            "Do {{ issue.undefined_field_xyz }}",
+        )
+        .unwrap();
+
+        let active_issue = issue("ISSUE-1", None, None);
+        let parks = Arc::new(Mutex::new(Vec::new()));
+        let tracker = Arc::new(CandidateTracker {
+            issue: active_issue.clone(),
+            parks: Arc::clone(&parks),
+            park_ok: true,
+        });
+        let agent_cfg = test_agent_config();
+        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let (state, control_rx) = test_state(Arc::clone(&store));
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state.clone(),
+            control_rx,
+        );
+
+        orchestrator.try_dispatch(active_issue.clone(), 0).await;
+
+        // A runs row must exist even though the child was never spawned.
+        let runs = store.list_runs_paged(0, 10).unwrap();
+        assert_eq!(runs.len(), 1, "exactly one runs row must be inserted");
+        assert_eq!(
+            runs[0].outcome.as_deref(),
+            Some("dispatch_failed"),
+            "outcome must be dispatch_failed"
+        );
+        assert!(
+            runs[0].finished_at.is_some(),
+            "finished_at must be set on the failed row"
+        );
+
+        // History ring must also record the failure.
+        let history = state.history.snapshot();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, RunStatus::DispatchFailed);
+
+        // A retry must be queued (attempt < max_retries).
+        assert_eq!(orchestrator.retries.len(), 1);
+        assert_eq!(orchestrator.retries[0].identifier, "ISSUE-1");
     }
 }
