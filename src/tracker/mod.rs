@@ -1,6 +1,5 @@
-//! Read-only tracker abstraction. The trait locks the read verb set (no write
-//! surface in v0: the orchestrator never writes issue state). A factory selects
-//! the implementation (`FileTracker` or `LinearTracker`) based on config.
+//! Tracker abstraction. The orchestrator reads issue state normally, and has a
+//! deliberately narrow write surface for safety/parking only.
 
 mod files;
 mod linear;
@@ -31,6 +30,12 @@ pub trait Tracker: Send + Sync {
     fn fetch_terminal(&self) -> Result<Vec<Issue>>;
     /// One issue by id or identifier; `None` if not found.
     fn fetch_one(&self, id: &str) -> Result<Option<Issue>>;
+    /// Safety/parking write: move the issue to the configured needs-human state
+    /// and add a comment explaining why the orchestrator parked it.
+    fn park_issue_needs_human(&self, issue: &Issue, comment: &str) -> Result<()> {
+        let _ = (issue, comment);
+        bail!("tracker does not support needs-human safety writes")
+    }
     /// Minimum rate-limit requests remaining seen since startup.
     /// Returns `None` when rate-limit tracking is not applicable (e.g. FileTracker).
     fn rate_limit_remaining(&self) -> Option<i64> {
@@ -76,6 +81,7 @@ pub fn build(cfg: &TrackerConfig, paths: &AgentPaths) -> Result<Arc<dyn Tracker>
                 project_slug,
                 active_states: cfg.active_states.clone(),
                 terminal_states: cfg.terminal_states.clone(),
+                needs_human: cfg.needs_human.clone(),
             })?;
             Ok(Arc::new(tracker))
         }
