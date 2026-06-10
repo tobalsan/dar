@@ -1462,22 +1462,32 @@ impl Orchestrator {
     /// Write the active-run, queue, and retry snapshots to `AppState` for the
     /// dashboard.
     async fn publish_snapshots(&self) {
-        // Active run (v0 max_concurrent typically 1; surface the first slot).
-        let active = self.slots.first().map(|slot| {
-            let last_event = self.last_event_line(&slot.identifier).unwrap_or_default();
-            ActiveRun {
-                identifier: slot.identifier.clone(),
-                state: slot.issue.state.clone(),
-                workspace: slot.workspace.clone(),
-                pid: slot.handle.as_ref().map(|h| h.pid()).unwrap_or(0),
-                started_at: slot.started_at,
-                last_event,
-                status: RunStatus::Running,
-            }
-        });
+        let active_runs: Vec<ActiveRun> = self
+            .slots
+            .iter()
+            .map(|slot| {
+                let last_event = self.last_event_line(&slot.identifier).unwrap_or_default();
+                ActiveRun {
+                    run_id: slot.run_id.clone(),
+                    identifier: slot.identifier.clone(),
+                    state: slot.issue.state.clone(),
+                    workspace: slot.workspace.clone(),
+                    pid: slot.handle.as_ref().map(|h| h.pid()).unwrap_or(0),
+                    started_at: slot.started_at,
+                    last_event,
+                    status: RunStatus::Running,
+                }
+            })
+            .collect();
+        // Legacy single-active field retained for callers that only display one.
+        let active = active_runs.first().cloned();
         {
             let mut guard = self.state.active.write().await;
             *guard = active;
+        }
+        {
+            let mut guard = self.state.active_runs.write().await;
+            *guard = active_runs;
         }
 
         let busy: HashSet<String> = self.slots.iter().map(|s| s.identifier.clone()).collect();
@@ -1528,6 +1538,10 @@ impl Orchestrator {
             self.state
                 .rate_limit_min_remaining
                 .fetch_min(remaining, std::sync::atomic::Ordering::SeqCst);
+        }
+        {
+            let mut guard = self.state.last_tick_at.write().await;
+            *guard = Some(Utc::now());
         }
     }
 

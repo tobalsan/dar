@@ -43,6 +43,7 @@ pub enum RunStatus {
 /// Snapshot of the currently-active run for the dashboard.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ActiveRun {
+    pub run_id: String,
     pub identifier: String,
     pub state: String,
     pub workspace: String,
@@ -121,6 +122,7 @@ impl HistoryRing {
     }
 
     /// Newest-to-oldest copy of the current ring contents.
+    #[cfg(test)]
     pub fn snapshot(&self) -> Vec<HistoryEntry> {
         let q = self.inner.lock().unwrap();
         q.iter().cloned().collect()
@@ -235,6 +237,7 @@ pub struct AppState {
     pub agent: AgentInfo,
     pub paused: Arc<AtomicBool>,
     pub active: Arc<RwLock<Option<ActiveRun>>>,
+    pub active_runs: Arc<RwLock<Vec<ActiveRun>>>,
     pub queue: Arc<RwLock<Vec<QueueItem>>>,
     pub retry: Arc<RwLock<Vec<RetryItem>>>,
     pub events: Arc<EventRing>,
@@ -246,6 +249,8 @@ pub struct AppState {
     /// Minimum Linear rate-limit requests remaining observed since startup.
     /// `i64::MAX` = no observation yet (tracker doesn't emit rate-limit info).
     pub rate_limit_min_remaining: Arc<AtomicI64>,
+    /// Last completed orchestrator dashboard snapshot tick.
+    pub last_tick_at: Arc<RwLock<Option<DateTime<Utc>>>>,
 }
 
 impl AppState {
@@ -261,6 +266,7 @@ impl AppState {
             agent,
             paused: Arc::new(AtomicBool::new(false)),
             active: Arc::new(RwLock::new(None)),
+            active_runs: Arc::new(RwLock::new(Vec::new())),
             queue: Arc::new(RwLock::new(Vec::new())),
             retry: Arc::new(RwLock::new(Vec::new())),
             events: Arc::new(EventRing::new()),
@@ -268,6 +274,7 @@ impl AppState {
             store,
             control_tx,
             rate_limit_min_remaining: Arc::new(AtomicI64::new(i64::MAX)),
+            last_tick_at: Arc::new(RwLock::new(None)),
         }
     }
 }

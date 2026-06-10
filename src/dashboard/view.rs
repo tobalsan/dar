@@ -4,10 +4,10 @@
 //! template (`templates/index.html`) renders all five PRD sections.
 
 use askama::Template;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::sync::atomic::Ordering;
 
-use crate::state::{ActiveRun, AgentInfo, AppState, QueueItem, RetryItem, RunStatus};
+use crate::state::{ActiveRun, AgentInfo, AppState};
 
 /// One pre-formatted history row for the template.
 pub struct HistoryRow {
@@ -15,6 +15,7 @@ pub struct HistoryRow {
     pub status_class: String,
     pub identifier: String,
     pub run: String,
+    pub run_id: String,
     pub age: String,
 }
 
@@ -23,75 +24,48 @@ pub struct HistoryRow {
 #[template(path = "index.html")]
 pub struct DashboardTemplate {
     pub agent: AgentInfo,
-    pub paused: bool,
-    pub active: Option<ActiveRun>,
-    /// `active.status` pre-formatted (`RunStatus` lacks `Display`).
-    pub active_status: String,
-    pub elapsed_secs: i64,
-    pub queue: Vec<QueueItem>,
-    pub retry: Vec<RetryItem>,
-    pub events: Vec<String>,
+    pub active_runs: Vec<ActiveRun>,
     pub history: Vec<HistoryRow>,
     /// Minimum Linear rate-limit requests remaining observed since startup.
     /// `None` when no Linear API calls have been made (e.g. FileTracker).
     pub rate_limit_min_remaining: Option<i64>,
+    pub active_count: usize,
+    pub recent_count: usize,
+    pub last_tick: String,
 }
 
 impl DashboardTemplate {
     /// Snapshot the shared state into an owned, render-ready template.
     pub async fn from_state(s: &AppState) -> Self {
-        let paused = s.paused.load(std::sync::atomic::Ordering::SeqCst);
+        let active_runs = s.active_runs.read().await.clone();
+        let last_tick = s
+            .last_tick_at
+            .read()
+            .await
+            .map(|ts| ts.to_rfc3339())
+            .unwrap_or_else(|| "never".to_string());
 
-        let active = s.active.read().await.clone();
-        let queue = s.queue.read().await.clone();
-        let retry = s.retry.read().await.clone();
-        let events = s.events.snapshot();
-
-        // Elapsed since the active run started, computed at render time.
-        let elapsed_secs = active
-            .as_ref()
-            .map(|a| (Utc::now() - a.started_at).num_seconds().max(0))
-            .unwrap_or(0);
-
-        // RunStatus has no Display impl; render its Debug form for the template.
-        let active_status = active
-            .as_ref()
-            .map(|a| format!("{:?}", a.status))
-            .unwrap_or_default();
-
-        let now = Utc::now();
         let history: Vec<HistoryRow> = s
-            .history
-            .snapshot()
+            .store
+            .list_runs(50)
+            .unwrap_or_default()
             .into_iter()
-            .map(|h| {
-                let (label, class) = match h.status {
-                    RunStatus::Succeeded => ("Completed", "completed"),
-                    RunStatus::Failed => ("Failed", "failed"),
-                    RunStatus::Cancelled => ("Interrupted", "interrupted"),
-                    RunStatus::Interrupted => ("Interrupted", "interrupted"),
-                    RunStatus::RetryQueued => ("Retrying", "retrying"),
-                    RunStatus::Running => ("Running", "running"),
-                    RunStatus::Crashed => ("Crashed", "failed"),
-                    RunStatus::NeedsHuman => ("Needs Human", "needs-human"),
-                    RunStatus::Stalled => ("Stalled", "failed"),
-                    RunStatus::Terminal => ("Terminal", "completed"),
-                    RunStatus::HookFailed => ("Hook Failed", "failed"),
-                    RunStatus::DispatchFailed => ("Dispatch Failed", "failed"),
-                    RunStatus::Released => ("Released", "completed"),
-                    RunStatus::Orphaned => ("Orphaned", "interrupted"),
-                    RunStatus::ParkBarrier => ("Parked", "interrupted"),
-                    RunStatus::Killed => ("Killed", "interrupted"),
-                };
+            .filter(|run| run.outcome.as_deref() != Some("park_barrier"))
+            .map(|run| {
+                let (label, class) = history_bucket(&run);
                 HistoryRow {
                     status: label.to_string(),
                     status_class: class.to_string(),
-                    identifier: h.identifier,
-                    run: format!("claude:{}", h.pid),
-                    age: fmt_age((now - h.ended_at).num_seconds().max(0)),
+                    identifier: run.issue_identifier,
+                    run: run.run_id.clone(),
+                    run_id: run.run_id,
+                    age: fmt_run_age(run.finished_at.as_deref().unwrap_or(&run.started_at)),
                 }
             })
             .collect();
+
+        let recent_count = history.len();
+        let active_count = active_runs.len();
 
         let rate_limit_min_remaining = {
             let v = s.rate_limit_min_remaining.load(Ordering::SeqCst);
@@ -104,15 +78,12 @@ impl DashboardTemplate {
 
         Self {
             agent: s.agent.clone(),
-            paused,
-            active,
-            active_status,
-            elapsed_secs,
-            queue,
-            retry,
-            events,
+            active_runs,
             history,
             rate_limit_min_remaining,
+            active_count,
+            recent_count,
+            last_tick,
         }
     }
 }
@@ -127,5 +98,27 @@ fn fmt_age(secs: i64) -> String {
         format!("{}h", secs / 3600)
     } else {
         format!("{}d", secs / 86_400)
+    }
+}
+
+fn fmt_run_age(ts: &str) -> String {
+    DateTime::parse_from_rfc3339(ts)
+        .map(|dt| fmt_age((Utc::now() - dt.with_timezone(&Utc)).num_seconds().max(0)))
+        .unwrap_or_else(|_| "-".to_string())
+}
+
+fn history_bucket(run: &crate::store::RunRow) -> (&'static str, &'static str) {
+    if run.process_alive || run.finished_at.is_none() || run.outcome.is_none() {
+        return ("Live", "live");
+    }
+    match run.outcome.as_deref().unwrap_or_default() {
+        "completed" | "terminal" | "released" => ("Completed", "completed"),
+        "error" | "failed" | "stalled" | "hook_failed" | "dispatch_failed" | "needs_human" => {
+            ("Failed", "failed")
+        }
+        "interrupted" | "interrupted_gateway_restart" | "killed" | "orphaned" => {
+            ("Interrupted", "interrupted")
+        }
+        _ => ("Other", "other"),
     }
 }

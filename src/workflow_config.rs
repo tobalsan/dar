@@ -28,7 +28,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::AgentConfig;
 
@@ -39,7 +39,7 @@ const DEFAULT_NEEDS_HUMAN_STATE: &str = "Needs Human";
 // ---------------------------------------------------------------------------
 
 /// All sections of the WORKFLOW.md YAML frontmatter.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct WorkflowFrontmatter {
     pub tracker: Option<WfTrackerConfig>,
@@ -55,7 +55,7 @@ pub struct WorkflowFrontmatter {
 /// Flat fields (`active_states`, `terminal_states`, `needs_human`) take
 /// precedence over the legacy nested form (`states.active` / `states.terminal`
 /// / `states.needs_human`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WfTrackerConfig {
     // --- Flat form (preferred) ---
     pub active_states: Option<Vec<String>>,
@@ -73,7 +73,7 @@ pub struct WfTrackerConfig {
 }
 
 /// Legacy `tracker.states.*` nesting.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WfTrackerStates {
     pub active: Option<Vec<String>>,
     pub terminal: Option<Vec<String>>,
@@ -81,7 +81,7 @@ pub struct WfTrackerStates {
 }
 
 /// Polling / scheduling overrides from WORKFLOW.md.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct WfPollingConfig {
     pub interval_ms: Option<u64>,
@@ -97,7 +97,7 @@ pub struct WfPollingConfig {
 }
 
 /// Workspace-root override from WORKFLOW.md.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WfWorkspaceConfig {
     pub root: Option<PathBuf>,
     pub reuse: Option<bool>,
@@ -109,7 +109,7 @@ pub struct WfWorkspaceConfig {
 /// `runner`/`kind` are the canonical runner-kind overrides; `sdk` is accepted
 /// for compatibility with agent.yaml-era configs.
 /// Falls back to agent.yaml `runner.use` / `runner.command`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WfAgentConfig {
     /// Runner kind override (canonical). Equivalent to agent.yaml `runner.use`.
     pub sdk: Option<String>,
@@ -137,7 +137,7 @@ impl WfAgentConfig {
 }
 
 /// Lifecycle hook scripts from WORKFLOW.md.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct WfHooksConfig {
     pub after_create: Option<String>,
@@ -152,14 +152,14 @@ pub struct WfHooksConfig {
 }
 
 /// Dashboard / HTTP server overrides from WORKFLOW.md.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WfServerConfig {
     pub bind: Option<IpAddr>,
     pub port: Option<u16>,
 }
 
 /// Linear integration settings from WORKFLOW.md (parsed; active use is a future concern).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct WfLinearConfig {
     pub project: Option<String>,
