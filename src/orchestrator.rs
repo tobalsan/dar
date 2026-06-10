@@ -26,7 +26,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::watch;
@@ -34,7 +34,7 @@ use tokio::sync::watch;
 use crate::config::AgentConfig;
 use crate::domain::Issue;
 use crate::logging;
-use crate::paths::{issue_workspace, AgentPaths};
+use crate::paths::{issue_workspace, issue_workspace_path, resolve_workspace_root, AgentPaths};
 use crate::prompt::PromptRenderer;
 use crate::runner::{self, ExitKind, KillReason, RunnerHandle, SpawnParams};
 use crate::state::{
@@ -43,6 +43,8 @@ use crate::state::{
 use crate::store::{new_run_id, NewClaim, NewEvent, NewHeartbeat, NewRun, RunFinish};
 use crate::tracker;
 use crate::workflow_config::EffectiveLoopConfig;
+use std::path::Path;
+use std::process::Command;
 use std::sync::Mutex;
 
 /// Max backoff cap for abnormal-exit retries (5 minutes).
@@ -398,6 +400,8 @@ impl Orchestrator {
                 &slot.run_id,
                 &slot.identifier,
                 &slot.issue.id,
+                &slot.issue,
+                Path::new(&slot.workspace),
                 status,
                 pid,
                 note,
@@ -448,7 +452,9 @@ impl Orchestrator {
                                 &run_id,
                                 &id,
                                 &slot.issue.id,
-                                RunStatus::Succeeded,
+                                &slot.issue,
+                                Path::new(&slot.workspace),
+                                RunStatus::Terminal,
                                 pid,
                                 "terminal after normal exit",
                                 Some(0),
@@ -465,6 +471,8 @@ impl Orchestrator {
                                 &run_id,
                                 &id,
                                 &slot.issue.id,
+                                &slot.issue,
+                                Path::new(&slot.workspace),
                                 RunStatus::NeedsHuman,
                                 pid,
                                 "needs-human after normal exit",
@@ -506,6 +514,8 @@ impl Orchestrator {
                                 &run_id,
                                 &id,
                                 &slot.issue.id,
+                                &slot.issue,
+                                Path::new(&slot.workspace),
                                 RunStatus::Succeeded,
                                 pid,
                                 "non-active after normal exit",
@@ -521,6 +531,8 @@ impl Orchestrator {
                         &run_id,
                         &id,
                         &slot.issue.id,
+                        &slot.issue,
+                        Path::new(&slot.workspace),
                         RunStatus::Interrupted,
                         pid,
                         reason,
@@ -543,6 +555,8 @@ impl Orchestrator {
                             &run_id,
                             &id,
                             &slot.issue.id,
+                            &slot.issue,
+                            Path::new(&slot.workspace),
                             RunStatus::NeedsHuman,
                             pid,
                             "needs-human after abnormal exit",
@@ -562,6 +576,8 @@ impl Orchestrator {
                             &run_id,
                             &id,
                             &slot.issue.id,
+                            &slot.issue,
+                            Path::new(&slot.workspace),
                             RunStatus::Failed,
                             pid,
                             "abnormal exit; retries exhausted",
@@ -742,7 +758,7 @@ impl Orchestrator {
             }
         };
 
-        let ws_root = self.paths.root.join(&self.effective_cfg.workspace_root);
+        let ws_root = resolve_workspace_root(&self.paths.root, &self.effective_cfg.workspace_root);
         if let Err(e) = std::fs::create_dir_all(&ws_root) {
             let msg = format!("creating workspace root {}: {e}", ws_root.display());
             logging::ev(&issue.identifier, "workspace_error", &msg);
@@ -757,6 +773,47 @@ impl Orchestrator {
             self.claims.remove(&issue.id);
             return;
         }
+        let workspace_path = match issue_workspace_path(&ws_root, &issue.identifier) {
+            Ok(w) => w,
+            Err(e) => {
+                let msg = format!("{e:#}");
+                logging::ev(&issue.identifier, "workspace_error", &msg);
+                let _ = self.state.store.insert_event(&NewEvent {
+                    run_id: None,
+                    issue_identifier: &issue.identifier,
+                    kind: "lifecycle",
+                    payload: &format!("workspace_error {msg}"),
+                    ts: Utc::now(),
+                });
+                self.schedule_backoff_after_render_failure(&issue, attempt, "workspace error");
+                self.claims.remove(&issue.id);
+                return;
+            }
+        };
+        if !self.effective_cfg.workspace_reuse && workspace_path.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&workspace_path) {
+                let msg = format!(
+                    "removing existing workspace {}: {e}",
+                    workspace_path.display()
+                );
+                logging::ev(&issue.identifier, "workspace_error", &msg);
+                let _ = self.state.store.insert_event(&NewEvent {
+                    run_id: None,
+                    issue_identifier: &issue.identifier,
+                    kind: "lifecycle",
+                    payload: &format!("workspace_error {msg}"),
+                    ts: Utc::now(),
+                });
+                self.schedule_backoff_after_render_failure(
+                    &issue,
+                    attempt,
+                    "workspace reuse error",
+                );
+                self.claims.remove(&issue.id);
+                return;
+            }
+        }
+        let existed = workspace_path.exists();
         let workspace = match issue_workspace(&ws_root, &issue.identifier) {
             Ok(w) => w,
             Err(e) => {
@@ -774,9 +831,40 @@ impl Orchestrator {
                 return;
             }
         };
+        if !existed {
+            if let Err(e) = self.run_lifecycle_hook("after_create", &issue, &workspace) {
+                logging::ev(
+                    &issue.identifier,
+                    "hook_error",
+                    &format!("after_create failed: {e:#}"),
+                );
+            }
+        }
 
         let started_at = Utc::now();
         let run_id = new_run_id(&issue.identifier, &started_at);
+
+        if let Err(e) = self.run_lifecycle_hook("before_run", &issue, &workspace) {
+            let msg = format!("before_run failed: {e:#}");
+            logging::ev(&issue.identifier, "hook_failed", &msg);
+            self.state.history.push(HistoryEntry {
+                identifier: issue.identifier.clone(),
+                status: RunStatus::HookFailed,
+                pid: 0,
+                ended_at: Utc::now(),
+                note: msg.clone(),
+            });
+            let _ = self.state.store.insert_event(&NewEvent {
+                run_id: None,
+                issue_identifier: &issue.identifier,
+                kind: "lifecycle",
+                payload: &format!("hook_failed {msg}"),
+                ts: Utc::now(),
+            });
+            self.cleanup_workspace_if_needed(&issue, &workspace, RunStatus::HookFailed);
+            self.claims.remove(&issue.id);
+            return;
+        }
 
         let last_event_at = Arc::new(Mutex::new(started_at));
         let params = SpawnParams {
@@ -839,6 +927,11 @@ impl Orchestrator {
                                 exit_code: None,
                                 finished_at: Utc::now(),
                             },
+                        );
+                        self.cleanup_workspace_if_needed(
+                            &issue,
+                            &workspace,
+                            RunStatus::DispatchFailed,
                         );
                         self.claims.remove(&issue.id);
                         return;
@@ -944,6 +1037,8 @@ impl Orchestrator {
         run_id: &str,
         identifier: &str,
         issue_id: &str,
+        issue: &Issue,
+        workspace: &Path,
         status: RunStatus,
         pid: u32,
         note: &str,
@@ -951,6 +1046,13 @@ impl Orchestrator {
         claim_id: Option<i64>,
     ) {
         let ended_at = Utc::now();
+        if let Err(e) = self.run_lifecycle_hook("after_run", issue, workspace) {
+            logging::ev(
+                identifier,
+                "hook_error",
+                &format!("after_run failed: {e:#}"),
+            );
+        }
         self.state.history.push(HistoryEntry {
             identifier: identifier.to_string(),
             status,
@@ -981,6 +1083,74 @@ impl Orchestrator {
             payload: &format!("{:?} {note}", status),
             ts: ended_at,
         });
+        self.cleanup_workspace_if_needed(issue, workspace, status);
+    }
+
+    fn run_lifecycle_hook(
+        &self,
+        name: &str,
+        issue: &Issue,
+        workspace: &Path,
+    ) -> anyhow::Result<()> {
+        let script = match name {
+            "after_create" => self.effective_cfg.hooks.after_create.as_deref(),
+            "before_run" => self.effective_cfg.hooks.before_run.as_deref(),
+            "after_run" => self.effective_cfg.hooks.after_run.as_deref(),
+            "before_remove" => self.effective_cfg.hooks.before_remove.as_deref(),
+            _ => None,
+        };
+        let Some(script) = script.filter(|s| !s.trim().is_empty()) else {
+            return Ok(());
+        };
+        let project_id = issue
+            .project_slug
+            .as_deref()
+            .or(self.effective_cfg.tracker_project_slug.as_deref())
+            .unwrap_or(&self.agent_cfg.id);
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .current_dir(workspace)
+            .env("AIHUB_PROJECT_ID", project_id)
+            .env("AIHUB_ISSUE_ID", &issue.id)
+            .env("AIHUB_ISSUE_IDENTIFIER", &issue.identifier)
+            .env("AIHUB_WORKSPACE", workspace)
+            .env_remove("LINEAR_API_KEY")
+            .status()
+            .with_context(|| format!("running {name} hook"))?;
+        if !status.success() {
+            anyhow::bail!("{name} hook exited with {status}");
+        }
+        Ok(())
+    }
+
+    fn cleanup_workspace_if_needed(&self, issue: &Issue, workspace: &Path, outcome: RunStatus) {
+        if !self.effective_cfg.cleanup_on_terminal {
+            return;
+        }
+        if !matches!(
+            outcome,
+            RunStatus::Terminal | RunStatus::HookFailed | RunStatus::DispatchFailed
+        ) {
+            return;
+        }
+        if let Err(e) = self.run_lifecycle_hook("before_remove", issue, workspace) {
+            logging::ev(
+                &issue.identifier,
+                "hook_error",
+                &format!("before_remove failed: {e:#}"),
+            );
+            return;
+        }
+        if let Err(e) = std::fs::remove_dir_all(workspace) {
+            if workspace.exists() {
+                logging::ev(
+                    &issue.identifier,
+                    "workspace_cleanup_error",
+                    &format!("removing {}: {e}", workspace.display()),
+                );
+            }
+        }
     }
 
     /// Request-kill every running child for the given reason.
