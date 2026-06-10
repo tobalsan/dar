@@ -11,13 +11,14 @@ tracker:
 runner:
   use: claude-code
   command: claude
-  max_run_timeout_ms: 1800000
+  max_run_timeout_ms: 3600000
+  stall_timeout_ms: 300000
 
 orchestrator:
   poll_interval_ms: 10000
   max_concurrent: 1
   max_retries: 3
-  retry_backoff_ms: 10000
+  retry_backoff_ms: 30000
 
 workspace:
   root: ./workspaces

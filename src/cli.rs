@@ -209,10 +209,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("WORKFLOW.md"), "existing content").unwrap();
         let err = init_workflow(dir.path(), false).unwrap_err();
-        assert!(
-            err.to_string().contains("already exists"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("already exists"), "got: {err}");
         // Original file must be untouched.
         let contents = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
         assert_eq!(contents, "existing content");
