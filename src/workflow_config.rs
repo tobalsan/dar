@@ -32,6 +32,8 @@ use serde::Deserialize;
 
 use crate::config::AgentConfig;
 
+const DEFAULT_NEEDS_HUMAN_STATE: &str = "Needs Human";
+
 // ---------------------------------------------------------------------------
 // Frontmatter structs
 // ---------------------------------------------------------------------------
@@ -119,6 +121,7 @@ pub struct WfAgentConfig {
     /// Per-attempt timeout override (ms).
     pub max_run_timeout_ms: Option<u64>,
     pub turn_timeout_ms: Option<u64>,
+    pub max_active_runs: Option<u32>,
 }
 
 impl WfAgentConfig {
@@ -248,6 +251,7 @@ pub struct EffectiveLoopConfig {
     pub poll_interval_ms: u64,
     pub poll_jitter_ms: u64,
     pub max_concurrent: usize,
+    pub max_active_runs: u32,
     pub max_retries: u32,
     pub retry_backoff_ms: u64,
     /// Whether a WORKFLOW.md parse error on live-reload keeps the stale snapshot.
@@ -304,6 +308,11 @@ impl EffectiveLoopConfig {
         let max_concurrent = p
             .and_then(|p| p.max_concurrent)
             .unwrap_or(base.orchestrator.max_concurrent);
+        let max_active_runs = wf
+            .agent
+            .as_ref()
+            .and_then(|a| a.max_active_runs)
+            .unwrap_or(base.orchestrator.max_active_runs);
         let max_retries = p
             .and_then(|p| p.max_retries)
             .unwrap_or(base.orchestrator.max_retries);
@@ -369,6 +378,7 @@ impl EffectiveLoopConfig {
             poll_interval_ms,
             poll_jitter_ms,
             max_concurrent,
+            max_active_runs,
             max_retries,
             retry_backoff_ms,
             allow_stale,
@@ -415,7 +425,10 @@ fn resolve_tracker(
         None => (
             base.tracker.active_states.clone(),
             base.tracker.terminal_states.clone(),
-            None,
+            base.tracker
+                .needs_human
+                .clone()
+                .or_else(|| Some(DEFAULT_NEEDS_HUMAN_STATE.to_string())),
         ),
         Some(tc) => {
             // Flat fields beat the legacy nested form.
@@ -434,7 +447,9 @@ fn resolve_tracker(
             let needs_human = tc
                 .needs_human
                 .clone()
-                .or_else(|| tc.states.as_ref().and_then(|s| s.needs_human.clone()));
+                .or_else(|| tc.states.as_ref().and_then(|s| s.needs_human.clone()))
+                .or_else(|| base.tracker.needs_human.clone())
+                .or_else(|| Some(DEFAULT_NEEDS_HUMAN_STATE.to_string()));
 
             (active, terminal, needs_human)
         }
@@ -467,6 +482,7 @@ mod tests {
                 terminal_states: vec!["done".into()],
                 project_slug: None,
                 endpoint: None,
+                needs_human: None,
             },
             runner: RunnerConfig {
                 use_: "claude-code".into(),
@@ -477,6 +493,7 @@ mod tests {
             orchestrator: OrchestratorConfig {
                 poll_interval_ms: 10_000,
                 max_concurrent: 1,
+                max_active_runs: 3,
                 max_retries: 3,
                 retry_backoff_ms: 10_000,
             },
@@ -599,7 +616,7 @@ body"#;
         let eff = EffectiveLoopConfig::merge(&base, &wf);
         assert_eq!(eff.active_states, vec!["todo"]);
         assert_eq!(eff.terminal_states, vec!["done"]);
-        assert_eq!(eff.needs_human, None);
+        assert_eq!(eff.needs_human, Some("Needs Human".into()));
         assert_eq!(eff.poll_interval_ms, 10_000);
         assert_eq!(eff.poll_jitter_ms, 0);
         assert_eq!(eff.runner_kind, "claude");
@@ -750,11 +767,11 @@ body"#;
     }
 
     #[test]
-    fn merge_needs_human_absent_is_none() {
+    fn merge_needs_human_absent_defaults_to_needs_human() {
         let base = base_config();
         let wf = WorkflowFrontmatter::default();
         let eff = EffectiveLoopConfig::merge(&base, &wf);
-        assert_eq!(eff.needs_human, None);
+        assert_eq!(eff.needs_human, Some("Needs Human".into()));
     }
 
     #[test]

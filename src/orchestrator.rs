@@ -3,7 +3,8 @@
 //! Owns an in-memory run registry of `max_concurrent` slots, a retry queue with
 //! exponential backoff, and the short continuation retry. Ticks every
 //! `poll_interval_ms`, draining `ControlMsg`s between/within ticks. It observes
-//! issue state and controls child-process lifetime; it NEVER writes issue state.
+//! issue state and controls child-process lifetime. The only tracker writes it
+//! performs are safety/parking writes to needs-human.
 //!
 //! Run-state machine per slot:
 //!   dispatch -> Running
@@ -222,6 +223,7 @@ impl Orchestrator {
                 // tracker filter and effective_cfg remain in sync.
                 let tracker_changed = new_eff.active_states != self.effective_cfg.active_states
                     || new_eff.terminal_states != self.effective_cfg.terminal_states
+                    || new_eff.needs_human != self.effective_cfg.needs_human
                     || new_eff.tracker_kind != self.effective_cfg.tracker_kind
                     || new_eff.tracker_project_slug != self.effective_cfg.tracker_project_slug
                     || new_eff.tracker_endpoint != self.effective_cfg.tracker_endpoint;
@@ -233,6 +235,7 @@ impl Orchestrator {
                     tracker_cfg.terminal_states = new_eff.terminal_states.clone();
                     tracker_cfg.project_slug = new_eff.tracker_project_slug.clone();
                     tracker_cfg.endpoint = Some(new_eff.tracker_endpoint.clone());
+                    tracker_cfg.needs_human = new_eff.needs_human.clone();
                     match tracker::build(&tracker_cfg, &self.paths) {
                         Ok(t) => {
                             self.tracker = t;
@@ -252,6 +255,7 @@ impl Orchestrator {
                             // tracker instance and effective_cfg stay in sync.
                             new_eff.active_states = self.effective_cfg.active_states.clone();
                             new_eff.terminal_states = self.effective_cfg.terminal_states.clone();
+                            new_eff.needs_human = self.effective_cfg.needs_human.clone();
                             new_eff.tracker_kind = self.effective_cfg.tracker_kind.clone();
                             new_eff.tracker_project_slug =
                                 self.effective_cfg.tracker_project_slug.clone();
@@ -394,6 +398,9 @@ impl Orchestrator {
             if let Some(handle) = slot.handle.take() {
                 handle.request_kill(kill_reason);
             }
+            if matches!(status, RunStatus::Stalled) {
+                self.park_issue_for_safety(&slot.issue, note);
+            }
             self.record_history(
                 &slot.run_id,
                 &slot.identifier,
@@ -474,19 +481,16 @@ impl Orchestrator {
                         }
                         Some(ref st) if active.contains(st) => {
                             logging::ev(&id, "continuation", "still active after exit 0; retry 1s");
-                            // Release the claim for this attempt; a new claim is
-                            // opened when the continuation attempt is dispatched.
-                            if let Some(cid) = claim_id {
-                                let _ = self.state.store.release_claim(cid, Utc::now());
-                            }
-                            self.claims.remove(&slot.issue.id);
-                            let _ = self.state.store.insert_event(&NewEvent {
-                                run_id: Some(&run_id),
-                                issue_identifier: &id,
-                                kind: "lifecycle",
-                                payload: "continuation still active after exit 0; retry 1s",
-                                ts: Utc::now(),
-                            });
+                            self.record_history(
+                                &run_id,
+                                &id,
+                                &slot.issue.id,
+                                RunStatus::Succeeded,
+                                pid,
+                                "still active after normal exit; continuation queued",
+                                Some(0),
+                                claim_id,
+                            );
                             self.retries.push(Retry {
                                 identifier: id.clone(),
                                 attempt: slot.attempt,
@@ -558,6 +562,7 @@ impl Orchestrator {
                                 slot.attempt, max_retries
                             ),
                         );
+                        self.park_issue_for_safety(&slot.issue, "worker error; retries exhausted");
                         self.record_history(
                             &run_id,
                             &id,
@@ -648,6 +653,9 @@ impl Orchestrator {
             }
             match self.tracker.fetch_one(&retry.identifier) {
                 Ok(Some(issue)) if self.effective_cfg.active_states.contains(&issue.state) => {
+                    if self.park_if_active_run_barrier_reached(&issue) {
+                        continue;
+                    }
                     if self.claims.contains(&issue.id) {
                         self.retries.push(retry);
                         continue;
@@ -704,6 +712,9 @@ impl Orchestrator {
                 break;
             }
             if self.claims.contains(&issue.id) {
+                continue;
+            }
+            if self.park_if_active_run_barrier_reached(&issue) {
                 continue;
             }
             logging::ev(&issue.identifier, "dispatch", "fresh candidate");
@@ -890,6 +901,7 @@ impl Orchestrator {
                 "failed",
                 &format!("{err}; retries exhausted"),
             );
+            self.park_issue_for_safety(issue, &format!("{err}; retries exhausted"));
             return;
         }
         let next = attempt + 1;
@@ -933,6 +945,112 @@ impl Orchestrator {
             kind: "lifecycle",
             payload,
             ts: Utc::now(),
+        });
+    }
+
+    fn park_issue_for_safety(&self, issue: &Issue, reason: &str) -> bool {
+        let comment = format!(
+            "Parking this issue in Needs Human.\n\nReason: {reason}\n\nThis is an orchestrator safety write; normal progress updates remain worker-owned."
+        );
+        match self.tracker.park_issue_needs_human(issue, &comment) {
+            Ok(()) => {
+                logging::ev(&issue.identifier, "parked", reason);
+                let _ = self.state.store.insert_event(&NewEvent {
+                    run_id: None,
+                    issue_identifier: &issue.identifier,
+                    kind: "lifecycle",
+                    payload: &format!("parked needs-human: {reason}"),
+                    ts: Utc::now(),
+                });
+                true
+            }
+            Err(e) => {
+                logging::ev(
+                    &issue.identifier,
+                    "park_error",
+                    &format!("needs-human safety write failed: {e:#}"),
+                );
+                let _ = self.state.store.insert_event(&NewEvent {
+                    run_id: None,
+                    issue_identifier: &issue.identifier,
+                    kind: "lifecycle",
+                    payload: &format!("park_error needs-human safety write failed: {e:#}"),
+                    ts: Utc::now(),
+                });
+                false
+            }
+        }
+    }
+
+    fn park_if_active_run_barrier_reached(&self, issue: &Issue) -> bool {
+        let max_active_runs = self.effective_cfg.max_active_runs;
+        if max_active_runs == 0 {
+            return false;
+        }
+        let consecutive = match self.state.store.consecutive_completed_runs(&issue.id) {
+            Ok(count) => count,
+            Err(e) => {
+                logging::ev(
+                    &issue.identifier,
+                    "park_barrier_error",
+                    &format!("counting completed active runs failed: {e:#}"),
+                );
+                return false;
+            }
+        };
+        if consecutive < max_active_runs {
+            return false;
+        }
+
+        let reason = format!(
+            "too many consecutive completed runs without leaving active state ({consecutive}/{max_active_runs})"
+        );
+        if self.park_issue_for_safety(issue, &reason) {
+            self.record_park_barrier(issue, &reason);
+        }
+        true
+    }
+
+    fn record_park_barrier(&self, issue: &Issue, reason: &str) {
+        let now = Utc::now();
+        let run_id = new_run_id(&issue.identifier, &now);
+        let workflow_path = self.paths.workflow_md().display().to_string();
+        if let Err(e) = self.state.store.insert_run(&NewRun {
+            run_id: &run_id,
+            issue_id: &issue.id,
+            issue_identifier: &issue.identifier,
+            workspace: "",
+            profile_json: None,
+            workflow_path: Some(&workflow_path),
+            workflow_sha: None,
+            pid: 0,
+            worker_id: Some("orchestrator"),
+            started_at: now,
+        }) {
+            tracing::warn!(issue = %issue.identifier, "insert park_barrier run failed: {e:#}");
+            return;
+        }
+        let _ = self.state.store.finish_run(
+            &run_id,
+            &RunFinish {
+                outcome: RunStatus::ParkBarrier,
+                exit_code: None,
+                finished_at: now,
+            },
+        );
+        self.state.history.push(HistoryEntry {
+            identifier: issue.identifier.clone(),
+            status: RunStatus::ParkBarrier,
+            pid: 0,
+            ended_at: now,
+            note: reason.to_string(),
+        });
+        let _ = self.state.store.insert_event(&NewEvent {
+            run_id: Some(&run_id),
+            issue_identifier: &issue.identifier,
+            kind: "lifecycle",
+            payload: &format!("park_barrier {reason}"),
+            ts: now,
         });
     }
 
@@ -1218,6 +1336,7 @@ mod tests {
 
     struct StaticTracker {
         issue: Issue,
+        parks: Option<Arc<Mutex<Vec<String>>>>,
     }
 
     impl Tracker for StaticTracker {
@@ -1244,6 +1363,13 @@ mod tests {
                 Ok(None)
             }
         }
+
+        fn park_issue_needs_human(&self, _issue: &Issue, comment: &str) -> Result<()> {
+            if let Some(parks) = &self.parks {
+                parks.lock().unwrap().push(comment.to_string());
+            }
+            Ok(())
+        }
     }
 
     struct MissingTracker;
@@ -1266,6 +1392,46 @@ mod tests {
         }
     }
 
+    struct CandidateTracker {
+        issue: Issue,
+        parks: Arc<Mutex<Vec<String>>>,
+        park_ok: bool,
+    }
+
+    impl Tracker for CandidateTracker {
+        fn poll_candidates(&self) -> Result<Vec<Issue>> {
+            Ok(vec![self.issue.clone()])
+        }
+
+        fn fetch_states(&self, ids: &[String]) -> Result<Vec<Issue>> {
+            Ok(ids
+                .iter()
+                .filter(|id| id.as_str() == self.issue.identifier || id.as_str() == self.issue.id)
+                .map(|_| self.issue.clone())
+                .collect())
+        }
+
+        fn fetch_terminal(&self) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_one(&self, id: &str) -> Result<Option<Issue>> {
+            if id == self.issue.identifier || id == self.issue.id {
+                Ok(Some(self.issue.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn park_issue_needs_human(&self, _issue: &Issue, comment: &str) -> Result<()> {
+            if !self.park_ok {
+                anyhow::bail!("simulated parking failure");
+            }
+            self.parks.lock().unwrap().push(comment.to_string());
+            Ok(())
+        }
+    }
+
     fn test_agent_config() -> AgentConfig {
         AgentConfig {
             id: "test-agent".to_string(),
@@ -1279,6 +1445,7 @@ mod tests {
                 terminal_states: vec!["done".to_string()],
                 project_slug: None,
                 endpoint: None,
+                needs_human: None,
             },
             runner: RunnerConfig {
                 use_: "claude-code".to_string(),
@@ -1289,6 +1456,7 @@ mod tests {
             orchestrator: OrchestratorConfig {
                 poll_interval_ms: 100,
                 max_concurrent: 1,
+                max_active_runs: 3,
                 max_retries: 3,
                 retry_backoff_ms: 1000,
             },
@@ -1312,6 +1480,7 @@ mod tests {
         needs_issue.state = "needs_human".to_string();
         let tracker = Arc::new(StaticTracker {
             issue: needs_issue.clone(),
+            parks: None,
         });
         let agent_cfg = test_agent_config();
         let mut effective_cfg =
@@ -1460,6 +1629,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn normal_exit_still_active_records_completed_without_parking() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("logs")).unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+
+        let active_issue = issue("ISSUE-1", None, None);
+        let parks = Arc::new(Mutex::new(Vec::new()));
+        let tracker = Arc::new(StaticTracker {
+            issue: active_issue.clone(),
+            parks: Some(Arc::clone(&parks)),
+        });
+        let agent_cfg = test_agent_config();
+        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let state = AppState::new(
+            AgentInfo {
+                id: "test-agent".to_string(),
+                folder: temp.path().display().to_string(),
+                tracker: "files".to_string(),
+                runner: "claude-code".to_string(),
+            },
+            control_tx,
+            Arc::clone(&store),
+            Vec::new(),
+        );
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state.clone(),
+            control_rx,
+        );
+        let started_at = Utc::now();
+        let run_id = new_run_id(&active_issue.identifier, &started_at);
+        store
+            .insert_run(&NewRun {
+                run_id: &run_id,
+                issue_id: &active_issue.id,
+                issue_identifier: &active_issue.identifier,
+                workspace: "workspace",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 42,
+                worker_id: None,
+                started_at,
+            })
+            .unwrap();
+        orchestrator.slots.push(RunSlot {
+            identifier: active_issue.identifier.clone(),
+            issue: active_issue.clone(),
+            workspace: "workspace".to_string(),
+            handle: Some(RunnerHandle::finished_for_test(42, ExitKind::Normal)),
+            attempt: 0,
+            run_id: run_id.clone(),
+            started_at,
+            claim_id: None,
+            last_event_at: Arc::new(Mutex::new(started_at)),
+        });
+        tokio::task::yield_now().await;
+
+        orchestrator.collect_finished().await;
+
+        assert_eq!(orchestrator.retries.len(), 1);
+        assert!(parks.lock().unwrap().is_empty());
+        assert_eq!(
+            store.consecutive_completed_runs(&active_issue.id).unwrap(),
+            1
+        );
+        let history = state.history.snapshot();
+        assert_eq!(history[0].status, RunStatus::Succeeded);
+    }
+
+    #[tokio::test]
     async fn turn_timeout_records_interrupted_without_retry() {
         let temp = TempDir::new().unwrap();
         std::fs::create_dir_all(temp.path().join("logs")).unwrap();
@@ -1542,8 +1790,10 @@ mod tests {
         std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
 
         let active_issue = issue("ISSUE-1", None, None);
+        let parks = Arc::new(Mutex::new(Vec::new()));
         let tracker = Arc::new(StaticTracker {
             issue: active_issue.clone(),
+            parks: Some(Arc::clone(&parks)),
         });
         let agent_cfg = test_agent_config();
         let mut effective_cfg =
@@ -1622,6 +1872,9 @@ mod tests {
         assert_eq!(store.claim_release_count_for_run(&run_id).unwrap(), (1, 1));
         let runs = store.list_runs_paged(0, 10).unwrap();
         assert_eq!(runs[0].outcome.as_deref(), Some("stalled"));
+        let parked = parks.lock().unwrap();
+        assert_eq!(parked.len(), 1);
+        assert!(parked[0].contains("stalled no runner events"));
     }
 
     #[tokio::test]
@@ -1631,8 +1884,10 @@ mod tests {
         std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
 
         let active_issue = issue("ISSUE-1", None, None);
+        let parks = Arc::new(Mutex::new(Vec::new()));
         let tracker = Arc::new(StaticTracker {
             issue: active_issue.clone(),
+            parks: Some(Arc::clone(&parks)),
         });
         let agent_cfg = test_agent_config();
         let mut effective_cfg =
@@ -1687,6 +1942,271 @@ mod tests {
         assert_eq!(orchestrator.retries[0].attempt, 2);
         assert!(!orchestrator.retries[0].continuation);
         assert!(state.history.snapshot().is_empty());
+        assert!(parks.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn abnormal_exit_at_retry_cap_parks_issue_needs_human() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("logs")).unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+
+        let active_issue = issue("ISSUE-1", None, None);
+        let parks = Arc::new(Mutex::new(Vec::new()));
+        let tracker = Arc::new(StaticTracker {
+            issue: active_issue.clone(),
+            parks: Some(Arc::clone(&parks)),
+        });
+        let agent_cfg = test_agent_config();
+        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let state = AppState::new(
+            AgentInfo {
+                id: "test-agent".to_string(),
+                folder: temp.path().display().to_string(),
+                tracker: "files".to_string(),
+                runner: "claude-code".to_string(),
+            },
+            control_tx,
+            Arc::clone(&store),
+            Vec::new(),
+        );
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state.clone(),
+            control_rx,
+        );
+        let started_at = Utc::now();
+        let run_id = new_run_id(&active_issue.identifier, &started_at);
+        store
+            .insert_run(&NewRun {
+                run_id: &run_id,
+                issue_id: &active_issue.id,
+                issue_identifier: &active_issue.identifier,
+                workspace: "workspace",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 42,
+                worker_id: None,
+                started_at,
+            })
+            .unwrap();
+        orchestrator.slots.push(RunSlot {
+            identifier: active_issue.identifier.clone(),
+            issue: active_issue,
+            workspace: "workspace".to_string(),
+            handle: Some(RunnerHandle::finished_for_test(
+                42,
+                ExitKind::Abnormal(Some(1)),
+            )),
+            attempt: 3,
+            run_id,
+            started_at,
+            claim_id: None,
+            last_event_at: Arc::new(Mutex::new(started_at)),
+        });
+        tokio::task::yield_now().await;
+
+        orchestrator.collect_finished().await;
+
+        assert!(orchestrator.retries.is_empty());
+        let history = state.history.snapshot();
+        assert_eq!(history[0].status, RunStatus::Failed);
+        let parked = parks.lock().unwrap();
+        assert_eq!(parked.len(), 1);
+        assert!(parked[0].contains("worker error; retries exhausted"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_parks_when_completed_active_run_barrier_reached() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("logs")).unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+
+        let active_issue = issue("ISSUE-1", None, None);
+        let parks = Arc::new(Mutex::new(Vec::new()));
+        let tracker = Arc::new(CandidateTracker {
+            issue: active_issue.clone(),
+            parks: Arc::clone(&parks),
+            park_ok: true,
+        });
+        let agent_cfg = test_agent_config();
+        let mut effective_cfg =
+            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        effective_cfg.max_active_runs = 2;
+
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        for idx in 0..2 {
+            let started_at = Utc::now() + chrono::Duration::milliseconds(idx);
+            let run_id = format!("ISSUE-1-completed-{idx}");
+            store
+                .insert_run(&NewRun {
+                    run_id: &run_id,
+                    issue_id: &active_issue.id,
+                    issue_identifier: &active_issue.identifier,
+                    workspace: "workspace",
+                    profile_json: None,
+                    workflow_path: None,
+                    workflow_sha: None,
+                    pid: 42,
+                    worker_id: None,
+                    started_at,
+                })
+                .unwrap();
+            store
+                .finish_run(
+                    &run_id,
+                    &RunFinish {
+                        outcome: RunStatus::Succeeded,
+                        exit_code: Some(0),
+                        finished_at: started_at,
+                    },
+                )
+                .unwrap();
+            store
+                .insert_event(&NewEvent {
+                    run_id: Some(&run_id),
+                    issue_identifier: &active_issue.identifier,
+                    kind: "lifecycle",
+                    payload: "Succeeded still active after normal exit; continuation queued",
+                    ts: started_at,
+                })
+                .unwrap();
+        }
+        let state = AppState::new(
+            AgentInfo {
+                id: "test-agent".to_string(),
+                folder: temp.path().display().to_string(),
+                tracker: "files".to_string(),
+                runner: "claude-code".to_string(),
+            },
+            control_tx,
+            Arc::clone(&store),
+            Vec::new(),
+        );
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state.clone(),
+            control_rx,
+        );
+
+        orchestrator.dispatch().await;
+
+        assert!(orchestrator.slots.is_empty());
+        let parked = parks.lock().unwrap();
+        assert_eq!(parked.len(), 1);
+        assert!(parked[0].contains("too many consecutive completed runs"));
+        let runs = store.list_runs_paged(0, 10).unwrap();
+        assert!(runs
+            .iter()
+            .any(|run| run.outcome.as_deref() == Some("park_barrier")));
+        let history = state.history.snapshot();
+        assert_eq!(history[0].status, RunStatus::ParkBarrier);
+    }
+
+    #[tokio::test]
+    async fn failed_barrier_parking_write_does_not_record_park_barrier() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("logs")).unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+
+        let active_issue = issue("ISSUE-1", None, None);
+        let parks = Arc::new(Mutex::new(Vec::new()));
+        let tracker = Arc::new(CandidateTracker {
+            issue: active_issue.clone(),
+            parks: Arc::clone(&parks),
+            park_ok: false,
+        });
+        let agent_cfg = test_agent_config();
+        let mut effective_cfg =
+            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        effective_cfg.max_active_runs = 1;
+
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let started_at = Utc::now();
+        store
+            .insert_run(&NewRun {
+                run_id: "ISSUE-1-completed",
+                issue_id: &active_issue.id,
+                issue_identifier: &active_issue.identifier,
+                workspace: "workspace",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 42,
+                worker_id: None,
+                started_at,
+            })
+            .unwrap();
+        store
+            .finish_run(
+                "ISSUE-1-completed",
+                &RunFinish {
+                    outcome: RunStatus::Succeeded,
+                    exit_code: Some(0),
+                    finished_at: started_at,
+                },
+            )
+            .unwrap();
+        store
+            .insert_event(&NewEvent {
+                run_id: Some("ISSUE-1-completed"),
+                issue_identifier: &active_issue.identifier,
+                kind: "lifecycle",
+                payload: "Succeeded still active after normal exit; continuation queued",
+                ts: started_at,
+            })
+            .unwrap();
+        let state = AppState::new(
+            AgentInfo {
+                id: "test-agent".to_string(),
+                folder: temp.path().display().to_string(),
+                tracker: "files".to_string(),
+                runner: "claude-code".to_string(),
+            },
+            control_tx,
+            Arc::clone(&store),
+            Vec::new(),
+        );
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state.clone(),
+            control_rx,
+        );
+
+        orchestrator.dispatch().await;
+
+        assert!(orchestrator.slots.is_empty());
+        assert!(parks.lock().unwrap().is_empty());
+        assert_eq!(
+            store.consecutive_completed_runs(&active_issue.id).unwrap(),
+            1
+        );
+        let runs = store.list_runs_paged(0, 10).unwrap();
+        assert!(!runs
+            .iter()
+            .any(|run| run.outcome.as_deref() == Some("park_barrier")));
+        assert!(state.history.snapshot().is_empty());
     }
 
     #[test]
@@ -1724,6 +2244,7 @@ mod tests {
                 terminal_states: vec!["done".to_string()],
                 project_slug: None,
                 endpoint: None,
+                needs_human: None,
             },
             runner: RunnerConfig {
                 use_: "claude-code".to_string(),
@@ -1734,6 +2255,7 @@ mod tests {
             orchestrator: OrchestratorConfig {
                 poll_interval_ms: 10,
                 max_concurrent: 1,
+                max_active_runs: 3,
                 max_retries: 1,
                 retry_backoff_ms: 10,
             },
