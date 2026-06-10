@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot, watch, RwLock};
 
 use crate::store::Store;
 
@@ -251,6 +251,9 @@ pub struct AppState {
     pub rate_limit_min_remaining: Arc<AtomicI64>,
     /// Last completed orchestrator dashboard snapshot tick.
     pub last_tick_at: Arc<RwLock<Option<DateTime<Utc>>>>,
+    /// Bumped (wrapping) by the orchestrator after each `publish_snapshots` call.
+    /// WebSocket clients subscribe via `version_rx` to avoid busy-polling.
+    pub version_tx: Arc<watch::Sender<u64>>,
 }
 
 impl AppState {
@@ -262,6 +265,7 @@ impl AppState {
         store: Arc<Store>,
         history_seed: Vec<HistoryEntry>,
     ) -> Self {
+        let (version_tx, _) = watch::channel(0u64);
         Self {
             agent,
             paused: Arc::new(AtomicBool::new(false)),
@@ -275,6 +279,7 @@ impl AppState {
             control_tx,
             rate_limit_min_remaining: Arc::new(AtomicI64::new(i64::MAX)),
             last_tick_at: Arc::new(RwLock::new(None)),
+            version_tx: Arc::new(version_tx),
         }
     }
 }

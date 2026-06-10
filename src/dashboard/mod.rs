@@ -494,49 +494,70 @@ async fn api_ws(State(api): State<ApiState>, ws: WebSocketUpgrade) -> Response {
 }
 
 async fn websocket_loop(mut socket: WebSocket, api: ApiState) {
+    let mut rx = api.state.version_tx.subscribe();
     let mut since = 0_i64;
+
+    // Send initial snapshot immediately on connect.
+    if !ws_send_snapshot(&mut socket, &api, &mut since).await {
+        return;
+    }
+
+    // Then block until the orchestrator publishes a new snapshot version.
     loop {
-        let active = api.state.active_runs.read().await.clone();
-        let queue = api.state.queue.read().await.clone();
-        let retry = api.state.retry.read().await.clone();
-        let runs = api.state.store.list_runs(50).unwrap_or_default();
-        let rate_limit_min_remaining = {
-            let value = api
-                .state
-                .rate_limit_min_remaining
-                .load(std::sync::atomic::Ordering::SeqCst);
-            if value == i64::MAX {
-                None
-            } else {
-                Some(value)
-            }
-        };
-        let events = api
-            .state
-            .store
-            .list_all_events_since(since, 100)
-            .unwrap_or_default();
-        if let Some(last) = events.last() {
-            since = last.event_id;
-        }
-        let payload = serde_json::json!({
-            "type": "snapshot",
-            "active": active,
-            "queue": queue,
-            "retry": retry,
-            "runs": runs,
-            "events": events,
-            "last_tick": api.state.last_tick_at.read().await.map(|ts| ts.to_rfc3339()),
-            "rate_limit_min_remaining": rate_limit_min_remaining,
-        });
-        if socket
-            .send(Message::Text(payload.to_string().into()))
-            .await
-            .is_err()
-        {
+        if rx.changed().await.is_err() {
+            // Sender dropped (orchestrator shut down).
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if !ws_send_snapshot(&mut socket, &api, &mut since).await {
+            break;
+        }
+    }
+}
+
+/// Build and send one snapshot frame. Returns `false` if the client should be dropped.
+async fn ws_send_snapshot(socket: &mut WebSocket, api: &ApiState, since: &mut i64) -> bool {
+    let active = api.state.active_runs.read().await.clone();
+    let queue = api.state.queue.read().await.clone();
+    let retry = api.state.retry.read().await.clone();
+    let runs = api.state.store.list_runs(50).unwrap_or_default();
+    let rate_limit_min_remaining = {
+        let value = api
+            .state
+            .rate_limit_min_remaining
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if value == i64::MAX {
+            None
+        } else {
+            Some(value)
+        }
+    };
+    let events = api
+        .state
+        .store
+        .list_all_events_since(*since, 100)
+        .unwrap_or_default();
+    if let Some(last) = events.last() {
+        *since = last.event_id;
+    }
+    let payload = serde_json::json!({
+        "type": "snapshot",
+        "active": active,
+        "queue": queue,
+        "retry": retry,
+        "runs": runs,
+        "events": events,
+        "last_tick": api.state.last_tick_at.read().await.map(|ts| ts.to_rfc3339()),
+        "rate_limit_min_remaining": rate_limit_min_remaining,
+    });
+    let msg = Message::Text(payload.to_string().into());
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        socket.send(msg),
+    )
+    .await
+    {
+        Ok(Ok(())) => true,
+        _ => false,
     }
 }
 

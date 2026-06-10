@@ -162,6 +162,7 @@ impl Store {
                 ts              TEXT    NOT NULL
             );
             CREATE INDEX IF NOT EXISTS events_issue_id ON events(issue_identifier, event_id);
+            CREATE INDEX IF NOT EXISTS events_run_id ON events(run_id, event_id);
 
             CREATE TABLE IF NOT EXISTS claims (
                 claim_id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -249,7 +250,8 @@ impl Store {
 
     /// On startup, mark any runs still flagged `process_alive=1` as
     /// `interrupted_gateway_restart`, set `finished_at` to now, and clear
-    /// `process_alive`. Returns the number of rows updated.
+    /// `process_alive`. Also prunes heartbeats for finished runs.
+    /// Returns the number of rows updated.
     pub fn mark_crashed_runs(&self) -> Result<usize> {
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
@@ -261,6 +263,12 @@ impl Store {
                 params![now],
             )
             .context("mark_crashed_runs")?;
+        conn.execute(
+            "DELETE FROM heartbeats
+             WHERE run_id IN (SELECT run_id FROM runs WHERE finished_at IS NOT NULL)",
+            [],
+        )
+        .context("prune_finished_run_heartbeats in mark_crashed_runs")?;
         Ok(n)
     }
 
@@ -438,7 +446,10 @@ impl Store {
     /// Count consecutive completed runs where the worker exited cleanly while
     /// the issue remained active. Stops at any other finished outcome,
     /// including terminal/non-active successful completions.
-    pub fn consecutive_completed_runs(&self, issue_id: &str) -> Result<u32> {
+    ///
+    /// `limit` caps how many rows are fetched; callers only need to know
+    /// whether the streak reached some threshold, so passing `max + 1` is enough.
+    pub fn consecutive_completed_runs(&self, issue_id: &str, limit: u32) -> Result<u32> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
@@ -446,11 +457,12 @@ impl Store {
                  WHERE issue_id=?1
                    AND finished_at IS NOT NULL
                    AND outcome IS NOT NULL
-                 ORDER BY finished_at DESC",
+                 ORDER BY finished_at DESC
+                 LIMIT ?2",
             )
             .context("prepare consecutive completed runs query")?;
         let rows = stmt
-            .query_map(params![issue_id], |row| {
+            .query_map(params![issue_id, limit], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
             .context("query consecutive completed runs")?;
@@ -610,6 +622,20 @@ impl Store {
             ],
         )
         .context("insert_heartbeat")?;
+        Ok(())
+    }
+
+    /// Delete heartbeat rows for runs that have already finished.
+    /// The `heartbeats_run_id` index makes this a single indexed DELETE.
+    /// Call this periodically to keep the heartbeats table bounded.
+    pub fn prune_finished_run_heartbeats(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM heartbeats
+             WHERE run_id IN (SELECT run_id FROM runs WHERE finished_at IS NOT NULL)",
+            [],
+        )
+        .context("prune_finished_run_heartbeats")?;
         Ok(())
     }
 
@@ -802,7 +828,7 @@ mod tests {
             }
         }
 
-        assert_eq!(store.consecutive_completed_runs(issue_id).unwrap(), 0);
+        assert_eq!(store.consecutive_completed_runs(issue_id, 10).unwrap(), 0);
     }
 
     #[test]
@@ -1045,6 +1071,82 @@ mod tests {
                 ts: now,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn prune_heartbeats_removes_finished_runs_keeps_active() {
+        let store = open_tmp();
+        let now = Utc::now();
+
+        // Insert a finished run and heartbeats for it.
+        store
+            .insert_run(&NewRun {
+                run_id: "finished-run",
+                issue_id: "issue-fin",
+                issue_identifier: "TEST-FIN",
+                workspace: "/tmp/ws",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 1,
+                worker_id: None,
+                started_at: now,
+            })
+            .unwrap();
+        store
+            .finish_run(
+                "finished-run",
+                &RunFinish {
+                    outcome: RunStatus::Succeeded,
+                    exit_code: Some(0),
+                    finished_at: now,
+                },
+            )
+            .unwrap();
+        for _ in 0..3 {
+            store
+                .insert_heartbeat(&NewHeartbeat {
+                    run_id: "finished-run",
+                    issue_identifier: "TEST-FIN",
+                    worker_id: "w1",
+                    ts: now,
+                })
+                .unwrap();
+        }
+
+        // Insert an active run and heartbeats for it.
+        store
+            .insert_run(&NewRun {
+                run_id: "active-run",
+                issue_id: "issue-act",
+                issue_identifier: "TEST-ACT",
+                workspace: "/tmp/ws",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 2,
+                worker_id: None,
+                started_at: now,
+            })
+            .unwrap();
+        for _ in 0..2 {
+            store
+                .insert_heartbeat(&NewHeartbeat {
+                    run_id: "active-run",
+                    issue_identifier: "TEST-ACT",
+                    worker_id: "w1",
+                    ts: now,
+                })
+                .unwrap();
+        }
+
+        store.prune_finished_run_heartbeats().unwrap();
+
+        // Finished-run heartbeats must be gone; active-run heartbeats must survive.
+        let finished_count = store.heartbeat_count_for_run("finished-run").unwrap();
+        let active_count = store.heartbeat_count_for_run("active-run").unwrap();
+        assert_eq!(finished_count, 0, "heartbeats for finished run must be pruned");
+        assert_eq!(active_count, 2, "heartbeats for active run must survive");
     }
 
     #[test]

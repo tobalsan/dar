@@ -198,14 +198,23 @@ impl Orchestrator {
         // Step 4: load WORKFLOW.md.
         self.maybe_reload_workflow();
 
-        // Steps 5-9: poll tracker, release/skip/backoff, respect concurrency,
-        // and dispatch unless paused.
+        // Poll candidates once per tick (after maybe_reload so config changes
+        // apply to the filter immediately).
+        let candidates = match self.tracker.poll_candidates() {
+            Ok(v) => v,
+            Err(e) => {
+                logging::ev("-", "poll_error", &format!("{e:#}"));
+                Vec::new()
+            }
+        };
+
+        // Steps 5-9: release/skip/backoff, respect concurrency, dispatch unless paused.
         if !self.state.paused.load(Ordering::SeqCst) {
-            self.dispatch().await;
+            self.dispatch(&candidates).await;
         }
 
         // Refresh dashboard snapshots last so they reflect post-tick reality.
-        self.publish_snapshots().await;
+        self.publish_snapshots(&candidates).await;
     }
 
     fn next_poll_delay(&self) -> Duration {
@@ -660,8 +669,8 @@ impl Orchestrator {
         }
     }
 
-    /// Steps 4-6. Build the candidate set, sort, and dispatch into free slots.
-    async fn dispatch(&mut self) {
+    /// Steps 4-6. Sort and dispatch the pre-fetched candidate set into free slots.
+    async fn dispatch(&mut self, candidates: &[Issue]) {
         let max = self.effective_cfg.max_concurrent;
         if self.slots.len() >= max {
             return;
@@ -732,28 +741,24 @@ impl Orchestrator {
             return;
         }
 
-        let mut candidates = match self.tracker.poll_candidates() {
-            Ok(v) => v,
-            Err(e) => {
-                logging::ev("-", "poll_error", &format!("{e:#}"));
-                return;
-            }
-        };
-
         let retry_ids: HashSet<String> =
             self.retries.iter().map(|r| r.identifier.clone()).collect();
-        candidates.retain(|i| {
-            !busy.contains(&i.id)
-                && !retry_ids.contains(&i.identifier)
-                && !retry_ids.contains(&i.id)
-                && !self.claims.contains(&i.id)
-        });
+        let mut fresh: Vec<Issue> = candidates
+            .iter()
+            .filter(|i| {
+                !busy.contains(&i.id)
+                    && !retry_ids.contains(&i.identifier)
+                    && !retry_ids.contains(&i.id)
+                    && !self.claims.contains(&i.id)
+            })
+            .cloned()
+            .collect();
 
         if self.tracker.sort_candidates_locally() {
-            sort_candidates(&mut candidates);
+            sort_candidates(&mut fresh);
         }
 
-        for issue in candidates {
+        for issue in fresh {
             if self.slots.len() >= max {
                 break;
             }
@@ -1098,7 +1103,7 @@ impl Orchestrator {
                     return ControlReply::err("issue already claimed");
                 }
                 self.try_dispatch(issue, 0).await;
-                self.publish_snapshots().await;
+                self.publish_snapshots(&[]).await;
                 ControlReply::ok("claim dispatched")
             }
             Ok(None) => ControlReply::err("issue not found"),
@@ -1132,7 +1137,7 @@ impl Orchestrator {
             None,
             slot.claim_id,
         );
-        self.publish_snapshots().await;
+        self.publish_snapshots(&[]).await;
         ControlReply::ok(note)
     }
 
@@ -1178,7 +1183,7 @@ impl Orchestrator {
             None,
             slot.claim_id,
         );
-        self.publish_snapshots().await;
+        self.publish_snapshots(&[]).await;
         if notes.is_empty() {
             ControlReply::ok("killed")
         } else {
@@ -1240,7 +1245,11 @@ impl Orchestrator {
         if max_active_runs == 0 {
             return false;
         }
-        let consecutive = match self.state.store.consecutive_completed_runs(&issue.id) {
+        let consecutive = match self
+            .state
+            .store
+            .consecutive_completed_runs(&issue.id, max_active_runs + 1)
+        {
             Ok(count) => count,
             Err(e) => {
                 logging::ev(
@@ -1496,11 +1505,12 @@ impl Orchestrator {
                 });
             }
         }
+        let _ = self.state.store.prune_finished_run_heartbeats();
     }
 
     /// Write the active-run, queue, and retry snapshots to `AppState` for the
-    /// dashboard.
-    async fn publish_snapshots(&self) {
+    /// dashboard. `candidates` is the list already fetched once this tick.
+    async fn publish_snapshots(&self, candidates: &[Issue]) {
         let active_runs: Vec<ActiveRun> = self
             .slots
             .iter()
@@ -1532,23 +1542,26 @@ impl Orchestrator {
         let busy: HashSet<String> = self.slots.iter().map(|s| s.identifier.clone()).collect();
         let retry_ids: HashSet<String> =
             self.retries.iter().map(|r| r.identifier.clone()).collect();
-        let mut queue_items: Vec<QueueItem> = match self.tracker.poll_candidates() {
-            Ok(mut v) => {
-                v.retain(|i| !busy.contains(&i.identifier) && !retry_ids.contains(&i.identifier));
-                if self.tracker.sort_candidates_locally() {
-                    sort_candidates(&mut v);
-                }
-                v.into_iter()
-                    .map(|i| QueueItem {
-                        identifier: i.identifier,
-                        title: i.title,
-                        state: i.state,
-                        priority: i.priority,
-                        created_at: i.created_at,
-                    })
-                    .collect()
+        let mut queue_items: Vec<QueueItem> = {
+            let mut v: Vec<Issue> = candidates
+                .iter()
+                .filter(|i| {
+                    !busy.contains(&i.identifier) && !retry_ids.contains(&i.identifier)
+                })
+                .cloned()
+                .collect();
+            if self.tracker.sort_candidates_locally() {
+                sort_candidates(&mut v);
             }
-            Err(_) => Vec::new(),
+            v.into_iter()
+                .map(|i| QueueItem {
+                    identifier: i.identifier,
+                    title: i.title,
+                    state: i.state,
+                    priority: i.priority,
+                    created_at: i.created_at,
+                })
+                .collect()
         };
         queue_items.truncate(50);
         {
@@ -1582,6 +1595,9 @@ impl Orchestrator {
             let mut guard = self.state.last_tick_at.write().await;
             *guard = Some(Utc::now());
         }
+        self.state
+            .version_tx
+            .send_modify(|v| *v = v.wrapping_add(1));
     }
 
     fn last_event_line(&self, identifier: &str) -> Option<String> {
@@ -2070,7 +2086,7 @@ mod tests {
         assert_eq!(orchestrator.retries.len(), 1);
         assert!(parks.lock().unwrap().is_empty());
         assert_eq!(
-            store.consecutive_completed_runs(&active_issue.id).unwrap(),
+            store.consecutive_completed_runs(&active_issue.id, 10).unwrap(),
             1
         );
         let history = state.history.snapshot();
@@ -2474,7 +2490,7 @@ mod tests {
             control_rx,
         );
 
-        orchestrator.dispatch().await;
+        orchestrator.dispatch(&[active_issue.clone()]).await;
 
         assert!(orchestrator.slots.is_empty());
         let parked = parks.lock().unwrap();
@@ -2564,12 +2580,12 @@ mod tests {
             control_rx,
         );
 
-        orchestrator.dispatch().await;
+        orchestrator.dispatch(&[active_issue.clone()]).await;
 
         assert!(orchestrator.slots.is_empty());
         assert!(parks.lock().unwrap().is_empty());
         assert_eq!(
-            store.consecutive_completed_runs(&active_issue.id).unwrap(),
+            store.consecutive_completed_runs(&active_issue.id, 10).unwrap(),
             1
         );
         let runs = store.list_runs_paged(0, 10).unwrap();
@@ -2769,5 +2785,80 @@ mod tests {
         let (claims, released) = store.claim_release_count_for_run(&run_id).unwrap();
         assert_eq!(claims, 1);
         assert_eq!(released, 1);
+    }
+
+    // ---------------------------------------------------------------------------
+    // poll_candidates called once per tick
+    // ---------------------------------------------------------------------------
+
+    struct CountingTracker {
+        poll_count: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl Tracker for CountingTracker {
+        fn poll_candidates(&self) -> Result<Vec<Issue>> {
+            self.poll_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+        fn fetch_states(&self, _ids: &[String]) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+        fn fetch_terminal(&self) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+        fn fetch_one(&self, _id: &str) -> Result<Option<Issue>> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_candidates_called_once_per_tick() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("logs")).unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+
+        let poll_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let tracker = Arc::new(CountingTracker {
+            poll_count: Arc::clone(&poll_count),
+        });
+        let agent_cfg = test_agent_config();
+        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let state = AppState::new(
+            AgentInfo {
+                id: "test-agent".to_string(),
+                folder: temp.path().display().to_string(),
+                tracker: "files".to_string(),
+                runner: "claude-code".to_string(),
+            },
+            control_tx,
+            Arc::clone(&store),
+            Vec::new(),
+        );
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state,
+            control_rx,
+        );
+
+        orchestrator.tick().await;
+        assert_eq!(
+            poll_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "poll_candidates must be called exactly once per tick"
+        );
+
+        orchestrator.tick().await;
+        assert_eq!(
+            poll_count.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "poll_candidates must be called exactly once per tick (second tick)"
+        );
     }
 }
