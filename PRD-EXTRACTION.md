@@ -84,6 +84,37 @@ Wherever AIHub iterates "for each project", this runtime operates on the single
 launch folder. The rest of this PRD is written with that simplification applied;
 sections below note where AIHub's multi-project behavior collapses to single-project.
 
+### Scope decision: agent definition vs. orchestrator workflow
+
+The launch folder is an **agent folder**, not merely an orchestrator project. The
+orchestrator loop is **one feature** of that agent; future iterations add more
+(e.g. chat). Two config files therefore have distinct, complementary roles and
+**both stay**:
+
+- **`agent.yaml` — the agent definition (identity & underlying coding agent).** The
+  durable description of *who/what the agent is*: `id`, `name`, `description`, the
+  underlying coding-agent SDK/runner (`sdk:` — e.g. `pi`, `claude`, `codex`,
+  `opencode`), `model` (`provider` + `model`), sandbox, extensions, system files,
+  etc. This is shared across **all** agent features, not just the orchestrator loop.
+  (Reference shape: `config/agents/<name>/agent.yaml`, e.g. the `sally` agent.)
+- **`WORKFLOW.md` — the orchestrator-loop config + prompt.** YAML frontmatter plus a
+  Markdown prompt body that configures *only* the orchestrator loop feature
+  (tracker, polling, workspace, hooks, concurrency, server, etc.) and the worker
+  prompt template. It does **not** redefine the agent.
+
+**Runner/model resolution (load-bearing):** for the orchestrator loop, the effective
+runner/SDK/provider/model is resolved as an **override-with-fallback**:
+
+- If `WORKFLOW.md` frontmatter specifies a runner (`agent.runner`/`agent.kind` and/or
+  model/provider/thinking), **those override** the agent definition — for the
+  orchestrator loop only.
+- Otherwise, the orchestrator loop **falls back to `agent.yaml`** (`sdk` → runner,
+  `model.provider`/`model.model`).
+
+This keeps the agent's identity in one place (`agent.yaml`) while letting the
+orchestrator feature pin a different runner/model when desired. `WORKFLOW.md` does
+not supersede `agent.yaml`; it layers on top of it for one feature.
+
 ### Scope boundary: import vs. re-home vs. drop
 
 AIHub's orchestrator splits into two halves:
@@ -303,9 +334,12 @@ hooks**.
 
 **Must import (runner abstraction + protocol runners):**
 
-Supported runners: `pi`, `claude`, `codex`, `cli`, `fake`. Default = `pi` when no
-effective runner is configured. Selection from `WORKFLOW.md agent.runner` /
-`agent.kind`.
+Supported runners: `pi`, `claude`, `codex`, `cli`, `fake`. **Effective-runner
+resolution (override-with-fallback):** use `WORKFLOW.md agent.runner` / `agent.kind`
+(+ model/provider/thinking) when present — these override for the orchestrator loop;
+otherwise fall back to the agent definition in `agent.yaml` (`sdk` → runner,
+`model.provider`/`model.model`). Default = `pi` only when neither source specifies a
+runner. (See "Scope decision: agent definition vs. orchestrator workflow".)
 
 - **pi** — JSON-RPC over child stdin/stdout. Session dir under
   `.aihub/pi-sessions`. Supports `--provider`, `--model`, `--thinking`, turn
@@ -461,6 +495,16 @@ or payload has `comment`).
 
 ## 11. Configuration
 
+**Two config files, distinct roles (both kept).** The launch folder is an *agent
+folder*. `agent.yaml` is the **agent definition** (identity + underlying coding
+agent: `sdk`/runner, `model.provider`/`model`, sandbox, extensions, system files) and
+is shared across all agent features. `WORKFLOW.md` frontmatter is the **orchestrator-
+loop config** (tracker/polling/workspace/agent-loop/hooks/server/linear) plus the
+worker prompt. For the orchestrator loop, `WORKFLOW.md` runner/model fields
+**override** `agent.yaml`; when absent, the loop falls back to `agent.yaml`'s
+`sdk`/`model`. `WORKFLOW.md` does **not** replace `agent.yaml`. (See "Scope
+decision: agent definition vs. orchestrator workflow".)
+
 **Single-project model:** the launch folder *is* the project. AIHub's gateway-level
 `extensions.orchestrator.*` knobs that only existed for multi-project hosting are
 **dropped**: `projects` (folder list), `projectsRoot`, `concurrency.global`. The few
@@ -469,9 +513,10 @@ remaining process-level knobs (`validation.strict`, notifier target,
 flags or the `WORKFLOW.md` frontmatter (`server`/`linear` sections) — there is no
 separate gateway config file.
 
-**Project config (`WORKFLOW.md` frontmatter — the single source of truth, import
-as-is):** tracker config; polling interval/jitter; workspace root/reuse/cleanup;
-runner kind/command/model/provider/thinking/settings; concurrency
+**Orchestrator-loop config (`WORKFLOW.md` frontmatter — the source of truth for the
+loop, import as-is):** tracker config; polling interval/jitter; workspace
+root/reuse/cleanup; runner kind/command/model/provider/thinking/settings (override
+over `agent.yaml`); concurrency
 (`agent.max_concurrent`, the only concurrency cap); max turns; turn timeout; stall
 timeout; max active runs; hooks; Linear options; server bind/port.
 
@@ -479,9 +524,12 @@ timeout; max active runs; hooks; Linear options; server bind/port.
 `$LINEAR_API_KEY`); webhook secret from config/frontmatter. GitHub creds are **not**
 orchestrator-managed — PR creation is prompt-level via `gh`.
 
-**Gap vs v0:** v0's `agent.yaml` is a flat config. Parity keeps the single-folder
-model but requires the richer `WORKFLOW.md` frontmatter schema above (it replaces
-`agent.yaml`).
+**Gap vs v0:** v0's `agent.yaml` is a single flat config that today carries both
+identity and loop settings. Parity **splits responsibilities**: `agent.yaml` stays
+as the agent definition (identity + underlying coding agent / `sdk` / `model`), and
+the orchestrator-loop settings move into the richer `WORKFLOW.md` frontmatter schema
+above. The loop reads `WORKFLOW.md` (overriding `agent.yaml` runner/model when set,
+else falling back to it). `agent.yaml` is **not** removed.
 
 ---
 
@@ -520,8 +568,9 @@ standalone process (e.g. webhook/CLI/stdout). Keep the burst-buffer policy exact
 
 - **Manual API surface** (§9): health, read workflow, list runs, run detail, logs,
   release, interrupt, kill, claim issue, tick, webhook.
-- **CLI commands:** an `init-workflow` (scaffold a `WORKFLOW.md` in the current
-  folder); optionally bootstrap a Linear project for this folder. *(Map to this
+- **CLI commands:** an `init-workflow` (scaffold a `WORKFLOW.md` for the orchestrator
+  loop in an existing agent folder — it does not scaffold `agent.yaml`, which is the
+  separate agent definition); optionally bootstrap a Linear project for this folder. *(Map to this
   repo's `agentropy` CLI; v0 has `run` + `doctor`. AIHub's `init-project` — which
   registered a new folder into the multi-project list — is not needed; the launch
   folder is the project.)*
@@ -582,8 +631,9 @@ Standalone parity = all of:
    (interrupt/kill), and pagination — live via polling + WebSocket (§8).
 8. Re-homed HTTP API with all listed routes (§9) + Linear webhook with HMAC +
    relevance filter (§10).
-9. `WORKFLOW.md` frontmatter as the single config source, with Linear API key +
-   webhook secret handling (§11).
+9. `WORKFLOW.md` frontmatter as the orchestrator-loop config source, layered over
+   `agent.yaml` (the agent definition) with override-with-fallback runner/model
+   resolution; Linear API key + webhook secret handling (§11).
 10. SQLite persistence: `runs`, `events`, `claims`, `heartbeats` with the full
     field set (§12).
 11. HITL notifier with the 60s / 5-item burst buffer + de-dupe (§13).
