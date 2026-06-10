@@ -38,6 +38,21 @@ pub struct LinearTrackerConfig {
     pub needs_human: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LinearProjectExport {
+    pub name: Option<String>,
+    pub slug: String,
+    pub endpoint: String,
+    pub exported_at: chrono::DateTime<chrono::Utc>,
+    pub issue_count: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LinearExport {
+    pub project: LinearProjectExport,
+    pub issues: Vec<Issue>,
+}
+
 pub struct LinearTracker {
     client: reqwest::Client,
     endpoint: String,
@@ -76,11 +91,23 @@ impl LinearTracker {
 
     /// Fetch every issue in the project (all states), paginated.
     async fn fetch_all_issues_async(&self) -> Result<Vec<RawIssue>> {
+        Ok(self.fetch_all_issues_with_project_async().await?.issues)
+    }
+
+    async fn fetch_all_issues_with_project_async(&self) -> Result<RawProjectIssues> {
         let mut all: Vec<RawIssue> = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut project_name: Option<String> = None;
+        let mut project_slug: Option<String> = None;
 
         loop {
             let page = self.fetch_page_async(cursor.as_deref()).await?;
+            if project_name.is_none() {
+                project_name = page.project_name.clone();
+            }
+            if project_slug.is_none() {
+                project_slug = page.project_slug.clone();
+            }
             all.extend(page.issues);
             if page.has_next_page {
                 cursor = page.end_cursor;
@@ -88,7 +115,11 @@ impl LinearTracker {
                 break;
             }
         }
-        Ok(all)
+        Ok(RawProjectIssues {
+            project_name,
+            project_slug,
+            issues: all,
+        })
     }
 
     async fn fetch_page_async(&self, after: Option<&str>) -> Result<IssuePage> {
@@ -171,6 +202,8 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
         }
 
         Ok(IssuePage {
+            project_name,
+            project_slug,
             issues,
             has_next_page,
             end_cursor,
@@ -329,6 +362,25 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
         self.run_async(async {
             let raw = self.fetch_all_issues_async().await?;
             Ok(raw.iter().map(raw_to_issue).collect())
+        })
+    }
+
+    pub fn export_snapshot(&self) -> Result<LinearExport> {
+        self.run_async(async {
+            let raw = self.fetch_all_issues_with_project_async().await?;
+            let issues: Vec<Issue> = raw.issues.iter().map(raw_to_issue).collect();
+            Ok(LinearExport {
+                project: LinearProjectExport {
+                    name: raw.project_name,
+                    slug: raw
+                        .project_slug
+                        .unwrap_or_else(|| self.project_slug.clone()),
+                    endpoint: self.endpoint.clone(),
+                    exported_at: Utc::now(),
+                    issue_count: issues.len(),
+                },
+                issues,
+            })
         })
     }
 
@@ -497,9 +549,17 @@ fn raw_to_issue(r: &RawIssue) -> Issue {
 // ---------------------------------------------------------------------------
 
 struct IssuePage {
+    project_name: Option<String>,
+    project_slug: Option<String>,
     issues: Vec<RawIssue>,
     has_next_page: bool,
     end_cursor: Option<String>,
+}
+
+struct RawProjectIssues {
+    project_name: Option<String>,
+    project_slug: Option<String>,
+    issues: Vec<RawIssue>,
 }
 
 #[derive(Debug, Deserialize)]

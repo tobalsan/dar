@@ -14,6 +14,8 @@ pub struct AgentConfig {
     pub tracker: TrackerConfig,
     pub runner: RunnerConfig,
     pub orchestrator: OrchestratorConfig,
+    #[serde(default)]
+    pub hitl: HitlConfig,
     pub workspace: WorkspaceConfig,
     pub dashboard: DashboardConfig,
 }
@@ -59,10 +61,16 @@ pub struct RunnerConfig {
         alias = "max_run_timeout_ms"
     )]
     pub max_run_timeout_ms: u64,
+    #[serde(default = "default_stall_timeout_ms")]
+    pub stall_timeout_ms: u64,
 }
 
 fn default_turn_timeout_ms() -> u64 {
     60 * 60 * 1000
+}
+
+fn default_stall_timeout_ms() -> u64 {
+    5 * 60 * 1000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -73,7 +81,52 @@ pub struct OrchestratorConfig {
     #[serde(default = "default_max_active_runs")]
     pub max_active_runs: u32,
     pub max_retries: u32,
+    #[serde(default = "default_retry_backoff_ms")]
     pub retry_backoff_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct HitlConfig {
+    #[serde(default)]
+    pub notifier: HitlNotifierConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HitlNotifierConfig {
+    #[serde(rename = "use", default = "default_hitl_notifier_use")]
+    pub use_: String,
+    #[serde(default = "default_hitl_window_secs")]
+    pub window_secs: u64,
+    #[serde(default = "default_hitl_max_items")]
+    pub max_items: usize,
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    #[serde(default)]
+    pub command: Vec<String>,
+}
+
+impl Default for HitlNotifierConfig {
+    fn default() -> Self {
+        Self {
+            use_: default_hitl_notifier_use(),
+            window_secs: default_hitl_window_secs(),
+            max_items: default_hitl_max_items(),
+            webhook_url: None,
+            command: Vec::new(),
+        }
+    }
+}
+
+fn default_hitl_notifier_use() -> String {
+    "stdout".to_string()
+}
+
+fn default_hitl_window_secs() -> u64 {
+    60
+}
+
+fn default_hitl_max_items() -> usize {
+    5
 }
 
 fn default_max_concurrent() -> usize {
@@ -82,6 +135,10 @@ fn default_max_concurrent() -> usize {
 
 fn default_max_active_runs() -> u32 {
     3
+}
+
+fn default_retry_backoff_ms() -> u64 {
+    30 * 1000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -93,6 +150,8 @@ pub struct WorkspaceConfig {
 pub struct DashboardConfig {
     pub bind: IpAddr,
     pub port: u16,
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
 }
 
 /// Reads `<root>/agent.yaml` and deserializes it.
@@ -136,8 +195,46 @@ impl AgentConfig {
         if self.orchestrator.max_concurrent < 1 {
             bail!("orchestrator.max_concurrent must be >= 1");
         }
+        if !matches!(
+            self.hitl.notifier.use_.as_str(),
+            "none" | "stdout" | "webhook" | "cli"
+        ) {
+            bail!(
+                "hitl.notifier.use must be one of none, stdout, webhook, cli (got {:?})",
+                self.hitl.notifier.use_
+            );
+        }
+        if self.hitl.notifier.window_secs == 0 {
+            bail!("hitl.notifier.window_secs must be > 0");
+        }
+        if self.hitl.notifier.max_items == 0 {
+            bail!("hitl.notifier.max_items must be > 0");
+        }
+        if self.hitl.notifier.use_ == "webhook"
+            && self
+                .hitl
+                .notifier
+                .webhook_url
+                .as_deref()
+                .is_none_or(str::is_empty)
+        {
+            bail!("hitl.notifier.webhook_url is required when hitl.notifier.use is \"webhook\"");
+        }
+        if self.hitl.notifier.use_ == "cli"
+            && self
+                .hitl
+                .notifier
+                .command
+                .first()
+                .is_none_or(|program| program.is_empty())
+        {
+            bail!("hitl.notifier.command is required when hitl.notifier.use is \"cli\"");
+        }
         if self.runner.max_run_timeout_ms == 0 {
             bail!("runner.max_run_timeout_ms must be > 0");
+        }
+        if self.runner.stall_timeout_ms == 0 {
+            bail!("runner.stall_timeout_ms must be > 0");
         }
         Ok(())
     }
