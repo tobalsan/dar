@@ -204,8 +204,11 @@ impl Orchestrator {
 
                 if states_changed {
                     let mut tracker_cfg = self.agent_cfg.tracker.clone();
+                    tracker_cfg.use_ = new_eff.tracker_kind.clone();
                     tracker_cfg.active_states = new_eff.active_states.clone();
                     tracker_cfg.terminal_states = new_eff.terminal_states.clone();
+                    tracker_cfg.project_slug = new_eff.tracker_project_slug.clone();
+                    tracker_cfg.endpoint = Some(new_eff.tracker_endpoint.clone());
                     match tracker::build(&tracker_cfg, &self.paths) {
                         Ok(t) => {
                             self.tracker = t;
@@ -982,6 +985,14 @@ impl Orchestrator {
             let mut guard = self.state.retry.write().await;
             *guard = retry_items;
         }
+
+        // Update rate-limit min-remaining from the tracker (LinearTracker updates
+        // this on each API call; FileTracker returns None).
+        if let Some(remaining) = self.tracker.rate_limit_remaining() {
+            self.state
+                .rate_limit_min_remaining
+                .fetch_min(remaining, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     fn last_event_line(&self, identifier: &str) -> Option<String> {
@@ -1073,6 +1084,10 @@ mod tests {
             labels: vec![],
             created_at: created.map(|s| Utc.timestamp_opt(s, 0).unwrap()),
             updated_at: None,
+            parent_id: None,
+            blocked_by: vec![],
+            project_name: None,
+            project_slug: None,
         }
     }
 
@@ -1132,11 +1147,13 @@ mod tests {
             name: "Test Agent".to_string(),
             tracker: TrackerConfig {
                 use_: "files".to_string(),
-                config: TrackerInner {
+                config: Some(TrackerInner {
                     path: "issues".into(),
-                },
+                }),
                 active_states: vec!["todo".to_string()],
                 terminal_states: vec!["done".to_string()],
+                project_slug: None,
+                endpoint: None,
             },
             runner: RunnerConfig {
                 use_: "claude-code".to_string(),
@@ -1482,11 +1499,13 @@ mod tests {
             name: "Test Agent".to_string(),
             tracker: TrackerConfig {
                 use_: "files".to_string(),
-                config: TrackerInner {
+                config: Some(TrackerInner {
                     path: "issues".into(),
-                },
+                }),
                 active_states: vec!["todo".to_string()],
                 terminal_states: vec!["done".to_string()],
+                project_slug: None,
+                endpoint: None,
             },
             runner: RunnerConfig {
                 use_: "claude-code".to_string(),

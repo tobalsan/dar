@@ -5,6 +5,7 @@
 
 use askama::Template;
 use chrono::Utc;
+use std::sync::atomic::Ordering;
 
 use crate::state::{ActiveRun, AgentInfo, AppState, QueueItem, RetryItem, RunStatus};
 
@@ -31,6 +32,9 @@ pub struct DashboardTemplate {
     pub retry: Vec<RetryItem>,
     pub events: Vec<String>,
     pub history: Vec<HistoryRow>,
+    /// Minimum Linear rate-limit requests remaining observed since startup.
+    /// `None` when no Linear API calls have been made (e.g. FileTracker).
+    pub rate_limit_min_remaining: Option<i64>,
 }
 
 impl DashboardTemplate {
@@ -81,6 +85,17 @@ impl DashboardTemplate {
             })
             .collect();
 
+        let rate_limit_min_remaining = {
+            let v = s
+                .rate_limit_min_remaining
+                .load(Ordering::SeqCst);
+            if v == i64::MAX {
+                None
+            } else {
+                Some(v)
+            }
+        };
+
         Self {
             agent: s.agent.clone(),
             paused,
@@ -91,6 +106,7 @@ impl DashboardTemplate {
             retry,
             events,
             history,
+            rate_limit_min_remaining,
         }
     }
 }

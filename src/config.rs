@@ -22,9 +22,17 @@ pub struct AgentConfig {
 pub struct TrackerConfig {
     #[serde(rename = "use")]
     pub use_: String,
-    pub config: TrackerInner,
+    /// Required for `use: files`; ignored for `use: linear`.
+    #[serde(default)]
+    pub config: Option<TrackerInner>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
+    /// Linear project slugId (used when `use: linear`).
+    #[serde(default)]
+    pub project_slug: Option<String>,
+    /// Linear GraphQL endpoint override (default `https://api.linear.app/graphql`).
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -87,11 +95,14 @@ impl AgentConfig {
     /// Validate invariants the loop relies on. Best-effort, called at startup
     /// and by `doctor`.
     pub fn validate(&self) -> Result<()> {
-        if self.tracker.use_ != "files" {
+        if !matches!(self.tracker.use_.as_str(), "files" | "linear") {
             bail!(
-                "tracker.use must be \"files\" in v0 (got {:?})",
+                "tracker.use must be \"files\" or \"linear\" (got {:?})",
                 self.tracker.use_
             );
+        }
+        if self.tracker.use_ == "files" && self.tracker.config.is_none() {
+            bail!("tracker.config.path is required when tracker.use is \"files\"");
         }
         if !matches!(
             self.runner.use_.as_str(),
