@@ -94,6 +94,14 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     let store = Arc::new(
         store::Store::open(&paths.store_db()).context("opening SQLite persistence store")?,
     );
+    match store.open_run_pids() {
+        Ok(pids) => {
+            for pid in pids {
+                runner::term_then_kill(pid, std::time::Duration::from_secs(5));
+            }
+        }
+        Err(e) => tracing::warn!("loading stale run PIDs failed: {e:#}"),
+    }
     if let Err(e) = store.mark_crashed_runs() {
         tracing::warn!("mark_crashed_runs failed: {e:#}");
     }

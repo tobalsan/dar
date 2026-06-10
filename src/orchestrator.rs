@@ -48,8 +48,8 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
 
-/// Max backoff cap for abnormal-exit retries (5 minutes).
-const BACKOFF_CAP: Duration = Duration::from_secs(300);
+/// Max backoff cap for dispatch/abnormal-exit retries (30 minutes).
+const BACKOFF_CAP: Duration = Duration::from_secs(30 * 60);
 /// Short continuation retry delay for normal-exit-but-still-active (1s).
 const CONTINUATION_DELAY: Duration = Duration::from_secs(1);
 
@@ -314,7 +314,7 @@ impl Orchestrator {
                 .signed_duration_since(last_event_at)
                 .to_std()
                 .unwrap_or_default();
-            if stale_for > Duration::from_millis(self.effective_cfg.max_run_timeout_ms) {
+            if stale_for > Duration::from_millis(self.effective_cfg.stall_timeout_ms) {
                 logging::ev(
                     &slot.identifier,
                     "stalled",
@@ -1572,7 +1572,7 @@ pub(crate) fn sort_candidates(v: &mut [Issue]) {
     });
 }
 
-/// Backoff for abnormal-exit retries: `min(retry_backoff_ms * 2^(attempt-1), 5min)`.
+/// Backoff for dispatch retries: `min(retry_backoff_ms * 2^(attempt-1), 30min)`.
 /// `attempt` is 1-based.
 pub(crate) fn backoff(retry_backoff_ms: u64, attempt: u32) -> Duration {
     let shift = attempt.saturating_sub(1);
@@ -1766,6 +1766,7 @@ mod tests {
                 command: "claude".to_string(),
                 model: None,
                 max_run_timeout_ms: 1000,
+                stall_timeout_ms: 300_000,
             },
             orchestrator: OrchestratorConfig {
                 poll_interval_ms: 100,
@@ -2112,7 +2113,7 @@ mod tests {
         let agent_cfg = test_agent_config();
         let mut effective_cfg =
             EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
-        effective_cfg.max_run_timeout_ms = 1;
+        effective_cfg.stall_timeout_ms = 1;
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
         let state = AppState::new(
@@ -2538,10 +2539,10 @@ mod tests {
 
     #[test]
     fn backoff_grows_then_caps() {
-        assert_eq!(backoff(1000, 1), Duration::from_millis(1000));
-        assert_eq!(backoff(1000, 2), Duration::from_millis(2000));
-        assert_eq!(backoff(1000, 3), Duration::from_millis(4000));
-        assert_eq!(backoff(1000, 30), BACKOFF_CAP);
+        assert_eq!(backoff(30_000, 1), Duration::from_secs(30));
+        assert_eq!(backoff(30_000, 2), Duration::from_secs(60));
+        assert_eq!(backoff(30_000, 3), Duration::from_secs(120));
+        assert_eq!(backoff(30_000, 7), Duration::from_secs(30 * 60));
         assert_eq!(backoff(u64::MAX, 64), BACKOFF_CAP);
     }
 
@@ -2565,6 +2566,7 @@ mod tests {
                 command,
                 model: None,
                 max_run_timeout_ms: 30_000,
+                stall_timeout_ms: 300_000,
             },
             orchestrator: OrchestratorConfig {
                 poll_interval_ms: 10,

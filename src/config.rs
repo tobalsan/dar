@@ -59,10 +59,16 @@ pub struct RunnerConfig {
         alias = "max_run_timeout_ms"
     )]
     pub max_run_timeout_ms: u64,
+    #[serde(default = "default_stall_timeout_ms")]
+    pub stall_timeout_ms: u64,
 }
 
 fn default_turn_timeout_ms() -> u64 {
     60 * 60 * 1000
+}
+
+fn default_stall_timeout_ms() -> u64 {
+    5 * 60 * 1000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -73,6 +79,7 @@ pub struct OrchestratorConfig {
     #[serde(default = "default_max_active_runs")]
     pub max_active_runs: u32,
     pub max_retries: u32,
+    #[serde(default = "default_retry_backoff_ms")]
     pub retry_backoff_ms: u64,
 }
 
@@ -82,6 +89,10 @@ fn default_max_concurrent() -> usize {
 
 fn default_max_active_runs() -> u32 {
     3
+}
+
+fn default_retry_backoff_ms() -> u64 {
+    30 * 1000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -138,6 +149,9 @@ impl AgentConfig {
         }
         if self.runner.max_run_timeout_ms == 0 {
             bail!("runner.max_run_timeout_ms must be > 0");
+        }
+        if self.runner.stall_timeout_ms == 0 {
+            bail!("runner.stall_timeout_ms must be > 0");
         }
         Ok(())
     }
