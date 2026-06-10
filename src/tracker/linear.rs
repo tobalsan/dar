@@ -1,11 +1,12 @@
 //! `LinearTracker`: polls Linear's GraphQL API scoped to a project by slugId.
 //!
 //! Rate-limit handling:
-//! - Reads `x-ratelimit-requests-remaining` and `x-ratelimit-requests-reset`
-//!   headers on every response.
-//! - When remaining ≤ 0 after a response: sleeps until reset + 1 s.
+//! - Reads `x-ratelimit-requests-remaining` / `x-ratelimit-requests-reset` and
+//!   `x-ratelimit-complexity-remaining` / `x-ratelimit-complexity-reset` headers
+//!   on every response.
+//! - When remaining ≤ 0 on either dimension: sleeps until that dimension's reset + 1 s.
 //! - On HTTP 429: sleeps for `Retry-After` seconds (or 60 s) then retries once.
-//! - Tracks the minimum remaining seen for the dashboard RATE LIMIT stat.
+//! - Tracks the minimum remaining seen (across both dimensions) for the dashboard RATE LIMIT stat.
 //!
 //! Blocked-issue skipping: `poll_candidates` fetches ALL project issues,
 //! builds a state-lookup map, and omits any active issue whose `blockedBy`
@@ -211,9 +212,8 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
     }
 
     /// Execute one GraphQL request. Handles:
-    /// - Rate-limit header tracking (`x-ratelimit-requests-remaining` /
-    ///   `x-ratelimit-requests-reset`).
-    /// - Sleep until reset + 1 s when remaining ≤ 0.
+    /// - Rate-limit header tracking for both requests and complexity dimensions.
+    /// - Sleep until reset + 1 s when remaining ≤ 0 on either dimension.
     /// - HTTP 429: sleep for `Retry-After` (or 60 s), retry once.
     async fn send_with_rate_limit_async(&self, body: Value) -> Result<Value> {
         let resp = self
@@ -284,34 +284,54 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
         parse_graphql_body(&text)
     }
 
-    /// Record `x-ratelimit-requests-remaining` into `min_remaining` and sleep
-    /// when the bucket is exhausted.
+    /// Record rate-limit headers into `min_remaining` and sleep when a bucket is
+    /// exhausted. Handles both the requests dimension
+    /// (`x-ratelimit-requests-remaining` / `x-ratelimit-requests-reset`) and the
+    /// complexity dimension (`x-ratelimit-complexity-remaining` /
+    /// `x-ratelimit-complexity-reset`). Whichever dimension reports remaining ≤ 0
+    /// first triggers the sleep; both are checked.
     async fn process_rate_limit_headers(&self, headers: &reqwest::header::HeaderMap) {
-        let remaining = headers
-            .get("x-ratelimit-requests-remaining")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<i64>().ok());
+        let dims: &[(&str, &str, &str)] = &[
+            (
+                "requests",
+                "x-ratelimit-requests-remaining",
+                "x-ratelimit-requests-reset",
+            ),
+            (
+                "complexity",
+                "x-ratelimit-complexity-remaining",
+                "x-ratelimit-complexity-reset",
+            ),
+        ];
 
-        let reset_ts = headers
-            .get("x-ratelimit-requests-reset")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<i64>().ok());
+        for (label, remaining_hdr, reset_hdr) in dims {
+            let remaining = headers
+                .get(*remaining_hdr)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<i64>().ok());
 
-        if let Some(r) = remaining {
-            // Track minimum using fetch_min (stable since Rust 1.45).
-            self.min_remaining.fetch_min(r, Ordering::SeqCst);
+            let reset_ts = headers
+                .get(*reset_hdr)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<i64>().ok());
 
-            if r <= 0 {
-                let wait_secs = reset_ts
-                    // Linear returns epoch milliseconds; convert to seconds before diffing.
-                    .map(|ts_ms| (ts_ms / 1000 - Utc::now().timestamp() + 1).max(0) as u64)
-                    .unwrap_or(60);
-                if wait_secs > 0 {
-                    tracing::warn!(
-                        wait_secs,
-                        "Linear rate limit exhausted; sleeping until bucket resets"
-                    );
-                    tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+            if let Some(r) = remaining {
+                // Track minimum across both dimensions using fetch_min (stable since Rust 1.45).
+                self.min_remaining.fetch_min(r, Ordering::SeqCst);
+
+                if r <= 0 {
+                    let wait_secs = reset_ts
+                        // Linear returns epoch milliseconds; convert to seconds before diffing.
+                        .map(|ts_ms| (ts_ms / 1000 - Utc::now().timestamp() + 1).max(0) as u64)
+                        .unwrap_or(60);
+                    if wait_secs > 0 {
+                        tracing::warn!(
+                            wait_secs,
+                            dimension = *label,
+                            "Linear rate limit exhausted; sleeping until bucket resets"
+                        );
+                        tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+                    }
                 }
             }
         }
@@ -664,4 +684,113 @@ struct RawRef {
     #[allow(dead_code)]
     id: String,
     identifier: String,
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+
+    use super::{LinearTracker, LinearTrackerConfig, UNSET_MIN};
+
+    fn make_tracker() -> LinearTracker {
+        LinearTracker::new(LinearTrackerConfig {
+            endpoint: "http://localhost".to_string(),
+            api_key: "test".to_string(),
+            project_slug: "test".to_string(),
+            active_states: vec![],
+            terminal_states: vec![],
+            needs_human: None,
+        })
+        .unwrap()
+    }
+
+    fn header_map(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut m = HeaderMap::new();
+        for (k, v) in pairs {
+            m.insert(
+                HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        m
+    }
+
+    /// Helper that runs the async header-processing on a fresh tracker and returns
+    /// the resulting min_remaining value.
+    fn process_headers_sync(headers: &HeaderMap) -> i64 {
+        let tracker = make_tracker();
+        // Use a single-threaded tokio runtime so we don't need a full multi-thread
+        // runtime just for header parsing (no actual sleep occurs when remaining > 0).
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tracker.process_rate_limit_headers(headers));
+        tracker.min_remaining.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn requests_dimension_is_tracked() {
+        let headers = header_map(&[("x-ratelimit-requests-remaining", "42")]);
+        assert_eq!(process_headers_sync(&headers), 42);
+    }
+
+    #[test]
+    fn complexity_dimension_is_tracked() {
+        let headers = header_map(&[("x-ratelimit-complexity-remaining", "17")]);
+        assert_eq!(process_headers_sync(&headers), 17);
+    }
+
+    #[test]
+    fn min_of_both_dimensions_is_recorded() {
+        // complexity (10) is more constrained than requests (100) — min should be 10.
+        let headers = header_map(&[
+            ("x-ratelimit-requests-remaining", "100"),
+            ("x-ratelimit-complexity-remaining", "10"),
+        ]);
+        assert_eq!(process_headers_sync(&headers), 10);
+    }
+
+    #[test]
+    fn no_rate_limit_headers_leaves_unset() {
+        let headers = header_map(&[]);
+        assert_eq!(process_headers_sync(&headers), UNSET_MIN);
+    }
+
+    #[test]
+    fn rate_limit_remaining_returns_none_before_any_request() {
+        use super::Tracker;
+        let tracker = make_tracker();
+        assert_eq!(tracker.rate_limit_remaining(), None);
+    }
+
+    #[test]
+    fn min_remaining_updates_across_calls() {
+        // Simulate two successive calls: first sees 50 requests, then 30 complexity.
+        let tracker = make_tracker();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let h1 = header_map(&[("x-ratelimit-requests-remaining", "50")]);
+        rt.block_on(tracker.process_rate_limit_headers(&h1));
+        assert_eq!(tracker.min_remaining.load(Ordering::SeqCst), 50);
+
+        let h2 = header_map(&[("x-ratelimit-complexity-remaining", "30")]);
+        rt.block_on(tracker.process_rate_limit_headers(&h2));
+        // 30 < 50 → min should now be 30
+        assert_eq!(tracker.min_remaining.load(Ordering::SeqCst), 30);
+
+        let h3 = header_map(&[("x-ratelimit-requests-remaining", "80")]);
+        rt.block_on(tracker.process_rate_limit_headers(&h3));
+        // 80 > 30 → min stays 30
+        assert_eq!(tracker.min_remaining.load(Ordering::SeqCst), 30);
+    }
 }
