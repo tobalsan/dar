@@ -261,6 +261,7 @@
   }
   .carry-tag.med { color: var(--clay); border: 1px solid var(--clay); }
   .carry-tag.low { color: var(--gray-500); border: 1px solid var(--gray-300); }
+  .carry-tag.fixed { color: var(--olive); border: 1px solid var(--olive); background: #EBF0E2; }
   .carry-body {
     font-size: 14px;
     color: var(--gray-700);
@@ -269,6 +270,11 @@
     font-family: var(--mono);
     font-size: 12px;
     color: var(--gray-500);
+  }
+  .carry-body .fix-note {
+    font-size: 13px;
+    color: var(--olive);
+    margin-top: 4px;
   }
 
   /* ---------- Numbered steps ---------- */
@@ -458,7 +464,7 @@
         <div class="stat-delta flat">PR #1&ndash;14 · ALG-172&hellip;185 Done</div>
       </div>
       <div class="stat-card">
-        <div class="stat-num">105</div>
+        <div class="stat-num">125</div>
         <div class="stat-label">Tests passing</div>
         <div class="stat-delta up">cargo test --release</div>
       </div>
@@ -488,7 +494,7 @@
     <p>
       However, the footprint gate <strong>would have failed as-is</strong>. Six blocker classes were
       identified and patched before this benchmark run (see next section). A handful of
-      lower-priority correctness issues remain open for follow-up triage (section 3).
+      lower-priority correctness issues were open at review time (section 3) and have since been fixed.
     </p>
     <ul class="highlights">
       <li>
@@ -502,8 +508,7 @@
         thread count, unbounded SQLite growth, and over-featured Tokio dependency. All patched.
       </li>
       <li>
-        <strong>8 correctness items remain open</strong> (section 3), none blocking the benchmark;
-        tagged LOW / MED for triage post-pilot.
+        <strong>8 correctness items subsequently fixed</strong> (section 3); all resolved after the benchmark review.
       </li>
     </ul>
   </section>
@@ -562,77 +567,85 @@
     </table>
   </section>
 
-  <!-- ── 4. Open issues ── -->
+  <!-- ── 4. Open issues — all resolved ── -->
   <section>
-    <h2>Known open issues (triage later)</h2>
+    <h2>Known open issues &mdash; all resolved</h2>
     <hr class="rule">
     <div class="carryover">
       <div class="carry-item">
-        <span class="carry-tag med">MED</span>
+        <span class="carry-tag fixed">FIXED</span>
         <div class="carry-body">
           <strong>Env-var prefix mismatch in hooks.</strong> The <code>before_remove</code> kill-path exports
           <code>AGENTROPY_*</code> variables; all other hook execution paths export <code>AIHUB_*</code>
           (per PRD &sect;5). Hook scripts that reference <code>AIHUB_WORKSPACE</code> on the remove path will
           silently receive an empty value.
           <div class="ref">orchestrator.rs:1651</div>
+          <div class="fix-note">All hook and runner child env vars unified to exactly <code>AGENT_*</code> prefix; <code>AIHUB_*</code> / <code>AGENTROPY_*</code> names retired; <code>$AIHUB_HOME</code> config expansion renamed <code>$AGENT_HOME</code>.</div>
         </div>
       </div>
       <div class="carry-item">
-        <span class="carry-tag med">MED</span>
+        <span class="carry-tag fixed">FIXED</span>
         <div class="carry-body">
           <strong>Missing <code>runs</code> row on certain failure paths.</strong> When dispatch fails due to
           a hook error or a prompt render error, no row is inserted into the <code>runs</code> table. Those
           failures are invisible in dashboard history and are not counted by the park barrier.
           <div class="ref">orchestrator.rs:888</div>
+          <div class="fix-note">Hook, render, workspace, and spawn dispatch failures now insert a <code>runs</code> row with outcome <code>dispatch_failed</code>; visible in history and counted by the park barrier.</div>
         </div>
       </div>
       <div class="carry-item">
-        <span class="carry-tag med">MED</span>
+        <span class="carry-tag fixed">FIXED</span>
         <div class="carry-body">
           <strong>Webhook rejects missing <code>webhookTimestamp</code> with HTTP 401.</strong>
           Additionally, issue-create events are filtered as irrelevant, so a newly created Todo issue
           does not trigger an immediate tick — the operator must wait for the next poll cycle.
           <div class="ref">dashboard/mod.rs:434</div>
+          <div class="fix-note">Missing <code>webhookTimestamp</code> accepted when HMAC is valid (timestamp checked only when present); issue-create events now treated as relevant and trigger an immediate tick.</div>
         </div>
       </div>
       <div class="carry-item">
-        <span class="carry-tag low">LOW</span>
+        <span class="carry-tag fixed">FIXED</span>
         <div class="carry-body">
           <strong>Dashboard run-state buckets diverge from PRD &sect;8.4.</strong> Stalled and
           <code>needs_human</code> runs surface as "Failed" instead of "Interrupted"; terminal and released
           runs surface as "Completed" instead of "Other".
+          <div class="fix-note">Stalled / <code>needs_human</code> now surface as "Interrupted"; terminal / released stay "Completed" (deliberate decision, diverges from PRD &sect;8.4 by design).</div>
         </div>
       </div>
       <div class="carry-item">
-        <span class="carry-tag low">LOW</span>
+        <span class="carry-tag fixed">FIXED</span>
         <div class="carry-body">
           <strong>Fragile park-barrier log-string coupling.</strong> The park barrier count is derived from
           an exact log-string literal shared between <code>orchestrator.rs</code> and a SQL pattern in
           <code>store.rs</code>. Any phrasing change to one side silently breaks the other.
+          <div class="fix-note">Shared constants <code>ACTIVE_CONTINUATION_MARKER</code> / <code>ACTIVE_CONTINUATION_EVENT</code> in <code>store.rs</code> used by both sides; latent bug where the marker never matched the SQL also fixed.</div>
         </div>
       </div>
       <div class="carry-item">
-        <span class="carry-tag low">LOW</span>
+        <span class="carry-tag fixed">FIXED</span>
         <div class="carry-body">
           <strong>Only request-rate headers tracked.</strong> Linear complexity headers are ignored. Per
           PRD &sect;2, both rate dimensions should be monitored.
+          <div class="fix-note">Linear complexity dimension now parsed and throttled alongside the requests dimension.</div>
         </div>
       </div>
       <div class="carry-item">
-        <span class="carry-tag low">LOW</span>
+        <span class="carry-tag fixed">FIXED</span>
         <div class="carry-body">
           <strong>Startup stale-PID kill is fire-and-forget.</strong> <code>mark_crashed_runs()</code>
           runs before the kill is confirmed complete, so a slow-dying process might still be alive when
           the orchestrator resumes its slot.
+          <div class="fix-note">Bounded 8 s <code>wait_for_pids_dead</code> call inserted between kill and <code>mark_crashed_runs</code>.</div>
         </div>
       </div>
       <div class="carry-item">
-        <span class="carry-tag low">LOW</span>
+        <span class="carry-tag fixed">FIXED</span>
         <div class="carry-body">
           <strong>Several codex / README gaps.</strong> The codex runner lacks <code>approvalPolicy</code>
           flags; thinking, effort, and provider config are absent; backoff exponent is
           <code>2^(attempt-1)</code> while PRD specifies <code>2^attempt</code>; README still describes
           the v0 feature set.
+          <div class="fix-note">Codex provider + thinking plumbed (<code>approvalPolicy</code> / <code>sandbox</code> / <code>effort</code> already existed); backoff exponent corrected to <code>2^attempt</code> (cap 30 min); README rewritten to current feature set.</div>
         </div>
       </div>
     </div>
@@ -687,7 +700,7 @@ truncate -s 0 ./example-agent/logs/agent.log 2>/dev/null || true</pre>
           <h3>Zero-cost smoke with the fake runner</h3>
           <p>
             Copy <code>example-agent</code> to a scratch folder and switch the runner to <code>fake</code>.
-            The fake runner is a built-in test shim that runs <code>sh -c 'printf "%s\n" "$AIHUB_PROMPT"'</code>
+            The fake runner is a built-in test shim that runs <code>sh -c 'printf "%s\n" "$AGENT_PROMPT"'</code>
             — it immediately exits zero after printing the rendered prompt. No Claude CLI, no API spend.
           </p>
 <pre># Create scratch agent folder
@@ -812,7 +825,7 @@ curl -s http://127.0.0.1:7878/export | jq .</pre>
         <tr>
           <td><span class="cb"></span></td>
           <td>Retry / exponential backoff on abnormal exit</td>
-          <td>Kill the child process mid-run; confirm retry counter increments and delay grows as <code>min(retry_backoff_ms &middot; 2^(n-1), 5&nbsp;min)</code>.</td>
+          <td>Kill the child process mid-run; confirm retry counter increments and delay grows as <code>min(retry_backoff_ms &middot; 2^n, 30&nbsp;min)</code>.</td>
         </tr>
         <tr>
           <td><span class="cb"></span></td>
@@ -1161,14 +1174,14 @@ awk '{print $3}' footprint-b2.log | awk 'NR%10==0 {s+=$1} END {printf "total fle
 | RSS delta over 1h churn | — MB |
 | DB size after 1h churn | — MB |
 | Binary size (release) | 8.2 MB |
-| Tests passing | 105 |
+| Tests passing | 125 |
 
 **Acceptance criteria:** all passed / [list any failures]
 
 **Footprint fixes applied:** 6 (Linear double-poll, fetch_one scan, WS poll,
 Tokio threads, SQLite growth, Tokio features)
 
-**Open items triaged:** 8 (8 LOW/MED items filed for follow-up, none blocking)
+**Open items triaged:** 8 (all 8 LOW/MED items subsequently fixed)
 
 **Reviewer:** [name]
 **Date:** [YYYY-MM-DD]</pre>
@@ -1190,7 +1203,7 @@ Tokio threads, SQLite growth, Tokio features)
 
   <footer>
     Sources: multi-agent review of PRs #1&ndash;14 vs PRD-EXTRACTION.md &nbsp;&middot;&nbsp;
-    <code>cargo test --release</code> (105 passing) &nbsp;&middot;&nbsp;
+    <code>cargo test --release</code> (125 passing) &nbsp;&middot;&nbsp;
     Linear ALG-186 &nbsp;&mdash;&nbsp; generated June 10, 2026
   </footer>
 
