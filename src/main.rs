@@ -146,11 +146,16 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
         },
     );
     match store.open_run_pids() {
-        Ok(pids) => {
-            for pid in pids {
+        Ok(pids) if !pids.is_empty() => {
+            for &pid in &pids {
                 runner::term_then_kill(pid, std::time::Duration::from_secs(5));
             }
+            // Wait for stale workers to die before marking their runs crashed,
+            // so a slow-dying process cannot still be alive when we resume slots
+            // (TOCTOU). Bounded at 8s: 5s grace + 3s extra.
+            runner::wait_for_pids_dead(&pids, std::time::Duration::from_secs(8));
         }
+        Ok(_) => {}
         Err(e) => tracing::warn!("loading stale run PIDs failed: {e:#}"),
     }
     if let Err(e) = store.mark_crashed_runs() {

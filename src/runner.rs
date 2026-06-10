@@ -867,6 +867,39 @@ pub fn term_then_kill(pid: u32, grace: std::time::Duration) {
     });
 }
 
+/// Poll until all PIDs in `pids` are no longer alive, or until `timeout` elapses.
+///
+/// Uses `kill(pid, 0)` to probe existence. Called at startup after
+/// `term_then_kill` so that `mark_crashed_runs` runs only once the stale
+/// workers are confirmed dead (avoids TOCTOU where a slow-dying process is
+/// still alive when we resume slots).
+pub fn wait_for_pids_dead(pids: &[u32], timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    let poll_interval = std::time::Duration::from_millis(100);
+    loop {
+        let alive: Vec<u32> = pids
+            .iter()
+            .copied()
+            .filter(|&pid| {
+                let p = Pid::from_raw(pid as i32);
+                kill(p, None).is_ok()
+            })
+            .collect();
+        if alive.is_empty() {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            tracing::warn!(
+                pids = ?alive,
+                "stale PIDs still alive after wait timeout; proceeding anyway"
+            );
+            break;
+        }
+        std::thread::sleep(poll_interval.min(remaining));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
