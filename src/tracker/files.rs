@@ -176,6 +176,10 @@ fn parse_issue_file(path: &Path) -> Result<Issue> {
         labels: fm.labels,
         created_at: fm.created_at,
         updated_at: fm.updated_at,
+        parent_id: None,
+        blocked_by: Vec::new(),
+        project_name: None,
+        project_slug: None,
     })
 }
 

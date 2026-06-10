@@ -18,6 +18,12 @@ pub struct Issue {
     pub labels: Vec<String>,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
+    /// Identifier of the parent issue, if any.
+    pub parent_id: Option<String>,
+    /// Identifiers of issues that block this one.
+    pub blocked_by: Vec<String>,
+    pub project_name: Option<String>,
+    pub project_slug: Option<String>,
 }
 
 impl Issue {

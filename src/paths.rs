@@ -37,9 +37,12 @@ impl AgentPaths {
     }
 
     /// Issues directory, resolved against the tracker's configured `config.path`
-    /// (relative to the agent root).
+    /// (relative to the agent root). Falls back to `./issues` when config is absent.
     pub fn issues_dir(&self, cfg: &TrackerConfig) -> PathBuf {
-        self.root.join(&cfg.config.path)
+        cfg.config
+            .as_ref()
+            .map(|c| self.root.join(&c.path))
+            .unwrap_or_else(|| self.root.join("issues"))
     }
 
     /// `<root>/logs`.

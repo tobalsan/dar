@@ -49,7 +49,7 @@ pub struct WorkflowFrontmatter {
     pub linear: Option<WfLinearConfig>,
 }
 
-/// Tracker state-name overrides from WORKFLOW.md.
+/// Tracker overrides from WORKFLOW.md.
 /// Flat fields (`active_states`, `terminal_states`, `needs_human`) take
 /// precedence over the legacy nested form (`states.active` / `states.terminal`
 /// / `states.needs_human`).
@@ -61,6 +61,13 @@ pub struct WfTrackerConfig {
     pub needs_human: Option<String>,
     // --- Legacy nested form ---
     pub states: Option<WfTrackerStates>,
+    // --- Tracker kind + Linear-specific ---
+    /// `"files"` or `"linear"`. Overrides agent.yaml `tracker.use`.
+    pub kind: Option<String>,
+    /// Linear project slugId to scope issue polling.
+    pub project_slug: Option<String>,
+    /// Linear GraphQL endpoint override (default `https://api.linear.app/graphql`).
+    pub endpoint: Option<String>,
 }
 
 /// Legacy `tracker.states.*` nesting.
@@ -225,12 +232,17 @@ fn find_closing_delim(s: &str) -> Option<(&str, &str)> {
 #[derive(Debug, Clone)]
 pub struct EffectiveLoopConfig {
     // Tracker
+    pub tracker_kind: String,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
     /// Optional "needs human" state name; when a child sets this state the issue
     /// is treated as active (not terminal) so the orchestrator won't re-dispatch
     /// it automatically.
     pub needs_human: Option<String>,
+    /// Linear project slugId (only relevant when tracker_kind == "linear").
+    pub tracker_project_slug: Option<String>,
+    /// Linear GraphQL endpoint (only relevant when tracker_kind == "linear").
+    pub tracker_endpoint: String,
     // Polling
     pub poll_interval_ms: u64,
     pub max_concurrent: usize,
@@ -261,8 +273,25 @@ impl EffectiveLoopConfig {
     /// Build by layering WORKFLOW.md frontmatter over agent.yaml base config.
     /// Every field present in `wf` wins; absent fields fall back to `base`.
     pub fn merge(base: &AgentConfig, wf: &WorkflowFrontmatter) -> Self {
-        // --- Tracker states ---
+        // --- Tracker states + kind ---
         let (active_states, terminal_states, needs_human) = resolve_tracker(base, wf);
+        let tracker_kind = wf
+            .tracker
+            .as_ref()
+            .and_then(|t| t.kind.as_deref())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| base.tracker.use_.clone());
+        let tracker_project_slug = wf
+            .tracker
+            .as_ref()
+            .and_then(|t| t.project_slug.clone())
+            .or_else(|| base.tracker.project_slug.clone());
+        let tracker_endpoint = wf
+            .tracker
+            .as_ref()
+            .and_then(|t| t.endpoint.clone())
+            .or_else(|| base.tracker.endpoint.clone())
+            .unwrap_or_else(|| "https://api.linear.app/graphql".to_string());
 
         // --- Polling ---
         let p = wf.polling.as_ref();
@@ -326,9 +355,12 @@ impl EffectiveLoopConfig {
             .unwrap_or(base.dashboard.port);
 
         Self {
+            tracker_kind,
             active_states,
             terminal_states,
             needs_human,
+            tracker_project_slug,
+            tracker_endpoint,
             poll_interval_ms,
             max_concurrent,
             max_retries,
@@ -422,11 +454,13 @@ mod tests {
             name: "Test".into(),
             tracker: TrackerConfig {
                 use_: "files".into(),
-                config: TrackerInner {
+                config: Some(TrackerInner {
                     path: "./issues".into(),
-                },
+                }),
                 active_states: vec!["todo".into()],
                 terminal_states: vec!["done".into()],
+                project_slug: None,
+                endpoint: None,
             },
             runner: RunnerConfig {
                 use_: "claude-code".into(),

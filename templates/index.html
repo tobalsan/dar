@@ -86,6 +86,11 @@
         <dt>polling</dt><dd>{% if paused %}paused{% else %}running{% endif %}</dd>
         <dt>tracker</dt><dd>{{ agent.tracker }}</dd>
         <dt>runner</dt><dd>{{ agent.runner }}</dd>
+        {% match rate_limit_min_remaining %}
+        {% when Some with (r) %}
+        <dt>rate limit</dt><dd>{{ r }} req remaining (min)</dd>
+        {% when None %}
+        {% endmatch %}
       </dl>
     </section>
 

@@ -77,11 +77,13 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     let prompt = prompt::PromptRenderer::load(&paths.workflow_md())?;
     let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &prompt.snapshot().frontmatter);
 
-    // Build tracker using effective active/terminal states (WORKFLOW.md wins,
-    // falls back to agent.yaml when absent).
+    // Build tracker using effective config (WORKFLOW.md wins, falls back to agent.yaml).
     let mut tracker_cfg = agent_cfg.tracker.clone();
+    tracker_cfg.use_ = effective_cfg.tracker_kind.clone();
     tracker_cfg.active_states = effective_cfg.active_states.clone();
     tracker_cfg.terminal_states = effective_cfg.terminal_states.clone();
+    tracker_cfg.project_slug = effective_cfg.tracker_project_slug.clone();
+    tracker_cfg.endpoint = Some(effective_cfg.tracker_endpoint.clone());
     let tracker = tracker::build(&tracker_cfg, &paths)?;
 
     let (control_tx, control_rx) = mpsc::unbounded_channel();
@@ -102,7 +104,7 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     let agent_info = AgentInfo {
         id: agent_cfg.id.clone(),
         folder: paths.root.display().to_string(),
-        tracker: agent_cfg.tracker.use_.clone(),
+        tracker: effective_cfg.tracker_kind.clone(),
         runner: effective_cfg.runner_kind.clone(),
     };
     let app_state = AppState::new(agent_info, control_tx, Arc::clone(&store), history_seed);

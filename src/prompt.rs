@@ -260,6 +260,10 @@ mod tests {
             labels: vec![],
             created_at: None,
             updated_at: None,
+            parent_id: None,
+            blocked_by: vec![],
+            project_name: None,
+            project_slug: None,
         }
     }
 

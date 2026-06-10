@@ -7,7 +7,7 @@
 //! the `paused` flag). Dashboard handlers take read locks for rendering.
 
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
@@ -194,6 +194,9 @@ pub struct AppState {
     pub store: Arc<Store>,
     /// Dashboard -> orchestrator control channel.
     pub control_tx: mpsc::UnboundedSender<ControlMsg>,
+    /// Minimum Linear rate-limit requests remaining observed since startup.
+    /// `i64::MAX` = no observation yet (tracker doesn't emit rate-limit info).
+    pub rate_limit_min_remaining: Arc<AtomicI64>,
 }
 
 impl AppState {
@@ -215,6 +218,7 @@ impl AppState {
             history: Arc::new(HistoryRing::from_seed(history_seed)),
             store,
             control_tx,
+            rate_limit_min_remaining: Arc::new(AtomicI64::new(i64::MAX)),
         }
     }
 }
