@@ -1747,11 +1747,10 @@ pub(crate) fn sort_candidates(v: &mut [Issue]) {
     });
 }
 
-/// Backoff for dispatch retries: `min(retry_backoff_ms * 2^(attempt-1), 30min)`.
-/// `attempt` is 1-based.
+/// Backoff for dispatch retries: `min(retry_backoff_ms * 2^attempt, 30min)`.
+/// `attempt` is 1-based (first retry = 1).
 pub(crate) fn backoff(retry_backoff_ms: u64, attempt: u32) -> Duration {
-    let shift = attempt.saturating_sub(1);
-    let factor = 1u64.checked_shl(shift).unwrap_or(u64::MAX);
+    let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
     let ms = retry_backoff_ms.saturating_mul(factor);
     let d = Duration::from_millis(ms);
     if d > BACKOFF_CAP {
@@ -2716,9 +2715,10 @@ mod tests {
 
     #[test]
     fn backoff_grows_then_caps() {
-        assert_eq!(backoff(30_000, 1), Duration::from_secs(30));
-        assert_eq!(backoff(30_000, 2), Duration::from_secs(60));
-        assert_eq!(backoff(30_000, 3), Duration::from_secs(120));
+        // formula: min(retry_backoff_ms * 2^attempt, 30min)
+        assert_eq!(backoff(30_000, 1), Duration::from_secs(60));
+        assert_eq!(backoff(30_000, 2), Duration::from_secs(120));
+        assert_eq!(backoff(30_000, 3), Duration::from_secs(240));
         assert_eq!(backoff(30_000, 7), Duration::from_secs(30 * 60));
         assert_eq!(backoff(u64::MAX, 64), BACKOFF_CAP);
     }

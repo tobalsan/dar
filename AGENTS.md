@@ -29,7 +29,7 @@ cargo test --release backoff_grows_then_caps   # a single test by name
 `Orchestrator::run` ticks every `poll_interval_ms`. Order inside `tick()` is load-bearing: `reconcile()` → `collect_finished()` → `dispatch()` → `publish_snapshots()`.
 
 - **reconcile** re-reads each *running* slot's issue file. It must SKIP slots whose child already finished (`handle.is_finished()`) so `collect_finished` can classify a clean exit — otherwise a just-completed run gets stolen and mis-recorded. A terminal issue at reconcile = **Succeeded** (agent did its job); missing / non-active = **Cancelled**.
-- **collect_finished** classifies exited children: normal exit + terminal issue → Succeeded; normal exit + still active → 1s **continuation** retry (does NOT count against `max_retries`); abnormal exit → **backoff** retry `min(retry_backoff_ms·2^(n-1), 5min)` up to `max_retries`, then Failed (log-only).
+- **collect_finished** classifies exited children: normal exit + terminal issue → Succeeded; normal exit + still active → 1s **continuation** retry (does NOT count against `max_retries`); abnormal exit → **backoff** retry `min(retry_backoff_ms·2^attempt, 30min)` up to `max_retries`, then Failed (log-only). `attempt` is 1-based (first retry = attempt 1).
 - **dispatch** sorts candidates by priority asc (null last) → `created_at` asc → identifier, dispatches up to `max_concurrent`. Due retries dispatch before fresh candidates.
 
 State is in-memory: kill `agentropy` and rerun → it starts cold and trusts whatever the issue files say.
