@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 # async runtime + process + signals
-tokio = { version = "1.43", features = ["full"] }
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "process", "signal", "sync", "time", "io-util", "net"] }
 # web / dashboard
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["trace"] }

@@ -41,7 +41,7 @@ fn main() {
     }
 }
 
-#[tokio::main]
+#[tokio::main(worker_threads = 2)]
 async fn main_inner() -> Result<()> {
     let cli = Cli::parse();
 
