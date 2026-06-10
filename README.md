@@ -244,6 +244,14 @@ subprocess tree. `pi` and `claude` persist per-issue session dirs under
 
 ## Environment variables exported to children
 
+On startup, `agentropy run` and `agentropy doctor` load `<agent-folder>/.env`
+when it exists. Values from the real process environment take precedence over
+the file. `.env` entries are for the daemon's own config/secrets lookup and are
+not exported wholesale to runner, hook, or HITL CLI child processes; those
+children receive their inherited environment with file-loaded keys removed plus
+the documented `AGENT_*` variables below. `agentropy init-workflow` ensures
+`.env` is listed in the agent folder's `.gitignore`.
+
 Every runner receives the following `AGENT_*` variables. Hook scripts receive
 the subset applicable to their lifecycle point.
 
@@ -288,7 +296,8 @@ Create a file `hello.md` in this workspace with the text "hello from agentropy".
 
 Set `tracker.use: linear` (or `tracker.kind: linear` in WORKFLOW.md). Requires:
 
-- `LINEAR_API_KEY` environment variable with a valid Linear API key.
+- `LINEAR_API_KEY` environment variable with a valid Linear API key, either in
+  the process environment or in `<agent-folder>/.env`.
 - `tracker.project_slug` set to the Linear project's slugId.
 
 The Linear tracker polls via GraphQL, scopes to the configured project, and
