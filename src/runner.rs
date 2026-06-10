@@ -70,6 +70,12 @@ pub struct SpawnParams<'a> {
     pub runner_kind: &'a str,
     /// Model override; passed to runners that support a model flag.
     pub model: Option<String>,
+    /// Model provider override (e.g. "openai", "anthropic"); forwarded to pi runner as `--provider`.
+    pub provider: Option<String>,
+    /// Thinking/reasoning budget; forwarded to pi runner as `--thinking`.
+    pub thinking: Option<String>,
+    /// Reasoning effort level (e.g. "low", "medium", "high"); forwarded to codex runner.
+    pub effort: Option<String>,
     pub workspace: &'a Path,
     pub workspace_root: &'a Path,
     pub agent_root: &'a Path,
@@ -283,7 +289,7 @@ impl RunnerSpec for CodexRunner<'_> {
         effective_command(self.p, &RunnerKind::Codex)
     }
     fn args(&self) -> Vec<OsString> {
-        vec![OsString::from("app-server")]
+        codex_args(self.p)
     }
     fn stdin_payload(&self) -> Option<Vec<u8>> {
         Some(codex_turn_request(self.p).into_bytes())
@@ -403,6 +409,13 @@ fn codex_turn_request(p: &SpawnParams<'_>) -> String {
             "issue_identifier": p.issue_id,
             "run_id": p.run_id,
             "model": p.model,
+            "provider": p.provider,
+            "thinking": p.thinking,
+            // Headless defaults: never require human approval; grant full disk
+            // access so the child can reach the issue file outside the workspace.
+            "approvalPolicy": "never",
+            "sandboxPolicy": "danger-full-access",
+            "effort": p.effort,
             "tools": worker_tools(p),
         }
     })
@@ -451,6 +464,33 @@ fn claude_args(p: &SpawnParams<'_>) -> Vec<OsString> {
     if let Some(ref model) = p.model {
         args.push(OsString::from("--model"));
         args.push(OsString::from(model));
+    }
+    args
+}
+
+fn codex_args(p: &SpawnParams<'_>) -> Vec<OsString> {
+    // Headless operation: never ask for human approval and grant full disk
+    // access (the agent folder lives outside the workspace cwd, so a
+    // restricted sandbox would block it).  These defaults mirror AIHub's
+    // codex runner and are always set for unattended dispatch.
+    let mut args = vec![
+        OsString::from("app-server"),
+        OsString::from("-c"),
+        OsString::from("approval_policy=\"never\""),
+        OsString::from("-c"),
+        OsString::from("sandbox_permissions=[\"disk-full-read-access\", \"disk-write-access\"]"),
+    ];
+    if let Some(ref model) = p.model {
+        args.push(OsString::from("-c"));
+        args.push(OsString::from(format!("model={model:?}")));
+    }
+    if let Some(ref provider) = p.provider {
+        args.push(OsString::from("-c"));
+        args.push(OsString::from(format!("model_provider={provider:?}")));
+    }
+    if let Some(ref effort) = p.effort {
+        args.push(OsString::from("-c"));
+        args.push(OsString::from(format!("model_reasoning_effort={effort:?}")));
     }
     args
 }
@@ -923,6 +963,9 @@ mod tests {
             command: "runner",
             runner_kind,
             model,
+            provider: None,
+            thinking: None,
+            effort: None,
             workspace,
             workspace_root,
             agent_root: workspace_root.parent().unwrap_or(workspace_root),
@@ -1053,7 +1096,26 @@ mod tests {
         let codex_spec = CodexRunner { p: &codex };
         let cli_spec = CliRunner { p: &cli };
 
-        assert_eq!(arg_strings(codex_spec.args()), vec!["app-server"]);
+        // Codex args must include app-server plus the headless approval/sandbox defaults.
+        let args = arg_strings(codex_spec.args());
+        assert_eq!(args[0], "app-server");
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("approval_policy")),
+            "approval_policy flag missing: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("sandbox_permissions")),
+            "sandbox_permissions flag missing: {args:?}"
+        );
+        // model is passed as a -c flag when set
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("model=")),
+            "model -c flag missing: {args:?}"
+        );
+
         // Codex must send a JSON-RPC turn request (not None).
         let payload = codex_spec.stdin_payload().unwrap();
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
@@ -1061,6 +1123,9 @@ mod tests {
         assert_eq!(json["method"], "turn");
         assert_eq!(json["params"]["issue_identifier"], "ISSUE-1");
         assert_eq!(json["params"]["model"], "codex-1");
+        // Turn request must carry headless defaults.
+        assert_eq!(json["params"]["approvalPolicy"], "never");
+        assert_eq!(json["params"]["sandboxPolicy"], "danger-full-access");
 
         let env: Vec<(String, String)> = cli_spec
             .env()
@@ -1076,6 +1141,127 @@ mod tests {
         assert!(env.contains(&("AIHUB_MODEL".into(), "model-a".into())));
         assert!(env.contains(&("AIHUB_WORKER_MODEL".into(), "model-a".into())));
         assert!(env.iter().any(|(k, _)| k == "AIHUB_WORKER_PROMPT"));
+    }
+
+    #[test]
+    fn codex_effort_is_passed_as_config_flag_and_turn_request() {
+        let workspace_root = Path::new("/tmp/agent/workspaces");
+        let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
+        let mut p = params("codex", Some("o3".to_string()), workspace, workspace_root);
+        p.effort = Some("high".to_string());
+
+        let codex_spec = CodexRunner { p: &p };
+        let args = arg_strings(codex_spec.args());
+
+        // -c model_reasoning_effort="high" must appear
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("model_reasoning_effort")),
+            "model_reasoning_effort flag missing: {args:?}"
+        );
+
+        // effort must be in the turn request params
+        let json: serde_json::Value =
+            serde_json::from_slice(&codex_spec.stdin_payload().unwrap()).unwrap();
+        assert_eq!(json["params"]["effort"], "high");
+    }
+
+    #[test]
+    fn codex_approval_and_sandbox_always_set_even_without_model() {
+        let workspace_root = Path::new("/tmp/agent/workspaces");
+        let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
+        // No model, no effort.
+        let p = params("codex", None, workspace, workspace_root);
+        let codex_spec = CodexRunner { p: &p };
+        let args = arg_strings(codex_spec.args());
+
+        assert_eq!(args[0], "app-server");
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("approval_policy")),
+            "approval_policy missing without model: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("sandbox_permissions")),
+            "sandbox_permissions missing without model: {args:?}"
+        );
+        // model -c flag must NOT be present when model is None
+        assert!(
+            !args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].starts_with("model=")),
+            "model flag should be absent when unset: {args:?}"
+        );
+        // effort -c flag must NOT be present
+        assert!(
+            !args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("model_reasoning_effort")),
+            "effort flag should be absent when unset: {args:?}"
+        );
+        // provider -c flag must NOT be present
+        assert!(
+            !args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("model_provider")),
+            "provider flag should be absent when unset: {args:?}"
+        );
+    }
+
+    #[test]
+    fn codex_provider_is_passed_as_config_flag_and_turn_request() {
+        let workspace_root = Path::new("/tmp/agent/workspaces");
+        let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
+        let mut p = params("codex", Some("o3".to_string()), workspace, workspace_root);
+        p.provider = Some("openai".to_string());
+
+        let codex_spec = CodexRunner { p: &p };
+        let args = arg_strings(codex_spec.args());
+
+        // -c model_provider="openai" must appear
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("model_provider")),
+            "model_provider flag missing: {args:?}"
+        );
+
+        // provider must be in the turn request params
+        let json: serde_json::Value =
+            serde_json::from_slice(&codex_spec.stdin_payload().unwrap()).unwrap();
+        assert_eq!(json["params"]["provider"], "openai");
+    }
+
+    #[test]
+    fn codex_thinking_is_passed_in_turn_request() {
+        let workspace_root = Path::new("/tmp/agent/workspaces");
+        let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
+        let mut p = params("codex", Some("o3".to_string()), workspace, workspace_root);
+        p.thinking = Some("8000".to_string());
+
+        let codex_spec = CodexRunner { p: &p };
+
+        // thinking must be in the turn request params
+        let json: serde_json::Value =
+            serde_json::from_slice(&codex_spec.stdin_payload().unwrap()).unwrap();
+        assert_eq!(json["params"]["thinking"], "8000");
+    }
+
+    #[test]
+    fn codex_provider_and_thinking_absent_when_unset() {
+        let workspace_root = Path::new("/tmp/agent/workspaces");
+        let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
+        let p = params("codex", None, workspace, workspace_root);
+        let codex_spec = CodexRunner { p: &p };
+
+        let args = arg_strings(codex_spec.args());
+        assert!(
+            !args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("model_provider")),
+            "provider flag should be absent when unset: {args:?}"
+        );
+
+        let json: serde_json::Value =
+            serde_json::from_slice(&codex_spec.stdin_payload().unwrap()).unwrap();
+        assert!(json["params"]["provider"].is_null());
+        assert!(json["params"]["thinking"].is_null());
     }
 
     #[test]

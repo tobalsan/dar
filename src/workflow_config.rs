@@ -120,6 +120,12 @@ pub struct WfAgentConfig {
     pub command: Option<String>,
     /// Model identifier (not present in v0 agent.yaml; new in WORKFLOW.md).
     pub model: Option<String>,
+    /// Model provider override (e.g. "openai", "anthropic"). Forwarded to runners that accept one.
+    pub provider: Option<String>,
+    /// Thinking/reasoning budget token limit. Forwarded to pi runner as `--thinking`.
+    pub thinking: Option<String>,
+    /// Reasoning effort level (e.g. "low", "medium", "high"). Forwarded to runners that accept one.
+    pub effort: Option<String>,
     /// Per-attempt timeout override (ms).
     pub max_run_timeout_ms: Option<u64>,
     pub turn_timeout_ms: Option<u64>,
@@ -277,6 +283,12 @@ pub struct EffectiveLoopConfig {
     pub runner_command: String,
     /// Model identifier passed to the runner (None = runner default).
     pub model: Option<String>,
+    /// Model provider passed to the runner (None = runner default).
+    pub provider: Option<String>,
+    /// Thinking/reasoning budget token limit passed to the runner (None = runner default).
+    pub thinking: Option<String>,
+    /// Reasoning effort level passed to the runner (None = runner default).
+    pub effort: Option<String>,
     pub max_run_timeout_ms: u64,
     pub stall_timeout_ms: u64,
     // Dashboard
@@ -373,6 +385,9 @@ impl EffectiveLoopConfig {
         let model = a
             .and_then(|a| a.model.clone())
             .or_else(|| base.runner.model.clone());
+        let provider = a.and_then(|a| a.provider.clone());
+        let thinking = a.and_then(|a| a.thinking.clone());
+        let effort = a.and_then(|a| a.effort.clone());
         let max_run_timeout_ms = a
             .and_then(|a| a.turn_timeout_ms.or(a.max_run_timeout_ms))
             .unwrap_or(base.runner.max_run_timeout_ms);
@@ -417,6 +432,9 @@ impl EffectiveLoopConfig {
             runner_kind,
             runner_command,
             model,
+            provider,
+            thinking,
+            effort,
             max_run_timeout_ms,
             stall_timeout_ms,
             dashboard_bind,
