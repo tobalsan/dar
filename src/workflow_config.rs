@@ -100,6 +100,8 @@ pub struct WfPollingConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct WfWorkspaceConfig {
     pub root: Option<PathBuf>,
+    pub reuse: Option<bool>,
+    pub cleanup_on_terminal: Option<bool>,
 }
 
 /// Runner / model overrides from WORKFLOW.md.
@@ -134,10 +136,15 @@ impl WfAgentConfig {
     }
 }
 
-/// Lifecycle hook scripts from WORKFLOW.md (parsed; execution is a future concern).
+/// Lifecycle hook scripts from WORKFLOW.md.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct WfHooksConfig {
+    pub after_create: Option<String>,
+    pub before_run: Option<String>,
+    pub after_run: Option<String>,
+    pub before_remove: Option<String>,
+    // Legacy names retained as parsed no-ops for backwards compatibility.
     pub before_dispatch: Option<String>,
     pub after_success: Option<String>,
     pub after_failure: Option<String>,
@@ -259,6 +266,8 @@ pub struct EffectiveLoopConfig {
     pub allow_stale: bool,
     // Workspace (relative to agent root)
     pub workspace_root: PathBuf,
+    pub workspace_reuse: bool,
+    pub cleanup_on_terminal: bool,
     // Runner / model
     pub runner_kind: String,
     pub runner_command: String,
@@ -327,6 +336,12 @@ impl EffectiveLoopConfig {
             .as_ref()
             .and_then(|w| w.root.clone())
             .unwrap_or_else(|| base.workspace.root.clone());
+        let workspace_reuse = wf.workspace.as_ref().and_then(|w| w.reuse).unwrap_or(true);
+        let cleanup_on_terminal = wf
+            .workspace
+            .as_ref()
+            .and_then(|w| w.cleanup_on_terminal)
+            .unwrap_or(false);
 
         // --- Runner / model ---
         let a = wf.agent.as_ref();
@@ -383,6 +398,8 @@ impl EffectiveLoopConfig {
             retry_backoff_ms,
             allow_stale,
             workspace_root,
+            workspace_reuse,
+            cleanup_on_terminal,
             runner_kind,
             runner_command,
             model,
@@ -561,14 +578,18 @@ polling:
   allow_stale: false
 workspace:
   root: ./ws
+  reuse: false
+  cleanup_on_terminal: true
 agent:
   sdk: claude-code
   command: claude
   model: claude-opus-4-6
   max_run_timeout_ms: 900000
 hooks:
-  before_dispatch: ./pre.sh
-  after_success: ./post.sh
+  after_create: ./after-create.sh
+  before_run: ./before-run.sh
+  after_run: ./after-run.sh
+  before_remove: ./before-remove.sh
 server:
   port: 9090
 linear:
@@ -590,14 +611,31 @@ body"#;
             fm.workspace.as_ref().unwrap().root,
             Some(PathBuf::from("./ws"))
         );
+        assert_eq!(fm.workspace.as_ref().unwrap().reuse, Some(false));
+        assert_eq!(
+            fm.workspace.as_ref().unwrap().cleanup_on_terminal,
+            Some(true)
+        );
         assert_eq!(fm.agent.as_ref().unwrap().sdk, Some("claude-code".into()));
         assert_eq!(
             fm.agent.as_ref().unwrap().model,
             Some("claude-opus-4-6".into())
         );
         assert_eq!(
-            fm.hooks.as_ref().unwrap().before_dispatch,
-            Some("./pre.sh".into())
+            fm.hooks.as_ref().unwrap().after_create,
+            Some("./after-create.sh".into())
+        );
+        assert_eq!(
+            fm.hooks.as_ref().unwrap().before_run,
+            Some("./before-run.sh".into())
+        );
+        assert_eq!(
+            fm.hooks.as_ref().unwrap().after_run,
+            Some("./after-run.sh".into())
+        );
+        assert_eq!(
+            fm.hooks.as_ref().unwrap().before_remove,
+            Some("./before-remove.sh".into())
         );
         assert_eq!(fm.server.as_ref().unwrap().port, Some(9090));
         assert_eq!(
@@ -623,6 +661,20 @@ body"#;
         assert_eq!(eff.runner_command, "claude");
         assert_eq!(eff.model, None);
         assert!(eff.allow_stale);
+        assert!(eff.workspace_reuse);
+        assert!(!eff.cleanup_on_terminal);
+    }
+
+    #[test]
+    fn merge_workspace_policy_overrides_defaults() {
+        let base = base_config();
+        let raw =
+            "---\nworkspace:\n  root: ./custom\n  reuse: false\n  cleanup_on_terminal: true\n---";
+        let snap = parse_workflow_md(raw).unwrap();
+        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        assert_eq!(eff.workspace_root, PathBuf::from("./custom"));
+        assert!(!eff.workspace_reuse);
+        assert!(eff.cleanup_on_terminal);
     }
 
     #[test]
