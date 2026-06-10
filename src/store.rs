@@ -220,12 +220,7 @@ impl Store {
         conn.execute(
             "UPDATE runs SET outcome=?1, finished_at=?2, exit_code=?3, process_alive=0
              WHERE run_id=?4",
-            params![
-                outcome,
-                f.finished_at.to_rfc3339(),
-                f.exit_code,
-                run_id,
-            ],
+            params![outcome, f.finished_at.to_rfc3339(), f.exit_code, run_id,],
         )
         .context("finish_run")?;
         Ok(())
@@ -397,19 +392,16 @@ impl Store {
              ORDER BY event_id ASC
              LIMIT ?3",
         )?;
-        let rows = stmt.query_map(
-            params![issue_identifier, since, limit as i64],
-            |row| {
-                Ok(EventRow {
-                    event_id: row.get(0)?,
-                    run_id: row.get(1)?,
-                    issue_identifier: row.get(2)?,
-                    kind: row.get(3)?,
-                    payload: row.get(4)?,
-                    ts: row.get(5)?,
-                })
-            },
-        )?;
+        let rows = stmt.query_map(params![issue_identifier, since, limit as i64], |row| {
+            Ok(EventRow {
+                event_id: row.get(0)?,
+                run_id: row.get(1)?,
+                issue_identifier: row.get(2)?,
+                kind: row.get(3)?,
+                payload: row.get(4)?,
+                ts: row.get(5)?,
+            })
+        })?;
 
         let mut out = Vec::new();
         for row in rows {
@@ -426,7 +418,12 @@ impl Store {
         conn.execute(
             "INSERT INTO claims (run_id, issue_identifier, worker_id, claimed_at)
              VALUES (?1,?2,?3,?4)",
-            params![c.run_id, c.issue_identifier, c.worker_id, c.claimed_at.to_rfc3339()],
+            params![
+                c.run_id,
+                c.issue_identifier,
+                c.worker_id,
+                c.claimed_at.to_rfc3339()
+            ],
         )
         .context("insert_claim")?;
         Ok(conn.last_insert_rowid())
@@ -451,7 +448,12 @@ impl Store {
         conn.execute(
             "INSERT INTO heartbeats (run_id, issue_identifier, worker_id, ts)
              VALUES (?1,?2,?3,?4)",
-            params![hb.run_id, hb.issue_identifier, hb.worker_id, hb.ts.to_rfc3339()],
+            params![
+                hb.run_id,
+                hb.issue_identifier,
+                hb.worker_id,
+                hb.ts.to_rfc3339()
+            ],
         )
         .context("insert_heartbeat")?;
         Ok(())
@@ -494,6 +496,7 @@ fn run_status_to_str(s: RunStatus) -> &'static str {
         RunStatus::Cancelled => "Cancelled",
         RunStatus::Failed => "Failed",
         RunStatus::Succeeded => "Succeeded",
+        RunStatus::Interrupted => "interrupted",
         RunStatus::Crashed => "interrupted_gateway_restart",
         RunStatus::NeedsHuman => "NeedsHuman",
     }
@@ -506,6 +509,7 @@ fn str_to_run_status(s: &str) -> Option<RunStatus> {
         "Cancelled" => Some(RunStatus::Cancelled),
         "Failed" => Some(RunStatus::Failed),
         "Succeeded" => Some(RunStatus::Succeeded),
+        "Interrupted" | "interrupted" => Some(RunStatus::Interrupted),
         "Crashed" | "interrupted_gateway_restart" => Some(RunStatus::Crashed),
         "NeedsHuman" => Some(RunStatus::NeedsHuman),
         _ => None,
@@ -535,7 +539,9 @@ mod tests {
         for tbl in ["runs", "events", "claims", "heartbeats"] {
             let count: i64 = conn
                 .query_row(
-                    &format!("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='{tbl}'"),
+                    &format!(
+                        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='{tbl}'"
+                    ),
                     [],
                     |r| r.get(0),
                 )
@@ -674,7 +680,10 @@ mod tests {
         let row = pages.iter().find(|r| r.run_id == run_id).unwrap();
         assert!(!row.process_alive);
         assert_eq!(row.outcome.as_deref(), Some("interrupted_gateway_restart"));
-        assert!(row.finished_at.is_some(), "finished_at must be set after crash mark");
+        assert!(
+            row.finished_at.is_some(),
+            "finished_at must be set after crash mark"
+        );
     }
 
     #[test]
@@ -704,7 +713,10 @@ mod tests {
         // load_recent_runs must include the crashed row.
         let recent = store.load_recent_runs(10).unwrap();
         let entry = recent.iter().find(|e| e.identifier == "TEST-5");
-        assert!(entry.is_some(), "crashed run must appear in load_recent_runs");
+        assert!(
+            entry.is_some(),
+            "crashed run must appear in load_recent_runs"
+        );
         assert!(
             matches!(entry.unwrap().status, RunStatus::Crashed),
             "status must be Crashed"
