@@ -1141,6 +1141,7 @@ mod tests {
             runner: RunnerConfig {
                 use_: "claude-code".to_string(),
                 command: "claude".to_string(),
+                model: None,
                 max_run_timeout_ms: 1000,
             },
             orchestrator: OrchestratorConfig {
@@ -1490,6 +1491,7 @@ mod tests {
             runner: RunnerConfig {
                 use_: "claude-code".to_string(),
                 command,
+                model: None,
                 max_run_timeout_ms: 30_000,
             },
             orchestrator: OrchestratorConfig {

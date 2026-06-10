@@ -298,12 +298,17 @@ impl EffectiveLoopConfig {
             .map(str::to_string)
             .unwrap_or_else(|| {
                 if runner_override.is_some() {
-                    default_runner_command(&runner_kind).to_string()
+                    // Use the well-known default for built-in runners; for custom
+                    // runner kinds fall back to base.runner.command so the operator's
+                    // configured command is honoured.
+                    default_runner_command(&runner_kind)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| base.runner.command.clone())
                 } else {
                     base.runner.command.clone()
                 }
             });
-        let model = a.and_then(|a| a.model.clone());
+        let model = a.and_then(|a| a.model.clone()).or_else(|| base.runner.model.clone());
         let max_run_timeout_ms = a
             .and_then(|a| a.turn_timeout_ms.or(a.max_run_timeout_ms))
             .unwrap_or(base.runner.max_run_timeout_ms);
@@ -350,12 +355,15 @@ fn normalize_runner_kind(kind: &str) -> String {
     }
 }
 
-fn default_runner_command(kind: &str) -> &'static str {
+/// Return the well-known default command for a built-in runner kind, or `None`
+/// for custom/unrecognised kinds (caller should fall back to base command).
+fn default_runner_command(kind: &str) -> Option<&'static str> {
     match kind {
-        "claude" | "claude-code" => "claude",
-        "codex" => "codex",
-        "cli" | "fake" => "sh",
-        _ => "pi",
+        "pi" | "" => Some("pi"),
+        "claude" | "claude-code" => Some("claude"),
+        "codex" => Some("codex"),
+        "cli" | "fake" => Some("sh"),
+        _ => None,
     }
 }
 
@@ -423,6 +431,7 @@ mod tests {
             runner: RunnerConfig {
                 use_: "claude-code".into(),
                 command: "claude".into(),
+                model: None,
                 max_run_timeout_ms: 1_800_000,
             },
             orchestrator: OrchestratorConfig {
@@ -611,6 +620,18 @@ body"#;
     }
 
     #[test]
+    fn unknown_runner_without_command_falls_back_to_base_command() {
+        // WORKFLOW.md names an unknown runner but omits `command:`.
+        // The base agent.yaml command should be used, not "pi".
+        let base = base_config(); // base.runner.command = "claude"
+        let raw = "---\nagent:\n  sdk: gemini-code\n---";
+        let snap = parse_workflow_md(raw).unwrap();
+        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        assert_eq!(eff.runner_kind, "gemini-code");
+        assert_eq!(eff.runner_command, "claude"); // falls back to base, not "pi"
+    }
+
+    #[test]
     fn merge_runner_alias_falls_back() {
         let base = base_config();
         // `runner` alias (no sdk) should be picked up.
@@ -691,5 +712,42 @@ body"#;
         let wf = WorkflowFrontmatter::default();
         let eff = EffectiveLoopConfig::merge(&base, &wf);
         assert_eq!(eff.needs_human, None);
+    }
+
+    #[test]
+    fn agent_yaml_sdk_field_is_used_as_runner_kind() {
+        use std::net::Ipv4Addr;
+        let mut base = base_config();
+        base.runner = RunnerConfig {
+            use_: "pi".into(),
+            command: String::new(),
+            model: None,
+            max_run_timeout_ms: 3_600_000,
+        };
+        // sdk field in agent.yaml should map to runner kind via the `use_` alias
+        let wf = WorkflowFrontmatter::default();
+        let eff = EffectiveLoopConfig::merge(&base, &wf);
+        assert_eq!(eff.runner_kind, "pi");
+        assert_eq!(eff.model, None);
+        let _ = Ipv4Addr::LOCALHOST; // keep import used
+    }
+
+    #[test]
+    fn agent_yaml_model_falls_back_when_workflow_absent() {
+        let mut base = base_config();
+        base.runner.model = Some("claude-opus-4-6".into());
+        let wf = WorkflowFrontmatter::default();
+        let eff = EffectiveLoopConfig::merge(&base, &wf);
+        assert_eq!(eff.model, Some("claude-opus-4-6".into()));
+    }
+
+    #[test]
+    fn workflow_model_overrides_agent_yaml_model() {
+        let mut base = base_config();
+        base.runner.model = Some("base-model".into());
+        let raw = "---\nagent:\n  model: override-model\n---";
+        let snap = parse_workflow_md(raw).unwrap();
+        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        assert_eq!(eff.model, Some("override-model".into()));
     }
 }

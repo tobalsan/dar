@@ -34,10 +34,14 @@ pub struct TrackerInner {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RunnerConfig {
-    #[serde(rename = "use")]
+    /// Runner kind. Accepts `use` (canonical), `sdk` (alias). Empty / absent → "pi".
+    #[serde(rename = "use", alias = "sdk", default)]
     pub use_: String,
     #[serde(default)]
     pub command: String,
+    /// Optional model identifier forwarded to runners that accept one.
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(
         default = "default_turn_timeout_ms",
         alias = "turn_timeout_ms",
@@ -91,7 +95,7 @@ impl AgentConfig {
         }
         if !matches!(
             self.runner.use_.as_str(),
-            "pi" | "claude" | "claude-code" | "codex" | "cli" | "fake"
+            "" | "pi" | "claude" | "claude-code" | "codex" | "cli" | "fake"
         ) {
             bail!(
                 "runner.use must be one of pi, claude, codex, cli, fake (got {:?})",
