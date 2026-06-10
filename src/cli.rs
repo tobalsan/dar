@@ -8,9 +8,9 @@
 //! Root resolution (canonical, absolute) is the CLI's job; downstream code in
 //! `AgentPaths` only does path arithmetic on top of the resolved root.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 /// Folder-scoped agent runtime.
@@ -132,6 +132,23 @@ If requirements, ownership, base branch, dependency state, credentials, or valid
 
 Validate the change before handoff. When the task is complete, leave the issue out of active states: move it to `In Review` when work is done and a PR is open or updated, or to a terminal state only when the workflow explicitly calls for it."#;
 
+/// Scaffold WORKFLOW.md with the canonical default prompt body.
+///
+/// Errors if the file already exists and `force` is false.
+pub(crate) fn init_workflow(root: &Path, force: bool) -> Result<()> {
+    let path = root.join("WORKFLOW.md");
+    if path.exists() && !force {
+        bail!(
+            "{} already exists; pass --force to overwrite it",
+            path.display()
+        );
+    }
+    std::fs::write(&path, format!("{DEFAULT_WORKFLOW_MD_BODY}\n"))
+        .with_context(|| format!("writing {}", path.display()))?;
+    println!("wrote {}", path.display());
+    Ok(())
+}
+
 /// Resolve `--dir` (or cwd when absent) into a canonical, absolute path.
 fn resolve_root(dir: Option<&std::path::Path>) -> Result<PathBuf> {
     let raw = match dir {
@@ -144,7 +161,7 @@ fn resolve_root(dir: Option<&std::path::Path>) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::DEFAULT_WORKFLOW_MD_BODY;
+    use super::{init_workflow, DEFAULT_WORKFLOW_MD_BODY};
 
     #[test]
     fn default_workflow_body_contains_standard_worker_procedure() {
@@ -176,5 +193,37 @@ mod tests {
         assert!(body.contains("prompt-level worker guidance"));
         assert!(!body.contains("daemon must"));
         assert!(!body.contains("orchestrator must"));
+    }
+
+    #[test]
+    fn init_workflow_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        init_workflow(dir.path(), false).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
+        assert!(written.contains("prompt-level worker guidance"));
+        assert!(written.ends_with('\n'));
+    }
+
+    #[test]
+    fn init_workflow_refuses_overwrite_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("WORKFLOW.md"), "existing content").unwrap();
+        let err = init_workflow(dir.path(), false).unwrap_err();
+        assert!(
+            err.to_string().contains("already exists"),
+            "got: {err}"
+        );
+        // Original file must be untouched.
+        let contents = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
+        assert_eq!(contents, "existing content");
+    }
+
+    #[test]
+    fn init_workflow_overwrites_with_force() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("WORKFLOW.md"), "old content").unwrap();
+        init_workflow(dir.path(), true).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
+        assert!(written.contains("prompt-level worker guidance"));
     }
 }

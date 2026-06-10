@@ -20,11 +20,11 @@ mod workflow_config;
 
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::sync::{mpsc, watch};
 
-use cli::{Cli, Command, DEFAULT_WORKFLOW_MD_BODY};
+use cli::{Cli, Command};
 use paths::AgentPaths;
 use state::{AgentInfo, AppState};
 use workflow_config::EffectiveLoopConfig;
@@ -52,25 +52,9 @@ async fn main_inner() -> Result<()> {
         }
         Command::InitWorkflow(args) => {
             let root = args.resolve_root()?;
-            init_workflow(&root, args.force)
+            cli::init_workflow(&root, args.force)
         }
     }
-}
-
-/// Scaffold WORKFLOW.md with the canonical default prompt body.
-fn init_workflow(root: &std::path::Path, force: bool) -> Result<()> {
-    let path = root.join("WORKFLOW.md");
-    if path.exists() && !force {
-        bail!(
-            "{} already exists; pass --force to overwrite it",
-            path.display()
-        );
-    }
-
-    std::fs::write(&path, format!("{DEFAULT_WORKFLOW_MD_BODY}\n"))
-        .with_context(|| format!("writing {}", path.display()))?;
-    println!("wrote {}", path.display());
-    Ok(())
 }
 
 /// The long-running `agentropy run` command. Wires up logging, config, tracker,
