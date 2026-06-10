@@ -226,12 +226,7 @@ impl RunnerSpec for PiRunner<'_> {
         Some(pi_turn_request(self.p).into_bytes())
     }
     fn session_dir(&self) -> Option<PathBuf> {
-        Some(
-            self.p
-                .agent_root
-                .join("pi-sessions")
-                .join(&self.p.issue_id),
-        )
+        Some(self.p.agent_root.join("pi-sessions").join(&self.p.issue_id))
     }
     fn env(&self) -> Vec<(OsString, OsString)> {
         env_with_session_dir(common_env(self.p), &self.session_dir().unwrap())
@@ -550,6 +545,16 @@ impl RunnerHandle {
         let done = tokio::spawn(async move { kind });
         Self { pid, kill_tx, done }
     }
+
+    #[cfg(test)]
+    pub(crate) fn pending_for_test(pid: u32, kind: ExitKind) -> Self {
+        let (kill_tx, kill_rx) = oneshot::channel::<KillReason>();
+        let done = tokio::spawn(async move {
+            let _ = kill_rx.await;
+            kind
+        });
+        Self { pid, kill_tx, done }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -666,8 +671,7 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     let timeout = Duration::from_millis(p.max_run_timeout_ms);
     let issue_id = p.issue_id.clone();
 
-    let done =
-        tokio::spawn(async move { supervise(child, pid, issue_id, timeout, kill_rx).await });
+    let done = tokio::spawn(async move { supervise(child, pid, issue_id, timeout, kill_rx).await });
 
     Ok(RunnerHandle { pid, kill_tx, done })
 }
@@ -944,7 +948,12 @@ mod tests {
     fn codex_sends_turn_request_and_cli_gets_aihub_env() {
         let workspace_root = Path::new("/tmp/agent/workspaces");
         let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
-        let codex = params("codex", Some("codex-1".to_string()), workspace, workspace_root);
+        let codex = params(
+            "codex",
+            Some("codex-1".to_string()),
+            workspace,
+            workspace_root,
+        );
         let cli = params(
             "cli",
             Some("model-a".to_string()),

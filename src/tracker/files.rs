@@ -45,9 +45,8 @@ impl FileTracker {
                 return Ok(out);
             }
             Err(e) => {
-                return Err(e).with_context(|| {
-                    format!("reading issues dir {}", self.issues_dir.display())
-                });
+                return Err(e)
+                    .with_context(|| format!("reading issues dir {}", self.issues_dir.display()));
             }
         };
 
@@ -105,9 +104,11 @@ impl Tracker for FileTracker {
 
     fn fetch_one(&self, id: &str) -> Result<Option<Issue>> {
         let all = self.read_all()?;
-        Ok(all
-            .into_iter()
-            .find(|i| i.id == id || i.identifier == id))
+        Ok(all.into_iter().find(|i| i.id == id || i.identifier == id))
+    }
+
+    fn sort_candidates_locally(&self) -> bool {
+        true
     }
 }
 

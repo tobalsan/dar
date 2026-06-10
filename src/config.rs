@@ -65,9 +65,14 @@ fn default_turn_timeout_ms() -> u64 {
 #[derive(Debug, Clone, Deserialize)]
 pub struct OrchestratorConfig {
     pub poll_interval_ms: u64,
+    #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
     pub max_retries: u32,
     pub retry_backoff_ms: u64,
+}
+
+fn default_max_concurrent() -> usize {
+    3
 }
 
 #[derive(Debug, Clone, Deserialize)]

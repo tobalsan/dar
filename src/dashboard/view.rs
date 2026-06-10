@@ -74,6 +74,14 @@ impl DashboardTemplate {
                     RunStatus::Running => ("Running", "running"),
                     RunStatus::Crashed => ("Crashed", "failed"),
                     RunStatus::NeedsHuman => ("Needs Human", "needs-human"),
+                    RunStatus::Stalled => ("Stalled", "failed"),
+                    RunStatus::Terminal => ("Terminal", "completed"),
+                    RunStatus::HookFailed => ("Hook Failed", "failed"),
+                    RunStatus::DispatchFailed => ("Dispatch Failed", "failed"),
+                    RunStatus::Released => ("Released", "completed"),
+                    RunStatus::Orphaned => ("Orphaned", "interrupted"),
+                    RunStatus::ParkBarrier => ("Parked", "interrupted"),
+                    RunStatus::Killed => ("Killed", "interrupted"),
                 };
                 HistoryRow {
                     status: label.to_string(),
@@ -86,9 +94,7 @@ impl DashboardTemplate {
             .collect();
 
         let rate_limit_min_remaining = {
-            let v = s
-                .rate_limit_min_remaining
-                .load(Ordering::SeqCst);
+            let v = s.rate_limit_min_remaining.load(Ordering::SeqCst);
             if v == i64::MAX {
                 None
             } else {

@@ -36,6 +36,11 @@ pub trait Tracker: Send + Sync {
     fn rate_limit_remaining(&self) -> Option<i64> {
         None
     }
+    /// Whether the orchestrator should apply the local v0 candidate sort.
+    /// Linear preserves API/native order.
+    fn sort_candidates_locally(&self) -> bool {
+        false
+    }
 }
 
 /// Build the configured tracker from `cfg`. Supports `use: files` and `use: linear`.
@@ -74,6 +79,9 @@ pub fn build(cfg: &TrackerConfig, paths: &AgentPaths) -> Result<Arc<dyn Tracker>
             })?;
             Ok(Arc::new(tracker))
         }
-        other => bail!("unsupported tracker.use {:?} (supports \"files\" and \"linear\")", other),
+        other => bail!(
+            "unsupported tracker.use {:?} (supports \"files\" and \"linear\")",
+            other
+        ),
     }
 }

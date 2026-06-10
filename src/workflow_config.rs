@@ -83,6 +83,7 @@ pub struct WfTrackerStates {
 #[serde(default)]
 pub struct WfPollingConfig {
     pub interval_ms: Option<u64>,
+    pub jitter_ms: Option<u64>,
     pub max_concurrent: Option<usize>,
     pub max_retries: Option<u32>,
     pub retry_backoff_ms: Option<u64>,
@@ -245,6 +246,7 @@ pub struct EffectiveLoopConfig {
     pub tracker_endpoint: String,
     // Polling
     pub poll_interval_ms: u64,
+    pub poll_jitter_ms: u64,
     pub max_concurrent: usize,
     pub max_retries: u32,
     pub retry_backoff_ms: u64,
@@ -298,6 +300,7 @@ impl EffectiveLoopConfig {
         let poll_interval_ms = p
             .and_then(|p| p.interval_ms)
             .unwrap_or(base.orchestrator.poll_interval_ms);
+        let poll_jitter_ms = p.and_then(|p| p.jitter_ms).unwrap_or(0);
         let max_concurrent = p
             .and_then(|p| p.max_concurrent)
             .unwrap_or(base.orchestrator.max_concurrent);
@@ -337,7 +340,9 @@ impl EffectiveLoopConfig {
                     base.runner.command.clone()
                 }
             });
-        let model = a.and_then(|a| a.model.clone()).or_else(|| base.runner.model.clone());
+        let model = a
+            .and_then(|a| a.model.clone())
+            .or_else(|| base.runner.model.clone());
         let max_run_timeout_ms = a
             .and_then(|a| a.turn_timeout_ms.or(a.max_run_timeout_ms))
             .unwrap_or(base.runner.max_run_timeout_ms);
@@ -362,6 +367,7 @@ impl EffectiveLoopConfig {
             tracker_project_slug,
             tracker_endpoint,
             poll_interval_ms,
+            poll_jitter_ms,
             max_concurrent,
             max_retries,
             retry_backoff_ms,
@@ -533,6 +539,7 @@ tracker:
   terminal_states: [closed]
 polling:
   interval_ms: 5000
+  jitter_ms: 250
   max_concurrent: 2
   allow_stale: false
 workspace:
@@ -560,6 +567,7 @@ body"#;
             Some(vec!["open".into()])
         );
         assert_eq!(fm.polling.as_ref().unwrap().interval_ms, Some(5000));
+        assert_eq!(fm.polling.as_ref().unwrap().jitter_ms, Some(250));
         assert_eq!(fm.polling.as_ref().unwrap().allow_stale, Some(false));
         assert_eq!(
             fm.workspace.as_ref().unwrap().root,
@@ -593,6 +601,7 @@ body"#;
         assert_eq!(eff.terminal_states, vec!["done"]);
         assert_eq!(eff.needs_human, None);
         assert_eq!(eff.poll_interval_ms, 10_000);
+        assert_eq!(eff.poll_jitter_ms, 0);
         assert_eq!(eff.runner_kind, "claude");
         assert_eq!(eff.runner_command, "claude");
         assert_eq!(eff.model, None);
