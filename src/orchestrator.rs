@@ -1780,6 +1780,7 @@ mod tests {
             dashboard: DashboardConfig {
                 bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: 7878,
+                webhook_secret: None,
             },
         }
     }
@@ -2579,6 +2580,7 @@ mod tests {
             dashboard: DashboardConfig {
                 bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: 0,
+                webhook_secret: None,
             },
         }
     }

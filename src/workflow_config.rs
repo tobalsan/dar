@@ -166,6 +166,8 @@ pub struct WfLinearConfig {
     pub team: Option<String>,
     /// Enable the linear_graphql worker tool when the child runs.
     pub worker_tool: Option<bool>,
+    /// HMAC-SHA256 secret used to verify Linear webhook requests.
+    pub webhook_secret: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +279,7 @@ pub struct EffectiveLoopConfig {
     // Dashboard
     pub dashboard_bind: IpAddr,
     pub dashboard_port: u16,
+    pub webhook_secret: Option<String>,
     // Extension points (parsed; not yet acted on in v0)
     #[allow(dead_code)]
     pub hooks: WfHooksConfig,
@@ -382,6 +385,11 @@ impl EffectiveLoopConfig {
             .as_ref()
             .and_then(|s| s.port)
             .unwrap_or(base.dashboard.port);
+        let webhook_secret = wf
+            .linear
+            .as_ref()
+            .and_then(|l| l.webhook_secret.clone())
+            .or_else(|| base.dashboard.webhook_secret.clone());
 
         Self {
             tracker_kind,
@@ -406,6 +414,7 @@ impl EffectiveLoopConfig {
             max_run_timeout_ms,
             dashboard_bind,
             dashboard_port,
+            webhook_secret,
             hooks: wf.hooks.clone().unwrap_or_default(),
             linear: wf.linear.clone().unwrap_or_default(),
         }
@@ -520,6 +529,7 @@ mod tests {
             dashboard: DashboardConfig {
                 bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: 7878,
+                webhook_secret: None,
             },
         }
     }
@@ -663,6 +673,29 @@ body"#;
         assert!(eff.allow_stale);
         assert!(eff.workspace_reuse);
         assert!(!eff.cleanup_on_terminal);
+        assert_eq!(eff.webhook_secret, None);
+    }
+
+    #[test]
+    fn merge_webhook_secret_falls_back_to_agent_yaml() {
+        let mut base = base_config();
+        base.dashboard.webhook_secret = Some("agent-secret".to_string());
+
+        let eff = EffectiveLoopConfig::merge(&base, &WorkflowFrontmatter::default());
+
+        assert_eq!(eff.webhook_secret, Some("agent-secret".to_string()));
+    }
+
+    #[test]
+    fn merge_webhook_secret_frontmatter_overrides_agent_yaml() {
+        let mut base = base_config();
+        base.dashboard.webhook_secret = Some("agent-secret".to_string());
+        let raw = "---\nlinear:\n  webhook_secret: workflow-secret\n---";
+        let snap = parse_workflow_md(raw).unwrap();
+
+        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+
+        assert_eq!(eff.webhook_secret, Some("workflow-secret".to_string()));
     }
 
     #[test]

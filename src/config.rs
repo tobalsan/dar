@@ -93,6 +93,8 @@ pub struct WorkspaceConfig {
 pub struct DashboardConfig {
     pub bind: IpAddr,
     pub port: u16,
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
 }
 
 /// Reads `<root>/agent.yaml` and deserializes it.
