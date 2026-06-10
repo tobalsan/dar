@@ -12,7 +12,7 @@ path = "src/main.rs"
 # async runtime + process + signals
 tokio = { version = "1.43", features = ["full"] }
 # web / dashboard
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["trace"] }
 # templates
 askama = "0.13"          # compile-time dashboard templates (Template derive + into_response w/ "with-axum")

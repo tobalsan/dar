@@ -116,6 +116,14 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
             }
         },
     );
+    match store.open_run_pids() {
+        Ok(pids) => {
+            for pid in pids {
+                runner::term_then_kill(pid, std::time::Duration::from_secs(5));
+            }
+        }
+        Err(e) => tracing::warn!("loading stale run PIDs failed: {e:#}"),
+    }
     if let Err(e) = store.mark_crashed_runs() {
         tracing::warn!("mark_crashed_runs failed: {e:#}");
     }
@@ -151,9 +159,20 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     let bind = effective_cfg.dashboard_bind;
     let port = effective_cfg.dashboard_port;
     let dash_state = app_state.clone();
+    let dash_agent_cfg = agent_cfg.clone();
+    let dash_effective_cfg = effective_cfg.clone();
     let dash_shutdown = shutdown_rx.clone();
-    let mut dash_task =
-        tokio::spawn(async move { dashboard::serve(dash_state, bind, port, dash_shutdown).await });
+    let mut dash_task = tokio::spawn(async move {
+        dashboard::serve(
+            dash_state,
+            dash_agent_cfg,
+            dash_effective_cfg,
+            bind,
+            port,
+            dash_shutdown,
+        )
+        .await
+    });
 
     tokio::select! {
         result = &mut dash_task => {

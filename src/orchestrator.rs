@@ -40,7 +40,7 @@ use crate::paths::{issue_workspace, issue_workspace_path, resolve_workspace_root
 use crate::prompt::PromptRenderer;
 use crate::runner::{self, ExitKind, KillReason, RunnerHandle, SpawnParams};
 use crate::state::{
-    ActiveRun, AppState, ControlMsg, HistoryEntry, QueueItem, RetryItem, RunStatus,
+    ActiveRun, AppState, ControlMsg, ControlReply, HistoryEntry, QueueItem, RetryItem, RunStatus,
 };
 use crate::store::{new_run_id, NewClaim, NewEvent, NewHeartbeat, NewRun, RunFinish};
 use crate::tracker;
@@ -49,8 +49,8 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
 
-/// Max backoff cap for abnormal-exit retries (5 minutes).
-const BACKOFF_CAP: Duration = Duration::from_secs(300);
+/// Max backoff cap for dispatch/abnormal-exit retries (30 minutes).
+const BACKOFF_CAP: Duration = Duration::from_secs(30 * 60);
 /// Short continuation retry delay for normal-exit-but-still-active (1s).
 const CONTINUATION_DELAY: Duration = Duration::from_secs(1);
 
@@ -186,11 +186,6 @@ impl Orchestrator {
 
     /// PRD steps 1-9 for one tick, prefixed with a WORKFLOW.md reload check.
     async fn tick(&mut self) {
-        // Drain any pending control messages before doing work.
-        while let Ok(msg) = self.control_rx.try_recv() {
-            self.handle_control(msg).await;
-        }
-
         // Step 1: heartbeat / lastTickAt for currently-live runs.
         self.heartbeat_active_runs();
 
@@ -347,7 +342,7 @@ impl Orchestrator {
                 .signed_duration_since(last_event_at)
                 .to_std()
                 .unwrap_or_default();
-            if stale_for > Duration::from_millis(self.effective_cfg.max_run_timeout_ms) {
+            if stale_for > Duration::from_millis(self.effective_cfg.stall_timeout_ms) {
                 logging::ev(
                     &slot.identifier,
                     "stalled",
@@ -1063,6 +1058,130 @@ impl Orchestrator {
                 logging::ev("-", "control", "resumed");
                 self.persist_system_event("control resumed");
             }
+            ControlMsg::Tick { reply } => {
+                logging::ev("-", "control", "manual tick");
+                self.persist_system_event("control manual tick");
+                self.tick().await;
+                let _ = reply.send(ControlReply::ok("tick complete"));
+            }
+            ControlMsg::Claim { identifier, reply } => {
+                let result = self.control_claim(&identifier).await;
+                let _ = reply.send(result);
+            }
+            ControlMsg::Release { run_id, reply } => {
+                let result = self
+                    .control_finish(&run_id, RunStatus::Released, "released")
+                    .await;
+                let _ = reply.send(result);
+            }
+            ControlMsg::Interrupt { run_id, reply } => {
+                let result = self
+                    .control_finish(&run_id, RunStatus::Interrupted, "interrupted")
+                    .await;
+                let _ = reply.send(result);
+            }
+            ControlMsg::Kill { run_id, reply } => {
+                let result = self.control_kill(&run_id).await;
+                let _ = reply.send(result);
+            }
+        }
+    }
+
+    async fn control_claim(&mut self, identifier: &str) -> ControlReply {
+        if self.slots.len() >= self.effective_cfg.max_concurrent {
+            return ControlReply::err("concurrency limit reached");
+        }
+        match self.tracker.fetch_one(identifier) {
+            Ok(Some(issue)) => {
+                if self.claims.contains(&issue.id) {
+                    return ControlReply::err("issue already claimed");
+                }
+                self.try_dispatch(issue, 0).await;
+                self.publish_snapshots().await;
+                ControlReply::ok("claim dispatched")
+            }
+            Ok(None) => ControlReply::err("issue not found"),
+            Err(e) => ControlReply::err(format!("fetch issue failed: {e:#}")),
+        }
+    }
+
+    async fn control_finish(
+        &mut self,
+        run_id: &str,
+        status: RunStatus,
+        note: &str,
+    ) -> ControlReply {
+        let Some(idx) = self.slots.iter().position(|slot| slot.run_id == run_id) else {
+            return ControlReply::err("run is not active");
+        };
+        let mut slot = self.slots.remove(idx);
+        let pid = slot.handle.as_ref().map(|h| h.pid()).unwrap_or(0);
+        if let Some(handle) = slot.handle.take() {
+            let _ = handle.request_kill_and_wait(KillReason::OperatorStop).await;
+        }
+        self.record_history(
+            &slot.run_id,
+            &slot.identifier,
+            &slot.issue.id,
+            &slot.issue,
+            Path::new(&slot.workspace),
+            status,
+            pid,
+            note,
+            None,
+            slot.claim_id,
+        );
+        self.publish_snapshots().await;
+        ControlReply::ok(note)
+    }
+
+    async fn control_kill(&mut self, run_id: &str) -> ControlReply {
+        let Some(idx) = self.slots.iter().position(|slot| slot.run_id == run_id) else {
+            return ControlReply::err("run is not active");
+        };
+        let mut slot = self.slots.remove(idx);
+        let pid = slot.handle.as_ref().map(|h| h.pid()).unwrap_or(0);
+        if let Some(handle) = slot.handle.take() {
+            let _ = handle.request_kill_and_wait(KillReason::OperatorStop).await;
+        }
+        let mut notes = Vec::new();
+        if let Some(cmd) = self.effective_cfg.hooks.before_remove.as_deref() {
+            if let Err(e) = run_before_remove(cmd, &slot.workspace, &slot.identifier, &slot.run_id)
+            {
+                let message = format!("before_remove failed: {e:#}");
+                self.persist_system_event(&message);
+                notes.push(message);
+            }
+        }
+        if let Err(e) = std::fs::remove_dir_all(&slot.workspace) {
+            if std::path::Path::new(&slot.workspace).exists() {
+                let message = format!("workspace remove failed: {e}");
+                self.persist_system_event(&message);
+                notes.push(message);
+            }
+        }
+        let note = if notes.is_empty() {
+            "killed".to_string()
+        } else {
+            format!("killed; {}", notes.join("; "))
+        };
+        self.record_history(
+            &slot.run_id,
+            &slot.identifier,
+            &slot.issue.id,
+            &slot.issue,
+            Path::new(&slot.workspace),
+            RunStatus::Killed,
+            pid,
+            &note,
+            None,
+            slot.claim_id,
+        );
+        self.publish_snapshots().await;
+        if notes.is_empty() {
+            ControlReply::ok("killed")
+        } else {
+            ControlReply::err(note)
         }
     }
 
@@ -1204,12 +1323,14 @@ impl Orchestrator {
         claim_id: Option<i64>,
     ) {
         let ended_at = Utc::now();
-        if let Err(e) = self.run_lifecycle_hook("after_run", issue, workspace) {
-            logging::ev(
-                identifier,
-                "hook_error",
-                &format!("after_run failed: {e:#}"),
-            );
+        if status != RunStatus::Killed {
+            if let Err(e) = self.run_lifecycle_hook("after_run", issue, workspace) {
+                logging::ev(
+                    identifier,
+                    "hook_error",
+                    &format!("after_run failed: {e:#}"),
+                );
+            }
         }
         self.state.history.push(HistoryEntry {
             identifier: identifier.to_string(),
@@ -1489,7 +1610,7 @@ pub(crate) fn sort_candidates(v: &mut [Issue]) {
     });
 }
 
-/// Backoff for abnormal-exit retries: `min(retry_backoff_ms * 2^(attempt-1), 5min)`.
+/// Backoff for dispatch retries: `min(retry_backoff_ms * 2^(attempt-1), 30min)`.
 /// `attempt` is 1-based.
 pub(crate) fn backoff(retry_backoff_ms: u64, attempt: u32) -> Duration {
     let shift = attempt.saturating_sub(1);
@@ -1500,6 +1621,27 @@ pub(crate) fn backoff(retry_backoff_ms: u64, attempt: u32) -> Duration {
         BACKOFF_CAP
     } else {
         d
+    }
+}
+
+fn run_before_remove(
+    command: &str,
+    workspace: &str,
+    identifier: &str,
+    run_id: &str,
+) -> anyhow::Result<()> {
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .env("AGENTROPY_WORKSPACE", workspace)
+        .env("AGENTROPY_ISSUE", identifier)
+        .env("AGENTROPY_RUN_ID", run_id)
+        .status()
+        .map_err(|e| anyhow::anyhow!("running before_remove hook: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("before_remove exited with {status}"))
     }
 }
 
@@ -1662,6 +1804,7 @@ mod tests {
                 command: "claude".to_string(),
                 model: None,
                 max_run_timeout_ms: 1000,
+                stall_timeout_ms: 300_000,
             },
             orchestrator: OrchestratorConfig {
                 poll_interval_ms: 100,
@@ -2009,7 +2152,7 @@ mod tests {
         let agent_cfg = test_agent_config();
         let mut effective_cfg =
             EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
-        effective_cfg.max_run_timeout_ms = 1;
+        effective_cfg.stall_timeout_ms = 1;
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
         let state = AppState::new(
@@ -2435,10 +2578,10 @@ mod tests {
 
     #[test]
     fn backoff_grows_then_caps() {
-        assert_eq!(backoff(1000, 1), Duration::from_millis(1000));
-        assert_eq!(backoff(1000, 2), Duration::from_millis(2000));
-        assert_eq!(backoff(1000, 3), Duration::from_millis(4000));
-        assert_eq!(backoff(1000, 30), BACKOFF_CAP);
+        assert_eq!(backoff(30_000, 1), Duration::from_secs(30));
+        assert_eq!(backoff(30_000, 2), Duration::from_secs(60));
+        assert_eq!(backoff(30_000, 3), Duration::from_secs(120));
+        assert_eq!(backoff(30_000, 7), Duration::from_secs(30 * 60));
         assert_eq!(backoff(u64::MAX, 64), BACKOFF_CAP);
     }
 
@@ -2462,6 +2605,7 @@ mod tests {
                 command,
                 model: None,
                 max_run_timeout_ms: 30_000,
+                stall_timeout_ms: 300_000,
             },
             orchestrator: OrchestratorConfig {
                 poll_interval_ms: 10,

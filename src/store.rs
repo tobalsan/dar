@@ -264,6 +264,30 @@ impl Store {
         Ok(n)
     }
 
+    /// Return PIDs for persisted runs that were still open when the previous
+    /// gateway process exited. Startup uses this to terminate stale worker
+    /// process groups before marking those rows interrupted.
+    pub fn open_run_pids(&self) -> Result<Vec<u32>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT pid FROM runs
+                 WHERE process_alive=1 AND finished_at IS NULL AND pid > 0",
+            )
+            .context("prepare open_run_pids")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, i64>(0))
+            .context("query open_run_pids")?;
+        let mut out = Vec::new();
+        for row in rows {
+            let pid = row?;
+            if pid > 0 && pid <= u32::MAX as i64 {
+                out.push(pid as u32);
+            }
+        }
+        Ok(out)
+    }
+
     /// Load the `limit` most recent finished runs, newest-first. Used to seed
     /// the in-memory `HistoryRing` on startup (replaces history.jsonl reload).
     pub fn load_recent_runs(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
@@ -376,6 +400,41 @@ impl Store {
         Ok(out)
     }
 
+    pub fn list_runs(&self, limit: usize) -> Result<Vec<RunRow>> {
+        self.list_runs_paged(0, limit)
+    }
+
+    pub fn get_run(&self, run_id: &str) -> Result<Option<RunRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT run_id, issue_id, issue_identifier, workspace,
+                    profile_json, workflow_path, workflow_sha,
+                    pid, worker_id, started_at, finished_at,
+                    outcome, exit_code, process_alive
+             FROM runs
+             WHERE run_id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![run_id], |row| {
+            Ok(RunRow {
+                run_id: row.get(0)?,
+                issue_id: row.get(1)?,
+                issue_identifier: row.get(2)?,
+                workspace: row.get(3)?,
+                profile_json: row.get(4)?,
+                workflow_path: row.get(5)?,
+                workflow_sha: row.get(6)?,
+                pid: row.get::<_, i64>(7).unwrap_or(0) as u32,
+                worker_id: row.get(8)?,
+                started_at: row.get(9)?,
+                finished_at: row.get(10)?,
+                outcome: row.get(11)?,
+                exit_code: row.get(12)?,
+                process_alive: row.get::<_, i64>(13).unwrap_or(0) != 0,
+            })
+        })?;
+        rows.next().transpose().context("get_run")
+    }
+
     /// Count consecutive completed runs where the worker exited cleanly while
     /// the issue remained active. Stops at any other finished outcome,
     /// including terminal/non-active successful completions.
@@ -460,6 +519,33 @@ impl Store {
              LIMIT ?3",
         )?;
         let rows = stmt.query_map(params![issue_identifier, since, limit as i64], |row| {
+            Ok(EventRow {
+                event_id: row.get(0)?,
+                run_id: row.get(1)?,
+                issue_identifier: row.get(2)?,
+                kind: row.get(3)?,
+                payload: row.get(4)?,
+                ts: row.get(5)?,
+            })
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_all_events_since(&self, since: i64, limit: usize) -> Result<Vec<EventRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT event_id, run_id, issue_identifier, kind, payload, ts
+             FROM events
+             WHERE event_id > ?1
+             ORDER BY event_id ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since, limit as i64], |row| {
             Ok(EventRow {
                 event_id: row.get(0)?,
                 run_id: row.get(1)?,
@@ -780,6 +866,46 @@ mod tests {
         let row = pages.iter().find(|r| r.run_id == run_id).unwrap();
         assert_eq!(row.exit_code, Some(2), "non-zero exit code must be stored");
         assert_eq!(row.outcome.as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn open_run_pids_returns_only_unfinished_alive_pids() {
+        let store = open_tmp();
+        let now = Utc::now();
+        for (run_id, pid, finish) in [
+            ("alive", 1234, false),
+            ("pid-zero", 0, false),
+            ("finished", 5678, true),
+        ] {
+            store
+                .insert_run(&NewRun {
+                    run_id,
+                    issue_id: run_id,
+                    issue_identifier: run_id,
+                    workspace: "/tmp/ws",
+                    profile_json: None,
+                    workflow_path: None,
+                    workflow_sha: None,
+                    pid,
+                    worker_id: None,
+                    started_at: now,
+                })
+                .unwrap();
+            if finish {
+                store
+                    .finish_run(
+                        run_id,
+                        &RunFinish {
+                            outcome: RunStatus::Succeeded,
+                            exit_code: Some(0),
+                            finished_at: now,
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+
+        assert_eq!(store.open_run_pids().unwrap(), vec![1234]);
     }
 
     #[test]
