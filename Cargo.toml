@@ -8,6 +8,7 @@ members = [
     "crates/orchestrator-api",
     "crates/runner-core",
     "extensions/dashboard",
+    "extensions/example",
     "extensions/frontend-log",
     "extensions/orchestrator",
     "extensions/tracker-files",
@@ -24,6 +25,10 @@ rust-version = "1.83"
 [[bin]]
 name = "agentropy"
 path = "src/main.rs"
+
+[[bin]]
+name = "cargo-agentropy"
+path = "src/bin/cargo-agentropy.rs"
 
 [dependencies]
 agentropy-host = { path = "crates/agentropy-host" }
