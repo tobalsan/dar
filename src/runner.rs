@@ -22,7 +22,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 pub use cap_runner::{ExitKind, KillReason, RunnerHandle, SpawnParams};
 use chrono::{DateTime, Utc};
 use runner_core::{setup_process_group, supervise};
@@ -78,19 +78,6 @@ enum RunnerKind {
 }
 
 impl RunnerKind {
-    fn parse(raw: &str) -> Result<Self> {
-        match raw {
-            "" | "pi" => Ok(Self::Pi),
-            "claude" | "claude-code" => Ok(Self::Claude),
-            "codex" => Ok(Self::Codex),
-            "cli" => Ok(Self::Cli),
-            "fake" => Ok(Self::Fake),
-            other => {
-                bail!("unsupported runner kind {other:?}; expected pi, claude, codex, cli, or fake")
-            }
-        }
-    }
-
     fn default_command(&self) -> &'static str {
         match self {
             Self::Pi => "pi",
@@ -490,12 +477,12 @@ fn codex_args(p: &SpawnParams<'_>) -> Vec<OsString> {
 /// its own process group, pipes the turn request/prompt to stdin, and
 /// supervises the child in a background task that streams output and enforces
 /// the per-turn timeout.
-pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
+async fn spawn_with_kind(kind: RunnerKind, p: SpawnParams<'_>) -> Result<RunnerHandle> {
     assert_contained(p.workspace_root, p.workspace)
         .context("workspace containment check failed; refusing to spawn child")?;
 
     // Build runner and collect all owned data before borrowing p further.
-    let rp = match RunnerKind::parse(p.runner_kind)? {
+    let rp = match kind {
         RunnerKind::Pi => collect_runner_params(PiRunner { p: &p }),
         RunnerKind::Claude => collect_runner_params(ClaudeRunner { p: &p }),
         RunnerKind::Codex => collect_runner_params(CodexRunner { p: &p }),
@@ -608,6 +595,35 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     Ok(RunnerHandle::new(pid, kill_tx, done))
 }
 
+pub fn registered_runners() -> Vec<(&'static str, Arc<dyn cap_runner::Runner>)> {
+    vec![
+        ("pi", Arc::new(RegisteredRunner(RunnerKind::Pi))),
+        ("claude", Arc::new(RegisteredRunner(RunnerKind::Claude))),
+        (
+            "claude-code",
+            Arc::new(RegisteredRunner(RunnerKind::Claude)),
+        ),
+        ("codex", Arc::new(RegisteredRunner(RunnerKind::Codex))),
+        ("cli", Arc::new(RegisteredRunner(RunnerKind::Cli))),
+        ("fake", Arc::new(RegisteredRunner(RunnerKind::Fake))),
+    ]
+}
+
+#[derive(Clone)]
+struct RegisteredRunner(RunnerKind);
+
+impl cap_runner::Runner for RegisteredRunner {
+    fn spawn<'a>(
+        &self,
+        params: SpawnParams<'a>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<RunnerHandle>> + Send + 'a>,
+    > {
+        let kind = self.0.clone();
+        Box::pin(async move { spawn_with_kind(kind, params).await })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal
 // ---------------------------------------------------------------------------
@@ -670,12 +686,12 @@ mod tests {
 
     /// Build command args via the appropriate per-runner struct.
     fn build_command_args(p: &SpawnParams<'_>) -> Vec<OsString> {
-        match RunnerKind::parse(p.runner_kind).unwrap_or(RunnerKind::Pi) {
-            RunnerKind::Pi => PiRunner { p }.args(),
-            RunnerKind::Claude => ClaudeRunner { p }.args(),
-            RunnerKind::Codex => CodexRunner { p }.args(),
-            RunnerKind::Cli => CliRunner { p }.args(),
-            RunnerKind::Fake => FakeRunner { p }.args(),
+        match p.runner_kind {
+            "claude" | "claude-code" => ClaudeRunner { p }.args(),
+            "codex" => CodexRunner { p }.args(),
+            "cli" => CliRunner { p }.args(),
+            "fake" => FakeRunner { p }.args(),
+            _ => PiRunner { p }.args(),
         }
     }
 
