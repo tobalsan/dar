@@ -1,0 +1,33 @@
+[package]
+name = "dashboard"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+
+[dependencies]
+anyhow = "1"
+askama = "0.13"
+axum = { version = "0.8", features = ["ws"] }
+cap-tracker = { path = "../../crates/cap-tracker" }
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+hmac = "0.12"
+host-api = { path = "../../crates/host-api" }
+mime_guess = "2"
+orchestrator-api = { path = "../../crates/orchestrator-api" }
+minijinja = "2.5"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+rust-embed = { version = "8", features = ["axum-ex"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+subtle = "2"
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+tempfile = "3"

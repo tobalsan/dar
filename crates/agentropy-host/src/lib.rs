@@ -16,6 +16,8 @@ use tokio::sync::watch;
 pub struct HostOptions {
     pub root: PathBuf,
     pub http_enabled: bool,
+    pub http_bind: std::net::IpAddr,
+    pub http_port: u16,
     pub load_dotenv: bool,
     pub foreground: Option<String>,
     pub interactive: Option<bool>,
@@ -26,6 +28,8 @@ impl HostOptions {
         Self {
             root: root.into(),
             http_enabled: true,
+            http_bind: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            http_port: 8080,
             load_dotenv: true,
             foreground: None,
             interactive: None,
@@ -44,6 +48,12 @@ impl HostOptions {
 
     pub fn interactive(mut self, interactive: bool) -> Self {
         self.interactive = Some(interactive);
+        self
+    }
+
+    pub fn http_addr(mut self, bind: std::net::IpAddr, port: u16) -> Self {
+        self.http_bind = bind;
+        self.http_port = port;
         self
     }
 }
@@ -83,6 +93,12 @@ pub async fn boot(extensions: Vec<Arc<dyn Extension>>, options: HostOptions) -> 
     }
     let paths = HostPaths::new(&options.root)?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let shutdown_on_signal = shutdown_tx.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = shutdown_on_signal.send(true);
+        }
+    });
     let shutdown = ShutdownToken::new(shutdown_rx);
     let mut register_ctx = RegisterCtx {
         bus: host_api::EventBus::new(),
@@ -106,6 +122,26 @@ pub async fn boot(extensions: Vec<Arc<dyn Extension>>, options: HostOptions) -> 
         .select(options.foreground.as_deref())?;
     let config = register_ctx.config.clone();
     let host = register_ctx.into_start_services()?;
+    let http_router = host.router.clone();
+    let http_shutdown = shutdown.clone();
+    let http_task = if options.http_enabled {
+        let bind = options.http_bind;
+        let port = options.http_port;
+        Some(tokio::spawn(async move {
+            let listener = tokio::net::TcpListener::bind((bind, port))
+                .await
+                .with_context(|| format!("binding host HTTP on {bind}:{port}"))?;
+            axum::serve(listener, http_router.as_ref().clone().into_make_service())
+                .with_graceful_shutdown(async move {
+                    let mut shutdown = http_shutdown;
+                    shutdown.cancelled().await;
+                })
+                .await
+                .context("host HTTP server")
+        }))
+    } else {
+        None
+    };
 
     for extension in extensions {
         let ctx = host_api::StartCtx {
@@ -134,6 +170,9 @@ pub async fn boot(extensions: Vec<Arc<dyn Extension>>, options: HostOptions) -> 
     }
 
     let _ = shutdown_tx.send(true);
+    if let Some(task) = http_task {
+        let _ = task.await?;
+    }
     Ok(())
 }
 

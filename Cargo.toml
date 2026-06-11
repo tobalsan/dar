@@ -5,8 +5,11 @@ members = [
     "crates/cap-tracker",
     "crates/cap-runner",
     "crates/host-api",
+    "crates/orchestrator-api",
     "crates/runner-core",
+    "extensions/dashboard",
     "extensions/frontend-log",
+    "extensions/orchestrator",
     "extensions/tracker-files",
     "extensions/tracker-linear",
 ]
@@ -26,6 +29,8 @@ path = "src/main.rs"
 agentropy-host = { path = "crates/agentropy-host" }
 host-api = { path = "crates/host-api" }
 frontend-log = { path = "extensions/frontend-log" }
+dashboard = { path = "extensions/dashboard" }
+orchestrator = { path = "extensions/orchestrator" }
 # async runtime + process + signals
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "process", "signal", "sync", "time", "io-util", "net"] }
 # web / dashboard

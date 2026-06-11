@@ -14,6 +14,7 @@ dependencies = [
  "cap-tracker",
  "chrono",
  "clap",
+ "dashboard",
  "frontend-log",
  "hex",
  "hmac",
@@ -21,6 +22,7 @@ dependencies = [
  "mime_guess",
  "minijinja",
  "nix",
+ "orchestrator",
  "reqwest",
  "runner-core",
  "rusqlite",
@@ -457,6 +459,36 @@ checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
  "typenum",
+]
+
+[[package]]
+name = "dashboard"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "askama",
+ "axum",
+ "cap-tracker",
+ "chrono",
+ "hex",
+ "hmac",
+ "host-api",
+ "mime_guess",
+ "minijinja",
+ "orchestrator-api",
+ "reqwest",
+ "rusqlite",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1183,6 +1215,43 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "orchestrator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cap-runner",
+ "cap-tracker",
+ "chrono",
+ "clap",
+ "host-api",
+ "minijinja",
+ "nix",
+ "orchestrator-api",
+ "reqwest",
+ "runner-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "tracker-files",
+ "tracker-linear",
+]
+
+[[package]]
+name = "orchestrator-api"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "tokio",
+]
 
 [[package]]
 name = "parking_lot"

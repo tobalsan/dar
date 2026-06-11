@@ -1,10 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
-use std::sync::Arc;
-
 macro_rules! plugins {
     ($($extension:expr),* $(,)?) => {
-        vec![$(Arc::new($extension) as Arc<dyn host_api::Extension>),*]
+        vec![$(std::sync::Arc::new($extension) as std::sync::Arc<dyn host_api::Extension>),*]
     };
 }
 
@@ -23,15 +21,19 @@ async fn main_inner() -> Result<()> {
     }
 
     let root = agentropy::host_root_from_args(std::env::args_os())?;
+    let (bind, port) = agentropy::dashboard_addr_for_root(&root)?;
     let options = agentropy_host::HostOptions::new(root)
         .without_dotenv()
+        .http_addr(bind, port)
         .foreground("logs");
     agentropy_host::boot(
         plugins![
             frontend_log::FrontendLogExtension,
             tracker_files::TrackerFilesExtension,
             tracker_linear::TrackerLinearExtension,
-            agentropy::MonolithExtension,
+            orchestrator::OrchestratorExtension,
+            dashboard::DashboardExtension::default(),
+            agentropy::BuiltinRunnerExtension,
         ],
         options,
     )

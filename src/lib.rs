@@ -32,11 +32,11 @@ use paths::AgentPaths;
 use state::{AgentInfo, AppState};
 use workflow_config::EffectiveLoopConfig;
 
-pub struct MonolithExtension;
+pub struct BuiltinRunnerExtension;
 
-impl Extension for MonolithExtension {
+impl Extension for BuiltinRunnerExtension {
     fn id(&self) -> &'static str {
-        "agentropy-monolith"
+        "agentropy-builtin-runners"
     }
 
     fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
@@ -46,6 +46,18 @@ impl Extension for MonolithExtension {
             }
             Ok(())
         })
+    }
+}
+
+pub struct MonolithExtension;
+
+impl Extension for MonolithExtension {
+    fn id(&self) -> &'static str {
+        "agentropy-monolith"
+    }
+
+    fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
+        BuiltinRunnerExtension.register(ctx)
     }
 
     fn start<'a>(&'a self, ctx: StartCtx) -> host_api::BoxFuture<'a, Result<()>> {
@@ -89,6 +101,14 @@ where
     Ok(root)
 }
 
+pub fn dashboard_addr_for_root(root: &std::path::Path) -> Result<(std::net::IpAddr, u16)> {
+    let paths = AgentPaths::new(root.to_path_buf());
+    let agent_cfg = config::load(&paths.root)?;
+    let prompt = prompt::PromptRenderer::load(&paths.workflow_md())?;
+    let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &prompt.snapshot().frontmatter);
+    Ok((effective_cfg.dashboard_bind, effective_cfg.dashboard_port))
+}
+
 pub async fn run_cli(services: ServiceRegistry) -> Result<()> {
     run_cli_inner(Cli::parse(), services, None).await
 }
@@ -123,9 +143,13 @@ async fn default_services(root: &std::path::Path) -> Result<ServiceRegistry> {
         config: ConfigStore::default(),
         shutdown: ShutdownToken::new(shutdown_rx),
     };
-    tracker_files::TrackerFilesExtension.register(&mut ctx).await?;
-    tracker_linear::TrackerLinearExtension.register(&mut ctx).await?;
-    MonolithExtension.register(&mut ctx).await?;
+    tracker_files::TrackerFilesExtension
+        .register(&mut ctx)
+        .await?;
+    tracker_linear::TrackerLinearExtension
+        .register(&mut ctx)
+        .await?;
+    BuiltinRunnerExtension.register(&mut ctx).await?;
     Ok(ctx.services)
 }
 
