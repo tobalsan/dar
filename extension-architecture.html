@@ -1,0 +1,348 @@
+<!-- Agentropy — Extension Architecture: Feasibility & Footprint -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentropy — Extension Architecture & Footprint</title>
+<style>
+  :root {
+    --ivory: #FAF9F5;
+    --slate: #141413;
+    --clay: #D97757;
+    --oat: #E3DACC;
+    --olive: #788C5D;
+    --rust: #B04A3F;
+    --gray-100: #F0EEE6;
+    --gray-300: #D1CFC5;
+    --gray-500: #87867F;
+    --gray-700: #3D3D3A;
+    --white: #FFFFFF;
+
+    --serif: ui-serif, Georgia, serif;
+    --sans: system-ui, -apple-system, sans-serif;
+    --mono: ui-monospace, 'SF Mono', Menlo, monospace;
+
+    --radius-panel: 12px;
+    --border: 1.5px solid var(--gray-300);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 56px 24px 120px;
+    background: var(--ivory);
+    color: var(--slate);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 900px; margin: 0 auto; }
+
+  header { margin-bottom: 40px; }
+  .header-top {
+    display: flex; align-items: baseline; justify-content: space-between;
+    flex-wrap: wrap; gap: 12px; margin-bottom: 8px;
+  }
+  h1 { font-family: var(--serif); font-weight: 500; font-size: 36px; letter-spacing: -0.01em; margin: 0; }
+  .auto-pill {
+    font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--gray-500); background: var(--gray-100); border: var(--border);
+    border-radius: 999px; padding: 5px 11px; white-space: nowrap;
+  }
+  .subtitle { color: var(--gray-500); font-size: 14px; }
+
+  section { margin-bottom: 52px; }
+  h2 { font-family: var(--serif); font-weight: 500; font-size: 24px; letter-spacing: -0.01em; margin: 0 0 6px; }
+  h3 { font-family: var(--serif); font-weight: 500; font-size: 17px; margin: 22px 0 8px; }
+  hr.rule { border: none; border-top: 1px solid var(--gray-300); margin: 0 0 22px; }
+  p { margin: 0 0 14px; color: var(--gray-700); }
+
+  .tldr {
+    background: var(--oat); border-radius: var(--radius-panel);
+    padding: 22px 26px; margin-bottom: 14px;
+  }
+  .tldr p { color: var(--slate); margin: 0 0 10px; }
+  .tldr p:last-child { margin: 0; }
+  .tldr strong { font-weight: 600; }
+
+  ul.highlights { list-style: none; margin: 0 0 14px; padding: 0; }
+  ul.highlights li {
+    position: relative; padding: 0 0 14px 26px; font-size: 15px; color: var(--gray-700);
+  }
+  ul.highlights li::before {
+    content: ""; position: absolute; left: 6px; top: 8px;
+    width: 7px; height: 7px; border-radius: 2px; background: var(--clay);
+  }
+  ul.highlights li strong { color: var(--slate); font-weight: 600; }
+
+  table.t {
+    width: 100%; border-collapse: separate; border-spacing: 0;
+    background: var(--white); border: var(--border); border-radius: var(--radius-panel);
+    overflow: hidden; margin: 10px 0 18px;
+  }
+  table.t thead th {
+    text-align: left; font-family: var(--sans); font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em; color: var(--gray-500);
+    background: var(--gray-100); padding: 12px 16px; border-bottom: 1px solid var(--gray-300);
+  }
+  table.t tbody td {
+    padding: 13px 16px; border-bottom: 1px solid var(--gray-100); font-size: 14px; vertical-align: top;
+  }
+  table.t tbody tr:last-child td { border-bottom: none; }
+  table.t tbody tr:hover { background: var(--ivory); }
+  .mono-cell { font-family: var(--mono); font-size: 12px; color: var(--gray-700); }
+
+  code {
+    font-family: var(--mono); font-size: 13px; background: var(--gray-100);
+    border-radius: 4px; padding: 2px 5px;
+  }
+  pre {
+    background: var(--slate); color: var(--ivory); font-family: var(--mono);
+    font-size: 13px; line-height: 1.55; border-radius: 8px; padding: 16px 20px;
+    overflow-x: auto; margin: 10px 0 14px; white-space: pre;
+  }
+  pre code { background: transparent; padding: 0; border-radius: 0; font-size: inherit; }
+
+  .pill {
+    font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--gray-700); background: var(--gray-100); border: var(--border);
+    border-radius: 999px; padding: 3px 8px; white-space: nowrap;
+  }
+  .pill.olive { background: #EBF0E2; color: var(--olive); border-color: #C5D2A9; }
+  .pill.rust  { background: #F5E8E7; color: var(--rust);  border-color: #DDA89F; }
+  .pill.clay  { background: #FAF0EC; color: var(--clay);  border-color: #E8BAA5; }
+
+  .verdict {
+    display: flex; gap: 12px; align-items: flex-start;
+    background: var(--white); border: var(--border); border-left: 4px solid var(--olive);
+    border-radius: var(--radius-panel); padding: 18px 22px; margin: 14px 0;
+  }
+  .verdict.warn { border-left-color: var(--clay); }
+  .verdict .vlabel {
+    font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--olive); flex-shrink: 0; padding-top: 2px; min-width: 64px;
+  }
+  .verdict.warn .vlabel { color: var(--clay); }
+  .verdict p { margin: 0; }
+
+  footer {
+    margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--gray-300);
+    font-family: var(--mono); font-size: 12px; color: var(--gray-500);
+  }
+  @media (max-width: 720px) { table.t thead { display: none; } }
+  @media print { body { padding: 24px; } pre { white-space: pre-wrap; } }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <div class="header-top">
+      <h1>Extension architecture &amp; footprint</h1>
+      <span class="auto-pill">Agentropy</span>
+    </div>
+    <div class="subtitle">Can a minimal core + plugins survive Rust's footprint promise? &mdash; feasibility note</div>
+  </header>
+
+  <!-- TL;DR -->
+  <section>
+    <div class="tldr">
+      <p><strong>Yes, it's possible.</strong> But two surprises drive the whole design:</p>
+      <p><strong>1. "Minimal core that loads plugins" is the opposite of "minimal footprint."</strong> A runtime plugin host is <em>more</em> code than a tuned monolith. The smallest binary comes from compiling only what you use, not from a generic loader.</p>
+      <p><strong>2. Footprint isn't your constraint anyway.</strong> The <code>claude</code>/<code>codex</code> child process outweighs your runtime by 10&ndash;50&times;. Whether your core is 15&nbsp;MB or 50&nbsp;MB is noise next to one LLM subprocess. Choose your transport on <em>portability and sandboxing</em>, not bytes.</p>
+    </div>
+  </section>
+
+  <!-- The ABI fact -->
+  <section>
+    <h2>Why naive "drop in a .so" doesn't work in Rust</h2>
+    <hr class="rule">
+    <p>
+      Your instinct &mdash; "Rust's power is compiling everything into one binary" &mdash; is right, and it's
+      exactly why dynamic plugins are awkward. Rust has <strong>no stable ABI</strong>: the way Rust lays out
+      types and function calls in memory can change between compiler versions. A plugin compiled today may not
+      safely link against a core compiled tomorrow. C/C++ have a frozen ABI; that's how Chrome and VSCode-native
+      modules work. Rust deliberately doesn't, in exchange for optimization freedom.
+    </p>
+    <p>
+      So clean in-process native plugins (<code>dlopen</code> + Rust types) are fragile and not recommended. That
+      leaves three real ways to be "extensible," each with a different footprint profile.
+    </p>
+
+    <table class="t">
+      <thead>
+        <tr>
+          <th style="width:150px;">Mechanism</th>
+          <th>What it is</th>
+          <th style="width:160px;">Footprint cost</th>
+          <th style="width:90px;">Drop-in?</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="pill olive">Cargo features</span></td>
+          <td>Compile-time on/off switches (<code>--features discord,github</code>). Unused code is stripped by the linker &mdash; truly zero-cost.</td>
+          <td><strong>Best.</strong> Pay only for compiled features.</td>
+          <td>No &mdash; recompile</td>
+        </tr>
+        <tr>
+          <td><span class="pill clay">WASM</span> (wasmtime)</td>
+          <td>Portable sandboxed modules loaded at runtime from the agent folder. Rust&rarr;WASM is solved.</td>
+          <td>Small. Host ~few&nbsp;MB shared across all plugins; each plugin &lt;1&nbsp;MB.</td>
+          <td><strong>Yes</strong></td>
+        </tr>
+        <tr>
+          <td><span class="pill rust">Subprocess</span></td>
+          <td>Each extension is its own process; talk over stdio JSON-RPC (MCP-style). Any language.</td>
+          <td>Multiplies. +5&ndash;15&nbsp;MB RSS per Rust ext; 4&ndash;10&times; that for Node/Python.</td>
+          <td><strong>Yes</strong></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="verdict warn">
+      <span class="vlabel">Tension</span>
+      <p>The "minimal binary that just loads extensions" dream pushes you toward WASM/subprocess. But a wasmtime host adds megabytes of code your current 8.2&nbsp;MB monolith doesn't carry. You don't get smaller by adding a loader &mdash; you get <em>more portable and swappable</em>. Be clear which one you actually want.</p>
+    </div>
+  </section>
+
+  <!-- Footprint math -->
+  <section>
+    <h2>Footprint, concretely</h2>
+    <hr class="rule">
+    <p>Your measured baseline: idle instance <strong>14.9&nbsp;MB RSS</strong>, binary <strong>8.2&nbsp;MB</strong> (per the pilot runbook). Here's what each architecture does to that, per agent, before the LLM child:</p>
+
+    <table class="t">
+      <thead>
+        <tr>
+          <th>Architecture</th>
+          <th style="width:170px;">Core RSS (idle)</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Today &mdash; monolith</td>
+          <td><strong>~15&nbsp;MB</strong></td>
+          <td>Everything compiled in. Your current state.</td>
+        </tr>
+        <tr>
+          <td>Monolith + cargo features</td>
+          <td><strong>~10&ndash;15&nbsp;MB</strong></td>
+          <td>Smaller if you drop unused trackers/runners. Lowest possible.</td>
+        </tr>
+        <tr>
+          <td>+ WASM host (wasmtime)</td>
+          <td><strong>~20&ndash;30&nbsp;MB</strong></td>
+          <td>Host code + a few resident plugins. Lazy tools cost 0 until called.</td>
+        </tr>
+        <tr>
+          <td>+ Subprocess channels</td>
+          <td><strong>~30&ndash;55&nbsp;MB</strong></td>
+          <td>Each persistent channel (Slack/Discord WS) is its own process.</td>
+        </tr>
+        <tr>
+          <td><span class="pill rust">LLM child (claude/codex)</span></td>
+          <td><strong>150&ndash;600&nbsp;MB+</strong></td>
+          <td>The real cost. Dwarfs every row above.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="verdict">
+      <span class="vlabel">Read</span>
+      <p>Even the heaviest extension architecture (~55&nbsp;MB) is a rounding error against one LLM subprocess. Your 8&nbsp;GB / 10-instance gate is decided by how many LLM children run at once, not by your plugin host. Footprint does <em>not</em> veto this design.</p>
+    </div>
+  </section>
+
+  <!-- Recommended design -->
+  <section>
+    <h2>Recommended: hybrid, transport-per-type</h2>
+    <hr class="rule">
+    <p>
+      Don't pick one transport. Match each of your four extension categories to the transport that fits its needs.
+      The core defines a small capability vocabulary; the manifest declares <code>runtime: feature | wasm | subprocess</code>;
+      the host routes accordingly.
+    </p>
+
+    <table class="t">
+      <thead>
+        <tr>
+          <th style="width:130px;">Category</th>
+          <th style="width:140px;">Best transport</th>
+          <th>Why</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Runner</strong><br>claude / codex / opencode</td>
+          <td><span class="pill olive">Feature</span> or thin WASM</td>
+          <td>These spawn a subprocess <em>anyway</em>. The adapter is tiny glue logic &mdash; build/arg/parse. No reason to pay a second process for it.</td>
+        </tr>
+        <tr>
+          <td><strong>Tracker</strong><br>linear / github / files</td>
+          <td><span class="pill clay">WASM</span></td>
+          <td>HTTP poll + JSON parse. Pure, portable, sandboxable. Third parties can ship a tracker as a single drop-in <code>.wasm</code>. Your <code>Tracker</code> trait is already the seam.</td>
+        </tr>
+        <tr>
+          <td><strong>Channel</strong><br>discord / slack / telegram</td>
+          <td><span class="pill rust">Subprocess / native</span></td>
+          <td>Long-lived TLS WebSockets + heavy SDKs. WASM sockets aren't mature on stable wasmtime. This is the one case where a separate process earns its RSS.</td>
+        </tr>
+        <tr>
+          <td><strong>Generic</strong><br>web chat / TUI / admin</td>
+          <td>In-core or WASM <code>ui.panel</code></td>
+          <td>UI fragments served by the core, or compiled-in for the dashboard you already have.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>What "the core" actually keeps</h3>
+    <ul class="highlights">
+      <li>The <strong>tick loop</strong> (reconcile &rarr; collect &rarr; dispatch &rarr; publish) &mdash; this is the irreducible product.</li>
+      <li>The <strong>two-state invariant</strong> (issue state owned by tracker, run state owned by orchestrator). Don't let plugins blur this.</li>
+      <li>Path containment, secret resolution, the capability vocabulary, and the plugin host.</li>
+      <li>A <strong>small frozen verb set</strong> per category &mdash; e.g. tracker = <code>poll_candidates / fetch_states / fetch_terminal</code> (+ optional writes). Adding a tracker = new plugin, zero core change. Adding a <em>verb</em> = deliberate core change.</li>
+    </ul>
+
+    <div class="verdict">
+      <span class="vlabel">Note</span>
+      <p>You've already started this. The read-only <code>Tracker</code> trait and the split runners <em>are</em> compile-time extensions. The migration is: lift those traits into a stable capability ABI, add a manifest + loader, and move the network-heavy/swappable ones out to WASM or subprocess. The orchestration loop barely changes.</p>
+    </div>
+  </section>
+
+  <!-- Pragmatic path -->
+  <section>
+    <h2>If footprint isn't the driver, what is?</h2>
+    <hr class="rule">
+    <p>Decide the design on these, in order &mdash; they matter far more than RSS:</p>
+    <ul class="highlights">
+      <li><strong>Drop-in without recompiling?</strong> If yes &rarr; you need WASM or subprocess. If "recompile is fine for first-party," cargo features alone get you a swappable monolith for free.</li>
+      <li><strong>Third-party / untrusted extensions?</strong> If yes &rarr; WASM (real sandbox) or subprocess (OS sandbox). Cargo features can't sandbox.</li>
+      <li><strong>Self-containment tenet (move the folder, move the agent).</strong> Favors WASM &mdash; one portable artifact, no per-arch native builds. Native channels break cross-platform <code>tar</code> unless you ship multi-arch.</li>
+      <li><strong>Dev velocity.</strong> Cargo features &gt; WASM &gt; subprocess for authoring speed of first-party code.</li>
+    </ul>
+
+    <h3>Suggested staging</h3>
+    <pre><code>v1  Trait + cargo-feature registry. Formalize the seams you already have.
+    Smallest binary, swap-by-recompile. Proves the verb set is right.
+
+v2  Add WASM host for trackers + tools (drop-in, sandboxed, portable).
+    This is where "git clone the folder = working agent" lands.
+
+v3  Subprocess channels (Slack/Discord) once you want them.
+    Per-agent tokens, opt-in, zero RSS when disabled.</code></pre>
+    <p>
+      If at v1 you can add a tracker or runner without touching the loop, the abstraction holds. If either forces
+      a core change, the verb set is wrong &mdash; fix that before adding any runtime loader.
+    </p>
+  </section>
+
+  <footer>
+    Agentropy &middot; extension feasibility note &middot; pairs with conversation.md, presentation.html, pilot-benchmark-runbook.html
+  </footer>
+
+</div>
+</body>
+</html>

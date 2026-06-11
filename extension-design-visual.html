@@ -1,0 +1,355 @@
+<!-- Agentropy — Extension Design, Visual Explainer -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentropy — How Extensions Work</title>
+<style>
+  :root {
+    --ivory:#FAF9F5; --slate:#141413; --clay:#D97757; --oat:#E3DACC;
+    --olive:#788C5D; --rust:#B04A3F; --gray-100:#F0EEE6; --gray-300:#D1CFC5;
+    --gray-500:#87867F; --gray-700:#3D3D3A; --white:#FFFFFF;
+    --serif:ui-serif,Georgia,serif; --sans:system-ui,-apple-system,sans-serif;
+    --mono:ui-monospace,'SF Mono',Menlo,monospace;
+    --border:1.5px solid var(--gray-300);
+  }
+  * { box-sizing:border-box; }
+  html { scroll-behavior:smooth; }
+  body {
+    margin:0; padding:0; background:var(--ivory); color:var(--slate);
+    font-family:var(--sans); font-size:15px; line-height:1.6; -webkit-font-smoothing:antialiased;
+  }
+  .page { max-width:960px; margin:0 auto; padding:0 24px; }
+
+  .hero { padding:88px 0 56px; border-bottom:1px solid var(--gray-300); }
+  .kicker { font-family:var(--mono); font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--clay); margin-bottom:18px; }
+  h1 { font-family:var(--serif); font-weight:500; font-size:clamp(34px,5vw,52px); letter-spacing:-.015em; margin:0; line-height:1.1; }
+  .hero p { font-size:18px; color:var(--gray-700); max-width:62ch; margin:20px 0 0; }
+
+  section { padding:64px 0; border-bottom:1px solid var(--gray-300); }
+  .snum { display:inline-flex; align-items:center; justify-content:center; width:30px; height:30px; border-radius:8px; background:var(--clay); color:var(--white); font-family:var(--mono); font-size:14px; font-weight:600; margin-bottom:16px; }
+  h2 { font-family:var(--serif); font-weight:500; font-size:28px; letter-spacing:-.01em; margin:0 0 10px; }
+  h3 { font-family:var(--serif); font-weight:500; font-size:18px; margin:26px 0 8px; }
+  p { margin:0 0 14px; color:var(--gray-700); max-width:72ch; }
+  .lead { font-size:16px; color:var(--gray-700); }
+  code { font-family:var(--mono); font-size:.86em; background:var(--gray-100); border-radius:4px; padding:2px 6px; color:var(--gray-700); }
+
+  .gloss { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:8px; }
+  @media (max-width:680px){ .gloss { grid-template-columns:1fr; } }
+  .gcard { background:var(--oat); border-radius:12px; padding:22px 24px; }
+  .gcard .term { font-family:var(--mono); font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--rust); margin-bottom:10px; }
+  .gcard .plain { font-size:15px; color:var(--slate); margin-bottom:10px; font-weight:500; }
+  .gcard p { font-size:14px; margin:0; }
+
+  figure { margin:28px 0 8px; }
+  .canvas { background:var(--white); border:var(--border); border-radius:16px; padding:34px 28px; overflow-x:auto; }
+  figcaption { font-size:13px; color:var(--gray-500); margin-top:12px; padding-left:2px; }
+  figcaption strong { color:var(--gray-700); font-weight:600; }
+
+  .box { border:var(--border); border-radius:12px; background:var(--white); padding:14px 16px; text-align:center; min-width:0; }
+  .box .bt { font-weight:600; font-size:14px; color:var(--slate); letter-spacing:-.01em; }
+  .box .bsub { font-size:11.5px; color:var(--gray-500); margin-top:3px; font-family:var(--mono); }
+  .box.host { border-color:var(--slate); border-width:2px; }
+  .box.feat { border-color:var(--clay); background:#FAF0EC; }
+  .box.cap  { border-color:var(--olive); background:#EBF0E2; }
+  .box.ext  { background:var(--gray-100); }
+  .box.dist { border-color:var(--gray-700); border-style:dashed; }
+  .box.bin  { border-color:var(--slate); background:var(--slate); color:var(--ivory); }
+  .box.bin .bt { color:var(--ivory); }  .box.bin .bsub { color:var(--gray-300); }
+
+  .bus { background:var(--clay); color:var(--white); border-radius:10px; padding:12px 16px; text-align:center; font-weight:600; font-size:14px; letter-spacing:.02em; }
+  .bus .bsub { font-family:var(--mono); font-size:11px; color:#FBE6DC; font-weight:400; margin-top:2px; }
+
+  .flow { display:flex; align-items:center; gap:0; flex-wrap:nowrap; }
+  .flow .box { flex:1; }
+  .arr { flex:0 0 46px; display:flex; align-items:center; justify-content:center; color:var(--gray-500); position:relative; }
+  .arr.v { flex-basis:auto; padding:10px 0; width:100%; }
+  .arr .lbl { position:absolute; font-family:var(--mono); font-size:10px; color:var(--gray-500); background:var(--white); padding:0 4px; transform:translateY(-16px); }
+  @media (max-width:680px){ .flow { flex-direction:column; align-items:stretch; } .flow .box { width:100%; } .arr { transform:rotate(90deg); } }
+
+  .row3 { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
+  .row4 { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+  @media (max-width:680px){ .row3,.row4 { grid-template-columns:1fr; } }
+
+  .reqs { list-style:none; margin:12px 0 0; padding:0; text-align:left; display:inline-block; }
+  .reqs li { font-family:var(--mono); font-size:12.5px; color:var(--gray-700); padding:3px 0 3px 22px; position:relative; }
+  .reqs li::before { content:"▸"; position:absolute; left:4px; color:var(--clay); }
+  .check { color:var(--olive); font-size:12px; font-family:var(--mono); margin-top:8px; display:block; }
+  .card-num { font-family:var(--mono); font-size:11px; color:var(--gray-500); margin-top:6px; }
+
+  table.t { width:100%; border-collapse:separate; border-spacing:0; background:var(--white); border:var(--border); border-radius:12px; overflow:hidden; margin:14px 0; }
+  table.t thead th { text-align:left; font-family:var(--sans); font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--gray-500); background:var(--gray-100); padding:12px 16px; border-bottom:1px solid var(--gray-300); }
+  table.t tbody td { padding:12px 16px; border-bottom:1px solid var(--gray-100); font-size:14px; vertical-align:top; }
+  table.t tbody tr:last-child td { border-bottom:none; }
+
+  pre { background:var(--slate); color:var(--ivory); font-family:var(--mono); font-size:13px; line-height:1.6; border-radius:10px; padding:18px 20px; overflow-x:auto; margin:14px 0; }
+  pre .c { color:var(--gray-500); }  pre .k { color:var(--clay); }  pre .s { color:#A8C08A; }
+
+  .legend { display:flex; flex-wrap:wrap; gap:18px; margin-top:18px; }
+  .legend .li { display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--gray-700); }
+  .swatch { width:16px; height:16px; border-radius:5px; border:var(--border); flex-shrink:0; }
+  .swatch.host { border-color:var(--slate); border-width:2px; }
+  .swatch.feat { border-color:var(--clay); background:#FAF0EC; }
+  .swatch.cap { border-color:var(--olive); background:#EBF0E2; }
+  .swatch.ext { background:var(--gray-100); }
+  .swatch.bus { background:var(--clay); border-color:var(--clay); }
+
+  .takeaway { display:flex; gap:14px; background:var(--white); border:var(--border); border-left:4px solid var(--clay); border-radius:12px; padding:18px 22px; margin:22px 0 0; }
+  .takeaway .tl { font-family:var(--mono); font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--clay); flex-shrink:0; padding-top:2px; }
+  .takeaway p { margin:0; }
+
+  footer { padding:40px 0 80px; font-family:var(--mono); font-size:12px; color:var(--gray-500); }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="hero">
+    <div class="kicker">Agentropy · extension architecture</div>
+    <h1>How extensions work,<br>drawn out.</h1>
+    <p>The core is a tiny host that knows nothing about your domain. The orchestrator, the scheduler, channels &mdash; all sit on top as extensions, each in its own repo. Here's the whole idea in boxes and arrows, with plain-English for the words that tripped you up.</p>
+  </header>
+
+  <!-- 0 GLOSSARY -->
+  <section>
+    <span class="snum">0</span>
+    <h2>Two words first</h2>
+    <p class="lead">"Trait" and "Issue model" lost you. They're simple, and everything below rests on them.</p>
+    <div class="gloss">
+      <div class="gcard">
+        <div class="term">trait</div>
+        <div class="plain">A checklist of abilities. A contract.</div>
+        <p>"To count as a <strong>Runner</strong>, you must be able to <em>execute a turn</em>." Anything that can is a runner, as far as the host is concerned. A job description &mdash; the host doesn't care who you are, only that you can do the job.</p>
+      </div>
+      <div class="gcard">
+        <div class="term">Issue model</div>
+        <div class="plain">One standard shape for a task.</div>
+        <p>Linear, GitHub, Jira each describe a task differently. The Issue model is the single shape they all translate into: <code>identifier</code>, <code>title</code>, <code>state</code>, <code>priority</code>&hellip; A shipping container &mdash; contents differ, the box is the same size. <em>(Lives only in the tracker contract, not the host.)</em></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 1 HOST NOT LOOP -->
+  <section>
+    <span class="snum">1</span>
+    <h2>The core is a host, not the loop</h2>
+    <p>The orchestrator is <em>not</em> the core. The core is generic plumbing that knows zero domain concepts &mdash; not even "Issue." It provides services; extensions use them. The orchestrator is just the first extension on top.</p>
+
+    <figure>
+      <div class="canvas">
+        <div class="row4" style="margin-bottom:14px;">
+          <div class="box feat"><div class="bt">orchestrator</div><div class="bsub">extension</div></div>
+          <div class="box feat"><div class="bt">scheduler</div><div class="bsub">extension</div></div>
+          <div class="box feat"><div class="bt">dashboard</div><div class="bsub">extension</div></div>
+          <div class="box ext"><div class="bt">slack / discord</div><div class="bsub">extensions</div></div>
+        </div>
+        <div class="arr v"><svg width="14" height="28" viewBox="0 0 14 28" fill="none" stroke="var(--gray-500)" stroke-width="1.6"><path d="M7 28V6M1 12l6-6 6 6"/></svg></div>
+        <div class="box host">
+          <div class="bt">agentropy host (the core)</div>
+          <div class="bsub">lifecycle · config · event bus · http mount · terminal · secrets · async runtime</div>
+        </div>
+      </div>
+      <figcaption><strong>Everything sits on the host.</strong> The host offers services (bottom); extensions consume them (top). Remove every extension and the host still runs &mdash; it just does nothing, because it knows nothing.</figcaption>
+    </figure>
+  </section>
+
+  <!-- 2 THREE ROLES -->
+  <section>
+    <span class="snum">2</span>
+    <h2>Three roles, one question</h2>
+    <p>Every piece is one of three things. The deciding question: <strong>does anything call into you through a typed contract?</strong></p>
+
+    <figure>
+      <div class="canvas">
+        <div class="flow">
+          <div class="box cap" style="flex:1;">
+            <div class="bt">Capability extension</div>
+            <div class="bsub">YES — someone calls in</div>
+            <ul class="reqs">
+              <li>implements a cap-* trait</li>
+              <li>tracker · runner · channel</li>
+              <li>host/orchestrator invoke it</li>
+            </ul>
+          </div>
+          <div class="box feat" style="flex:1;">
+            <div class="bt">Plain (feature) extension</div>
+            <div class="bsub">NO — it self-drives</div>
+            <ul class="reqs">
+              <li>host-api only, no contract</li>
+              <li>scheduler · dashboard · TUI · sink</li>
+              <li>uses bus + http + terminal</li>
+            </ul>
+          </div>
+          <div class="box host" style="flex:1;">
+            <div class="bt">Host</div>
+            <div class="bsub">the plumbing</div>
+            <ul class="reqs">
+              <li>knows no domain</li>
+              <li>offers services to both</li>
+              <li>runs the bus</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <figcaption><strong>"General" features have no cap crate.</strong> A <code>cap-*</code> exists only when there's a shared method signature to call (<code>tracker.poll</code>, <code>runner.execute</code>, <code>channel.send</code>). A web UI and a metrics sink share none, so they're plain &mdash; depend on <code>host-api</code> and nothing else.</figcaption>
+    </figure>
+
+    <div class="takeaway">
+      <span class="tl">Twist</span>
+      <p>The <strong>orchestrator is a plain extension</strong> that <em>consumes</em> <code>cap-tracker</code> + <code>cap-runner</code>. So capability crates flow two ways: <strong>providers implement</strong> them (github tracker), <strong>consumers call</strong> them (orchestrator). Plain features touch neither.</p>
+    </div>
+  </section>
+
+  <!-- 3 CARDINALITY -->
+  <section>
+    <span class="snum">3</span>
+    <h2>Cardinality — one runner, many channels</h2>
+    <p>Capabilities differ in how many run at once. This is what "swappable" got wrong: channels don't replace each other, they coexist.</p>
+
+    <table class="t">
+      <thead><tr><th style="width:140px;">Capability</th><th style="width:130px;">Active at once</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>runner</td><td><strong>exactly 1</strong></td><td>The agent runs one runner at a time (claude <em>or</em> codex).</td></tr>
+        <tr><td>tracker</td><td><strong>1</strong> (N later)</td><td>Orchestrator polls one configured tracker. More is possible, not needed now.</td></tr>
+        <tr><td>channel</td><td><strong>N concurrent</strong></td><td>Every configured channel is live. Reachable from all of them simultaneously.</td></tr>
+        <tr><td>plain</td><td><strong>N independent</strong></td><td>Run as many as you configure; each does its own thing.</td></tr>
+      </tbody>
+    </table>
+
+    <figure>
+      <div class="canvas">
+        <div class="flow">
+          <div style="flex:1; display:flex; flex-direction:column; gap:10px;">
+            <div class="box ext"><div class="bt">Discord</div><div class="bsub">channel · live</div></div>
+            <div class="box ext"><div class="bt">Slack</div><div class="bsub">channel · live</div></div>
+            <div class="box ext"><div class="bt">Telegram</div><div class="bsub">channel · live</div></div>
+          </div>
+          <div class="arr"><span class="lbl">inbound</span><svg width="22" height="14" viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 7h19M14 1l6 6-6 6"/></svg></div>
+          <div class="bus" style="flex:.9;">event bus<div class="bsub">host registry routes all</div></div>
+          <div class="arr"><svg width="22" height="14" viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 7h19M14 1l6 6-6 6"/></svg></div>
+          <div class="box feat" style="flex:.9;"><div class="bt">the agent</div><div class="bsub">one runner</div></div>
+        </div>
+      </div>
+      <figcaption><strong>All channels at once.</strong> The host holds a channel registry, keeps every one live, and fans their inbound messages onto the bus. Outbound replies are addressed back to whichever channel by id. The agent is reachable everywhere, simultaneously &mdash; with a single active runner behind it.</figcaption>
+    </figure>
+  </section>
+
+  <!-- 4 TRAIT + ISSUE (condensed) -->
+  <section>
+    <span class="snum">4</span>
+    <h2>Contracts &amp; the standard shape</h2>
+    <p>A capability is a contract the caller talks to without knowing who fills it. Trackers also agree on the Issue shape they hand back.</p>
+
+    <figure>
+      <div class="canvas">
+        <div class="box cap" style="max-width:420px; margin:0 auto 8px;">
+          <div class="bt">Tracker — the contract (trait)</div>
+          <ul class="reqs">
+            <li>poll_candidates() → which issues are ready?</li>
+            <li>fetch_states(ids) → still active?</li>
+            <li>fetch_terminal()  → which are done?</li>
+          </ul>
+        </div>
+        <div class="arr v"><svg width="14" height="26" viewBox="0 0 14 26" fill="none" stroke="var(--gray-500)" stroke-width="1.6"><path d="M7 0v18M1 12l6 6 6-6"/></svg></div>
+        <div class="row3">
+          <div class="box ext"><div class="bt">Linear</div><div class="bsub">GraphQL</div><span class="check">✓ fills contract</span></div>
+          <div class="box ext"><div class="bt">GitHub</div><div class="bsub">REST</div><span class="check">✓ fills contract</span></div>
+          <div class="box ext"><div class="bt">Files</div><div class="bsub">./issues/*.md</div><span class="check">✓ fills contract</span></div>
+        </div>
+        <div class="arr v"><span class="lbl">all return →</span><svg width="14" height="26" viewBox="0 0 14 26" fill="none" stroke="var(--gray-500)" stroke-width="1.6"><path d="M7 0v18M1 12l6 6 6-6"/></svg></div>
+        <div class="box feat" style="max-width:420px; margin:0 auto;">
+          <div class="bt">Issue — the standard shape</div>
+          <div class="bsub">identifier · title · state · priority · assignees</div>
+        </div>
+      </div>
+      <figcaption>Three trackers fill one contract three ways, and all hand back the same Issue shape. The orchestrator that consumes them never grows a "which tracker is this?" branch.</figcaption>
+    </figure>
+  </section>
+
+  <!-- 5 REPO TOPOLOGY -->
+  <section>
+    <span class="snum">5</span>
+    <h2>Every piece is its own repo</h2>
+    <p>Your real goal. The contract crates are tiny and shared; everyone depends on them and on nothing else. Arrows mean "depends on."</p>
+
+    <figure>
+      <div class="canvas">
+        <div class="row4" style="margin-bottom:6px;">
+          <div class="box feat"><div class="bt">orchestrator</div><div class="bsub">consumes tracker+runner</div></div>
+          <div class="box ext"><div class="bt">tracker-github</div><div class="bsub">provides tracker</div></div>
+          <div class="box ext"><div class="bt">runner-codex</div><div class="bsub">provides runner</div></div>
+          <div class="box feat"><div class="bt">scheduler</div><div class="bsub">plain · uses bus</div></div>
+        </div>
+        <div class="arr v"><svg width="220" height="30" viewBox="0 0 220 30" fill="none" stroke="var(--olive)" stroke-width="1.5"><path d="M28 0v8q0 6 6 6h152q6 0 6-6V0"/><path d="M110 14v9M105 19l5 5 5-5"/></svg></div>
+        <div class="row3" style="max-width:760px; margin:0 auto;">
+          <div class="box cap"><div class="bt">cap-tracker</div><div class="bsub">trait + Issue model</div></div>
+          <div class="box cap"><div class="bt">cap-runner</div><div class="bsub">trait</div></div>
+          <div class="box cap"><div class="bt">cap-channel</div><div class="bsub">trait</div></div>
+        </div>
+        <div class="arr v"><svg width="14" height="26" viewBox="0 0 14 26" fill="none" stroke="var(--olive)" stroke-width="1.5"><path d="M7 0v18M1 12l6 6 6-6"/></svg></div>
+        <div class="box host" style="max-width:520px; margin:0 auto;">
+          <div class="bt">agentropy-host-api</div>
+          <div class="bsub">lifecycle · config · event bus · http mount · the base everyone needs</div>
+        </div>
+      </div>
+      <figcaption><strong>Two layers of contract.</strong> Everyone depends on <code>host-api</code>. Capability extensions also depend on their one <code>cap-*</code> crate &mdash; the scheduler depends on <code>host-api</code> only, never imports Issue. Nothing depends on a sibling extension.</figcaption>
+    </figure>
+
+    <div class="legend">
+      <div class="li"><span class="swatch host"></span> host / contract base</div>
+      <div class="li"><span class="swatch cap"></span> capability contract (cap-*)</div>
+      <div class="li"><span class="swatch ext"></span> capability provider</div>
+      <div class="li"><span class="swatch feat"></span> feature / consumer extension</div>
+      <div class="li"><span class="swatch bus"></span> event bus</div>
+      <div class="li"><span class="swatch bin"></span> final binary</div>
+    </div>
+  </section>
+
+  <!-- 6 INVENTORY + BUILD/RUN -->
+  <section>
+    <span class="snum">6</span>
+    <h2>Pick · build · run</h2>
+    <p>Each extension raises its hand with one line. A thin <code>dist</code> repo names the mix you want; <code>cargo build</code> drops only those into one binary. That's your recompile step.</p>
+
+    <pre><span class="c">// inside any extension repo — its whole "register me" cost:</span>
+<span class="k">inventory</span>::submit! { Plugin { id: <span class="s">"github"</span>, role: Tracker, make: || Box::new(GithubTracker::new()) } }</pre>
+
+    <figure>
+      <div class="canvas">
+        <div class="flow">
+          <div class="box dist" style="flex:1.2;"><div class="bt">agentropy-dist</div><div class="bsub">lists host + chosen exts</div></div>
+          <div class="arr"><span class="lbl">cargo build</span><svg width="22" height="14" viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 7h19M14 1l6 6-6 6"/></svg></div>
+          <div class="box bin" style="flex:1;"><div class="bt">one static binary</div><div class="bsub">~8–15 MB · only what you picked</div></div>
+        </div>
+      </div>
+      <figcaption>Linking an extension auto-registers it on the shelf &mdash; no per-extension wiring code. Drop a line from <code>dist/Cargo.toml</code>, rebuild, it's gone and uncompiled.</figcaption>
+    </figure>
+
+    <h3>At runtime — the bus is the spine</h3>
+    <figure>
+      <div class="canvas">
+        <div class="flow" style="margin-bottom:14px;">
+          <div class="box feat"><div class="bt">scheduler</div><div class="bsub">timer fires</div></div>
+          <div class="arr"><span class="lbl">publish</span><svg width="22" height="14" viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 7h19M14 1l6 6-6 6"/></svg></div>
+          <div class="bus" style="flex:1.2;">event bus<div class="bsub">schedule.fired</div></div>
+          <div class="arr"><span class="lbl">subscribe</span><svg width="22" height="14" viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 7h19M14 1l6 6-6 6"/></svg></div>
+          <div class="box feat"><div class="bt">orchestrator</div><div class="bsub">reacts → dispatch</div></div>
+        </div>
+      </div>
+      <figcaption><strong>No extension imports another.</strong> The scheduler emits an event; the orchestrator happens to listen. Swap, add, or remove either side and the bus doesn't care. That decoupling is what lets <em>any</em> feature coexist &mdash; the scheduler is just the first to prove it.</figcaption>
+    </figure>
+
+    <div class="takeaway">
+      <span class="tl">Net</span>
+      <p>Separate repos ✓. Independent versioning ✓. Any extension type, not just orchestration ✓. Smallest footprint ✓. Price: one <code>cargo build</code> on a mix change. Linchpins: keep <code>host-api</code> and each <code>cap-*</code> tiny and stable.</p>
+    </div>
+  </section>
+
+  <footer>
+    Agentropy · visual explainer · pairs with extension-architecture.html
+  </footer>
+
+</div>
+</body>
+</html>
