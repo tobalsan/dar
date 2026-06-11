@@ -438,10 +438,9 @@ fn webhook_signature_header(headers: &HeaderMap) -> Option<&str> {
 fn is_webhook_timestamp_current(payload: &serde_json::Value, now_ms: i64) -> Option<bool> {
     const WEBHOOK_TIMESTAMP_TOLERANCE_MS: i64 = 60_000;
     let ts = payload.get("webhookTimestamp")?;
-    Some(
-        ts.as_i64()
-            .is_some_and(|timestamp| timestamp.abs_diff(now_ms) <= WEBHOOK_TIMESTAMP_TOLERANCE_MS as u64),
-    )
+    Some(ts.as_i64().is_some_and(|timestamp| {
+        timestamp.abs_diff(now_ms) <= WEBHOOK_TIMESTAMP_TOLERANCE_MS as u64
+    }))
 }
 
 fn is_relevant_linear_webhook(payload: &serde_json::Value) -> bool {
@@ -551,16 +550,11 @@ async fn ws_send_snapshot(socket: &mut WebSocket, api: &ApiState, since: &mut i6
         "retry": retry,
         "runs": runs,
         "events": events,
-        "last_tick": api.state.last_tick_at.read().await.map(|ts| ts.to_rfc3339()),
+        "last_tick_at": api.state.last_tick_at.read().await.map(|ts| ts.to_rfc3339()),
         "rate_limit_min_remaining": rate_limit_min_remaining,
     });
     let msg = Message::Text(payload.to_string().into());
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        socket.send(msg),
-    )
-    .await
-    {
+    match tokio::time::timeout(std::time::Duration::from_secs(5), socket.send(msg)).await {
         Ok(Ok(())) => true,
         _ => false,
     }

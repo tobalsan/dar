@@ -32,18 +32,18 @@ pub struct DashboardTemplate {
     pub active_count: usize,
     pub recent_count: usize,
     pub last_tick: String,
+    pub last_tick_at: String,
 }
 
 impl DashboardTemplate {
     /// Snapshot the shared state into an owned, render-ready template.
     pub async fn from_state(s: &AppState) -> Self {
         let active_runs = s.active_runs.read().await.clone();
-        let last_tick = s
-            .last_tick_at
-            .read()
-            .await
-            .map(|ts| ts.to_rfc3339())
+        let tick_at = *s.last_tick_at.read().await;
+        let last_tick = tick_at
+            .map(|ts| fmt_age((Utc::now() - ts).num_seconds().max(0)))
             .unwrap_or_else(|| "never".to_string());
+        let last_tick_at = tick_at.map(|ts| ts.to_rfc3339()).unwrap_or_default();
 
         let history: Vec<HistoryRow> = s
             .store
@@ -84,6 +84,7 @@ impl DashboardTemplate {
             active_count,
             recent_count,
             last_tick,
+            last_tick_at,
         }
     }
 }
@@ -150,7 +151,10 @@ mod tests {
 
     #[test]
     fn stalled_maps_to_interrupted() {
-        assert_eq!(history_bucket(&run_with_outcome("stalled")), ("Interrupted", "interrupted"));
+        assert_eq!(
+            history_bucket(&run_with_outcome("stalled")),
+            ("Interrupted", "interrupted")
+        );
     }
 
     #[test]
@@ -163,22 +167,34 @@ mod tests {
 
     #[test]
     fn error_maps_to_failed() {
-        assert_eq!(history_bucket(&run_with_outcome("error")), ("Failed", "failed"));
+        assert_eq!(
+            history_bucket(&run_with_outcome("error")),
+            ("Failed", "failed")
+        );
     }
 
     #[test]
     fn hook_failed_maps_to_failed() {
-        assert_eq!(history_bucket(&run_with_outcome("hook_failed")), ("Failed", "failed"));
+        assert_eq!(
+            history_bucket(&run_with_outcome("hook_failed")),
+            ("Failed", "failed")
+        );
     }
 
     #[test]
     fn completed_maps_to_completed() {
-        assert_eq!(history_bucket(&run_with_outcome("completed")), ("Completed", "completed"));
+        assert_eq!(
+            history_bucket(&run_with_outcome("completed")),
+            ("Completed", "completed")
+        );
     }
 
     #[test]
     fn terminal_maps_to_completed() {
-        assert_eq!(history_bucket(&run_with_outcome("terminal")), ("Completed", "completed"));
+        assert_eq!(
+            history_bucket(&run_with_outcome("terminal")),
+            ("Completed", "completed")
+        );
     }
 
     #[test]

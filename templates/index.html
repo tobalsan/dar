@@ -80,7 +80,7 @@
       <h1>agentropy</h1>
       <span class="stat">Active <strong id="active-count">{{ active_count }}</strong></span>
       <span class="stat">Recent <strong id="recent-count">{{ recent_count }}</strong></span>
-      <span class="stat">Last tick <strong id="last-tick">{{ last_tick }}</strong></span>
+      <span class="stat">Last tick <strong id="last-tick" data-last-tick-at="{{ last_tick_at }}">{{ last_tick }}</strong></span>
       <span class="stat">Rate limit <strong id="rate-limit">{% match rate_limit_min_remaining %}{% when Some with (r) %}{{ r }}{% when None %}n/a{% endmatch %}</strong></span>
       <span class="spacer"></span>
       <button id="refresh">Refresh</button>
@@ -153,6 +153,18 @@
     const qs = (s, root = document) => root.querySelector(s);
     const qsa = (s, root = document) => [...root.querySelectorAll(s)];
     const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const age = (iso) => {
+      if (!iso) return 'never';
+      const secs = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 1000));
+      if (secs < 60) return `${secs}s`;
+      if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+      if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
+      return `${Math.floor(secs / 86400)}d`;
+    };
+    const renderLastTick = () => {
+      const el = qs('#last-tick');
+      el.textContent = age(el.dataset.lastTickAt);
+    };
     const bucketFor = (run) => {
       if (run.process_alive || !run.finished_at || !run.outcome) return 'Live';
       const o = String(run.outcome).toLowerCase();
@@ -254,13 +266,17 @@
     qs('#kill').addEventListener('click', () => control('kill'));
     qsa('.tab').forEach(t => t.addEventListener('click', () => { state.tab = t.dataset.tab; renderDrawer(); }));
     refresh().catch(err => console.error(err));
+    setInterval(renderLastTick, 1000);
     setInterval(() => refresh().catch(err => console.error(err)), 2500);
     try {
       const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
       ws.onmessage = (ev) => {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'snapshot') {
-          if (msg.last_tick) qs('#last-tick').textContent = msg.last_tick;
+          if (msg.last_tick_at) {
+            qs('#last-tick').dataset.lastTickAt = msg.last_tick_at;
+            renderLastTick();
+          }
           qs('#rate-limit').textContent = msg.rate_limit_min_remaining ?? 'n/a';
           if (Array.isArray(msg.runs)) {
             state.runs = msg.runs.filter(r => String(r.outcome || '').toLowerCase() !== 'park_barrier');
