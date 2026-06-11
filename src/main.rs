@@ -17,13 +17,16 @@ async fn main_inner() -> Result<()> {
     }
 
     let root = agentropy::host_root_from_args(std::env::args_os())?;
+    let (bind, port) = agentropy::dashboard_addr_for_root(&root)?;
     let options = agentropy_host::HostOptions::new(root)
         .without_dotenv()
+        .http_addr(bind, port)
         .foreground("logs");
     agentropy_host::boot(
         vec![
             Arc::new(frontend_log::FrontendLogExtension),
-            Arc::new(agentropy::MonolithExtension),
+            Arc::new(orchestrator::OrchestratorExtension),
+            Arc::new(dashboard::DashboardExtension::default()),
         ],
         options,
     )

@@ -77,6 +77,14 @@ where
     Ok(root)
 }
 
+pub fn dashboard_addr_for_root(root: &std::path::Path) -> Result<(std::net::IpAddr, u16)> {
+    let paths = AgentPaths::new(root.to_path_buf());
+    let agent_cfg = config::load(&paths.root)?;
+    let prompt = prompt::PromptRenderer::load(&paths.workflow_md())?;
+    let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &prompt.snapshot().frontmatter);
+    Ok((effective_cfg.dashboard_bind, effective_cfg.dashboard_port))
+}
+
 pub async fn run_cli() -> Result<()> {
     run_cli_inner(Cli::parse(), None).await
 }

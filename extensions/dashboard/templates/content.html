@@ -1,0 +1,54 @@
+<header>
+  <div class="top">
+    <h1>agentropy</h1>
+    <span class="stat">Active <strong>{{ active_count }}</strong></span>
+    <span class="stat">Recent <strong>{{ recent_count }}</strong></span>
+    <span class="stat">Last tick <strong data-last-tick-at="{{ last_tick_at }}">{{ last_tick }}</strong></span>
+    <span class="stat">Rate limit <strong>{% match rate_limit_min_remaining %}{% when Some with (r) %}{{ r }}{% when None %}n/a{% endmatch %}</strong></span>
+    <span class="spacer"></span>
+    <button hx-post="/control/pause" hx-swap="none">Pause</button>
+    <button hx-post="/control/resume" hx-swap="none">Resume</button>
+    <button class="danger" hx-post="/control/stop" hx-swap="none">Stop</button>
+  </div>
+  <div class="folder">{{ agent.id }} · {{ agent.folder }}</div>
+</header>
+
+<main>
+  <div class="stack">
+    <section class="panel">
+      <h2>Active runs</h2>
+      <div class="run-list">
+        {% if active_runs.is_empty() %}
+        <p class="empty">Idle, nothing running.</p>
+        {% else %}
+        {% for a in active_runs %}
+        <div class="run-row">
+          <span class="run-title">{{ a.identifier }}</span>
+          <span class="pill live">Live</span>
+          <span class="meta">{{ a.workspace }}</span>
+          <span class="meta">pid {{ a.pid }}</span>
+        </div>
+        {% endfor %}
+        {% endif %}
+      </div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <h2>Recent runs</h2>
+    <div class="run-list">
+      {% if history.is_empty() %}
+      <p class="empty">No recent runs yet.</p>
+      {% else %}
+      {% for h in history %}
+      <div class="run-row">
+        <span class="run-title">{{ h.identifier }}</span>
+        <span class="pill {{ h.status_class }}">{{ h.status }}</span>
+        <span class="meta">{{ h.run }}</span>
+        <span class="meta">{{ h.age }}</span>
+      </div>
+      {% endfor %}
+      {% endif %}
+    </div>
+  </section>
+</main>

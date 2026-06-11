@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>agentropy - {{ content.agent.id }}</title>
+  <script src="/assets/htmx.min.js"></script>
+  <style>
+    :root {
+      --bg: #111317; --panel: #1b1f26; --panel-2: #202630; --border: #303844;
+      --fg: #eceff3; --muted: #9ba6b5; --accent: #62b3b0; --ok: #57c785;
+      --warn: #f2b84b; --bad: #f26d6d; --info: #7aa2f7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    button {
+      border: 1px solid var(--border); background: var(--panel-2); color: var(--fg);
+      border-radius: 6px; padding: .45rem .7rem; font: inherit; cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    button.danger:hover { border-color: var(--bad); color: var(--bad); }
+    header { padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); background: #15181d; }
+    .top { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }
+    h1 { font-size: 1.05rem; margin: 0 .4rem 0 0; }
+    .stat { color: var(--muted); padding: .2rem .45rem; border: 1px solid var(--border); border-radius: 6px; }
+    .stat strong { color: var(--fg); font-weight: 700; }
+    .spacer { flex: 1; }
+    .folder { color: var(--muted); margin-top: .55rem; word-break: break-all; }
+    main { padding: 1rem 1.25rem; display: grid; grid-template-columns: minmax(18rem, .8fr) 1.2fr; gap: 1rem; }
+    section { min-width: 0; }
+    h2 { font-size: .76rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin: 0 0 .65rem; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: .9rem; }
+    .stack { display: grid; gap: 1rem; align-content: start; }
+    .empty { color: var(--muted); font-style: italic; margin: .3rem 0; }
+    .run-list { display: grid; gap: .45rem; }
+    .run-row {
+      width: 100%; text-align: left; display: grid; grid-template-columns: 1fr auto; gap: .35rem .75rem;
+      padding: .6rem; background: #171b21; border: 1px solid var(--border); border-radius: 6px;
+    }
+    .run-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .meta { color: var(--muted); font-size: .78rem; overflow-wrap: anywhere; }
+    .pill { border-radius: 999px; padding: .12rem .45rem; font-size: .72rem; font-weight: 700; }
+    .completed { background: rgba(87,199,133,.15); color: var(--ok); }
+    .failed { background: rgba(242,109,109,.15); color: var(--bad); }
+    .interrupted { background: rgba(242,184,75,.15); color: var(--warn); }
+    .other { background: rgba(155,166,181,.15); color: var(--muted); }
+    .live { background: rgba(122,162,247,.15); color: var(--info); }
+    @media (max-width: 760px) {
+      header, main { padding-left: .8rem; padding-right: .8rem; }
+      main { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div id="content" hx-get="/content" hx-trigger="every 2s" hx-swap="innerHTML">
+    {{ content|safe }}
+  </div>
+</body>
+</html>
