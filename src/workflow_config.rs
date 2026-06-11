@@ -364,20 +364,19 @@ impl EffectiveLoopConfig {
         // --- Runner / model ---
         let a = wf.agent.as_ref();
         let runner_override = a.and_then(|a| a.effective_runner());
-        let runner_kind = runner_override
-            .map(str::to_string)
-            .unwrap_or_else(|| normalize_runner_kind(&base.runner.use_));
+        let runner_kind = runner_override.map(str::to_string).unwrap_or_else(|| {
+            if base.runner.use_.trim().is_empty() {
+                "pi".to_string()
+            } else {
+                base.runner.use_.clone()
+            }
+        });
         let runner_command = a
             .and_then(|a| a.command.as_deref())
             .map(str::to_string)
             .unwrap_or_else(|| {
                 if runner_override.is_some() {
-                    // Use the well-known default for built-in runners; for custom
-                    // runner kinds fall back to base.runner.command so the operator's
-                    // configured command is honoured.
-                    default_runner_command(&runner_kind)
-                        .map(str::to_string)
-                        .unwrap_or_else(|| base.runner.command.clone())
+                    String::new()
                 } else {
                     base.runner.command.clone()
                 }
@@ -443,26 +442,6 @@ impl EffectiveLoopConfig {
             hooks: wf.hooks.clone().unwrap_or_default(),
             linear: wf.linear.clone().unwrap_or_default(),
         }
-    }
-}
-
-fn normalize_runner_kind(kind: &str) -> String {
-    match kind {
-        "claude-code" => "claude".to_string(),
-        "" => "pi".to_string(),
-        other => other.to_string(),
-    }
-}
-
-/// Return the well-known default command for a built-in runner kind, or `None`
-/// for custom/unrecognised kinds (caller should fall back to base command).
-fn default_runner_command(kind: &str) -> Option<&'static str> {
-    match kind {
-        "pi" | "" => Some("pi"),
-        "claude" | "claude-code" => Some("claude"),
-        "codex" => Some("codex"),
-        "cli" | "fake" => Some("sh"),
-        _ => None,
     }
 }
 
@@ -700,7 +679,7 @@ body"#;
         assert_eq!(eff.needs_human, Some("Needs Human".into()));
         assert_eq!(eff.poll_interval_ms, 10_000);
         assert_eq!(eff.poll_jitter_ms, 0);
-        assert_eq!(eff.runner_kind, "claude");
+        assert_eq!(eff.runner_kind, "claude-code");
         assert_eq!(eff.runner_command, "claude");
         assert_eq!(eff.model, None);
         assert!(eff.allow_stale);
@@ -806,7 +785,7 @@ body"#;
         let snap = parse_workflow_md(raw).unwrap();
         let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
         assert_eq!(eff.runner_kind, "gemini-code");
-        assert_eq!(eff.runner_command, "claude"); // falls back to base, not "pi"
+        assert_eq!(eff.runner_command, "");
     }
 
     #[test]
@@ -817,9 +796,7 @@ body"#;
         let snap = parse_workflow_md(raw).unwrap();
         let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
         assert_eq!(eff.runner_kind, "cli");
-        // Runner override uses that runner's default command instead of the
-        // base runner command.
-        assert_eq!(eff.runner_command, "sh");
+        assert_eq!(eff.runner_command, "");
     }
 
     #[test]
@@ -829,7 +806,7 @@ body"#;
         let snap = parse_workflow_md(raw).unwrap();
         let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
         assert_eq!(eff.runner_kind, "codex");
-        assert_eq!(eff.runner_command, "codex");
+        assert_eq!(eff.runner_command, "");
         assert_eq!(eff.max_run_timeout_ms, 2500);
         assert_eq!(eff.stall_timeout_ms, 300_000);
     }
