@@ -165,23 +165,16 @@ fn parse_issue_file(path: &Path) -> Result<Issue> {
         }
     };
 
-    Ok(Issue {
-        id,
-        identifier,
-        title,
-        description,
-        url: None,
-        state: fm.state.unwrap_or_default(),
-        priority: fm.priority,
-        assignees: fm.assignees,
-        labels: fm.labels,
-        created_at: fm.created_at,
-        updated_at: fm.updated_at,
-        parent_id: None,
-        blocked_by: Vec::new(),
-        project_name: None,
-        project_slug: None,
-    })
+    Ok(
+        Issue::builder(id, identifier, title, fm.state.unwrap_or_default())
+            .description(description)
+            .priority(fm.priority)
+            .assignees(fm.assignees)
+            .labels(fm.labels)
+            .created_at(fm.created_at)
+            .updated_at(fm.updated_at)
+            .build(),
+    )
 }
 
 /// Split a leading `---\n ... \n---` frontmatter block from the body. Returns

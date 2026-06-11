@@ -1161,7 +1161,10 @@ mod tests {
         // Finished-run heartbeats must be gone; active-run heartbeats must survive.
         let finished_count = store.heartbeat_count_for_run("finished-run").unwrap();
         let active_count = store.heartbeat_count_for_run("active-run").unwrap();
-        assert_eq!(finished_count, 0, "heartbeats for finished run must be pruned");
+        assert_eq!(
+            finished_count, 0,
+            "heartbeats for finished run must be pruned"
+        );
         assert_eq!(active_count, 2, "heartbeats for active run must survive");
     }
 

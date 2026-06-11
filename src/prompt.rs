@@ -250,23 +250,9 @@ mod tests {
     use tempfile::NamedTempFile;
 
     fn make_issue(id: &str) -> Issue {
-        Issue {
-            id: id.to_string(),
-            identifier: id.to_string(),
-            title: "Test issue".to_string(),
-            description: Some("Do the thing.".to_string()),
-            url: None,
-            state: "todo".to_string(),
-            priority: None,
-            assignees: vec![],
-            labels: vec![],
-            created_at: None,
-            updated_at: None,
-            parent_id: None,
-            blocked_by: vec![],
-            project_name: None,
-            project_slug: None,
-        }
+        Issue::builder(id, id, "Test issue", "todo")
+            .description(Some("Do the thing.".to_string()))
+            .build()
     }
 
     #[test]

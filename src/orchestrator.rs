@@ -965,25 +965,28 @@ impl Orchestrator {
         }
 
         let last_event_at = Arc::new(Mutex::new(started_at));
-        let params = SpawnParams {
-            command: &self.effective_cfg.runner_command,
-            runner_kind: &self.effective_cfg.runner_kind,
-            model: self.effective_cfg.model.clone(),
-            provider: self.effective_cfg.provider.clone(),
-            thinking: self.effective_cfg.thinking.clone(),
-            effort: self.effective_cfg.effort.clone(),
-            workspace: &workspace,
-            workspace_root: &ws_root,
-            agent_root: &self.paths.root,
+        let runner_events: Arc<dyn cap_runner::RunnerEventSink> = self.state.events.clone();
+        let runner_store: Arc<dyn cap_runner::RunnerEventStore> = self.state.store.clone();
+        let params = SpawnParams::builder(
+            &self.effective_cfg.runner_command,
+            &self.effective_cfg.runner_kind,
+            &workspace,
+            &ws_root,
+            &self.paths.root,
             prompt,
-            issue_id: issue.identifier.clone(),
-            run_id: run_id.clone(),
-            max_run_timeout_ms: self.effective_cfg.max_run_timeout_ms,
-            expose_linear_graphql_tool: self.effective_cfg.linear.worker_tool.unwrap_or(false),
-            events: Arc::clone(&self.state.events),
-            store: Arc::clone(&self.state.store),
-            last_event_at: Arc::clone(&last_event_at),
-        };
+            issue.identifier.clone(),
+            run_id.clone(),
+            self.effective_cfg.max_run_timeout_ms,
+            runner_events,
+            runner_store,
+            Arc::clone(&last_event_at),
+        )
+        .model(self.effective_cfg.model.clone())
+        .provider(self.effective_cfg.provider.clone())
+        .thinking(self.effective_cfg.thinking.clone())
+        .effort(self.effective_cfg.effort.clone())
+        .expose_linear_graphql_tool(self.effective_cfg.linear.worker_tool.unwrap_or(false))
+        .build();
 
         match runner::spawn(params).await {
             Ok(handle) => {
@@ -1654,9 +1657,7 @@ impl Orchestrator {
         let mut queue_items: Vec<QueueItem> = {
             let mut v: Vec<Issue> = candidates
                 .iter()
-                .filter(|i| {
-                    !busy.contains(&i.identifier) && !retry_ids.contains(&i.identifier)
-                })
+                .filter(|i| !busy.contains(&i.identifier) && !retry_ids.contains(&i.identifier))
                 .cloned()
                 .collect();
             if self.tracker.sort_candidates_locally() {
@@ -1806,25 +1807,28 @@ mod tests {
     use tempfile::tempdir;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
+    use tokio::sync::oneshot;
 
     fn issue(id: &str, prio: Option<i32>, created: Option<i64>) -> Issue {
-        Issue {
-            id: id.to_string(),
-            identifier: id.to_string(),
-            title: id.to_string(),
-            description: None,
-            url: None,
-            state: "todo".to_string(),
-            priority: prio,
-            assignees: vec![],
-            labels: vec![],
-            created_at: created.map(|s| Utc.timestamp_opt(s, 0).unwrap()),
-            updated_at: None,
-            parent_id: None,
-            blocked_by: vec![],
-            project_name: None,
-            project_slug: None,
-        }
+        Issue::builder(id, id, id, "todo")
+            .priority(prio)
+            .created_at(created.map(|s| Utc.timestamp_opt(s, 0).unwrap()))
+            .build()
+    }
+
+    fn finished_handle_for_test(pid: u32, kind: ExitKind) -> RunnerHandle {
+        let (kill_tx, _kill_rx) = oneshot::channel::<KillReason>();
+        let done = tokio::spawn(async move { kind });
+        RunnerHandle::new(pid, kill_tx, done)
+    }
+
+    fn pending_handle_for_test(pid: u32, kind: ExitKind) -> RunnerHandle {
+        let (kill_tx, kill_rx) = oneshot::channel::<KillReason>();
+        let done = tokio::spawn(async move {
+            let _ = kill_rx.await;
+            kind
+        });
+        RunnerHandle::new(pid, kill_tx, done)
     }
 
     struct StaticTracker {
@@ -2035,10 +2039,7 @@ mod tests {
             identifier: needs_issue.identifier.clone(),
             issue: needs_issue,
             workspace: "workspace".to_string(),
-            handle: Some(RunnerHandle::finished_for_test(
-                42,
-                ExitKind::Abnormal(Some(17)),
-            )),
+            handle: Some(finished_handle_for_test(42, ExitKind::Abnormal(Some(17)))),
             attempt: 1,
             run_id: run_id.clone(),
             started_at,
@@ -2103,10 +2104,7 @@ mod tests {
             identifier: active_issue.identifier.clone(),
             issue: active_issue,
             workspace: "workspace".to_string(),
-            handle: Some(RunnerHandle::finished_for_test(
-                42,
-                ExitKind::Abnormal(None),
-            )),
+            handle: Some(finished_handle_for_test(42, ExitKind::Abnormal(None))),
             attempt: 1,
             run_id,
             started_at,
@@ -2182,7 +2180,7 @@ mod tests {
             identifier: active_issue.identifier.clone(),
             issue: active_issue.clone(),
             workspace: "workspace".to_string(),
-            handle: Some(RunnerHandle::finished_for_test(42, ExitKind::Normal)),
+            handle: Some(finished_handle_for_test(42, ExitKind::Normal)),
             attempt: 0,
             run_id: run_id.clone(),
             started_at,
@@ -2196,7 +2194,9 @@ mod tests {
         assert_eq!(orchestrator.retries.len(), 1);
         assert!(parks.lock().unwrap().is_empty());
         assert_eq!(
-            store.consecutive_completed_runs(&active_issue.id, 10).unwrap(),
+            store
+                .consecutive_completed_runs(&active_issue.id, 10)
+                .unwrap(),
             1
         );
         let history = state.history.snapshot();
@@ -2256,7 +2256,7 @@ mod tests {
             identifier: active_issue.identifier.clone(),
             issue: active_issue,
             workspace: "workspace".to_string(),
-            handle: Some(RunnerHandle::finished_for_test(
+            handle: Some(finished_handle_for_test(
                 42,
                 ExitKind::Interrupted {
                     reason: "turn_timeout",
@@ -2349,7 +2349,7 @@ mod tests {
             identifier: active_issue.identifier.clone(),
             issue: active_issue,
             workspace: "workspace".to_string(),
-            handle: Some(RunnerHandle::pending_for_test(
+            handle: Some(pending_handle_for_test(
                 42,
                 ExitKind::Interrupted { reason: "stalled" },
             )),
@@ -2419,10 +2419,7 @@ mod tests {
             identifier: active_issue.identifier.clone(),
             issue: active_issue,
             workspace: "workspace".to_string(),
-            handle: Some(RunnerHandle::finished_for_test(
-                42,
-                ExitKind::Abnormal(None),
-            )),
+            handle: Some(finished_handle_for_test(42, ExitKind::Abnormal(None))),
             attempt: 1,
             run_id,
             started_at,
@@ -2499,10 +2496,7 @@ mod tests {
             identifier: active_issue.identifier.clone(),
             issue: active_issue,
             workspace: "workspace".to_string(),
-            handle: Some(RunnerHandle::finished_for_test(
-                42,
-                ExitKind::Abnormal(Some(1)),
-            )),
+            handle: Some(finished_handle_for_test(42, ExitKind::Abnormal(Some(1)))),
             attempt: 3,
             run_id,
             started_at,
@@ -2695,7 +2689,9 @@ mod tests {
         assert!(orchestrator.slots.is_empty());
         assert!(parks.lock().unwrap().is_empty());
         assert_eq!(
-            store.consecutive_completed_runs(&active_issue.id, 10).unwrap(),
+            store
+                .consecutive_completed_runs(&active_issue.id, 10)
+                .unwrap(),
             1
         );
         let runs = store.list_runs_paged(0, 10).unwrap();
@@ -2908,7 +2904,8 @@ mod tests {
 
     impl Tracker for CountingTracker {
         fn poll_candidates(&self) -> Result<Vec<Issue>> {
-            self.poll_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.poll_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(Vec::new())
         }
         fn fetch_states(&self, _ids: &[String]) -> Result<Vec<Issue>> {
