@@ -196,6 +196,11 @@
         <span class="meta">${esc(run.started_at)}</span>
       </button>`;
     }
+    function closeDrawer() {
+      state.selected = null;
+      qs('#drawer').classList.remove('open');
+      qs('#drawer').setAttribute('aria-hidden', 'true');
+    }
     async function openRun(runId) {
       if (!runId) return;
       state.selected = await json(`/runs/${encodeURIComponent(runId)}`);
@@ -235,7 +240,16 @@
       renderDrawer();
     }
     qs('#refresh').addEventListener('click', refresh);
-    qs('#close-drawer').addEventListener('click', () => qs('#drawer').classList.remove('open'));
+    qs('#close-drawer').addEventListener('click', closeDrawer);
+    document.addEventListener('click', (ev) => {
+      const drawer = qs('#drawer');
+      if (!drawer.classList.contains('open')) return;
+      if (drawer.contains(ev.target) || ev.target.closest('.run-row')) return;
+      closeDrawer();
+    });
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && qs('#drawer').classList.contains('open')) closeDrawer();
+    });
     qs('#interrupt').addEventListener('click', () => control('interrupt'));
     qs('#kill').addEventListener('click', () => control('kill'));
     qsa('.tab').forEach(t => t.addEventListener('click', () => { state.tab = t.dataset.tab; renderDrawer(); }));
