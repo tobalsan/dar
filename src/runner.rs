@@ -30,6 +30,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::oneshot;
 
+use crate::dotenv;
 use crate::logging;
 use crate::paths::assert_contained;
 use crate::state::EventRing;
@@ -682,6 +683,7 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     for arg in &rp.args {
         cmd.arg(arg);
     }
+    dotenv::scrub_loaded_env(&mut cmd);
     cmd.envs(rp.env);
     cmd.current_dir(p.workspace)
         .stdin(Stdio::piped())

@@ -34,6 +34,7 @@ use tokio::sync::watch;
 
 use crate::config::AgentConfig;
 use crate::domain::Issue;
+use crate::dotenv;
 use crate::hitl::{HitlNotification, HitlNotify, NoopHitlNotifier};
 use crate::logging;
 use crate::paths::{issue_workspace, issue_workspace_path, resolve_workspace_root, AgentPaths};
@@ -1502,7 +1503,9 @@ impl Orchestrator {
             .as_deref()
             .or(self.effective_cfg.tracker_project_slug.as_deref())
             .unwrap_or(&self.agent_cfg.id);
-        let status = Command::new("sh")
+        let mut command = Command::new("sh");
+        dotenv::scrub_loaded_env(&mut command);
+        let status = command
             .arg("-c")
             .arg(script)
             .current_dir(workspace)
@@ -1766,7 +1769,9 @@ fn run_before_remove(
     identifier: &str,
     run_id: &str,
 ) -> anyhow::Result<()> {
-    let status = std::process::Command::new("sh")
+    let mut hook = std::process::Command::new("sh");
+    dotenv::scrub_loaded_env(&mut hook);
+    let status = hook
         .arg("-c")
         .arg(command)
         .env("AGENT_WORKSPACE", workspace)
@@ -2966,6 +2971,28 @@ mod tests {
             2,
             "poll_candidates must be called exactly once per tick (second tick)"
         );
+    }
+
+    #[test]
+    fn run_before_remove_scrubs_dotenv_loaded_keys() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join(".env"),
+            "AGENTROPY_TEST_BEFORE_REMOVE_SECRET=file\n",
+        )
+        .unwrap();
+        std::env::remove_var("AGENTROPY_TEST_BEFORE_REMOVE_SECRET");
+        crate::dotenv::load_agent_env(temp.path()).unwrap();
+
+        run_before_remove(
+            "test -z \"${AGENTROPY_TEST_BEFORE_REMOVE_SECRET:-}\"",
+            temp.path().to_str().unwrap(),
+            "ISSUE-1",
+            "run-1",
+        )
+        .unwrap();
+
+        std::env::remove_var("AGENTROPY_TEST_BEFORE_REMOVE_SECRET");
     }
 
     // ---------------------------------------------------------------------------

@@ -12,14 +12,26 @@
 use std::path::Path;
 
 use crate::config;
+use crate::dotenv::LoadReport;
 use crate::paths::AgentPaths;
 use crate::prompt::PromptRenderer;
 use crate::tracker;
 
 /// Run all preflight checks against `root`. Returns the process exit code.
-pub fn run(root: &Path) -> anyhow::Result<i32> {
+pub fn run(root: &Path, dotenv: &LoadReport) -> anyhow::Result<i32> {
     let paths = AgentPaths::new(root.to_path_buf());
     let mut ok = true;
+
+    if dotenv.found {
+        pass(&format!(
+            ".env loaded from {} ({} loaded, {} already set)",
+            dotenv.path.display(),
+            dotenv.loaded.len(),
+            dotenv.skipped_existing.len()
+        ));
+    } else {
+        pass(&format!(".env not found at {}", dotenv.path.display()));
+    }
 
     // 1. Config.
     let cfg = match config::load(&paths.root) {

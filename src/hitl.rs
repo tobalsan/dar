@@ -11,6 +11,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 
 use crate::config::HitlNotifierConfig;
+use crate::dotenv;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize)]
 pub struct HitlNotification {
@@ -218,7 +219,9 @@ impl Sink {
                 let (program, args) = command
                     .split_first()
                     .ok_or_else(|| anyhow!("HITL CLI command is empty"))?;
-                let mut child = Command::new(program)
+                let mut command = Command::new(program);
+                dotenv::scrub_loaded_env(&mut command);
+                let mut child = command
                     .args(args)
                     .stdin(Stdio::piped())
                     .spawn()

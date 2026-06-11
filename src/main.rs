@@ -9,6 +9,7 @@ mod config;
 mod dashboard;
 mod doctor;
 mod domain;
+mod dotenv;
 mod export;
 mod hitl;
 mod logging;
@@ -48,11 +49,13 @@ async fn main_inner() -> Result<()> {
     match cli.command {
         Command::Run(args) => {
             let root = args.resolve_root()?;
+            dotenv::load_agent_env(&root)?;
             run(root).await
         }
         Command::Doctor(args) => {
             let root = args.resolve_root()?;
-            let code = doctor::run(&root)?;
+            let dotenv_report = dotenv::load_agent_env(&root)?;
+            let code = doctor::run(&root, &dotenv_report)?;
             std::process::exit(code);
         }
         Command::InitWorkflow(args) => {

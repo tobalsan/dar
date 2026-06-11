@@ -182,8 +182,29 @@ pub(crate) fn init_workflow_with_options(
     let body =
         workflow_body_with_frontmatter(linear_project_slug, linear_project, expose_graphql_tool);
     std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+    ensure_gitignore_entry(root, ".env")?;
     println!("wrote {}", path.display());
     Ok(())
+}
+
+fn ensure_gitignore_entry(root: &Path, entry: &str) -> Result<()> {
+    let path = root.join(".gitignore");
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    if existing.lines().any(|line| line.trim() == entry) {
+        return Ok(());
+    }
+
+    let mut next = existing;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(entry);
+    next.push('\n');
+    std::fs::write(&path, next).with_context(|| format!("writing {}", path.display()))
 }
 
 fn workflow_body_with_frontmatter(
@@ -276,6 +297,8 @@ mod tests {
         let written = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
         assert!(written.contains("prompt-level worker guidance"));
         assert!(written.ends_with('\n'));
+        let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(gitignore.lines().any(|line| line == ".env"));
     }
 
     #[test]
@@ -314,5 +337,18 @@ mod tests {
         assert!(written.contains("tracker:\n  kind: linear\n  project_slug: abc123"));
         assert!(written.contains("linear:\n  project: Agentropy Test\n  exposeGraphqlTool: true"));
         assert!(!dir.path().join("agent.yaml").exists());
+    }
+
+    #[test]
+    fn init_workflow_preserves_existing_gitignore_and_adds_env_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "logs/\n").unwrap();
+
+        init_workflow(dir.path(), false).unwrap();
+        init_workflow(dir.path(), true).unwrap();
+
+        let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(gitignore.contains("logs/\n"));
+        assert_eq!(gitignore.lines().filter(|line| *line == ".env").count(), 1);
     }
 }
