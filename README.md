@@ -78,6 +78,85 @@ cargo build --release          # → ./target/release/agentropy
 For the `claude` runner: the **Claude Code CLI** (`claude`) must be installed
 and authenticated on the host. Agentropy does not bundle, install, or auth it.
 
+## Extensions
+
+The codebase is a cargo workspace: a domain-free host (`crates/agentropy-host`)
+plus small contract crates (`crates/host-api`, `crates/cap-tracker`,
+`crates/cap-runner`, `crates/orchestrator-api`), with features living as one
+crate each under `extensions/`. The binary is assembled from an explicit plugin
+list in the composition root (`dist/`). Extensions import `host-api`
+(and optionally one cap/api crate) and read zero host internals.
+
+For writing your own extension, start from `extensions/example` (the living
+reference, kept green in CI) or scaffold one with
+`cargo agentropy new my-extension --kind background` (or `service` /
+`foreground`).
+
+### Adding an extension
+
+1. Add the crate as a dependency in `dist/Cargo.toml`:
+
+   ```toml
+   my-extension = { path = "../extensions/my-extension" }
+   ```
+
+2. Add one line to the `plugins![]` list in `dist/src/main.rs`:
+
+   ```rust
+   plugins![
+       frontend_log::FrontendLogExtension,
+       tracker_files::TrackerFilesExtension,
+       tracker_linear::TrackerLinearExtension,
+       orchestrator::OrchestratorExtension,
+       dashboard::DashboardExtension::default(),
+       runner_pi::RunnerPiExtension,
+       runner_claude::RunnerClaudeExtension,
+       runner_codex::RunnerCodexExtension,
+       runner_cli::RunnerCliExtension,
+       runner_fake::RunnerFakeExtension,
+       my_extension::MyExtension,           // <- new
+   ],
+   ```
+
+3. `cargo build --release`.
+
+Removing an extension is the reverse: delete its `plugins![]` line and
+`dist/Cargo.toml` dependency, rebuild.
+
+### Enabling & configuring extensions
+
+Linked is not the same as enabled. Tracker and runner extensions only
+*register* named services; `agent.yaml` `use:` keys pick which one actually
+runs:
+
+```yaml
+tracker:
+  use: files            # files | linear
+
+runner:
+  use: claude-code      # pi | claude | claude-code | codex | cli | fake
+```
+
+Background extensions in `plugins![]` (orchestrator, dashboard, frontend-log)
+start unconditionally. The foreground extension — the one that owns terminal
+output — is selected per agent via the top-level `foreground:` key in
+`agent.yaml` (default `"logs"`, the frontend-log extension). An unknown id
+causes a clean boot error and exit 1.
+
+Per-extension config is passed via the top-level `extensions:` map in
+`agent.yaml`, keyed by extension id. The host delivers each value to the
+matching extension via `ConfigStore`. Missing section = empty config.
+
+```yaml
+foreground: logs          # optional; default "logs"
+
+extensions:
+  dashboard:
+    port: 7878
+```
+
+See [Configuration](#configuration-agentyaml) for the full `agent.yaml` reference.
+
 ## CLI
 
 ```bash
