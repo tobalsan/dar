@@ -10,6 +10,8 @@ members = [
     "extensions/dashboard",
     "extensions/frontend-log",
     "extensions/orchestrator",
+    "extensions/tracker-files",
+    "extensions/tracker-linear",
 ]
 resolver = "2"
 
@@ -58,14 +60,15 @@ tracing-appender = "0.2"
 nix = { version = "0.29", features = ["signal", "process"] }
 # SQLite persistence
 rusqlite = { version = "0.32", features = ["bundled"] }
-# HTTP client (LinearTracker GraphQL)
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 # errors
 anyhow = "1"
 thiserror = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 cap-tracker = { path = "crates/cap-tracker" }
 cap-runner = { path = "crates/cap-runner" }
 runner-core = { path = "crates/runner-core" }
+tracker-files = { path = "extensions/tracker-files" }
+tracker-linear = { path = "extensions/tracker-linear" }
 # static dashboard assets (only htmx.min.js is embedded; templates are askama-compiled)
 rust-embed = { version = "8", features = ["axum-ex"] }
 mime_guess = "2"

@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
@@ -187,4 +189,19 @@ pub trait Tracker: Send + Sync {
     fn sort_candidates_locally(&self) -> bool {
         false
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackerBuildConfig {
+    pub root: PathBuf,
+    pub config_path: Option<PathBuf>,
+    pub active_states: Vec<String>,
+    pub terminal_states: Vec<String>,
+    pub project_slug: Option<String>,
+    pub endpoint: Option<String>,
+    pub needs_human: Option<String>,
+}
+
+pub trait TrackerFactory: Send + Sync {
+    fn build(&self, cfg: TrackerBuildConfig) -> Result<Arc<dyn Tracker>>;
 }

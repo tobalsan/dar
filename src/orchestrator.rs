@@ -39,14 +39,13 @@ use crate::hitl::{HitlNotification, HitlNotify, NoopHitlNotifier};
 use crate::logging;
 use crate::paths::{issue_workspace, issue_workspace_path, resolve_workspace_root, AgentPaths};
 use crate::prompt::PromptRenderer;
-use crate::runner::{self, ExitKind, KillReason, RunnerHandle, SpawnParams};
+use crate::runner::{ExitKind, KillReason, RunnerHandle, SpawnParams};
 use crate::state::{
     ActiveRun, AppState, ControlMsg, ControlReply, HistoryEntry, QueueItem, RetryItem, RunStatus,
 };
 use crate::store::{
     new_run_id, NewClaim, NewEvent, NewHeartbeat, NewRun, RunFinish, ACTIVE_CONTINUATION_MARKER,
 };
-use crate::tracker;
 use crate::workflow_config::EffectiveLoopConfig;
 use std::path::Path;
 use std::process::Command;
@@ -87,6 +86,8 @@ pub struct Orchestrator {
     agent_cfg: AgentConfig,
     paths: AgentPaths,
     tracker: Arc<dyn crate::tracker::Tracker>,
+    runner: Arc<dyn cap_runner::Runner>,
+    runner_services: host_api::ServiceRegistry,
     prompt: PromptRenderer,
     /// Effective loop config derived from agent_cfg + WORKFLOW.md frontmatter.
     /// Re-derived on every successful WORKFLOW.md reload.
@@ -116,6 +117,8 @@ impl Orchestrator {
             agent_cfg,
             paths,
             tracker,
+            default_runner(),
+            default_runner_services(),
             prompt,
             effective_cfg,
             state,
@@ -129,6 +132,8 @@ impl Orchestrator {
         agent_cfg: AgentConfig,
         paths: AgentPaths,
         tracker: Arc<dyn crate::tracker::Tracker>,
+        runner: Arc<dyn cap_runner::Runner>,
+        runner_services: host_api::ServiceRegistry,
         prompt: PromptRenderer,
         effective_cfg: EffectiveLoopConfig,
         state: AppState,
@@ -139,6 +144,8 @@ impl Orchestrator {
             agent_cfg,
             paths,
             tracker,
+            runner,
+            runner_services,
             prompt,
             effective_cfg,
             state,
@@ -273,9 +280,13 @@ impl Orchestrator {
                     tracker_cfg.project_slug = new_eff.tracker_project_slug.clone();
                     tracker_cfg.endpoint = Some(new_eff.tracker_endpoint.clone());
                     tracker_cfg.needs_human = new_eff.needs_human.clone();
-                    match tracker::build(&tracker_cfg, &self.paths) {
-                        Ok(t) => {
-                            self.tracker = t;
+                    match crate::tracker::build_configured(
+                        &self.runner_services,
+                        &tracker_cfg,
+                        self.paths.root.clone(),
+                    ) {
+                        Ok(tracker) => {
+                            self.tracker = tracker;
                             logging::ev(
                                 "-",
                                 "workflow_reload",
@@ -302,6 +313,35 @@ impl Orchestrator {
                                 "workflow_reload",
                                 &format!(
                                     "tracker rebuild failed (tracker config unchanged): {e:#}"
+                                ),
+                            );
+                        }
+                    }
+                }
+
+                let runner_changed = new_eff.runner_kind != self.effective_cfg.runner_kind;
+                if runner_changed {
+                    let runner_id = runner_service_id(&new_eff.runner_kind);
+                    match self
+                        .runner_services
+                        .get_named::<dyn cap_runner::Runner>(runner_id)
+                    {
+                        Ok(runner) => {
+                            self.runner = runner;
+                            logging::ev(
+                                "-",
+                                "workflow_reload",
+                                &format!("runner resolved: kind={runner_id}"),
+                            );
+                        }
+                        Err(e) => {
+                            new_eff.runner_kind = self.effective_cfg.runner_kind.clone();
+                            new_eff.runner_command = self.effective_cfg.runner_command.clone();
+                            logging::ev(
+                                "-",
+                                "workflow_reload",
+                                &format!(
+                                    "runner resolution failed (runner config unchanged): {e:#}"
                                 ),
                             );
                         }
@@ -988,7 +1028,7 @@ impl Orchestrator {
         .expose_linear_graphql_tool(self.effective_cfg.linear.worker_tool.unwrap_or(false))
         .build();
 
-        match runner::spawn(params).await {
+        match self.runner.spawn(params).await {
             Ok(handle) => {
                 let pid = handle.pid();
                 // Persist the new run to SQLite.
@@ -1721,6 +1761,30 @@ impl Orchestrator {
     }
 }
 
+fn default_runner() -> Arc<dyn cap_runner::Runner> {
+    default_runner_services()
+        .get_named::<dyn cap_runner::Runner>("pi")
+        .expect("pi runner is registered")
+}
+
+fn default_runner_services() -> host_api::ServiceRegistry {
+    let mut services = host_api::ServiceRegistry::default();
+    for (id, runner) in crate::runner::registered_runners() {
+        services
+            .service::<dyn cap_runner::Runner>(id, runner)
+            .expect("runner id is unique");
+    }
+    services
+}
+
+fn runner_service_id(raw: &str) -> &str {
+    if raw.trim().is_empty() {
+        "pi"
+    } else {
+        raw
+    }
+}
+
 /// Sort candidates: priority asc (null last), then `created_at` asc (null last),
 /// then identifier asc.
 pub(crate) fn sort_candidates(v: &mut [Issue]) {
@@ -1798,7 +1862,6 @@ mod tests {
     use crate::prompt::PromptRenderer;
     use crate::state::{AgentInfo, AppState};
     use crate::store::{Store, ACTIVE_CONTINUATION_EVENT};
-    use crate::tracker::FileTracker;
     use crate::tracker::Tracker;
     use crate::workflow_config::{EffectiveLoopConfig, WorkflowFrontmatter};
     use anyhow::Result;
@@ -1808,6 +1871,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::mpsc;
     use tokio::sync::oneshot;
+    use tracker_files::FileTracker;
 
     fn issue(id: &str, prio: Option<i32>, created: Option<i64>) -> Issue {
         Issue::builder(id, id, id, "todo")

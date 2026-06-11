@@ -16,9 +16,11 @@ use crate::dotenv::LoadReport;
 use crate::paths::AgentPaths;
 use crate::prompt::PromptRenderer;
 use crate::tracker;
+use crate::workflow_config::EffectiveLoopConfig;
+use host_api::ServiceRegistry;
 
 /// Run all preflight checks against `root`. Returns the process exit code.
-pub fn run(root: &Path, dotenv: &LoadReport) -> anyhow::Result<i32> {
+pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyhow::Result<i32> {
     let paths = AgentPaths::new(root.to_path_buf());
     let mut ok = true;
 
@@ -54,21 +56,34 @@ pub fn run(root: &Path, dotenv: &LoadReport) -> anyhow::Result<i32> {
     };
 
     // 2. WORKFLOW.md prompt template.
-    match PromptRenderer::load(&paths.workflow_md()) {
-        Ok(_) => pass("WORKFLOW.md loads"),
+    let prompt = match PromptRenderer::load(&paths.workflow_md()) {
+        Ok(prompt) => {
+            pass("WORKFLOW.md loads");
+            Some(prompt)
+        }
         Err(e) => {
             fail(&format!("WORKFLOW.md: {e:#}"));
             ok = false;
+            None
         }
-    }
+    };
 
     // 3. Tracker (only if config parsed, since build needs it).
-    if let Some(cfg) = cfg {
-        match tracker::build(&cfg.tracker, &paths) {
+    if let (Some(cfg), Some(prompt)) = (cfg, prompt) {
+        let effective_cfg = EffectiveLoopConfig::merge(&cfg, &prompt.snapshot().frontmatter);
+        let mut tracker_cfg = cfg.tracker.clone();
+        tracker_cfg.use_ = effective_cfg.tracker_kind.clone();
+        tracker_cfg.active_states = effective_cfg.active_states.clone();
+        tracker_cfg.terminal_states = effective_cfg.terminal_states.clone();
+        tracker_cfg.project_slug = effective_cfg.tracker_project_slug.clone();
+        tracker_cfg.endpoint = Some(effective_cfg.tracker_endpoint.clone());
+        tracker_cfg.needs_human = effective_cfg.needs_human.clone();
+
+        match tracker::build_configured(&services, &tracker_cfg, paths.root.clone()) {
             Ok(t) => match t.poll_candidates() {
                 Ok(issues) => pass(&format!(
                     "tracker '{}' reachable ({} active issue(s))",
-                    cfg.tracker.use_,
+                    tracker_cfg.use_,
                     issues.len()
                 )),
                 Err(e) => {
@@ -78,6 +93,19 @@ pub fn run(root: &Path, dotenv: &LoadReport) -> anyhow::Result<i32> {
             },
             Err(e) => {
                 fail(&format!("tracker build failed: {e:#}"));
+                ok = false;
+            }
+        }
+
+        let runner_id = if effective_cfg.runner_kind.trim().is_empty() {
+            "pi"
+        } else {
+            &effective_cfg.runner_kind
+        };
+        match services.get_named::<dyn cap_runner::Runner>(runner_id) {
+            Ok(_) => pass(&format!("runner '{runner_id}' registered")),
+            Err(e) => {
+                fail(&format!("runner resolution failed: {e:#}"));
                 ok = false;
             }
         }

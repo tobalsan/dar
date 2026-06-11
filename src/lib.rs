@@ -4,7 +4,6 @@ mod dashboard;
 mod doctor;
 mod domain;
 mod dotenv;
-mod export;
 mod hitl;
 mod logging;
 mod orchestrator;
@@ -21,7 +20,10 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use host_api::{Extension, ShutdownToken, StartCtx, APP_DONE_TOPIC};
+use host_api::{
+    ConfigStore, EventBus, Extension, ForegroundRegistry, HostCommand, HostPaths, HttpRegistry,
+    RegisterCtx, ServiceRegistry, ShutdownToken, StartCtx, APP_DONE_TOPIC,
+};
 use tokio::sync::{mpsc, watch};
 
 pub use cli::{Cli, Command};
@@ -30,6 +32,23 @@ use paths::AgentPaths;
 use state::{AgentInfo, AppState};
 use workflow_config::EffectiveLoopConfig;
 
+pub struct BuiltinRunnerExtension;
+
+impl Extension for BuiltinRunnerExtension {
+    fn id(&self) -> &'static str {
+        "agentropy-builtin-runners"
+    }
+
+    fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            for (id, runner) in runner::registered_runners() {
+                ctx.services.service::<dyn cap_runner::Runner>(id, runner)?;
+            }
+            Ok(())
+        })
+    }
+}
+
 pub struct MonolithExtension;
 
 impl Extension for MonolithExtension {
@@ -37,13 +56,18 @@ impl Extension for MonolithExtension {
         "agentropy-monolith"
     }
 
+    fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
+        BuiltinRunnerExtension.register(ctx)
+    }
+
     fn start<'a>(&'a self, ctx: StartCtx) -> host_api::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             logging::set_event_bus(ctx.host.bus.clone());
             let bus = ctx.host.bus.clone();
             let shutdown = ctx.shutdown.clone();
+            let services = ctx.host.services.clone();
             tokio::spawn(async move {
-                if let Err(e) = run_cli_with_shutdown(shutdown).await {
+                if let Err(e) = run_cli_with_shutdown(services, shutdown).await {
                     tracing::error!("agentropy monolith exited: {e:#}");
                 }
                 let _ = bus.publish(APP_DONE_TOPIC, true);
@@ -85,67 +109,93 @@ pub fn dashboard_addr_for_root(root: &std::path::Path) -> Result<(std::net::IpAd
     Ok((effective_cfg.dashboard_bind, effective_cfg.dashboard_port))
 }
 
-pub async fn run_cli() -> Result<()> {
-    run_cli_inner(Cli::parse(), None).await
+pub async fn run_cli(services: ServiceRegistry) -> Result<()> {
+    run_cli_inner(Cli::parse(), services, None).await
 }
 
-async fn run_cli_with_shutdown(shutdown: ShutdownToken) -> Result<()> {
-    run_cli_inner(Cli::parse(), Some(shutdown)).await
+async fn run_cli_with_shutdown(services: ServiceRegistry, shutdown: ShutdownToken) -> Result<()> {
+    run_cli_inner(Cli::parse(), services, Some(shutdown)).await
 }
 
 pub async fn run_parsed_cli(cli: Cli) -> Result<()> {
-    run_cli_inner(cli, None).await
+    let root = cli_root(&cli)?;
+    let services = default_services(&root).await?;
+    run_cli_inner(cli, services, None).await
 }
 
-async fn run_cli_inner(cli: Cli, host_shutdown: Option<ShutdownToken>) -> Result<()> {
+fn cli_root(cli: &Cli) -> Result<std::path::PathBuf> {
+    match &cli.command {
+        Command::Run(args) => args.resolve_root(),
+        Command::Doctor(args) => args.resolve_root(),
+        Command::InitWorkflow(args) => args.resolve_root(),
+        Command::Export(args) => args.resolve_root(),
+    }
+}
+
+async fn default_services(root: &std::path::Path) -> Result<ServiceRegistry> {
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut ctx = RegisterCtx {
+        bus: EventBus::new(),
+        http: HttpRegistry::disabled(),
+        foreground: ForegroundRegistry::default(),
+        services: ServiceRegistry::default(),
+        paths: HostPaths::new(root)?,
+        config: ConfigStore::default(),
+        shutdown: ShutdownToken::new(shutdown_rx),
+    };
+    tracker_files::TrackerFilesExtension
+        .register(&mut ctx)
+        .await?;
+    tracker_linear::TrackerLinearExtension
+        .register(&mut ctx)
+        .await?;
+    BuiltinRunnerExtension.register(&mut ctx).await?;
+    Ok(ctx.services)
+}
+
+async fn run_cli_inner(
+    cli: Cli,
+    services: ServiceRegistry,
+    host_shutdown: Option<ShutdownToken>,
+) -> Result<()> {
     match cli.command {
         Command::Run(args) => {
             let root = args.resolve_root()?;
             dotenv::load_agent_env(&root)?;
-            run(root, host_shutdown).await
+            run(root, services, host_shutdown).await
         }
         Command::Doctor(args) => {
             let root = args.resolve_root()?;
             let dotenv_report = dotenv::load_agent_env(&root)?;
-            let code = doctor::run(&root, &dotenv_report)?;
+            let code = doctor::run(&root, &dotenv_report, services)?;
             std::process::exit(code);
         }
         Command::InitWorkflow(args) => {
             let root = args.resolve_root()?;
-            if args.linear_project_slug.is_none()
-                && args.linear_project.is_none()
-                && !args.expose_graphql_tool
-            {
-                cli::init_workflow(&root, args.force)
-            } else {
-                cli::init_workflow_with_options(
-                    &root,
-                    args.force,
-                    args.linear_project_slug.as_deref(),
-                    args.linear_project.as_deref(),
-                    args.expose_graphql_tool,
-                )
-            }
+            services
+                .get_named::<dyn HostCommand>("init-workflow")?
+                .run(serde_json::json!({
+                    "dir": root,
+                    "force": args.force,
+                    "linear_project_slug": args.linear_project_slug,
+                    "linear_project": args.linear_project,
+                    "expose_graphql_tool": args.expose_graphql_tool,
+                }))
         }
         Command::Export(args) => {
             let root = args.resolve_root()?;
-            export_command(root)
+            services
+                .get_named::<dyn HostCommand>("export")?
+                .run(serde_json::json!({ "dir": root }))
         }
     }
 }
 
-fn export_command(root: std::path::PathBuf) -> Result<()> {
-    let paths = AgentPaths::new(root);
-    let result = export::export_linear_project_from_paths(&paths)?;
-    println!(
-        "exported {} issues to {}",
-        result.issue_count,
-        result.dir.display()
-    );
-    Ok(())
-}
-
-async fn run(root: std::path::PathBuf, host_shutdown: Option<ShutdownToken>) -> Result<()> {
+async fn run(
+    root: std::path::PathBuf,
+    services: ServiceRegistry,
+    host_shutdown: Option<ShutdownToken>,
+) -> Result<()> {
     let paths = AgentPaths::new(root);
 
     std::fs::create_dir_all(paths.logs_dir())
@@ -173,10 +223,18 @@ async fn run(root: std::path::PathBuf, host_shutdown: Option<ShutdownToken>) -> 
     tracker_cfg.project_slug = effective_cfg.tracker_project_slug.clone();
     tracker_cfg.endpoint = Some(effective_cfg.tracker_endpoint.clone());
     tracker_cfg.needs_human = effective_cfg.needs_human.clone();
-    let tracker = match tracker::build(&tracker_cfg, &paths) {
+    let tracker = match tracker::build_configured(&services, &tracker_cfg, paths.root.clone()) {
         Ok(tracker) => tracker,
         Err(e) => {
-            notify_startup_error(&hitl, &format!("building tracker failed: {e:#}"));
+            notify_startup_error(&hitl, &format!("resolving tracker failed: {e:#}"));
+            return Err(e);
+        }
+    };
+    let runner_id = runner_service_id(&effective_cfg.runner_kind);
+    let runner = match services.get_named::<dyn cap_runner::Runner>(runner_id) {
+        Ok(runner) => runner,
+        Err(e) => {
+            notify_startup_error(&hitl, &format!("resolving runner failed: {e:#}"));
             return Err(e);
         }
     };
@@ -223,6 +281,8 @@ async fn run(root: std::path::PathBuf, host_shutdown: Option<ShutdownToken>) -> 
         agent_cfg.clone(),
         paths.clone(),
         Arc::clone(&tracker),
+        Arc::clone(&runner),
+        services.clone(),
         prompt,
         effective_cfg.clone(),
         app_state.clone(),
@@ -296,6 +356,14 @@ async fn run(root: std::path::PathBuf, host_shutdown: Option<ShutdownToken>) -> 
     hitl.stop();
 
     Ok(())
+}
+
+fn runner_service_id(raw: &str) -> &str {
+    if raw.trim().is_empty() {
+        "pi"
+    } else {
+        raw
+    }
 }
 
 fn notify_startup_error(hitl: &Arc<dyn HitlNotify>, message: &str) {

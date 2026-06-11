@@ -404,8 +404,8 @@ mod tests {
 
     #[test]
     fn default_workflow_body_parses_and_renders_strict() {
-        use crate::cli::DEFAULT_WORKFLOW_MD_BODY;
         use std::io::Write;
+        use tracker_linear::DEFAULT_WORKFLOW_MD_BODY;
 
         let mut f = NamedTempFile::new().unwrap();
         write!(f, "{DEFAULT_WORKFLOW_MD_BODY}").unwrap();
