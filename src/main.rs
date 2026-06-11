@@ -29,6 +29,8 @@ async fn main_inner() -> Result<()> {
     agentropy_host::boot(
         plugins![
             frontend_log::FrontendLogExtension,
+            tracker_files::TrackerFilesExtension,
+            tracker_linear::TrackerLinearExtension,
             agentropy::MonolithExtension,
         ],
         options,

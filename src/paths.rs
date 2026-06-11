@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use crate::config::{TrackerConfig, WorkspaceConfig};
+use crate::config::WorkspaceConfig;
 
 /// All paths derive from a single canonical, absolute agent root.
 #[derive(Debug, Clone)]
@@ -34,15 +34,6 @@ impl AgentPaths {
     /// `<root>/WORKFLOW.md`.
     pub fn workflow_md(&self) -> PathBuf {
         self.root.join("WORKFLOW.md")
-    }
-
-    /// Issues directory, resolved against the tracker's configured `config.path`
-    /// (relative to the agent root). Falls back to `./issues` when config is absent.
-    pub fn issues_dir(&self, cfg: &TrackerConfig) -> PathBuf {
-        cfg.config
-            .as_ref()
-            .map(|c| self.root.join(&c.path))
-            .unwrap_or_else(|| self.root.join("issues"))
     }
 
     /// `<root>/logs`.

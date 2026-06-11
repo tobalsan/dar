@@ -171,9 +171,6 @@ impl AgentConfig {
         if self.tracker.use_.trim().is_empty() {
             bail!("tracker.use must be non-empty");
         }
-        if self.tracker.use_ == "files" && self.tracker.config.is_none() {
-            bail!("tracker.config.path is required when tracker.use is \"files\"");
-        }
         if self.tracker.active_states.is_empty() {
             bail!("tracker.active_states must be non-empty");
         }

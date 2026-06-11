@@ -280,15 +280,11 @@ impl Orchestrator {
                     tracker_cfg.project_slug = new_eff.tracker_project_slug.clone();
                     tracker_cfg.endpoint = Some(new_eff.tracker_endpoint.clone());
                     tracker_cfg.needs_human = new_eff.needs_human.clone();
-                    let mut services = host_api::ServiceRegistry::default();
-                    match crate::tracker::register_configured(
-                        &mut services,
+                    match crate::tracker::build_configured(
+                        &self.runner_services,
                         &tracker_cfg,
-                        &self.paths,
-                    )
-                    .and_then(|_| {
-                        services.get_named::<dyn crate::tracker::Tracker>(&tracker_cfg.use_)
-                    }) {
+                        self.paths.root.clone(),
+                    ) {
                         Ok(tracker) => {
                             self.tracker = tracker;
                             logging::ev(
@@ -1866,7 +1862,6 @@ mod tests {
     use crate::prompt::PromptRenderer;
     use crate::state::{AgentInfo, AppState};
     use crate::store::{Store, ACTIVE_CONTINUATION_EVENT};
-    use crate::tracker::FileTracker;
     use crate::tracker::Tracker;
     use crate::workflow_config::{EffectiveLoopConfig, WorkflowFrontmatter};
     use anyhow::Result;
@@ -1876,6 +1871,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::mpsc;
     use tokio::sync::oneshot;
+    use tracker_files::FileTracker;
 
     fn issue(id: &str, prio: Option<i32>, created: Option<i64>) -> Issue {
         Issue::builder(id, id, id, "todo")

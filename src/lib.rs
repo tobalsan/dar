@@ -4,7 +4,6 @@ mod dashboard;
 mod doctor;
 mod domain;
 mod dotenv;
-mod export;
 mod hitl;
 mod logging;
 mod orchestrator;
@@ -21,7 +20,10 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use host_api::{Extension, RegisterCtx, ServiceRegistry, ShutdownToken, StartCtx, APP_DONE_TOPIC};
+use host_api::{
+    ConfigStore, EventBus, Extension, ForegroundRegistry, HostCommand, HostPaths, HttpRegistry,
+    RegisterCtx, ServiceRegistry, ShutdownToken, StartCtx, APP_DONE_TOPIC,
+};
 use tokio::sync::{mpsc, watch};
 
 pub use cli::{Cli, Command};
@@ -96,11 +98,35 @@ async fn run_cli_with_shutdown(services: ServiceRegistry, shutdown: ShutdownToke
 }
 
 pub async fn run_parsed_cli(cli: Cli) -> Result<()> {
-    let mut services = ServiceRegistry::default();
-    for (id, runner) in runner::registered_runners() {
-        services.service::<dyn cap_runner::Runner>(id, runner)?;
-    }
+    let root = cli_root(&cli)?;
+    let services = default_services(&root).await?;
     run_cli_inner(cli, services, None).await
+}
+
+fn cli_root(cli: &Cli) -> Result<std::path::PathBuf> {
+    match &cli.command {
+        Command::Run(args) => args.resolve_root(),
+        Command::Doctor(args) => args.resolve_root(),
+        Command::InitWorkflow(args) => args.resolve_root(),
+        Command::Export(args) => args.resolve_root(),
+    }
+}
+
+async fn default_services(root: &std::path::Path) -> Result<ServiceRegistry> {
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut ctx = RegisterCtx {
+        bus: EventBus::new(),
+        http: HttpRegistry::disabled(),
+        foreground: ForegroundRegistry::default(),
+        services: ServiceRegistry::default(),
+        paths: HostPaths::new(root)?,
+        config: ConfigStore::default(),
+        shutdown: ShutdownToken::new(shutdown_rx),
+    };
+    tracker_files::TrackerFilesExtension.register(&mut ctx).await?;
+    tracker_linear::TrackerLinearExtension.register(&mut ctx).await?;
+    MonolithExtension.register(&mut ctx).await?;
+    Ok(ctx.services)
 }
 
 async fn run_cli_inner(
@@ -122,42 +148,28 @@ async fn run_cli_inner(
         }
         Command::InitWorkflow(args) => {
             let root = args.resolve_root()?;
-            if args.linear_project_slug.is_none()
-                && args.linear_project.is_none()
-                && !args.expose_graphql_tool
-            {
-                cli::init_workflow(&root, args.force)
-            } else {
-                cli::init_workflow_with_options(
-                    &root,
-                    args.force,
-                    args.linear_project_slug.as_deref(),
-                    args.linear_project.as_deref(),
-                    args.expose_graphql_tool,
-                )
-            }
+            services
+                .get_named::<dyn HostCommand>("init-workflow")?
+                .run(serde_json::json!({
+                    "dir": root,
+                    "force": args.force,
+                    "linear_project_slug": args.linear_project_slug,
+                    "linear_project": args.linear_project,
+                    "expose_graphql_tool": args.expose_graphql_tool,
+                }))
         }
         Command::Export(args) => {
             let root = args.resolve_root()?;
-            export_command(root)
+            services
+                .get_named::<dyn HostCommand>("export")?
+                .run(serde_json::json!({ "dir": root }))
         }
     }
 }
 
-fn export_command(root: std::path::PathBuf) -> Result<()> {
-    let paths = AgentPaths::new(root);
-    let result = export::export_linear_project_from_paths(&paths)?;
-    println!(
-        "exported {} issues to {}",
-        result.issue_count,
-        result.dir.display()
-    );
-    Ok(())
-}
-
 async fn run(
     root: std::path::PathBuf,
-    mut services: ServiceRegistry,
+    services: ServiceRegistry,
     host_shutdown: Option<ShutdownToken>,
 ) -> Result<()> {
     let paths = AgentPaths::new(root);
@@ -187,17 +199,7 @@ async fn run(
     tracker_cfg.project_slug = effective_cfg.tracker_project_slug.clone();
     tracker_cfg.endpoint = Some(effective_cfg.tracker_endpoint.clone());
     tracker_cfg.needs_human = effective_cfg.needs_human.clone();
-    match tracker::register_configured(&mut services, &tracker_cfg, &paths) {
-        Ok(()) => {}
-        Err(e) => {
-            notify_startup_error(
-                &hitl,
-                &format!("registering tracker services failed: {e:#}"),
-            );
-            return Err(e);
-        }
-    };
-    let tracker = match services.get_named::<dyn tracker::Tracker>(&tracker_cfg.use_) {
+    let tracker = match tracker::build_configured(&services, &tracker_cfg, paths.root.clone()) {
         Ok(tracker) => tracker,
         Err(e) => {
             notify_startup_error(&hitl, &format!("resolving tracker failed: {e:#}"));

@@ -160,6 +160,10 @@ pub struct ForegroundProvider {
     pub factory: ForegroundFactory,
 }
 
+pub trait HostCommand: Send + Sync {
+    fn run(&self, args: serde_json::Value) -> Result<()>;
+}
+
 #[derive(Clone)]
 pub struct ShutdownToken {
     rx: watch::Receiver<bool>,

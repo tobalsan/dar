@@ -20,7 +20,7 @@ use crate::workflow_config::EffectiveLoopConfig;
 use host_api::ServiceRegistry;
 
 /// Run all preflight checks against `root`. Returns the process exit code.
-pub fn run(root: &Path, dotenv: &LoadReport, mut services: ServiceRegistry) -> anyhow::Result<i32> {
+pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyhow::Result<i32> {
     let paths = AgentPaths::new(root.to_path_buf());
     let mut ok = true;
 
@@ -79,9 +79,7 @@ pub fn run(root: &Path, dotenv: &LoadReport, mut services: ServiceRegistry) -> a
         tracker_cfg.endpoint = Some(effective_cfg.tracker_endpoint.clone());
         tracker_cfg.needs_human = effective_cfg.needs_human.clone();
 
-        match tracker::register_configured(&mut services, &tracker_cfg, &paths)
-            .and_then(|_| services.get_named::<dyn tracker::Tracker>(&tracker_cfg.use_))
-        {
+        match tracker::build_configured(&services, &tracker_cfg, paths.root.clone()) {
             Ok(t) => match t.poll_candidates() {
                 Ok(issues) => pass(&format!(
                     "tracker '{}' reachable ({} active issue(s))",
