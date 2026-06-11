@@ -604,27 +604,28 @@ fn ensure_success(response: &Value, pointer: &str, label: &str) -> Result<()> {
 }
 
 fn raw_to_issue(r: &RawIssue) -> Issue {
-    Issue {
-        id: r.id.clone(),
-        identifier: r.identifier.clone(),
-        title: r.title.clone(),
-        description: r.description.clone(),
-        url: r.url.clone(),
-        state: r.state.name.clone(),
-        priority: r.priority,
-        assignees: Vec::new(),
-        labels: r.labels.nodes.iter().map(|l| l.name.clone()).collect(),
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-        parent_id: r.parent.as_ref().map(|p| p.id.clone()),
-        blocked_by: r
-            .blocked_by()
+    Issue::builder(
+        r.id.clone(),
+        r.identifier.clone(),
+        r.title.clone(),
+        r.state.name.clone(),
+    )
+    .description(r.description.clone())
+    .url(r.url.clone())
+    .priority(r.priority)
+    .labels(r.labels.nodes.iter().map(|l| l.name.clone()).collect())
+    .created_at(r.created_at)
+    .updated_at(r.updated_at)
+    .parent_id(r.parent.as_ref().map(|p| p.id.clone()))
+    .blocked_by(
+        r.blocked_by()
             .iter()
             .map(|b| b.identifier.clone())
             .collect(),
-        project_name: r.project_name.clone(),
-        project_slug: r.project_slug.clone(),
-    }
+    )
+    .project_name(r.project_name.clone())
+    .project_slug(r.project_slug.clone())
+    .build()
 }
 
 // ---------------------------------------------------------------------------

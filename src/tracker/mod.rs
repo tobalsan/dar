@@ -9,44 +9,11 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 
 use crate::config::TrackerConfig;
-use crate::domain::Issue;
 use crate::paths::AgentPaths;
 
+pub use cap_tracker::Tracker;
 pub use files::FileTracker;
 pub use linear::LinearTracker;
-
-/// Read-only view over issues. Sync because fs reads are cheap; for network-backed
-/// implementations the sync methods use `block_in_place` internally.
-pub trait Tracker: Send + Sync {
-    /// All issues whose state is in `active_states`. Implementations MUST skip
-    /// issues that are blocked by any non-terminal issue.
-    fn poll_candidates(&self) -> Result<Vec<Issue>>;
-    /// Current state of the given issue ids (by id or identifier). Missing ids
-    /// are simply omitted from the result.
-    #[allow(dead_code)]
-    fn fetch_states(&self, ids: &[String]) -> Result<Vec<Issue>>;
-    /// All issues whose state is in `terminal_states`.
-    #[allow(dead_code)]
-    fn fetch_terminal(&self) -> Result<Vec<Issue>>;
-    /// One issue by id or identifier; `None` if not found.
-    fn fetch_one(&self, id: &str) -> Result<Option<Issue>>;
-    /// Safety/parking write: move the issue to the configured needs-human state
-    /// and add a comment explaining why the orchestrator parked it.
-    fn park_issue_needs_human(&self, issue: &Issue, comment: &str) -> Result<()> {
-        let _ = (issue, comment);
-        bail!("tracker does not support needs-human safety writes")
-    }
-    /// Minimum rate-limit requests remaining seen since startup.
-    /// Returns `None` when rate-limit tracking is not applicable (e.g. FileTracker).
-    fn rate_limit_remaining(&self) -> Option<i64> {
-        None
-    }
-    /// Whether the orchestrator should apply the local v0 candidate sort.
-    /// Linear preserves API/native order.
-    fn sort_candidates_locally(&self) -> bool {
-        false
-    }
-}
 
 /// Build the configured tracker from `cfg`. Supports `use: files` and `use: linear`.
 pub fn build(cfg: &TrackerConfig, paths: &AgentPaths) -> Result<Arc<dyn Tracker>> {

@@ -19,14 +19,14 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+pub use cap_runner::{ExitKind, KillReason, RunnerHandle, SpawnParams};
 use chrono::{DateTime, Utc};
-use nix::sys::signal::{kill, Signal};
-use nix::unistd::Pid;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use runner_core::{setup_process_group, supervise};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::oneshot;
 
@@ -36,60 +36,32 @@ use crate::paths::assert_contained;
 use crate::state::EventRing;
 use crate::store::{NewEvent, Store};
 
-/// Grace period between SIGTERM and SIGKILL of the child process group.
-const KILL_GRACE: Duration = Duration::from_secs(5);
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
-/// How an attempt finished, from the orchestrator's point of view.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ExitKind {
-    /// Process exited with code 0.
-    Normal,
-    /// Non-zero exit, killed by signal, or timed out. Carries the OS exit code
-    /// when the process exited on its own (non-zero status), or `None` when
-    /// killed by signal, timed out, or the wait call failed.
-    Abnormal(Option<i32>),
-    /// The runner was interrupted by an orchestrator-level condition.
-    Interrupted { reason: &'static str },
+impl cap_runner::RunnerEventSink for EventRing {
+    fn push(&self, line: String) {
+        EventRing::push(self, line);
+    }
 }
 
-/// Why the orchestrator asked to kill a running child.
-pub enum KillReason {
-    #[allow(dead_code)]
-    Timeout,
-    OperatorStop,
-    Reconcile,
-}
-
-/// Parameters for spawning one agent run.
-pub struct SpawnParams<'a> {
-    pub command: &'a str,
-    /// Runner kind (e.g. "pi", "claude"). Selects which backend is used.
-    pub runner_kind: &'a str,
-    /// Model override; passed to runners that support a model flag.
-    pub model: Option<String>,
-    /// Model provider override (e.g. "openai", "anthropic"); forwarded to pi runner as `--provider`.
-    pub provider: Option<String>,
-    /// Thinking/reasoning budget; forwarded to pi runner as `--thinking`.
-    pub thinking: Option<String>,
-    /// Reasoning effort level (e.g. "low", "medium", "high"); forwarded to codex runner.
-    pub effort: Option<String>,
-    pub workspace: &'a Path,
-    pub workspace_root: &'a Path,
-    pub agent_root: &'a Path,
-    pub prompt: String,
-    pub issue_id: String,
-    /// SQLite run_id for this dispatch attempt. Used to tag event rows.
-    pub run_id: String,
-    pub max_run_timeout_ms: u64,
-    /// Expose the optional Linear GraphQL worker tool to compatible protocol runners.
-    pub expose_linear_graphql_tool: bool,
-    pub events: Arc<EventRing>,
-    pub store: Arc<Store>,
-    pub last_event_at: Arc<Mutex<DateTime<Utc>>>,
+impl cap_runner::RunnerEventStore for Store {
+    fn insert_event(
+        &self,
+        run_id: Option<&str>,
+        issue_identifier: &str,
+        kind: &'static str,
+        payload: &str,
+        ts: DateTime<Utc>,
+    ) {
+        let _ = Store::insert_event(
+            self,
+            &NewEvent {
+                run_id,
+                issue_identifier,
+                kind,
+                payload,
+                ts,
+            },
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -511,149 +483,6 @@ fn codex_args(p: &SpawnParams<'_>) -> Vec<OsString> {
 }
 
 // ---------------------------------------------------------------------------
-// Event normalization
-// ---------------------------------------------------------------------------
-
-/// Classify a protocol output line into a UI log row type and display text.
-/// Tries JSON parsing first (for pi/claude/codex protocol events); falls back
-/// to text heuristics for plain text output.
-fn classify_protocol_line(stream: &str, text: &str) -> (&'static str, String) {
-    if stream == "stderr" {
-        return ("error", text.to_string());
-    }
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-        let row_type = map_event_type(&value);
-        let display = extract_display_text(&value).unwrap_or_else(|| text.to_string());
-        (row_type, display)
-    } else {
-        (normalize_log_row(stream, text), text.to_string())
-    }
-}
-
-/// Map a parsed JSON protocol event's `type` field to a normalized UI row type.
-/// Handles direct events and JSON-RPC response envelopes (`result.*`).
-fn map_event_type(v: &serde_json::Value) -> &'static str {
-    match v.get("type").and_then(|t| t.as_str()) {
-        Some("assistant") => "assistant",
-        Some("thinking") | Some("thought") => "thinking",
-        Some("user") => "user",
-        Some("tool_use") | Some("tool_call") => "tool_call",
-        Some("tool_result") | Some("tool_output") => "tool_output",
-        Some("error") => "error",
-        _ => {
-            // JSON-RPC response envelope: look inside "result"
-            if let Some(result) = v.get("result") {
-                return map_event_type(result);
-            }
-            "assistant"
-        }
-    }
-}
-
-/// Extract a human-readable text snippet from a protocol event.
-fn extract_display_text(v: &serde_json::Value) -> Option<String> {
-    // Direct "text" field
-    if let Some(t) = v.get("text").and_then(|t| t.as_str()) {
-        return Some(t.to_string());
-    }
-    // Direct "content" as a string
-    if let Some(c) = v.get("content").and_then(|c| c.as_str()) {
-        return Some(c.to_string());
-    }
-    // JSON-RPC envelope: recurse into "result"
-    if let Some(t) = v.get("result").and_then(extract_display_text) {
-        return Some(t);
-    }
-    // Claude streaming NDJSON: message.content[0].text
-    v.get("message")
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|item| item.get("text"))
-        .and_then(|t| t.as_str())
-        .map(|s| s.to_string())
-}
-
-/// Text-based heuristic fallback for non-JSON lines.
-fn normalize_log_row(stream: &str, text: &str) -> &'static str {
-    let lower = text.to_ascii_lowercase();
-    if stream == "stderr" || lower.contains("error") || lower.contains("\"type\":\"error\"") {
-        "error"
-    } else if lower.contains("thinking") || lower.contains("thought") {
-        "thinking"
-    } else if lower.contains("tool_call") || lower.contains("tool use") {
-        "tool_call"
-    } else if lower.contains("tool_output") || lower.contains("tool result") {
-        "tool_output"
-    } else if lower.contains("\"role\":\"user\"") {
-        "user"
-    } else {
-        "assistant"
-    }
-}
-
-// ---------------------------------------------------------------------------
-// RunnerHandle
-// ---------------------------------------------------------------------------
-
-/// Handle to a running child. Owns the kill channel and the supervising task's
-/// join handle. `wait` / `request_kill` consume the handle; the orchestrator
-/// stores it via `Option::take`.
-pub struct RunnerHandle {
-    pub pid: u32,
-    kill_tx: oneshot::Sender<KillReason>,
-    done: tokio::task::JoinHandle<ExitKind>,
-}
-
-impl RunnerHandle {
-    pub fn pid(&self) -> u32 {
-        self.pid
-    }
-
-    /// Non-consuming completion check so the orchestrator can poll a stored
-    /// handle each tick, then `take()` + `wait()` to collect the `ExitKind`.
-    pub fn is_finished(&self) -> bool {
-        self.done.is_finished()
-    }
-
-    /// Await the run to completion and return its classified exit.
-    pub async fn wait(self) -> ExitKind {
-        // The supervising task always resolves to an ExitKind; a JoinError
-        // (panic/cancel) is treated as abnormal.
-        self.done.await.unwrap_or(ExitKind::Abnormal(None))
-    }
-
-    /// Ask the supervising task to terminate the child for the given reason.
-    pub fn request_kill(self, why: KillReason) {
-        let _ = self.kill_tx.send(why);
-        drop(self.done);
-    }
-
-    pub async fn request_kill_and_wait(self, why: KillReason) -> ExitKind {
-        let Self { kill_tx, done, .. } = self;
-        let _ = kill_tx.send(why);
-        done.await.unwrap_or(ExitKind::Abnormal(None))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn finished_for_test(pid: u32, kind: ExitKind) -> Self {
-        let (kill_tx, _kill_rx) = oneshot::channel::<KillReason>();
-        let done = tokio::spawn(async move { kind });
-        Self { pid, kill_tx, done }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pending_for_test(pid: u32, kind: ExitKind) -> Self {
-        let (kill_tx, kill_rx) = oneshot::channel::<KillReason>();
-        let done = tokio::spawn(async move {
-            let _ = kill_rx.await;
-            kind
-        });
-        Self { pid, kill_tx, done }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // spawn
 // ---------------------------------------------------------------------------
 
@@ -688,9 +517,8 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     cmd.current_dir(p.workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Own process group so signalling the negative pid hits the whole tree.
-        .process_group(0);
+        .stderr(Stdio::piped());
+    setup_process_group(&mut cmd);
 
     let mut child = cmd.spawn().with_context(|| {
         format!(
@@ -713,7 +541,7 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
         ),
     );
     persist_runner_event(
-        &p.store,
+        p.store.as_ref(),
         Some(&p.run_id),
         &p.issue_id,
         rp.event_kind,
@@ -740,7 +568,7 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     let stderr = child.stderr.take();
 
     if let Some(out) = stdout {
-        spawn_line_pump(
+        runner_core::spawn_line_pump(
             out,
             p.issue_id.clone(),
             p.run_id.clone(),
@@ -749,10 +577,11 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
             Arc::clone(&p.events),
             Arc::clone(&p.store),
             Arc::clone(&p.last_event_at),
+            logging::ev,
         );
     }
     if let Some(err) = stderr {
-        spawn_line_pump(
+        runner_core::spawn_line_pump(
             err,
             p.issue_id.clone(),
             p.run_id.clone(),
@@ -761,6 +590,7 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
             Arc::clone(&p.events),
             Arc::clone(&p.store),
             Arc::clone(&p.last_event_at),
+            logging::ev,
         );
     }
 
@@ -768,193 +598,32 @@ pub async fn spawn(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     let timeout = Duration::from_millis(p.max_run_timeout_ms);
     let issue_id = p.issue_id.clone();
 
-    let done = tokio::spawn(async move { supervise(child, pid, issue_id, timeout, kill_rx).await });
+    let done = tokio::spawn(async move {
+        supervise(child, pid, timeout, kill_rx, move |kind, message| {
+            logging::ev(&issue_id, kind, &message);
+        })
+        .await
+    });
 
-    Ok(RunnerHandle { pid, kill_tx, done })
+    Ok(RunnerHandle::new(pid, kill_tx, done))
 }
 
 // ---------------------------------------------------------------------------
 // Internal
 // ---------------------------------------------------------------------------
 
-/// Drive the child: wait for exit, the per-turn timeout, or a kill request.
-async fn supervise(
-    mut child: tokio::process::Child,
-    pid: u32,
-    issue_id: String,
-    timeout: Duration,
-    kill_rx: oneshot::Receiver<KillReason>,
-) -> ExitKind {
-    let kind = tokio::select! {
-        status = child.wait() => {
-            match status {
-                Ok(s) if s.success() => {
-                    logging::ev(&issue_id, "exit", "code=0 (normal)");
-                    return ExitKind::Normal;
-                }
-                Ok(s) => {
-                    let code = s.code();
-                    logging::ev(&issue_id, "exit", &format!("status={s} (abnormal)"));
-                    return ExitKind::Abnormal(code);
-                }
-                Err(e) => {
-                    logging::ev(&issue_id, "exit", &format!("wait error: {e} (abnormal)"));
-                    return ExitKind::Abnormal(None);
-                }
-            }
-        }
-        _ = tokio::time::sleep(timeout) => {
-            logging::ev(&issue_id, "timeout", "turn_timeout_ms exceeded; killing");
-            ExitKind::Interrupted { reason: "turn_timeout" }
-        }
-        reason = kill_rx => {
-            match reason {
-                Ok(KillReason::Timeout) => logging::ev(&issue_id, "kill", "reason=timeout"),
-                Ok(KillReason::OperatorStop) => logging::ev(&issue_id, "kill", "reason=operator_stop"),
-                Ok(KillReason::Reconcile) => logging::ev(&issue_id, "kill", "reason=reconcile"),
-                Err(_) => logging::ev(&issue_id, "kill", "handle dropped"),
-            }
-            ExitKind::Abnormal(None)
-        }
-    };
-
-    term_then_kill(pid, KILL_GRACE);
-    let _ = child.wait().await;
-    kind
-}
-
-/// Stream one byte source line-by-line into the event ring + SQLite + log.
-/// Each line is ANSI-stripped, classified via JSON parsing (or text heuristic
-/// fallback), then stored with a normalized `log_row` type.
-#[allow(clippy::too_many_arguments)]
-fn spawn_line_pump<R>(
-    reader: R,
-    issue_id: String,
-    run_id: String,
-    stream: &'static str,
-    runner_event_kind: &'static str,
-    events: Arc<EventRing>,
-    store: Arc<Store>,
-    last_event_at: Arc<Mutex<DateTime<Utc>>>,
-) where
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-{
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(reader).lines();
-        loop {
-            match lines.next_line().await {
-                Ok(Some(line)) => {
-                    let ts = Utc::now();
-                    let clean = strip_ansi(&line);
-                    let (row_type, display) = classify_protocol_line(stream, &clean);
-                    let formatted = format!("child[{issue_id}]: {clean}");
-                    events.push(formatted);
-                    if let Ok(mut t) = last_event_at.lock() {
-                        *t = ts;
-                    }
-                    logging::ev(&issue_id, stream, &clean);
-                    let payload = serde_json::json!({
-                        "type": "protocol_event",
-                        "stream": stream,
-                        "log_row": row_type,
-                        "text": display,
-                    })
-                    .to_string();
-                    let _ = store.insert_event(&NewEvent {
-                        run_id: Some(&run_id),
-                        issue_identifier: &issue_id,
-                        kind: runner_event_kind,
-                        payload: &payload,
-                        ts,
-                    });
-                }
-                Ok(None) => break, // EOF
-                Err(e) => {
-                    logging::ev(&issue_id, stream, &format!("read error: {e}"));
-                    break;
-                }
-            }
-        }
-    });
-}
-
 fn persist_runner_event(
-    store: &Store,
+    store: &dyn cap_runner::RunnerEventStore,
     run_id: Option<&str>,
     issue_id: &str,
     kind: &'static str,
     value: serde_json::Value,
 ) {
     let payload = value.to_string();
-    let _ = store.insert_event(&NewEvent {
-        run_id,
-        issue_identifier: issue_id,
-        kind,
-        payload: &payload,
-        ts: Utc::now(),
-    });
+    store.insert_event(run_id, issue_id, kind, &payload, Utc::now());
 }
 
-fn strip_ansi(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
-            chars.next();
-            for c in chars.by_ref() {
-                if ('@'..='~').contains(&c) {
-                    break;
-                }
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
-/// Send SIGTERM to the child's process group, wait `grace`, then SIGKILL.
-pub fn term_then_kill(pid: u32, grace: std::time::Duration) {
-    let pgid = Pid::from_raw(-(pid as i32));
-    let _ = kill(pgid, Signal::SIGTERM);
-    std::thread::spawn(move || {
-        std::thread::sleep(grace);
-        let _ = kill(pgid, Signal::SIGKILL);
-    });
-}
-
-/// Poll until all PIDs in `pids` are no longer alive, or until `timeout` elapses.
-///
-/// Uses `kill(pid, 0)` to probe existence. Called at startup after
-/// `term_then_kill` so that `mark_crashed_runs` runs only once the stale
-/// workers are confirmed dead (avoids TOCTOU where a slow-dying process is
-/// still alive when we resume slots).
-pub fn wait_for_pids_dead(pids: &[u32], timeout: std::time::Duration) {
-    let deadline = std::time::Instant::now() + timeout;
-    let poll_interval = std::time::Duration::from_millis(100);
-    loop {
-        let alive: Vec<u32> = pids
-            .iter()
-            .copied()
-            .filter(|&pid| {
-                let p = Pid::from_raw(pid as i32);
-                kill(p, None).is_ok()
-            })
-            .collect();
-        if alive.is_empty() {
-            break;
-        }
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            tracing::warn!(
-                pids = ?alive,
-                "stale PIDs still alive after wait timeout; proceeding anyway"
-            );
-            break;
-        }
-        std::thread::sleep(poll_interval.min(remaining));
-    }
-}
+pub use runner_core::{term_then_kill, wait_for_pids_dead};
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -975,25 +644,22 @@ mod tests {
         workspace: &'a Path,
         workspace_root: &'a Path,
     ) -> SpawnParams<'a> {
-        SpawnParams {
-            command: "runner",
+        SpawnParams::builder(
+            "runner",
             runner_kind,
-            model,
-            provider: None,
-            thinking: None,
-            effort: None,
             workspace,
             workspace_root,
-            agent_root: workspace_root.parent().unwrap_or(workspace_root),
-            prompt: String::new(),
-            issue_id: "ISSUE-1".to_string(),
-            run_id: "ISSUE-1-test".to_string(),
-            max_run_timeout_ms: 1000,
-            expose_linear_graphql_tool: false,
-            events: Arc::new(EventRing::new()),
-            store: Arc::new(Store::open(&PathBuf::from(":memory:")).unwrap()),
-            last_event_at: Arc::new(Mutex::new(Utc::now())),
-        }
+            workspace_root.parent().unwrap_or(workspace_root),
+            String::new(),
+            "ISSUE-1".to_string(),
+            "ISSUE-1-test".to_string(),
+            1000,
+            Arc::new(EventRing::new()),
+            Arc::new(Store::open(&PathBuf::from(":memory:")).unwrap()),
+            Arc::new(Mutex::new(Utc::now())),
+        )
+        .model(model)
+        .build()
     }
 
     fn arg_strings(args: Vec<OsString>) -> Vec<String> {
@@ -1204,19 +870,22 @@ mod tests {
         );
         // model -c flag must NOT be present when model is None
         assert!(
-            !args.windows(2)
+            !args
+                .windows(2)
                 .any(|w| w[0] == "-c" && w[1].starts_with("model=")),
             "model flag should be absent when unset: {args:?}"
         );
         // effort -c flag must NOT be present
         assert!(
-            !args.windows(2)
+            !args
+                .windows(2)
                 .any(|w| w[0] == "-c" && w[1].contains("model_reasoning_effort")),
             "effort flag should be absent when unset: {args:?}"
         );
         // provider -c flag must NOT be present
         assert!(
-            !args.windows(2)
+            !args
+                .windows(2)
                 .any(|w| w[0] == "-c" && w[1].contains("model_provider")),
             "provider flag should be absent when unset: {args:?}"
         );
@@ -1269,7 +938,8 @@ mod tests {
 
         let args = arg_strings(codex_spec.args());
         assert!(
-            !args.windows(2)
+            !args
+                .windows(2)
                 .any(|w| w[0] == "-c" && w[1].contains("model_provider")),
             "provider flag should be absent when unset: {args:?}"
         );
@@ -1298,59 +968,5 @@ mod tests {
         assert_eq!(value["method"], "turn");
         assert_eq!(value["params"]["issue_identifier"], "ISSUE-1");
         assert_eq!(value["params"]["model"], "pi-model");
-    }
-
-    #[test]
-    fn ansi_is_stripped_before_log_row_normalization() {
-        let clean = strip_ansi("\u{1b}[31mtool_call\u{1b}[0m: run");
-        assert_eq!(clean, "tool_call: run");
-        assert_eq!(normalize_log_row("stdout", &clean), "tool_call");
-        assert_eq!(normalize_log_row("stderr", "plain failure"), "error");
-    }
-
-    #[test]
-    fn json_protocol_events_normalized_by_type_field() {
-        let (row, display) =
-            classify_protocol_line("stdout", r#"{"type":"assistant","text":"Hello"}"#);
-        assert_eq!(row, "assistant");
-        assert_eq!(display, "Hello");
-
-        let (row, _) = classify_protocol_line("stdout", r#"{"type":"thinking","text":"hmm"}"#);
-        assert_eq!(row, "thinking");
-
-        let (row, _) = classify_protocol_line("stdout", r#"{"type":"tool_use","name":"bash"}"#);
-        assert_eq!(row, "tool_call");
-
-        let (row, display) =
-            classify_protocol_line("stdout", r#"{"type":"tool_result","content":"ok"}"#);
-        assert_eq!(row, "tool_output");
-        assert_eq!(display, "ok");
-
-        let (row, _) = classify_protocol_line("stdout", r#"{"type":"error","message":"oops"}"#);
-        assert_eq!(row, "error");
-    }
-
-    #[test]
-    fn stderr_lines_always_classified_as_error() {
-        let (row, _) = classify_protocol_line("stderr", r#"{"type":"assistant","text":"x"}"#);
-        assert_eq!(row, "error");
-        let (row, _) = classify_protocol_line("stderr", "plain text");
-        assert_eq!(row, "error");
-    }
-
-    #[test]
-    fn jsonrpc_result_unwrapped_for_type_mapping() {
-        let rpc = r#"{"jsonrpc":"2.0","id":"r1","result":{"type":"assistant","text":"Done"}}"#;
-        let (row, display) = classify_protocol_line("stdout", rpc);
-        assert_eq!(row, "assistant");
-        assert_eq!(display, "Done");
-    }
-
-    #[test]
-    fn non_json_falls_back_to_heuristic() {
-        let (row, _) = classify_protocol_line("stdout", "thinking about the problem");
-        assert_eq!(row, "thinking");
-        let (row, _) = classify_protocol_line("stdout", "tool_call: bash");
-        assert_eq!(row, "tool_call");
     }
 }
