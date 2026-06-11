@@ -21,10 +21,10 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use host_api::{Extension, StartCtx};
+use host_api::{Extension, ShutdownToken, StartCtx, APP_DONE_TOPIC};
 use tokio::sync::{mpsc, watch};
 
-use cli::{Cli, Command};
+pub use cli::{Cli, Command};
 use hitl::{BurstHitlNotifier, HitlNotification, HitlNotify};
 use paths::AgentPaths;
 use state::{AgentInfo, AppState};
@@ -37,9 +37,29 @@ impl Extension for MonolithExtension {
         "agentropy-monolith"
     }
 
-    fn start<'a>(&'a self, _ctx: StartCtx) -> host_api::BoxFuture<'a, Result<()>> {
-        Box::pin(async { run_cli().await })
+    fn start<'a>(&'a self, ctx: StartCtx) -> host_api::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            logging::set_event_bus(ctx.host.bus.clone());
+            let bus = ctx.host.bus.clone();
+            let shutdown = ctx.shutdown.clone();
+            tokio::spawn(async move {
+                if let Err(e) = run_cli_with_shutdown(shutdown).await {
+                    tracing::error!("agentropy monolith exited: {e:#}");
+                }
+                let _ = bus.publish(APP_DONE_TOPIC, true);
+            });
+            Ok(())
+        })
     }
+}
+
+pub fn cli_command_is_run<I, S>(args: I) -> Result<bool>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString> + Clone,
+{
+    let cli = Cli::try_parse_from(args)?;
+    Ok(matches!(cli.command, Command::Run(_)))
 }
 
 pub fn host_root_from_args<I, S>(args: I) -> Result<std::path::PathBuf>
@@ -58,13 +78,23 @@ where
 }
 
 pub async fn run_cli() -> Result<()> {
-    let cli = Cli::parse();
+    run_cli_inner(Cli::parse(), None).await
+}
 
+async fn run_cli_with_shutdown(shutdown: ShutdownToken) -> Result<()> {
+    run_cli_inner(Cli::parse(), Some(shutdown)).await
+}
+
+pub async fn run_parsed_cli(cli: Cli) -> Result<()> {
+    run_cli_inner(cli, None).await
+}
+
+async fn run_cli_inner(cli: Cli, host_shutdown: Option<ShutdownToken>) -> Result<()> {
     match cli.command {
         Command::Run(args) => {
             let root = args.resolve_root()?;
             dotenv::load_agent_env(&root)?;
-            run(root).await
+            run(root, host_shutdown).await
         }
         Command::Doctor(args) => {
             let root = args.resolve_root()?;
@@ -107,7 +137,7 @@ fn export_command(root: std::path::PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn run(root: std::path::PathBuf) -> Result<()> {
+async fn run(root: std::path::PathBuf, host_shutdown: Option<ShutdownToken>) -> Result<()> {
     let paths = AgentPaths::new(root);
 
     std::fs::create_dir_all(paths.logs_dir())
@@ -242,7 +272,7 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
         &format!("agentropy running; dashboard on http://{bind}:{port}/"),
     );
 
-    wait_for_signal().await?;
+    wait_for_signal(host_shutdown).await?;
     logging::ev("-", "shutdown", "signal received, stopping");
     let _ = store.insert_event(&store::NewEvent {
         run_id: None,
@@ -276,12 +306,20 @@ fn startup_task_error(
     }
 }
 
-async fn wait_for_signal() -> Result<()> {
+async fn wait_for_signal(host_shutdown: Option<ShutdownToken>) -> Result<()> {
     use tokio::signal::unix::{signal, SignalKind};
     let mut term = signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
-    tokio::select! {
-        r = tokio::signal::ctrl_c() => { r.context("installing SIGINT handler")?; }
-        _ = term.recv() => {}
+    if let Some(mut host_shutdown) = host_shutdown {
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => { r.context("installing SIGINT handler")?; }
+            _ = term.recv() => {}
+            _ = host_shutdown.cancelled() => {}
+        }
+    } else {
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => { r.context("installing SIGINT handler")?; }
+            _ = term.recv() => {}
+        }
     }
     Ok(())
 }
@@ -301,5 +339,20 @@ mod host_boot_tests {
         ])
         .unwrap();
         assert_eq!(root, temp.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn foreground_host_is_only_used_for_run_command() {
+        assert!(cli_command_is_run(["agentropy", "run"]).unwrap());
+        assert!(!cli_command_is_run(["agentropy", "export"]).unwrap());
+        assert!(!cli_command_is_run(["agentropy", "init-workflow"]).unwrap());
+    }
+
+    #[test]
+    fn clap_display_errors_remain_successful_exits() {
+        let err = Cli::try_parse_from(["agentropy", "--help"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let err = Cli::try_parse_from(["agentropy", "run", "--help"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
     }
 }

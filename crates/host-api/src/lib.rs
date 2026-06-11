@@ -16,6 +16,8 @@
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::io::Write;
+use std::panic::PanicHookInfo;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -26,6 +28,8 @@ use serde_json::Value;
 use tokio::sync::{broadcast, watch};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub const APP_DONE_TOPIC: &str = "host.app-done";
+pub const LOG_EVENTS_TOPIC: &str = "host.log-events";
 
 pub trait Extension: Send + Sync {
     fn id(&self) -> &'static str;
@@ -37,6 +41,123 @@ pub trait Extension: Send + Sync {
     fn start<'a>(&'a self, _ctx: StartCtx) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Ok(()) })
     }
+}
+
+pub trait Foreground: Send {
+    fn run<'a>(
+        &'a mut self,
+        ctx: StartCtx,
+        terminal: ExclusiveTerminal,
+    ) -> BoxFuture<'a, Result<()>>;
+}
+
+pub type ForegroundFactory = Arc<dyn Fn() -> Box<dyn Foreground> + Send + Sync>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogEvent {
+    pub level: String,
+    pub target: String,
+    pub message: String,
+}
+
+pub struct ExclusiveTerminal {
+    interactive: bool,
+    panic_hook: Option<Arc<Mutex<Option<Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>>>>>,
+    restore: Option<Arc<dyn Fn() + Send + Sync>>,
+    stdout: Box<dyn Write + Send>,
+}
+
+impl ExclusiveTerminal {
+    pub fn new(
+        interactive: bool,
+        stdout: Box<dyn Write + Send>,
+        restore: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            interactive,
+            panic_hook: None,
+            restore: Some(Arc::new(restore)),
+            stdout,
+        }
+    }
+
+    pub fn non_interactive(stdout: Box<dyn Write + Send>) -> Self {
+        Self {
+            interactive: false,
+            panic_hook: None,
+            restore: None,
+            stdout,
+        }
+    }
+
+    pub fn is_interactive(&self) -> bool {
+        self.interactive
+    }
+
+    pub fn writer(&mut self) -> &mut dyn Write {
+        self.stdout.as_mut()
+    }
+
+    pub fn restore(&mut self) {
+        if let Some(restore) = self.restore.take() {
+            restore();
+        }
+        if let Some(hook) = self.panic_hook.take() {
+            if let Some(hook) = hook.lock().expect("panic hook mutex poisoned").take() {
+                std::panic::set_hook(hook);
+            }
+        }
+    }
+
+    pub fn set_previous_panic_hook(
+        &mut self,
+        hook: Arc<Mutex<Option<Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>>>>,
+    ) {
+        self.panic_hook = Some(hook);
+    }
+}
+
+impl Drop for ExclusiveTerminal {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+#[derive(Default)]
+pub struct ForegroundRegistry {
+    providers: Vec<ForegroundProvider>,
+}
+
+impl ForegroundRegistry {
+    pub fn foreground(&mut self, id: impl Into<String>, factory: ForegroundFactory) -> Result<()> {
+        let id = id.into();
+        if self.providers.iter().any(|provider| provider.id == id) {
+            bail!("foreground provider {id} is already registered");
+        }
+        self.providers.push(ForegroundProvider { id, factory });
+        Ok(())
+    }
+
+    pub fn select(&self, configured: Option<&str>) -> Result<Option<ForegroundProvider>> {
+        match configured {
+            Some(id) => self
+                .providers
+                .iter()
+                .find(|provider| provider.id == id)
+                .cloned()
+                .map(Some)
+                .ok_or_else(|| anyhow!("foreground provider {id} is not registered")),
+            None if self.providers.is_empty() => Ok(None),
+            None if self.providers.len() == 1 => Ok(Some(self.providers[0].clone())),
+            None => bail!("multiple foreground providers registered; configure foreground"),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ForegroundProvider {
+    pub id: String,
+    pub factory: ForegroundFactory,
 }
 
 #[derive(Clone)]
@@ -410,6 +531,7 @@ fn normalize_route(route: &str) -> Result<String> {
 pub struct RegisterCtx {
     pub bus: EventBus,
     pub http: HttpRegistry,
+    pub foreground: ForegroundRegistry,
     pub services: ServiceRegistry,
     pub paths: HostPaths,
     pub config: ConfigStore,

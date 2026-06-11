@@ -1,9 +1,15 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use crossterm::ExecutableCommand;
 use host_api::{
-    ConfigStore, Extension, HostPaths, HttpRegistry, RegisterCtx, ServiceRegistry, ShutdownToken,
+    ConfigStore, ExclusiveTerminal, Extension, HostPaths, HttpRegistry, RegisterCtx,
+    ServiceRegistry, ShutdownToken,
 };
 use tokio::sync::watch;
 
@@ -11,6 +17,8 @@ pub struct HostOptions {
     pub root: PathBuf,
     pub http_enabled: bool,
     pub load_dotenv: bool,
+    pub foreground: Option<String>,
+    pub interactive: Option<bool>,
 }
 
 impl HostOptions {
@@ -19,11 +27,23 @@ impl HostOptions {
             root: root.into(),
             http_enabled: true,
             load_dotenv: true,
+            foreground: None,
+            interactive: None,
         }
     }
 
     pub fn without_dotenv(mut self) -> Self {
         self.load_dotenv = false;
+        self
+    }
+
+    pub fn foreground(mut self, id: impl Into<String>) -> Self {
+        self.foreground = Some(id.into());
+        self
+    }
+
+    pub fn interactive(mut self, interactive: bool) -> Self {
+        self.interactive = Some(interactive);
         self
     }
 }
@@ -71,6 +91,7 @@ pub async fn boot(extensions: Vec<Arc<dyn Extension>>, options: HostOptions) -> 
         } else {
             HttpRegistry::disabled()
         },
+        foreground: host_api::ForegroundRegistry::default(),
         services: ServiceRegistry::default(),
         paths: paths.clone(),
         config: ConfigStore::default(),
@@ -80,6 +101,9 @@ pub async fn boot(extensions: Vec<Arc<dyn Extension>>, options: HostOptions) -> 
     for extension in &extensions {
         extension.register(&mut register_ctx).await?;
     }
+    let foreground = register_ctx
+        .foreground
+        .select(options.foreground.as_deref())?;
     let config = register_ctx.config.clone();
     let host = register_ctx.into_start_services()?;
 
@@ -93,8 +117,64 @@ pub async fn boot(extensions: Vec<Arc<dyn Extension>>, options: HostOptions) -> 
         extension.start(ctx).await?;
     }
 
+    if let Some(provider) = foreground {
+        let mut foreground = (provider.factory)();
+        let ctx = host_api::StartCtx {
+            shutdown: shutdown.clone(),
+            paths: paths.clone(),
+            config: config.clone(),
+            host: host.clone(),
+        };
+        foreground
+            .run(
+                ctx,
+                acquire_terminal(options.interactive.unwrap_or_else(stdout_is_terminal))?,
+            )
+            .await?;
+    }
+
     let _ = shutdown_tx.send(true);
     Ok(())
+}
+
+fn stdout_is_terminal() -> bool {
+    std::io::stdout().is_terminal()
+}
+
+fn acquire_terminal(interactive: bool) -> Result<ExclusiveTerminal> {
+    if !interactive {
+        return Ok(ExclusiveTerminal::non_interactive(Box::new(
+            std::io::stdout(),
+        )));
+    }
+
+    let mut stdout = std::io::stdout();
+    enable_raw_mode().context("enabling terminal raw mode")?;
+    if let Err(e) = stdout.execute(EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        return Err(e).context("entering alternate screen");
+    }
+
+    let previous_hook = Arc::new(Mutex::new(Some(std::panic::take_hook())));
+    let hook_for_panic = Arc::clone(&previous_hook);
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        if let Some(hook) = hook_for_panic
+            .lock()
+            .expect("panic hook mutex poisoned")
+            .as_ref()
+        {
+            hook(info);
+        }
+    }));
+    let mut terminal = ExclusiveTerminal::new(true, Box::new(stdout), restore_terminal);
+    terminal.set_previous_panic_hook(previous_hook);
+    Ok(terminal)
+}
+
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = std::io::stdout().execute(LeaveAlternateScreen);
 }
 
 #[cfg(test)]
@@ -103,7 +183,10 @@ mod tests {
 
     use anyhow::Result;
     use axum::{routing::get, Router};
-    use host_api::{assert_contained, Extension, HostPaths, HttpMount, RegisterCtx, StartCtx};
+    use host_api::{
+        assert_contained, ExclusiveTerminal, Extension, Foreground, HostPaths, HttpMount,
+        RegisterCtx, StartCtx,
+    };
 
     use super::*;
 
@@ -133,6 +216,57 @@ mod tests {
         fn start<'a>(&'a self, _ctx: StartCtx) -> host_api::BoxFuture<'a, Result<()>> {
             Box::pin(async move {
                 self.log.lock().unwrap().push(format!("start:{}", self.id));
+                Ok(())
+            })
+        }
+    }
+
+    struct ForegroundExt {
+        id: &'static str,
+        foreground_id: &'static str,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Extension for ForegroundExt {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                let id = self.foreground_id;
+                let log = Arc::clone(&self.log);
+                ctx.foreground.foreground(
+                    id,
+                    Arc::new(move || {
+                        Box::new(RecordingForeground {
+                            id,
+                            log: Arc::clone(&log),
+                        })
+                    }),
+                )?;
+                Ok(())
+            })
+        }
+    }
+
+    struct RecordingForeground {
+        id: &'static str,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Foreground for RecordingForeground {
+        fn run<'a>(
+            &'a mut self,
+            _ctx: StartCtx,
+            terminal: ExclusiveTerminal,
+        ) -> host_api::BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.log.lock().unwrap().push(format!(
+                    "foreground:{} interactive={}",
+                    self.id,
+                    terminal.is_interactive()
+                ));
                 Ok(())
             })
         }
@@ -226,6 +360,107 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn uniquely_registered_foreground_runs_after_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        boot(
+            vec![
+                Arc::new(RecordingExt {
+                    id: "background",
+                    log: Arc::clone(&log),
+                }),
+                Arc::new(ForegroundExt {
+                    id: "frontend",
+                    foreground_id: "logs",
+                    log: Arc::clone(&log),
+                }),
+            ],
+            HostOptions::new(temp.path())
+                .without_dotenv()
+                .interactive(false),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                "register:background",
+                "start:background",
+                "foreground:logs interactive=false"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_foreground_selects_one_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        boot(
+            vec![
+                Arc::new(ForegroundExt {
+                    id: "frontend-a",
+                    foreground_id: "logs",
+                    log: Arc::clone(&log),
+                }),
+                Arc::new(ForegroundExt {
+                    id: "frontend-b",
+                    foreground_id: "tui",
+                    log: Arc::clone(&log),
+                }),
+            ],
+            HostOptions::new(temp.path())
+                .without_dotenv()
+                .interactive(false)
+                .foreground("tui"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["foreground:tui interactive=false"]
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_foregrounds_without_selection_fail_boot() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let err = boot(
+            vec![
+                Arc::new(ForegroundExt {
+                    id: "frontend-a",
+                    foreground_id: "logs",
+                    log: Arc::clone(&log),
+                }),
+                Arc::new(ForegroundExt {
+                    id: "frontend-b",
+                    foreground_id: "tui",
+                    log,
+                }),
+            ],
+            HostOptions::new(temp.path()).without_dotenv(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("multiple foreground providers"));
+    }
+
+    #[test]
+    fn exclusive_terminal_restores_on_drop() {
+        let restored = Arc::new(Mutex::new(false));
+        {
+            let restored = Arc::clone(&restored);
+            let _terminal = ExclusiveTerminal::new(true, Box::new(Vec::<u8>::new()), move || {
+                *restored.lock().unwrap() = true;
+            });
+        }
+        assert!(*restored.lock().unwrap());
     }
 
     #[test]

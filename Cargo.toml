@@ -6,6 +6,7 @@ members = [
     "crates/cap-runner",
     "crates/host-api",
     "crates/runner-core",
+    "extensions/frontend-log",
 ]
 resolver = "2"
 
@@ -22,6 +23,7 @@ path = "src/main.rs"
 [dependencies]
 agentropy-host = { path = "crates/agentropy-host" }
 host-api = { path = "crates/host-api" }
+frontend-log = { path = "extensions/frontend-log" }
 # async runtime + process + signals
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "process", "signal", "sync", "time", "io-util", "net"] }
 # web / dashboard
