@@ -1,17 +1,37 @@
 //! Domain-free extension host contracts.
 //!
-//! The typed event bus has two topic classes:
+//! ## Event Bus Delivery Semantics
 //!
-//! - Broadcast topics deliver each published value to currently subscribed
-//!   receivers. They are best-effort fan-out: a slow receiver can lag and observe
-//!   a `Lagged` error from Tokio's broadcast channel; values published before a
-//!   subscription are not replayed.
-//! - Retained topics are watch-like. Publishing replaces the retained value and
-//!   wakes subscribers. New subscribers immediately observe the latest retained
-//!   value. `read_retained` returns that current value without subscribing.
+//! The typed event bus has two topic classes: broadcast and retained.
+//!
+//! Broadcast topics are bounded, best-effort fan-out channels backed by
+//! `tokio::sync::broadcast`. `register_broadcast(id, capacity)` sets the per-topic
+//! ring capacity; zero is normalized to one. Publishing is never backpressured by
+//! slow subscribers and does not wait for delivery. If the ring overwrites values
+//! before a receiver reads them, that receiver observes
+//! `RecvError::Lagged(skipped)` and resumes at the oldest value still retained by
+//! the ring. Values published before a subscription are not replayed. For one
+//! publisher calling `publish` sequentially, each receiver observes the surviving
+//! values for that topic in publish order; there is no ordering guarantee across
+//! different topics.
+//!
+//! Retained topics are unbounded with respect to history because they keep exactly
+//! one value: the current state. They are backed by `tokio::sync::watch`.
+//! Publishing replaces the retained value and wakes subscribers; intermediate
+//! values may be coalesced for a slow subscriber. New subscribers immediately
+//! observe the latest value, and `read_retained` returns that current value without
+//! subscribing. Retained topics are for state snapshots, not event history.
+//!
+//! Shutdown is coordinated outside the bus by [`ShutdownToken`]. The bus does not
+//! drain broadcast rings or retained updates on shutdown; extensions that need a
+//! graceful drain should stop producing when their shutdown token is cancelled and
+//! finish any in-flight work they own before returning from `start`-spawned tasks.
+//! Dropping the host-side bus closes the underlying Tokio channels and receivers
+//! then observe `Closed`.
 //!
 //! Topic payloads are typed by the caller. A topic id may only be registered for
-//! one Rust payload type; attempting to reuse the same id with another type fails.
+//! one Rust payload type and one delivery class; attempting to reuse the same id
+//! with another type or class fails.
 
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
