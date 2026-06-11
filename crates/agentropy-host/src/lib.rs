@@ -13,6 +13,12 @@ use host_api::{
 };
 use tokio::sync::watch;
 
+/// Callback invoked when an extension fails to start (or boot fails before the
+/// foreground runs). Lets the composition root surface the failure (e.g. via the
+/// HITL notifier) before the host exits. Receives the failing extension id (or
+/// `"-"` for boot-phase failures with no single owner) and the error message.
+pub type StartupErrorHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
 pub struct HostOptions {
     pub root: PathBuf,
     pub http_enabled: bool,
@@ -21,6 +27,7 @@ pub struct HostOptions {
     pub load_dotenv: bool,
     pub foreground: Option<String>,
     pub interactive: Option<bool>,
+    pub on_startup_error: Option<StartupErrorHook>,
 }
 
 impl HostOptions {
@@ -33,7 +40,18 @@ impl HostOptions {
             load_dotenv: true,
             foreground: None,
             interactive: None,
+            on_startup_error: None,
         }
+    }
+
+    /// Register a callback fired when any extension's `register`/`start` or the
+    /// foreground handoff returns an error during boot.
+    pub fn on_startup_error(
+        mut self,
+        hook: impl Fn(&str, &str) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_startup_error = Some(Arc::new(hook));
+        self
     }
 
     pub fn without_dotenv(mut self) -> Self {
@@ -88,10 +106,24 @@ fn load_dotenv(root: &Path) -> Result<()> {
 }
 
 pub async fn boot(extensions: Vec<Arc<dyn Extension>>, options: HostOptions) -> Result<()> {
+    let on_error = options.on_startup_error.clone();
+    let report = |id: &str, err: &anyhow::Error| {
+        if let Some(hook) = &on_error {
+            hook(id, &format!("{err:#}"));
+        }
+    };
+    boot_inner(extensions, options, &report).await
+}
+
+async fn boot_inner(
+    extensions: Vec<Arc<dyn Extension>>,
+    options: HostOptions,
+    report: &impl Fn(&str, &anyhow::Error),
+) -> Result<()> {
     if options.load_dotenv {
-        load_dotenv(&options.root)?;
+        load_dotenv(&options.root).inspect_err(|e| report("-", e))?;
     }
-    let paths = HostPaths::new(&options.root)?;
+    let paths = HostPaths::new(&options.root).inspect_err(|e| report("-", e))?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let shutdown_on_signal = shutdown_tx.clone();
     tokio::spawn(async move {
@@ -115,11 +147,15 @@ pub async fn boot(extensions: Vec<Arc<dyn Extension>>, options: HostOptions) -> 
     };
 
     for extension in &extensions {
-        extension.register(&mut register_ctx).await?;
+        extension
+            .register(&mut register_ctx)
+            .await
+            .inspect_err(|e| report(extension.id(), e))?;
     }
     let foreground = register_ctx
         .foreground
-        .select(options.foreground.as_deref())?;
+        .select(options.foreground.as_deref())
+        .inspect_err(|e| report("-", e))?;
     let config = register_ctx.config.clone();
     let host = register_ctx.into_start_services()?;
     let http_router = host.router.clone();
@@ -150,7 +186,10 @@ pub async fn boot(extensions: Vec<Arc<dyn Extension>>, options: HostOptions) -> 
             config: config.clone(),
             host: host.clone(),
         };
-        extension.start(ctx).await?;
+        extension
+            .start(ctx)
+            .await
+            .inspect_err(|e| report(extension.id(), e))?;
     }
 
     if let Some(provider) = foreground {
@@ -161,12 +200,12 @@ pub async fn boot(extensions: Vec<Arc<dyn Extension>>, options: HostOptions) -> 
             config: config.clone(),
             host: host.clone(),
         };
+        let terminal = acquire_terminal(options.interactive.unwrap_or_else(stdout_is_terminal))
+            .inspect_err(|e| report(&provider.id, e))?;
         foreground
-            .run(
-                ctx,
-                acquire_terminal(options.interactive.unwrap_or_else(stdout_is_terminal))?,
-            )
-            .await?;
+            .run(ctx, terminal)
+            .await
+            .inspect_err(|e| report(&provider.id, e))?;
     }
 
     let _ = shutdown_tx.send(true);
@@ -488,6 +527,43 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("multiple foreground providers"));
+    }
+
+    struct FailingStartExt;
+
+    impl Extension for FailingStartExt {
+        fn id(&self) -> &'static str {
+            "failing"
+        }
+
+        fn start<'a>(&'a self, _ctx: StartCtx) -> host_api::BoxFuture<'a, Result<()>> {
+            Box::pin(async move { Err(anyhow::anyhow!("boom on start")) })
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_error_hook_fires_on_failing_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let captured: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let err = boot(
+            vec![Arc::new(FailingStartExt)],
+            HostOptions::new(temp.path())
+                .without_dotenv()
+                .on_startup_error(move |id, message| {
+                    sink.lock()
+                        .unwrap()
+                        .push((id.to_string(), message.to_string()));
+                }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("boom on start"));
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].0, "failing");
+        assert!(captured[0].1.contains("boom on start"));
     }
 
     #[test]
