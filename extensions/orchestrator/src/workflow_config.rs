@@ -537,6 +537,7 @@ mod tests {
                 port: 7878,
                 webhook_secret: None,
             },
+            foreground: "logs".to_string(),
             extensions: Default::default(),
         }
     }

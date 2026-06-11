@@ -19,10 +19,18 @@ pub struct AgentConfig {
     pub hitl: HitlConfig,
     pub workspace: WorkspaceConfig,
     pub dashboard: DashboardConfig,
+    /// Host-level foreground slot selection: the id of the extension that owns
+    /// the terminal. Absent → "logs" (the frontend-log extension).
+    #[serde(default = "default_foreground")]
+    pub foreground: String,
     /// Per-extension config, keyed by extension id. Each value is handed to the
     /// matching extension via the host `ConfigStore`. Missing section = empty.
     #[serde(default)]
     pub extensions: HashMap<String, serde_yaml::Value>,
+}
+
+fn default_foreground() -> String {
+    "logs".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -265,4 +273,16 @@ mod tests {
         assert!(cfg.extension_configs().unwrap().is_empty());
     }
 
+    #[test]
+    fn foreground_defaults_to_logs_when_absent() {
+        let cfg: AgentConfig = serde_yaml::from_str(BASE).unwrap();
+        assert_eq!(cfg.foreground, "logs");
+    }
+
+    #[test]
+    fn foreground_parses_explicit_value() {
+        let raw = format!("{BASE}foreground: tui\n");
+        let cfg: AgentConfig = serde_yaml::from_str(&raw).unwrap();
+        assert_eq!(cfg.foreground, "tui");
+    }
 }

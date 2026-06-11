@@ -2471,6 +2471,7 @@ mod tests {
                 port: 7878,
                 webhook_secret: None,
             },
+            foreground: "logs".to_string(),
             extensions: Default::default(),
         }
     }
@@ -3300,6 +3301,7 @@ mod tests {
                 port: 0,
                 webhook_secret: None,
             },
+            foreground: "logs".to_string(),
             extensions: Default::default(),
         }
     }
