@@ -50,6 +50,7 @@ pub fn load_agent_env(root: &Path) -> Result<LoadReport> {
         } else {
             std::env::set_var(&key, value);
             loaded_key_set().lock().unwrap().insert(key.clone());
+            runner_core::record_loaded_env_key(key.clone());
             loaded.push(key);
         }
     }

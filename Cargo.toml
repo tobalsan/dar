@@ -6,6 +6,11 @@ members = [
     "crates/cap-runner",
     "crates/host-api",
     "crates/runner-core",
+    "extensions/runner-claude",
+    "extensions/runner-cli",
+    "extensions/runner-codex",
+    "extensions/runner-fake",
+    "extensions/runner-pi",
 ]
 resolver = "2"
 
@@ -59,11 +64,17 @@ thiserror = "2"
 cap-tracker = { path = "crates/cap-tracker" }
 cap-runner = { path = "crates/cap-runner" }
 runner-core = { path = "crates/runner-core" }
+runner-claude = { path = "extensions/runner-claude" }
+runner-cli = { path = "extensions/runner-cli" }
+runner-codex = { path = "extensions/runner-codex" }
+runner-fake = { path = "extensions/runner-fake" }
+runner-pi = { path = "extensions/runner-pi" }
 # static dashboard assets (only htmx.min.js is embedded; templates are askama-compiled)
 rust-embed = { version = "8", features = ["axum-ex"] }
 mime_guess = "2"
 
 [dev-dependencies]
+futures = "0.3"
 tempfile = "3"
 
 [profile.release]

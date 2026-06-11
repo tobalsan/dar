@@ -1,12 +1,271 @@
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use cap_runner::{ExitKind, KillReason, RunnerEventSink, RunnerEventStore};
+use anyhow::{bail, Context, Result};
+use cap_runner::{
+    ExitKind, KillReason, RunnerEventSink, RunnerEventStore, RunnerHandle, SpawnParams,
+};
 use chrono::Utc;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
+use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::oneshot;
+
+static FILE_LOADED_KEYS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+
+pub trait RunnerSpec {
+    fn command(&self, params: &SpawnParams<'_>) -> OsString;
+    fn args(&self, params: &SpawnParams<'_>) -> Vec<OsString>;
+    fn stdin_payload(&self, params: &SpawnParams<'_>) -> Option<Vec<u8>>;
+    fn session_dir(&self, params: &SpawnParams<'_>) -> Option<PathBuf>;
+    fn env(&self, params: &SpawnParams<'_>) -> Vec<(OsString, OsString)>;
+    fn event_kind(&self) -> &'static str;
+}
+
+pub fn effective_command(params: &SpawnParams<'_>, default_command: &str) -> OsString {
+    if params.command.trim().is_empty() {
+        OsString::from(default_command)
+    } else {
+        OsString::from(params.command)
+    }
+}
+
+pub fn common_env(params: &SpawnParams<'_>) -> Vec<(OsString, OsString)> {
+    let mut env = vec![
+        (
+            OsString::from(cap_runner::AGENT_ISSUE_IDENTIFIER),
+            OsString::from(&params.issue_id),
+        ),
+        (
+            OsString::from(cap_runner::AGENT_ISSUE_ID),
+            OsString::from(&params.issue_id),
+        ),
+        (
+            OsString::from(cap_runner::AGENT_RUN_ID),
+            OsString::from(&params.run_id),
+        ),
+        (
+            OsString::from(cap_runner::AGENT_PROJECT_ID),
+            OsString::from(&params.issue_id),
+        ),
+        (
+            OsString::from(cap_runner::AGENT_WORKSPACE),
+            params.workspace.as_os_str().to_os_string(),
+        ),
+        (
+            OsString::from(cap_runner::AGENT_WORKSPACE_ROOT),
+            params.workspace_root.as_os_str().to_os_string(),
+        ),
+        (
+            OsString::from(cap_runner::AGENT_PROMPT),
+            OsString::from(&params.prompt),
+        ),
+        (
+            OsString::from(cap_runner::AGENT_WORKER_PROMPT),
+            OsString::from(&params.prompt),
+        ),
+    ];
+    if let Some(model) = &params.model {
+        env.push((
+            OsString::from(cap_runner::AGENT_MODEL),
+            OsString::from(model),
+        ));
+        env.push((
+            OsString::from(cap_runner::AGENT_WORKER_MODEL),
+            OsString::from(model),
+        ));
+    }
+    if params.expose_linear_graphql_tool {
+        env.push((
+            OsString::from(cap_runner::AGENT_LINEAR_GRAPHQL_TOOL),
+            OsString::from("1"),
+        ));
+    }
+    env
+}
+
+pub fn env_with_session_dir(
+    mut env: Vec<(OsString, OsString)>,
+    session_dir: &Path,
+) -> Vec<(OsString, OsString)> {
+    env.push((
+        OsString::from(cap_runner::AGENT_SESSION_DIR),
+        session_dir.as_os_str().to_os_string(),
+    ));
+    env
+}
+
+pub fn worker_tools(params: &SpawnParams<'_>) -> Vec<serde_json::Value> {
+    if params.expose_linear_graphql_tool {
+        vec![serde_json::json!({
+            "name": "linear_graphql",
+            "description": "Execute a Linear GraphQL operation against the configured Linear API endpoint.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "GraphQL query or mutation document."
+                    },
+                    "variables": {
+                        "type": "object",
+                        "description": "GraphQL variables object."
+                    }
+                },
+                "required": ["query"]
+            }
+        })]
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn record_loaded_env_key(key: impl Into<String>) {
+    FILE_LOADED_KEYS
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(key.into());
+}
+
+pub fn scrub_loaded_env(cmd: &mut Command) {
+    let Some(keys) = FILE_LOADED_KEYS.get() else {
+        return;
+    };
+    for key in keys.lock().unwrap().iter() {
+        cmd.env_remove(key);
+    }
+}
+
+pub fn assert_contained(root: &Path, child: &Path) -> Result<()> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", root.display()))?;
+    let child = child
+        .canonicalize()
+        .with_context(|| format!("canonicalizing {}", child.display()))?;
+    if !child.starts_with(&root) {
+        bail!("{} is outside {}", child.display(), root.display());
+    }
+    Ok(())
+}
+
+pub async fn spawn_spec<S>(spec: S, params: SpawnParams<'_>) -> Result<RunnerHandle>
+where
+    S: RunnerSpec,
+{
+    assert_contained(params.workspace_root, params.workspace)
+        .context("workspace containment check failed; refusing to spawn child")?;
+
+    let command = spec.command(&params);
+    let args = spec.args(&params);
+    let stdin_payload = spec.stdin_payload(&params);
+    let session_dir = spec.session_dir(&params);
+    let env = spec.env(&params);
+    let event_kind = spec.event_kind();
+
+    if let Some(dir) = &session_dir {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating runner session dir {}", dir.display()))?;
+    }
+
+    let mut cmd = Command::new(&command);
+    for arg in &args {
+        cmd.arg(arg);
+    }
+    scrub_loaded_env(&mut cmd);
+    cmd.envs(env);
+    cmd.current_dir(params.workspace)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    setup_process_group(&mut cmd);
+
+    let mut child = cmd.spawn().with_context(|| {
+        format!(
+            "spawning `{}` in {}",
+            command.to_string_lossy(),
+            params.workspace.display()
+        )
+    })?;
+
+    let pid = child
+        .id()
+        .context("child has no pid immediately after spawn")?;
+    tracing::info!(
+        issue = %params.issue_id,
+        runner = %params.runner_kind,
+        pid,
+        cwd = %params.workspace.display(),
+        "runner spawned"
+    );
+    persist_runner_event(
+        params.store.as_ref(),
+        Some(&params.run_id),
+        &params.issue_id,
+        event_kind,
+        serde_json::json!({
+            "type": "spawn",
+            "runner": params.runner_kind,
+            "pid": pid,
+            "command": command.to_string_lossy(),
+            "args": args.iter().map(|a| a.to_string_lossy().to_string()).collect::<Vec<_>>(),
+            "session_dir": session_dir.as_ref().map(|d| d.display().to_string()),
+        }),
+    );
+
+    if let (Some(mut stdin), Some(payload)) = (child.stdin.take(), stdin_payload) {
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&payload).await;
+            let _ = stdin.flush().await;
+        });
+    }
+
+    if let Some(out) = child.stdout.take() {
+        spawn_line_pump(
+            out,
+            params.issue_id.clone(),
+            params.run_id.clone(),
+            "stdout",
+            event_kind,
+            std::sync::Arc::clone(&params.events),
+            std::sync::Arc::clone(&params.store),
+            std::sync::Arc::clone(&params.last_event_at),
+            |issue, stream, line| tracing::info!(%issue, %stream, %line, "runner output"),
+        );
+    }
+    if let Some(err) = child.stderr.take() {
+        spawn_line_pump(
+            err,
+            params.issue_id.clone(),
+            params.run_id.clone(),
+            "stderr",
+            event_kind,
+            std::sync::Arc::clone(&params.events),
+            std::sync::Arc::clone(&params.store),
+            std::sync::Arc::clone(&params.last_event_at),
+            |issue, stream, line| tracing::info!(%issue, %stream, %line, "runner output"),
+        );
+    }
+
+    let (kill_tx, kill_rx) = oneshot::channel::<KillReason>();
+    let timeout = Duration::from_millis(params.max_run_timeout_ms);
+    let issue_id = params.issue_id.clone();
+
+    let done = tokio::spawn(async move {
+        supervise(child, pid, timeout, kill_rx, move |kind, message| {
+            tracing::info!(issue = %issue_id, %kind, %message, "runner supervise");
+        })
+        .await
+    });
+
+    Ok(RunnerHandle::new(pid, kill_tx, done))
+}
 
 /// Configure a child command to run in its own process group, so signalling the
 /// negative pid reaches the whole subtree.
@@ -242,6 +501,17 @@ pub fn wait_for_pids_dead(pids: &[u32], timeout: Duration) {
         }
         std::thread::sleep(poll_interval.min(remaining));
     }
+}
+
+fn persist_runner_event(
+    store: &dyn RunnerEventStore,
+    run_id: Option<&str>,
+    issue_id: &str,
+    kind: &'static str,
+    value: serde_json::Value,
+) {
+    let payload = value.to_string();
+    store.insert_event(run_id, issue_id, kind, &payload, Utc::now());
 }
 
 #[cfg(test)]

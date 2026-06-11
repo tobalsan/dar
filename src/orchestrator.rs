@@ -35,7 +35,9 @@ use tokio::sync::watch;
 use crate::config::AgentConfig;
 use crate::domain::Issue;
 use crate::dotenv;
-use crate::hitl::{HitlNotification, HitlNotify, NoopHitlNotifier};
+#[cfg(test)]
+use crate::hitl::NoopHitlNotifier;
+use crate::hitl::{HitlNotification, HitlNotify};
 use crate::logging;
 use crate::paths::{issue_workspace, issue_workspace_path, resolve_workspace_root, AgentPaths};
 use crate::prompt::PromptRenderer;
@@ -103,7 +105,7 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new(
         agent_cfg: AgentConfig,
         paths: AgentPaths,
@@ -1765,20 +1767,34 @@ impl Orchestrator {
     }
 }
 
+#[cfg(test)]
 fn default_runner() -> Arc<dyn cap_runner::Runner> {
     default_runner_services()
         .get_named::<dyn cap_runner::Runner>("pi")
         .expect("pi runner is registered")
 }
 
+#[cfg(test)]
 fn default_runner_services() -> host_api::ServiceRegistry {
-    let mut services = host_api::ServiceRegistry::default();
-    for (id, runner) in crate::runner::registered_runners() {
-        services
-            .service::<dyn cap_runner::Runner>(id, runner)
-            .expect("runner id is unique");
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut ctx = host_api::RegisterCtx {
+        bus: host_api::EventBus::new(),
+        http: host_api::HttpRegistry::disabled(),
+        services: host_api::ServiceRegistry::default(),
+        paths: host_api::HostPaths::new(".").expect("current directory is canonicalizable"),
+        config: host_api::ConfigStore::default(),
+        shutdown: host_api::ShutdownToken::new(shutdown_rx),
+    };
+    for extension in [
+        &runner_pi::PiRunnerExtension as &dyn host_api::Extension,
+        &runner_claude::ClaudeRunnerExtension,
+        &runner_codex::CodexRunnerExtension,
+        &runner_cli::CliRunnerExtension,
+        &runner_fake::FakeRunnerExtension,
+    ] {
+        futures::executor::block_on(extension.register(&mut ctx)).expect("runner registers");
     }
-    services
+    ctx.services
 }
 
 fn runner_service_id(raw: &str) -> &str {

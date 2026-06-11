@@ -39,9 +39,7 @@ impl Extension for MonolithExtension {
 
     fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            for (id, runner) in runner::registered_runners() {
-                ctx.services.service::<dyn cap_runner::Runner>(id, runner)?;
-            }
+            let _ = ctx;
             Ok(())
         })
     }
