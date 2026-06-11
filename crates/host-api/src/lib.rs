@@ -160,6 +160,10 @@ pub struct ForegroundProvider {
     pub factory: ForegroundFactory,
 }
 
+pub trait HostCommand: Send + Sync {
+    fn run(&self, args: serde_json::Value) -> Result<()>;
+}
+
 #[derive(Clone)]
 pub struct ShutdownToken {
     rx: watch::Receiver<bool>,
@@ -285,7 +289,7 @@ pub struct ServiceRegistry {
 }
 
 impl ServiceRegistry {
-    pub fn register<T>(&mut self, id: impl Into<String>, service: Arc<T>) -> Result<()>
+    pub fn service<T>(&mut self, id: impl Into<String>, service: Arc<T>) -> Result<()>
     where
         T: ?Sized + Send + Sync + 'static,
     {
@@ -300,7 +304,14 @@ impl ServiceRegistry {
         Ok(())
     }
 
-    pub fn get<T>(&self, id: &str) -> Result<Arc<T>>
+    pub fn register<T>(&mut self, id: impl Into<String>, service: Arc<T>) -> Result<()>
+    where
+        T: ?Sized + Send + Sync + 'static,
+    {
+        self.service::<T>(id, service)
+    }
+
+    pub fn get_named<T>(&self, id: &str) -> Result<Arc<T>>
     where
         T: ?Sized + Send + Sync + 'static,
     {
@@ -315,6 +326,13 @@ impl ServiceRegistry {
             .downcast_ref::<Arc<T>>()
             .cloned()
             .ok_or_else(|| anyhow!("service {id} type mismatch"))
+    }
+
+    pub fn get<T>(&self, id: &str) -> Result<Arc<T>>
+    where
+        T: ?Sized + Send + Sync + 'static,
+    {
+        self.get_named::<T>(id)
     }
 }
 

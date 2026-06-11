@@ -37,6 +37,8 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "tracker-files",
+ "tracker-linear",
 ]
 
 [[package]]
@@ -2105,6 +2107,37 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "tracker-files"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cap-tracker",
+ "chrono",
+ "host-api",
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "tracker-linear"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cap-tracker",
+ "chrono",
+ "host-api",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

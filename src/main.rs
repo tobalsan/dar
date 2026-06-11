@@ -2,6 +2,12 @@ use anyhow::Result;
 use clap::Parser;
 use std::sync::Arc;
 
+macro_rules! plugins {
+    ($($extension:expr),* $(,)?) => {
+        vec![$(Arc::new($extension) as Arc<dyn host_api::Extension>),*]
+    };
+}
+
 fn main() {
     if let Err(e) = main_inner() {
         eprintln!("agentropy: {e:#}");
@@ -21,9 +27,11 @@ async fn main_inner() -> Result<()> {
         .without_dotenv()
         .foreground("logs");
     agentropy_host::boot(
-        vec![
-            Arc::new(frontend_log::FrontendLogExtension),
-            Arc::new(agentropy::MonolithExtension),
+        plugins![
+            frontend_log::FrontendLogExtension,
+            tracker_files::TrackerFilesExtension,
+            tracker_linear::TrackerLinearExtension,
+            agentropy::MonolithExtension,
         ],
         options,
     )

@@ -168,23 +168,8 @@ impl AgentConfig {
     /// Validate invariants the loop relies on. Best-effort, called at startup
     /// and by `doctor`.
     pub fn validate(&self) -> Result<()> {
-        if !matches!(self.tracker.use_.as_str(), "files" | "linear") {
-            bail!(
-                "tracker.use must be \"files\" or \"linear\" (got {:?})",
-                self.tracker.use_
-            );
-        }
-        if self.tracker.use_ == "files" && self.tracker.config.is_none() {
-            bail!("tracker.config.path is required when tracker.use is \"files\"");
-        }
-        if !matches!(
-            self.runner.use_.as_str(),
-            "" | "pi" | "claude" | "claude-code" | "codex" | "cli" | "fake"
-        ) {
-            bail!(
-                "runner.use must be one of pi, claude, codex, cli, fake (got {:?})",
-                self.runner.use_
-            );
+        if self.tracker.use_.trim().is_empty() {
+            bail!("tracker.use must be non-empty");
         }
         if self.tracker.active_states.is_empty() {
             bail!("tracker.active_states must be non-empty");
