@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use host_api::{Extension, StartCtx};
+use host_api::{Extension, RegisterCtx, ServiceRegistry, StartCtx};
 use tokio::sync::{mpsc, watch};
 
 use cli::{Cli, Command};
@@ -37,8 +37,17 @@ impl Extension for MonolithExtension {
         "agentropy-monolith"
     }
 
-    fn start<'a>(&'a self, _ctx: StartCtx) -> host_api::BoxFuture<'a, Result<()>> {
-        Box::pin(async { run_cli().await })
+    fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            for (id, runner) in runner::registered_runners() {
+                ctx.services.service::<dyn cap_runner::Runner>(id, runner)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn start<'a>(&'a self, ctx: StartCtx) -> host_api::BoxFuture<'a, Result<()>> {
+        Box::pin(async move { run_cli(ctx.host.services).await })
     }
 }
 
@@ -57,19 +66,19 @@ where
     Ok(root)
 }
 
-pub async fn run_cli() -> Result<()> {
+pub async fn run_cli(services: ServiceRegistry) -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
         Command::Run(args) => {
             let root = args.resolve_root()?;
             dotenv::load_agent_env(&root)?;
-            run(root).await
+            run(root, services).await
         }
         Command::Doctor(args) => {
             let root = args.resolve_root()?;
             let dotenv_report = dotenv::load_agent_env(&root)?;
-            let code = doctor::run(&root, &dotenv_report)?;
+            let code = doctor::run(&root, &dotenv_report, services)?;
             std::process::exit(code);
         }
         Command::InitWorkflow(args) => {
@@ -107,7 +116,7 @@ fn export_command(root: std::path::PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn run(root: std::path::PathBuf) -> Result<()> {
+async fn run(root: std::path::PathBuf, mut services: ServiceRegistry) -> Result<()> {
     let paths = AgentPaths::new(root);
 
     std::fs::create_dir_all(paths.logs_dir())
@@ -135,10 +144,28 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     tracker_cfg.project_slug = effective_cfg.tracker_project_slug.clone();
     tracker_cfg.endpoint = Some(effective_cfg.tracker_endpoint.clone());
     tracker_cfg.needs_human = effective_cfg.needs_human.clone();
-    let tracker = match tracker::build(&tracker_cfg, &paths) {
+    match tracker::register_configured(&mut services, &tracker_cfg, &paths) {
+        Ok(()) => {}
+        Err(e) => {
+            notify_startup_error(
+                &hitl,
+                &format!("registering tracker services failed: {e:#}"),
+            );
+            return Err(e);
+        }
+    };
+    let tracker = match services.get_named::<dyn tracker::Tracker>(&tracker_cfg.use_) {
         Ok(tracker) => tracker,
         Err(e) => {
-            notify_startup_error(&hitl, &format!("building tracker failed: {e:#}"));
+            notify_startup_error(&hitl, &format!("resolving tracker failed: {e:#}"));
+            return Err(e);
+        }
+    };
+    let runner_id = runner_service_id(&effective_cfg.runner_kind);
+    let runner = match services.get_named::<dyn cap_runner::Runner>(runner_id) {
+        Ok(runner) => runner,
+        Err(e) => {
+            notify_startup_error(&hitl, &format!("resolving runner failed: {e:#}"));
             return Err(e);
         }
     };
@@ -185,6 +212,8 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
         agent_cfg.clone(),
         paths.clone(),
         Arc::clone(&tracker),
+        Arc::clone(&runner),
+        services.clone(),
         prompt,
         effective_cfg.clone(),
         app_state.clone(),
@@ -258,6 +287,14 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     hitl.stop();
 
     Ok(())
+}
+
+fn runner_service_id(raw: &str) -> &str {
+    if raw.trim().is_empty() {
+        "pi"
+    } else {
+        raw
+    }
 }
 
 fn notify_startup_error(hitl: &Arc<dyn HitlNotify>, message: &str) {
