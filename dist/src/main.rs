@@ -44,6 +44,10 @@ async fn main_inner() -> Result<()> {
 /// Boot the extension host for the long-running `run` loop.
 async fn run(root: std::path::PathBuf) -> Result<()> {
     let (bind, port) = dashboard_addr_for_root(&root)?;
+    // Per-extension config from agent.yaml `extensions:`, so extensions can read
+    // their own settings via the host ConfigStore (PRD-EXTENSIONS story 11).
+    let agent_config = config::load(&root)?;
+    let config = ConfigStore::from_values(agent_config.extension_configs()?);
     // Surface any extension startup failure via the configured HITL notifier so
     // a misconfigured extension still pages the operator (PRD story 57).
     let hitl = startup_hitl(&root);
@@ -51,6 +55,7 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
     let options = agentropy_host::HostOptions::new(root)
         .without_dotenv()
         .http_addr(bind, port)
+        .config(config)
         .foreground("logs")
         .on_startup_error(move |id, message| {
             hitl_for_hook.notify(HitlNotification::new(

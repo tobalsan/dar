@@ -1,5 +1,6 @@
 //! Deserialize and validate `agent.yaml` into a typed config tree.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +19,10 @@ pub struct AgentConfig {
     pub hitl: HitlConfig,
     pub workspace: WorkspaceConfig,
     pub dashboard: DashboardConfig,
+    /// Per-extension config, keyed by extension id. Each value is handed to the
+    /// matching extension via the host `ConfigStore`. Missing section = empty.
+    #[serde(default)]
+    pub extensions: HashMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -165,6 +170,20 @@ pub fn load(root: &Path) -> Result<AgentConfig> {
 }
 
 impl AgentConfig {
+    /// Per-extension config keyed by extension id, with each value converted to a
+    /// `serde_json::Value` for the host `ConfigStore`. Unknown ids are passed
+    /// through untouched (tolerated by the host).
+    pub fn extension_configs(&self) -> Result<HashMap<String, serde_json::Value>> {
+        self.extensions
+            .iter()
+            .map(|(id, value)| {
+                let json = serde_json::to_value(value)
+                    .with_context(|| format!("converting extensions.{id} config to JSON"))?;
+                Ok((id.clone(), json))
+            })
+            .collect()
+    }
+
     /// Validate invariants the loop relies on. Best-effort, called at startup
     /// and by `doctor`.
     pub fn validate(&self) -> Result<()> {
@@ -223,4 +242,27 @@ impl AgentConfig {
         }
         Ok(())
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE: &str = "id: a\nname: A\ntracker:\n  use: files\n  config:\n    path: ./issues\n  active_states: [todo]\n  terminal_states: [done]\nrunner:\n  use: claude-code\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
+
+    #[test]
+    fn extension_configs_extracts_per_extension_section() {
+        let raw = format!("{BASE}extensions:\n  dashboard:\n    port: 9000\n  example:\n    greeting: hi\n");
+        let cfg: AgentConfig = serde_yaml::from_str(&raw).unwrap();
+        let configs = cfg.extension_configs().unwrap();
+        assert_eq!(configs["dashboard"], serde_json::json!({ "port": 9000 }));
+        assert_eq!(configs["example"], serde_json::json!({ "greeting": "hi" }));
+    }
+
+    #[test]
+    fn extension_configs_empty_when_section_missing() {
+        let cfg: AgentConfig = serde_yaml::from_str(BASE).unwrap();
+        assert!(cfg.extension_configs().unwrap().is_empty());
+    }
+
 }

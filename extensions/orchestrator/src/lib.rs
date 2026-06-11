@@ -2471,6 +2471,7 @@ mod tests {
                 port: 7878,
                 webhook_secret: None,
             },
+            extensions: Default::default(),
         }
     }
 
@@ -3299,6 +3300,7 @@ mod tests {
                 port: 0,
                 webhook_secret: None,
             },
+            extensions: Default::default(),
         }
     }
 

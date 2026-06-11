@@ -28,6 +28,7 @@ pub struct HostOptions {
     pub foreground: Option<String>,
     pub interactive: Option<bool>,
     pub on_startup_error: Option<StartupErrorHook>,
+    pub config: ConfigStore,
 }
 
 impl HostOptions {
@@ -41,7 +42,14 @@ impl HostOptions {
             foreground: None,
             interactive: None,
             on_startup_error: None,
+            config: ConfigStore::default(),
         }
+    }
+
+    /// Provide the per-extension config store extensions read at register/start.
+    pub fn config(mut self, config: ConfigStore) -> Self {
+        self.config = config;
+        self
     }
 
     /// Register a callback fired when any extension's `register`/`start` or the
@@ -142,7 +150,7 @@ async fn boot_inner(
         foreground: host_api::ForegroundRegistry::default(),
         services: ServiceRegistry::default(),
         paths: paths.clone(),
-        config: ConfigStore::default(),
+        config: options.config.clone(),
         shutdown: shutdown.clone(),
     };
 
@@ -438,6 +446,46 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_options_config_reaches_extension_at_start() {
+        struct ConfigReadingExt {
+            seen: Arc<Mutex<Option<serde_json::Value>>>,
+        }
+
+        impl Extension for ConfigReadingExt {
+            fn id(&self) -> &'static str {
+                "cfg-ext"
+            }
+
+            fn start<'a>(&'a self, ctx: StartCtx) -> host_api::BoxFuture<'a, Result<()>> {
+                Box::pin(async move {
+                    *self.seen.lock().unwrap() = ctx.config.get("cfg-ext").cloned();
+                    Ok(())
+                })
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let seen = Arc::new(Mutex::new(None));
+        let mut values = std::collections::HashMap::new();
+        values.insert("cfg-ext".to_string(), serde_json::json!({ "port": 9000 }));
+        boot(
+            vec![Arc::new(ConfigReadingExt {
+                seen: Arc::clone(&seen),
+            })],
+            HostOptions::new(temp.path())
+                .without_dotenv()
+                .config(ConfigStore::from_values(values)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            Some(serde_json::json!({ "port": 9000 }))
+        );
     }
 
     #[tokio::test]
