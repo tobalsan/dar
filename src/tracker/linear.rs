@@ -9,8 +9,8 @@
 //! - Tracks the minimum remaining seen (across both dimensions) for the dashboard RATE LIMIT stat.
 //!
 //! Blocked-issue skipping: `poll_candidates` fetches ALL project issues,
-//! builds a state-lookup map, and omits any active issue whose `blockedBy`
-//! list contains at least one non-terminal issue.
+//! builds a state-lookup map, and omits any active issue whose inverse `blocks`
+//! relation contains at least one non-terminal issue.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -146,7 +146,12 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
           state { name type }
           labels { nodes { name } }
           parent { id identifier }
-          blockedBy { nodes { id identifier } }
+          inverseRelations(first: 50) {
+            nodes {
+              type
+              issue { id identifier state { name type } }
+            }
+          }
         }
       }
     }
@@ -364,11 +369,16 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
             if !self.active.contains(&r.state.name) {
                 continue;
             }
-            // Skip if any fetched blocker is not terminal.
-            let blocked = r.blocked_by.nodes.iter().any(|b| {
-                state_map
-                    .get(b.identifier.as_str())
-                    .map(|s| !self.terminal.contains(&s.to_string()))
+            // Skip if any blocker is not terminal.
+            let blocked = r.blocked_by().iter().any(|b| {
+                b.state
+                    .as_ref()
+                    .map(|s| !self.terminal.contains(&s.name))
+                    .or_else(|| {
+                        state_map
+                            .get(b.identifier.as_str())
+                            .map(|s| !self.terminal.contains(&s.to_string()))
+                    })
                     .unwrap_or(false) // unknown / cross-project blocker = not blocking
             });
             if !blocked {
@@ -468,7 +478,12 @@ query AgentropyFetchOne($id: String!) {
     state { name type }
     labels { nodes { name } }
     parent { id identifier }
-    blockedBy { nodes { id identifier } }
+    inverseRelations(first: 50) {
+      nodes {
+        type
+        issue { id identifier state { name type } }
+      }
+    }
     project { name slugId }
   }
 }
@@ -494,8 +509,8 @@ query AgentropyFetchOne($id: String!) {
             .and_then(Value::as_str)
             .map(String::from);
 
-        let mut raw: RawIssue = serde_json::from_value(node)
-            .context("parsing Linear issue node in fetch_one")?;
+        let mut raw: RawIssue =
+            serde_json::from_value(node).context("parsing Linear issue node in fetch_one")?;
         raw.project_name = project_name;
         raw.project_slug = project_slug;
         Ok(Some(raw_to_issue(&raw)))
@@ -603,8 +618,7 @@ fn raw_to_issue(r: &RawIssue) -> Issue {
         updated_at: r.updated_at,
         parent_id: r.parent.as_ref().map(|p| p.id.clone()),
         blocked_by: r
-            .blocked_by
-            .nodes
+            .blocked_by()
             .iter()
             .map(|b| b.identifier.clone())
             .collect(),
@@ -646,13 +660,24 @@ struct RawIssue {
     state: RawState,
     labels: RawLabelConnection,
     parent: Option<RawRef>,
-    #[serde(rename = "blockedBy", default)]
-    blocked_by: RawRefConnection,
+    #[serde(rename = "inverseRelations", default)]
+    inverse_relations: RawRelationConnection,
     // injected after deserialization
     #[serde(skip)]
     project_name: Option<String>,
     #[serde(skip)]
     project_slug: Option<String>,
+}
+
+impl RawIssue {
+    fn blocked_by(&self) -> Vec<&RawRef> {
+        self.inverse_relations
+            .nodes
+            .iter()
+            .filter(|r| r.kind == "blocks")
+            .map(|r| &r.issue)
+            .collect()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -673,10 +698,17 @@ struct RawLabel {
     name: String,
 }
 
-/// Wrapper for GraphQL connection fields that return `{ nodes: [...] }`.
+/// Wrapper for GraphQL relation connections that return `{ nodes: [...] }`.
 #[derive(Debug, Default, Deserialize)]
-struct RawRefConnection {
-    nodes: Vec<RawRef>,
+struct RawRelationConnection {
+    nodes: Vec<RawRelation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawRelation {
+    #[serde(rename = "type")]
+    kind: String,
+    issue: RawRef,
 }
 
 #[derive(Debug, Deserialize)]
@@ -684,6 +716,7 @@ struct RawRef {
     #[allow(dead_code)]
     id: String,
     identifier: String,
+    state: Option<RawState>,
 }
 
 // ---------------------------------------------------------------------------
@@ -696,7 +729,7 @@ mod tests {
 
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
-    use super::{LinearTracker, LinearTrackerConfig, UNSET_MIN};
+    use super::{LinearTracker, LinearTrackerConfig, RawIssue, UNSET_MIN};
 
     fn make_tracker() -> LinearTracker {
         LinearTracker::new(LinearTrackerConfig {
@@ -768,6 +801,51 @@ mod tests {
         use super::Tracker;
         let tracker = make_tracker();
         assert_eq!(tracker.rate_limit_remaining(), None);
+    }
+
+    #[test]
+    fn inverse_blocks_relations_become_blockers() {
+        let issue: RawIssue = serde_json::from_str(
+            r#"{
+              "id": "issue-b",
+              "identifier": "ALG-2",
+              "title": "Blocked issue",
+              "description": null,
+              "url": null,
+              "priority": null,
+              "createdAt": null,
+              "updatedAt": null,
+              "state": { "name": "Todo", "type": "unstarted" },
+              "labels": { "nodes": [] },
+              "parent": null,
+              "inverseRelations": {
+                "nodes": [
+                  {
+                    "type": "blocks",
+                    "issue": {
+                      "id": "issue-a",
+                      "identifier": "ALG-1",
+                      "state": { "name": "In Progress", "type": "started" }
+                    }
+                  },
+                  {
+                    "type": "related",
+                    "issue": {
+                      "id": "issue-c",
+                      "identifier": "ALG-3",
+                      "state": { "name": "Todo", "type": "unstarted" }
+                    }
+                  }
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let blockers = issue.blocked_by();
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].identifier, "ALG-1");
+        assert_eq!(super::raw_to_issue(&issue).blocked_by, vec!["ALG-1"]);
     }
 
     #[test]
