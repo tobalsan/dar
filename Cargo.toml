@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    ".",
+    "dist",
     "crates/agentropy-host",
     "crates/cap-tracker",
     "crates/cap-runner",
@@ -11,81 +11,17 @@ members = [
     "extensions/example",
     "extensions/frontend-log",
     "extensions/orchestrator",
+    "extensions/runner-claude",
+    "extensions/runner-cli",
+    "extensions/runner-codex",
+    "extensions/runner-fake",
+    "extensions/runner-pi",
     "extensions/tracker-files",
     "extensions/tracker-linear",
 ]
 resolver = "2"
 
-[package]
-name = "agentropy"
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.83"
-
-[[bin]]
-name = "agentropy"
-path = "src/main.rs"
-
-[[bin]]
-name = "cargo-agentropy"
-path = "src/bin/cargo-agentropy.rs"
-
-[dependencies]
-agentropy-host = { path = "crates/agentropy-host" }
-host-api = { path = "crates/host-api" }
-frontend-log = { path = "extensions/frontend-log" }
-dashboard = { path = "extensions/dashboard" }
-orchestrator = { path = "extensions/orchestrator" }
-# async runtime + process + signals
-tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "process", "signal", "sync", "time", "io-util", "net"] }
-# web / dashboard
-axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["trace"] }
-# templates
-askama = "0.13"          # compile-time dashboard templates (Template derive + into_response w/ "with-axum")
-minijinja = "2.5"        # runtime WORKFLOW.md prompt rendering, strict undefined
-# serde stack
-serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"       # PRD-pinned (0.9.34, deprecated upstream but functional)
-serde_json = "1"
-# webhook signature verification
-hmac = "0.12"
-sha2 = "0.10"
-subtle = "2"
-hex = "0.4"
-# time
-chrono = { version = "0.4", features = ["serde"] }
-# cli
-clap = { version = "4.5", features = ["derive"] }
-# logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-tracing-appender = "0.2"
-# unix signals (SIGTERM/SIGKILL to child process groups)
-nix = { version = "0.29", features = ["signal", "process"] }
-# SQLite persistence
-rusqlite = { version = "0.32", features = ["bundled"] }
-# errors
-anyhow = "1"
-thiserror = "2"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-cap-tracker = { path = "crates/cap-tracker" }
-cap-runner = { path = "crates/cap-runner" }
-runner-core = { path = "crates/runner-core" }
-tracker-files = { path = "extensions/tracker-files" }
-tracker-linear = { path = "extensions/tracker-linear" }
-# static dashboard assets (only htmx.min.js is embedded; templates are askama-compiled)
-rust-embed = { version = "8", features = ["axum-ex"] }
-mime_guess = "2"
-
-[dev-dependencies]
-tempfile = "3"
-
 [profile.release]
 strip = true
 lto = "thin"
 codegen-units = 1
-
-[package.metadata]
-# askama: create askama.toml at crate root OR rely on default ./templates dir.
-# Dashboard templates live in ./templates/*.html (askama default search path).

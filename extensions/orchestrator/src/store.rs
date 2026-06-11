@@ -23,14 +23,14 @@ use crate::state::{HistoryEntry, RunStatus};
 /// the issue is still active (continuation queued).  `record_history` prefixes
 /// this with the `RunStatus` debug name, so the stored lifecycle-event payload
 /// becomes `"Succeeded still active after normal exit; continuation queued"`.
-pub(crate) const ACTIVE_CONTINUATION_MARKER: &str =
+pub const ACTIVE_CONTINUATION_MARKER: &str =
     "still active after normal exit; continuation queued";
 
 /// Full lifecycle-event `payload` value stored by `record_history` for an
 /// active-continuation run.  The park-barrier SQL query matches against this
 /// exact string; it is derived from `ACTIVE_CONTINUATION_MARKER` so the two
 /// stay in sync automatically.
-pub(crate) const ACTIVE_CONTINUATION_EVENT: &str =
+pub const ACTIVE_CONTINUATION_EVENT: &str =
     "Succeeded still active after normal exit; continuation queued";
 
 // ─── public row/param types ───────────────────────────────────────────────────

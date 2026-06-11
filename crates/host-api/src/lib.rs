@@ -33,6 +33,15 @@
 //! one Rust payload type and one delivery class; attempting to reuse the same id
 //! with another type or class fails.
 
+/// Build a `Vec<Arc<dyn Extension>>` from a list of extension values for the
+/// composition root's plugin list.
+#[macro_export]
+macro_rules! plugins {
+    ($($extension:expr),* $(,)?) => {
+        vec![$(::std::sync::Arc::new($extension) as ::std::sync::Arc<dyn $crate::Extension>),*]
+    };
+}
+
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;

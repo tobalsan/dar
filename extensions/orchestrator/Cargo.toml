@@ -13,6 +13,11 @@ clap = { version = "4.5", features = ["derive"] }
 host-api = { path = "../../crates/host-api" }
 orchestrator-api = { path = "../../crates/orchestrator-api" }
 runner-core = { path = "../../crates/runner-core" }
+runner-pi = { path = "../runner-pi" }
+runner-claude = { path = "../runner-claude" }
+runner-codex = { path = "../runner-codex" }
+runner-cli = { path = "../runner-cli" }
+runner-fake = { path = "../runner-fake" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -8,37 +8,20 @@ version = "0.1.0"
 dependencies = [
  "agentropy-host",
  "anyhow",
- "askama",
- "axum",
  "cap-runner",
- "cap-tracker",
- "chrono",
  "clap",
  "dashboard",
  "frontend-log",
- "hex",
- "hmac",
  "host-api",
- "mime_guess",
- "minijinja",
- "nix",
  "orchestrator",
- "reqwest",
- "runner-core",
- "rusqlite",
- "rust-embed",
- "serde",
+ "runner-claude",
+ "runner-cli",
+ "runner-codex",
+ "runner-fake",
+ "runner-pi",
  "serde_json",
- "serde_yaml",
- "sha2",
- "subtle",
  "tempfile",
- "thiserror",
  "tokio",
- "tower-http",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
  "tracker-files",
  "tracker-linear",
 ]
@@ -51,6 +34,7 @@ dependencies = [
  "axum",
  "crossterm",
  "host-api",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
@@ -1243,7 +1227,12 @@ dependencies = [
  "nix",
  "orchestrator-api",
  "reqwest",
+ "runner-claude",
+ "runner-cli",
+ "runner-codex",
  "runner-core",
+ "runner-fake",
+ "runner-pi",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1536,15 +1525,74 @@ dependencies = [
 ]
 
 [[package]]
+name = "runner-claude"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cap-runner",
+ "chrono",
+ "host-api",
+ "runner-core",
+]
+
+[[package]]
+name = "runner-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cap-runner",
+ "chrono",
+ "host-api",
+ "runner-core",
+]
+
+[[package]]
+name = "runner-codex"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cap-runner",
+ "chrono",
+ "host-api",
+ "runner-core",
+ "serde_json",
+]
+
+[[package]]
 name = "runner-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "cap-runner",
  "chrono",
+ "host-api",
  "nix",
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "runner-fake"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cap-runner",
+ "chrono",
+ "host-api",
+ "runner-core",
+]
+
+[[package]]
+name = "runner-pi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cap-runner",
+ "chrono",
+ "host-api",
+ "runner-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -2100,7 +2148,6 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
  "url",
 ]
 

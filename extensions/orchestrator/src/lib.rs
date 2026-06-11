@@ -56,29 +56,17 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
 
-#[path = "../../../src/cli.rs"]
-pub mod cli;
-#[path = "../../../src/config.rs"]
 pub mod config;
-#[path = "../../../src/domain.rs"]
 pub mod domain;
-#[path = "../../../src/dotenv.rs"]
 pub mod dotenv;
-#[path = "../../../src/hitl.rs"]
 pub mod hitl;
-#[path = "../../../src/logging.rs"]
 pub mod logging;
-#[path = "../../../src/paths.rs"]
 pub mod paths;
-#[path = "../../../src/prompt.rs"]
 pub mod prompt;
-#[path = "../../../src/runner.rs"]
 pub mod runner;
 pub mod state;
 pub mod store;
-#[path = "../../../src/tracker/mod.rs"]
 pub mod tracker;
-#[path = "../../../src/workflow_config.rs"]
 pub mod workflow_config;
 
 /// Max backoff cap for dispatch/abnormal-exit retries (30 minutes).
@@ -2279,7 +2267,15 @@ fn default_runner() -> Arc<dyn cap_runner::Runner> {
 
 fn default_runner_services() -> host_api::ServiceRegistry {
     let mut services = host_api::ServiceRegistry::default();
-    for (id, runner) in crate::runner::registered_runners() {
+    let runners: [(&str, Arc<dyn cap_runner::Runner>); 6] = [
+        ("pi", Arc::new(runner_pi::PiRunner)),
+        ("claude", Arc::new(runner_claude::ClaudeRunner)),
+        ("claude-code", Arc::new(runner_claude::ClaudeRunner)),
+        ("codex", Arc::new(runner_codex::CodexRunner)),
+        ("cli", Arc::new(runner_cli::CliRunner)),
+        ("fake", Arc::new(runner_fake::FakeRunner)),
+    ];
+    for (id, runner) in runners {
         services
             .service::<dyn cap_runner::Runner>(id, runner)
             .expect("runner id is unique");

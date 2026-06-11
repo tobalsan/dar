@@ -1,12 +1,12 @@
 //! Minimal `.env` loader for agent-folder scoped runtime configuration.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
 use anyhow::{bail, Context, Result};
 
-static FILE_LOADED_KEYS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+/// Children spawned via `runner-core` must never inherit `.env`-loaded keys;
+/// the scrub registry lives there so backend extension crates share it.
+pub use runner_core::scrub_loaded_env;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadReport {
@@ -49,7 +49,7 @@ pub fn load_agent_env(root: &Path) -> Result<LoadReport> {
             skipped_existing.push(key);
         } else {
             std::env::set_var(&key, value);
-            loaded_key_set().lock().unwrap().insert(key.clone());
+            runner_core::register_scrubbed_env_key(key.clone());
             loaded.push(key);
         }
     }
@@ -60,39 +60,6 @@ pub fn load_agent_env(root: &Path) -> Result<LoadReport> {
         loaded,
         skipped_existing,
     })
-}
-
-/// Remove env vars that came from `.env` from a child command environment.
-pub fn scrub_loaded_env<C>(cmd: &mut C)
-where
-    C: EnvRemove,
-{
-    let Some(keys) = FILE_LOADED_KEYS.get() else {
-        return;
-    };
-    for key in keys.lock().unwrap().iter() {
-        cmd.env_remove(key);
-    }
-}
-
-pub trait EnvRemove {
-    fn env_remove<K: AsRef<std::ffi::OsStr>>(&mut self, key: K) -> &mut Self;
-}
-
-impl EnvRemove for std::process::Command {
-    fn env_remove<K: AsRef<std::ffi::OsStr>>(&mut self, key: K) -> &mut Self {
-        std::process::Command::env_remove(self, key)
-    }
-}
-
-impl EnvRemove for tokio::process::Command {
-    fn env_remove<K: AsRef<std::ffi::OsStr>>(&mut self, key: K) -> &mut Self {
-        tokio::process::Command::env_remove(self, key)
-    }
-}
-
-fn loaded_key_set() -> &'static Mutex<HashSet<String>> {
-    FILE_LOADED_KEYS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 fn parse_line(line: &str) -> Result<Option<(String, String)>> {

@@ -1,0 +1,35 @@
+[package]
+name = "agentropy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+
+[[bin]]
+name = "agentropy"
+path = "src/main.rs"
+
+[[bin]]
+name = "cargo-agentropy"
+path = "src/bin/cargo-agentropy.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal"] }
+host-api = { path = "../crates/host-api" }
+agentropy-host = { path = "../crates/agentropy-host" }
+cap-runner = { path = "../crates/cap-runner" }
+orchestrator = { path = "../extensions/orchestrator" }
+frontend-log = { path = "../extensions/frontend-log" }
+dashboard = { path = "../extensions/dashboard" }
+tracker-files = { path = "../extensions/tracker-files" }
+tracker-linear = { path = "../extensions/tracker-linear" }
+runner-pi = { path = "../extensions/runner-pi" }
+runner-claude = { path = "../extensions/runner-claude" }
+runner-codex = { path = "../extensions/runner-codex" }
+runner-cli = { path = "../extensions/runner-cli" }
+runner-fake = { path = "../extensions/runner-fake" }
+
+[dev-dependencies]
+tempfile = "3"

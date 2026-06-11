@@ -11,13 +11,13 @@
 
 use std::path::Path;
 
-use crate::config;
-use crate::dotenv::LoadReport;
-use crate::paths::AgentPaths;
-use crate::prompt::PromptRenderer;
-use crate::tracker;
-use crate::workflow_config::EffectiveLoopConfig;
 use host_api::ServiceRegistry;
+use orchestrator::config;
+use orchestrator::dotenv::LoadReport;
+use orchestrator::paths::AgentPaths;
+use orchestrator::prompt::PromptRenderer;
+use orchestrator::tracker;
+use orchestrator::workflow_config::EffectiveLoopConfig;
 
 /// Run all preflight checks against `root`. Returns the process exit code.
 pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyhow::Result<i32> {
