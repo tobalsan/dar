@@ -1,200 +1,255 @@
 # PRD — Extension Architecture Refactor
 
-> Status: draft · needs-triage
+> Status: draft (council-revised) · needs-triage
 > Companion visuals: `extension-design-visual.html`, `extension-architecture.html`
-> Supersedes the monolith layout described in `PRD.md` (the behavior contracts in `PRD.md` still hold; only the packaging changes).
+> Supersedes the monolith layout in `PRD.md` (behavior contracts in `PRD.md` still hold; only the packaging changes).
+> Revision note: this draft incorporates a /council review (two independent synthesis rounds, consistent verdict). Key corrections vs the first draft: a **generic typed service registry** replaces the domain-aware `Role` enum; an **exclusive `foreground` slot** is added so an extension can *replace* top-level terminal behavior (the TUI requirement); today's log streaming becomes the `frontend-log` extension; an **`orchestrator-api`** contract crate exposes run snapshots/control so dashboard and TUI integrate without importing the orchestrator; `cap-channel` and the host channel registry are **dropped** for now; `inventory` is demoted in favor of an explicit `dist` plugin list; nothing is "frozen."
 
 ## Problem Statement
 
-Agentropy today is one Rust binary. Every capability — the Linear/file trackers, the claude/codex/pi/cli runners, the orchestrator tick loop, the dashboard — lives in `src/` and compiles together. That was right for v0, but it now blocks the next phase:
+Agentropy today is one Rust binary. Every capability — the Linear/file trackers, the claude/codex/pi/cli runners, the orchestrator tick loop, the dashboard, the terminal log stream — lives in `src/` and compiles together. That blocks the next phase:
 
-- I cannot develop a new runner, tracker, or a brand-new feature (scheduler, Discord channel, web chat) **in its own repo** without touching core.
-- Adding a capability means editing core dispatch code (`tracker::build`, `RunnerKind::parse`) — a `match` arm per backend. Core knows every concrete backend by name.
-- There is no seam for feature types that aren't tracker/runner at all (scheduler, channels, sinks). The architecture only has slots for what v0 happened to need.
-- The core conflates "the plumbing every feature needs" with "the orchestration domain." The binary *is* the orchestrator, so there's no way to ship a build that does something other than orchestrate.
+- I cannot develop a new runner, tracker, or a brand-new feature (scheduler, Discord channel, TUI) **in its own crate/repo** without touching core.
+- Adding a backend means editing core dispatch (`tracker::build`, `RunnerKind::parse`) — a `match` arm per backend. Core knows every concrete backend by name.
+- There is no seam for feature types that aren't tracker/runner: a scheduler, a channel, a TUI. The architecture only has slots for what v0 happened to need.
+- **The critical gap:** an extension cannot *replace* a top-level behavior. Today the binary streams logs to the terminal. A TUI must be able to make the binary display a full TUI **instead** — own raw mode, the keyboard, the alternate screen, panic cleanup. An additive plugin called by the host cannot do that.
+- The core conflates "plumbing every feature needs" with "the orchestration domain." The binary *is* the orchestrator; there's no way to ship a build that does something else.
 
-I want the core stripped to the bare minimum: a host that knows **zero** domain concepts (not even "Issue"), and every current feature re-expressed as an extension. New extension types must be addable without re-architecting.
+I want the core stripped to a **raw, domain-free host** that knows zero domain concepts (not even "Issue"), every current feature re-expressed as an extension, and the act of writing the *next* extension (scheduler, channels, TUI) to be simple. Design should stay open — let contracts emerge as real implementations prove them — while the **initial set ships fully functional**: orchestrator loop, Linear tracker, the runners.
 
 ## Solution
 
-Split the monolith into a **cargo workspace** (monorepo for now) with three layers:
+A **cargo workspace** (monorepo for now) in three layers.
 
-1. **Contract crates** — tiny, stable, rarely-changing:
-   - `host-api`: generic plumbing contract (lifecycle, config, event bus, http mount, terminal, secrets/env, async runtime handle, the `inventory` registry types). Domain-free.
-   - `cap-tracker`: the `Tracker` trait + the frozen `Issue` model.
-   - `cap-runner`: the `Runner` trait + spawn/handle/exit types.
-   - `cap-channel`: the `Channel` trait (scaffold; no v0 code fills it yet).
-2. **The host** — `agentropy-host`: the minimal binary plumbing. CLI, config load, logging, paths, dotenv, the event bus implementation, the http server it mounts extensions onto, and the boot sequence that reads the `inventory` registry and starts every linked extension. Knows no domain.
-3. **Extensions** — one crate per feature under `./extensions/`. Each self-registers via `inventory::submit!`. Current features become: `tracker-linear`, `tracker-files`, `runner-claude`, `runner-codex`, `runner-pi`, `runner-cli`, `runner-fake`, `orchestrator`, `dashboard`.
+### Layer 1 — Contract crates (tiny, additive, `0.x`, never "frozen")
+- `host-api` — generic plumbing only: extension lifecycle, config access by id, a **typed service registry**, a **typed event bus**, HTTP mount, paths/containment + per-extension data dir, a shutdown/cancellation token, and **exclusive slots** (the `foreground` owner). Knows no domain — no `Issue`, no `Tracker`, no `Role`.
+- `cap-tracker` — the `Tracker` trait (only the methods the orchestrator calls) + the `Issue` model (`#[non_exhaustive]`, builder, `metadata` map). Owns tracker provider registration.
+- `cap-runner` — the `Runner` trait + `SpawnParams`/`RunnerHandle`/`ExitKind`/`KillReason` + normalized output events + `AGENT_*` constants. Contract types only.
+- `orchestrator-api` — the orchestrator's *public* contract: `RunSnapshot`, `RunStatus`, `ControlMsg`, `RunRequested`/`DispatchRequested`, normalized log rows. Lets dashboard/TUI name run state without importing the orchestrator impl.
+- `runner-core` — shared (non-contract) helper crate: process-group supervision, line pump, `term_then_kill`, protocol-line classification. Backends call it; not part of the public contract.
 
-A thin `agentropy-dist` bin crate names the chosen mix in its `Cargo.toml`. `cargo build` links only those extensions; linking auto-registers them; the result is one static binary containing exactly what was picked. Changing the mix = edit `dist/Cargo.toml`, rebuild. That recompile step is **accepted** (explicit user decision — separate-repo development matters, runtime drop-in does not).
+**No `cap-channel` in this PRD.** No `agentropy-events` mega-crate — event payloads live in the API crate that *owns* them (`orchestrator-api` owns run/dispatch events; `cap-runner` owns runner output events; a future `chat-api` will own chat events).
 
-**Roles** (the deciding question: *does anything call into you through a typed contract?*):
-- **Capability extension** — YES. Implements a `cap-*` trait; the host or a consumer invokes it. `tracker-linear`, `runner-codex`.
-- **Plain (feature) extension** — NO. Self-drives on `host-api` only; uses the bus + http mount + terminal. `dashboard`, future `scheduler`, future channels' glue.
-- **Host** — the plumbing. Knows no domain, offers services to both.
+### Layer 2 — The host (`agentropy-host`)
+Minimal binary plumbing implementing the `host-api` services. Two-phase boot:
+1. construct registered extensions;
+2. `register()` on all (they contribute services, bus subscriptions, HTTP routes, foreground candidates);
+3. select **exactly one** foreground provider from config;
+4. `start()` background extensions;
+5. hand the **main thread + terminal** to the selected foreground owner;
+6. on shutdown: cancel background tasks, restore the terminal.
 
-The **orchestrator is a plain extension** that *consumes* `cap-tracker` + `cap-runner`. Capability crates therefore flow two ways: providers **implement** them, consumers **call** them. Plain features touch neither.
+The host stops writing to stdout/stderr directly after foreground handoff; logs flow to a tracing layer / event stream the active foreground consumes.
 
-The **event bus is the decoupling spine**: no extension imports a sibling. A future scheduler publishes `schedule.fired`; the orchestrator happens to subscribe. Swap either side, the bus doesn't care.
+### Layer 3 — Extensions (`./extensions/<name>`)
+One crate per feature. Current features become: `tracker-linear`, `tracker-files`, `runner-claude`, `runner-codex`, `runner-pi`, `runner-cli`, `runner-fake`, `orchestrator`, `dashboard`, and **`frontend-log`** (today's terminal log stream, extracted). Plus `extensions/example` kept green in CI.
+
+### Assembly — `dist/`
+The composition root. An **explicit plugin list** names the mix:
+```rust
+agentropy_host::run(plugins![
+    tracker_linear::extension(),
+    tracker_files::extension(),
+    runner_claude::extension(),
+    runner_codex::extension(),
+    runner_pi::extension(),
+    orchestrator::extension(),
+    dashboard::extension(),
+    frontend_log::extension(),
+]).await
+```
+Changing the mix = edit this list + `dist/Cargo.toml`, rebuild. That recompile step is **accepted** (separate-crate development matters; runtime drop-in does not). `inventory` is **not** foundational; if ever reintroduced it must be domain-free (`{ id, construct }` only, no role enum) and hidden behind an SDK macro.
+
+### Roles — descriptive, not encoded
+"Capability extension" (registers a typed service: tracker, runner) vs "plain extension" (self-drives on bus + http + foreground) vs "host" remains a useful *mental* model, but it is **not a type in `host-api`**. The host knows only: extensions register services, subscribe to the bus, mount routes, and may provide a foreground. The orchestrator — itself an extension — resolves `tracker.use`/`runner.use` against the service registry.
 
 ## User Stories
 
 ### Extension authoring (the core driver)
-1. As an extension author, I want to write a new tracker in its own crate that depends only on `cap-tracker` + `host-api`, so that I can develop and version it without editing core.
-2. As an extension author, I want to register my extension with a single `inventory::submit!` line, so that I never write per-extension wiring in core.
-3. As an extension author, I want to add a runner backend (e.g. `runner-gemini`) without touching any `match` arm in shared code, so that core has no per-backend knowledge.
-4. As an extension author, I want a brand-new feature type (scheduler, channel, sink) to depend on `host-api` alone when it has no shared call-in signature, so that I'm not forced to invent a fake capability trait.
-5. As an extension author, I want the contract crates (`host-api`, `cap-*`) to be small and stable, so that my extension rarely breaks on a core bump.
-6. As an extension author, I want my extension to declare which events it publishes and subscribes to, so that I can integrate via the bus without importing other extensions.
+1. As an extension author, I want to create a new extension by touching only its own crate plus the `dist` plugin list, importing `host-api` (and optionally one cap/api crate), so that I read zero host internals.
+2. As an extension author, I want a `cargo agentropy new <name> --kind background|service|foreground` scaffold that compiles immediately, so that the cost to start is near zero.
+3. As an extension author, I want a living `extensions/example` (config validation, `register()`, `start()`, typed publish/subscribe, graceful shutdown, data dir) kept green in CI, so that I copy a working reference, not folklore.
+4. As an extension author, I want to register a tracker/runner as a typed service (`registrar.service::<dyn Tracker>("linear", …)`) with no `match` arm anywhere in shared code, so that core has zero per-backend knowledge.
+5. As an extension author, I want the contract crates (`host-api`, `cap-*`, `orchestrator-api`) small, `0.x`, and additive (`#[non_exhaustive]`, defaulted trait methods), so that my extension rarely breaks on a bump.
+6. As an extension author, I want to integrate via **typed** bus events (`bus.publish(DispatchRequested{…})`, `bus.subscribe::<RunSnapshot>()`), not stringly topics, so that the compiler catches my mistakes.
+7. As an extension author, I want documented bus delivery semantics (bounded/unbounded, lossy/backpressured, ordering, slow-subscriber, shutdown), so that I don't reverse-engineer the orchestrator.
+8. As an extension author, I want `ctx.data_dir(ext_id)` for my local state, so that persistence is a one-liner and stays inside the agent folder.
 
 ### Build & assembly
-7. As an operator, I want a `dist` crate whose `Cargo.toml` lists the exact extensions I want, so that the binary contains only what I picked.
-8. As an operator, I want to remove an extension by deleting one dependency line and rebuilding, so that it's gone and uncompiled — no dead code in the binary.
-9. As an operator, I want the built binary footprint to stay in the ~8–15 MB range with idle RSS near today's ~14.9 MB, so that the refactor doesn't regress the footprint gate.
-10. As an operator, I want `cargo build --release` from the workspace root to produce `agentropy` exactly as today, so that my deploy story is unchanged.
-11. As a maintainer, I want every contract and extension crate to build and test independently in CI, so that a break is localized to its crate.
+9. As an operator, I want a `dist` plugin list naming exact extensions, so that the binary contains only what I picked.
+10. As an operator, I want to remove an extension by deleting one list line + its dep and rebuilding, so that it's gone and uncompiled.
+11. As an operator, I want linked ≠ started: an extension compiled into the binary starts only when enabled/selected by config, so that a linked-but-unconfigured Discord ext with no token can't break startup.
+12. As an operator, I want footprint held at the ALG-186 gate (~8.2 MB stripped binary, ~14.9 MB idle RSS, 0% idle CPU), so that the refactor doesn't regress.
+13. As a maintainer, I want each crate to build and test independently in CI, so that a break is localized.
+
+### Service registry & boot
+14. As the host, I want to expose a generic typed service registry and know nothing about what a service *means*, so that new capability kinds never require editing `host-api`.
+15. As the orchestrator, I want to resolve `tracker.use = linear` / `runner.use = claude` via `ctx.services().get_named::<dyn Tracker>(id)`, so that selection lives with the consumer, not the host.
+16. As the host, I want two-phase boot (`register()` all → select foreground → `start()` background → hand off main thread), so that subscriptions and slots are resolved before any timer or task fires.
+17. As an operator, I want `doctor` to validate only enabled/selected extensions (and assert configured ids resolve to a registered provider), so that the preflight is meaningful and fails loudly on a typo.
+
+### Foreground ownership (the TUI requirement)
+18. As an operator, I want a `foreground:` config selecting exactly one top-level owner of the terminal, so that I choose `logs` or `tui` declaratively.
+19. As a foreground extension, I want a `Foreground::run(self, ctx, ExclusiveTerminal)` handoff giving me sole ownership of stdout/raw-mode/alt-screen/keyboard, so that I can render a TUI without the host corrupting it.
+20. As the host, I want to stop writing logs directly to the terminal after handoff and route them to a tracing layer / log-event stream, so that the active foreground decides how logs appear.
+21. As today's behavior, I want terminal log streaming extracted into `frontend-log` (the default foreground), so that the acid test passes: if the current log stream can't be an extension, the seam isn't real.
+22. As a TUI author, I want to be just another `foreground` provider that replaces `frontend-log`, so that building the TUI needs no host change.
+23. As the host, I want startup to fail if two extensions claim the foreground slot and none is selected-unique, so that ownership conflicts surface immediately.
+24. As any extension, I want raw mode / alternate screen restored on shutdown **and panic**, so that a crash doesn't wreck the operator's terminal.
+25. As an operator with no TTY (CI/daemon), I want explicit non-interactive foreground behavior, so that headless runs are well-defined.
 
 ### Tracker capability
-12. As the orchestrator, I want to call `poll_candidates()` / `fetch_states()` / `fetch_terminal()` / `fetch_one()` on a `Tracker` without knowing whether it's Linear, GitHub, or files, so that I never grow a "which tracker?" branch.
-13. As a tracker author, I want to translate my native API into the frozen `Issue` shape (`identifier`, `title`, `state`, `priority`, `assignees`, …), so that all trackers hand back the same container.
-14. As the orchestrator, I want the `Tracker` trait to stay **read-only for issue state** (with only the narrow `park_issue_needs_human` safety write), so that the two-state-layer invariant holds: the orchestrator NEVER writes issue state.
-15. As a tracker author, I want to declare whether the orchestrator should apply its local candidate sort (`sort_candidates_locally`), so that API-ordered trackers (Linear) keep native order.
-16. As a tracker author, I want to optionally report `rate_limit_remaining`, so that the dashboard can surface it without the trait requiring it.
+26. As the orchestrator, I want to call `poll_candidates` / `fetch_states` / `fetch_terminal` / `fetch_one` on a `Tracker` without knowing the backend, so that I never grow a "which tracker?" branch.
+27. As a tracker author, I want to translate my native API into the `Issue` shape and construct it via a builder (it's `#[non_exhaustive]`), so that the model can gain fields without breaking me.
+28. As the orchestrator, I want `Tracker` read-only for issue state (only the narrow defaulted `park_issue_needs_human` safety write, erroring by default), so that the two-state invariant holds: the orchestrator NEVER writes issue state.
+29. As a tracker author, I want `sort_candidates_locally()` defaulted false, so that API-ordered trackers (Linear) keep native order.
+30. As a tracker author, I want optional metadata (rate-limit remaining, tracker-native fields via the `metadata` map) without the trait requiring it, so that the contract stays minimal.
 
 ### Runner capability
-17. As the orchestrator, I want to spawn a runner via the `Runner` trait without knowing whether it's claude/codex/pi/cli, so that dispatch code is backend-agnostic.
-18. As a runner author, I want to own my command/args/stdin-payload/env/session-dir construction inside my crate, so that backend quirks (claude's `--permission-mode bypassPermissions --add-dir`, codex's `app-server` + sandbox flags) live with the backend.
-19. As the orchestrator, I want exactly one runner active at a time (claude **or** codex), so that the agent runs a single runner per the cardinality rule.
-20. As a runner author, I want my child spawned in its own process group with the SIGTERM→grace→SIGKILL lifecycle handled by shared code, so that I don't re-implement supervision.
-21. As the dashboard, I want runner output normalized into log-row types (assistant/thinking/tool_call/tool_output/error/user) regardless of backend, so that the UI renders uniformly.
-22. As a runner author, I want to receive the standard `AGENT_*` env contract, so that scripts/CLI runners keep working unchanged.
+31. As the orchestrator, I want to spawn via the `Runner` trait without knowing claude/codex/pi/cli, so that dispatch is backend-agnostic.
+32. As a runner author, I want my command/args/stdin/env/session-dir construction inside my crate, calling `runner-core` for supervision/line-pump/kill, so that backend quirks (claude `bypassPermissions --add-dir`, codex `app-server` sandbox flags) live with the backend and I don't re-implement process control.
+33. As the orchestrator, I want exactly one runner active at a time, so that the cardinality rule holds.
+34. As the dashboard/TUI, I want runner output normalized into log-row types (assistant/thinking/tool_call/tool_output/error/user) regardless of backend, so that any renderer is uniform.
+35. As a runner author, I want the standard `AGENT_*` env contract, so that CLI/script runners keep working unchanged.
 
-### Channel capability (scaffold only)
-23. As a channel author, I want a `cap-channel` trait so that I can later build Discord/Slack/Telegram bridges that the host treats uniformly.
-24. As an operator, I want all configured channels to be **live simultaneously** (N concurrent), so that the agent is reachable from Discord, Slack, and Telegram at once — channels coexist, they do not replace each other.
-25. As the host, I want a channel registry that fans inbound channel messages onto the bus and routes outbound replies back to the originating channel by id, so that channels never call each other.
-
-### Orchestrator (plain extension owning run state)
-26. As the orchestrator, I want to own the entire run-state model (`RunStatus`: Running/RetryQueued/Cancelled/Failed/Succeeded, the history ring, SQLite run persistence), so that the host stays domain-free.
-27. As the orchestrator, I want to keep the tick order `reconcile → collect_finished → dispatch → publish_snapshots`, so that a just-finished run isn't stolen and mis-recorded.
-28. As the orchestrator, I want to remain the **sole mutator** of run state (including the `paused` flag), so that single-writer discipline survives the refactor.
-29. As the orchestrator, I want to receive `ControlMsg` (Stop/Pause/Resume) from the dashboard over a channel and apply them to run state only — never issue state — so that control never crosses the two-state boundary.
-30. As the orchestrator, I want retry classification preserved (normal+terminal → Succeeded; normal+active → 1s continuation not counting against max_retries; abnormal → exponential backoff capped at 30 min up to max_retries → Failed), so that behavior is byte-for-byte the same.
-31. As the orchestrator, I want to subscribe to bus events (e.g. a future `schedule.fired`) to trigger a dispatch pass, so that other extensions can drive me without importing me.
-32. As the orchestrator, I want to persist finished runs to `logs/history.jsonl` / SQLite and reload on startup, so that the cold-start-trusts-issue-files behavior is unchanged.
+### Orchestrator (extension + public api crate)
+36. As the orchestrator, I want to own the entire run-state model (`RunStatus`, history ring, SQLite run persistence, `logs/history.jsonl`), so that the host stays domain-free.
+37. As the orchestrator, I want to expose `RunSnapshot`/`RunStatus`/`ControlMsg`/`RunRequested` via `orchestrator-api`, so that dashboard and TUI name them without importing my impl crate (no sibling-impl import).
+38. As the orchestrator, I want to keep the tick order `reconcile → collect_finished → dispatch → publish_snapshots`, so that a just-finished run isn't stolen/mis-recorded.
+39. As the orchestrator, I want to remain the **sole mutator** of run state (incl. `paused`), so that single-writer discipline survives.
+40. As the orchestrator, I want to receive `ControlMsg` (Pause/Resume/Stop{run_id}/Cancel{run_id}) over one typed path (the bus) and apply to run state only — never issue state — so that control never crosses the two-state boundary.
+41. As the orchestrator, I want retry classification preserved (normal+terminal → Succeeded; normal+active → 1s continuation, not counting vs max_retries; abnormal → exponential backoff capped 30 min up to max_retries → Failed), so that behavior is unchanged.
+42. As the orchestrator, I want to publish `RunSnapshot` as a **retained** (watch-like) value, so that a dashboard/TUI starting late gets current state immediately, then updates.
+43. As the orchestrator, I want to subscribe to `DispatchRequested`/`RunRequested`, so that a scheduler or channel can drive me without importing me.
+44. As the orchestrator, I want finished runs persisted and reloaded on startup, so that cold-start-trusts-issue-files is unchanged.
 
 ### Dashboard (plain extension)
-33. As the dashboard, I want to mount my routes on the host's http server rather than owning the listener, so that the host owns the port and other extensions can mount too.
-34. As the dashboard, I want to read run-state snapshots published by the orchestrator (read locks / snapshot channel), so that I render without mutating.
-35. As the dashboard, I want my askama templates compiled in my own crate, so that a template/field mismatch is a build error in the dashboard crate, not core.
-36. As the dashboard, I want to keep self-polling via HTMX into `#content` (not `<body>`), so that the existing UI keeps working.
+45. As the dashboard, I want to mount routes on the host HTTP server (not own the listener), so that the host owns the port and other extensions can mount too.
+46. As the dashboard, I want to read retained `RunSnapshot` and send `ControlMsg` over the bus, so that I render read-only and request control without mutating.
+47. As the dashboard, I want my askama templates compiled in my own crate, so that a template/field mismatch is a build error in the dashboard crate.
+48. As the dashboard, I want HTMX self-polling into `#content` (not `<body>`) preserved, so that the UI keeps working.
 
-### Path containment & safety (preserved invariants)
-37. As the host, I want all paths to derive from one canonical agent root with `assert_contained` rejecting `..`/symlink escapes, so that a child cwd cannot escape the workspace root.
-38. As a runner, I want containment asserted before spawn, so that the safety guarantee is unchanged after the split.
+### HTTP surface
+49. As the host, I want a defined route-namespace + collision rule (and whether one extension may claim `/`, and whether HTTP can be disabled entirely), so that two extensions can't silently conflict.
 
-### Operability
-39. As an operator, I want `agentropy doctor --dir` to still preflight config/template/tracker, so that the diagnostic survives — implemented by querying the registry for which extensions are linked + their config validation hooks.
-40. As an operator, I want the agent to remain self-contained (agent = folder; move folder = move agent), so that the tenet survives the refactor.
-41. As an operator, I want startup errors from any extension surfaced through the existing HITL notifier path, so that a misconfigured extension still pages me.
+### Future extensions enabled (not built here)
+50. As a scheduler author, I want to publish either `DispatchRequested{reason: Schedule}` (wake the poll pass) or `RunRequested{source: Scheduler, prompt, …}` (create ad-hoc work), so that cron can either trigger normal dispatch or inject work — orchestrator stays sole run-state mutator.
+51. As a scheduler author, I want `ctx.data_dir("scheduler")` for last-fired state, a cancellation token for my loop, and defined paused/catch-up/timezone semantics, so that cron behaves across restarts.
+52. As a channel author (Discord/Telegram), I want to be a plain long-running extension that loads its own secrets, runs its websocket/webhook/poll loop, publishes typed `ChatInbound`, subscribes to `ChatOutbound`, and shuts down via the cancellation token, so that no channel logic leaks into the host.
+53. As a channel author, I want a defined bridge from chat stimulus to work (publish `RunRequested` / `DispatchRequested` / `ControlMsg`), so that an inbound message actually causes useful behavior.
+
+### Preserved invariants
+54. As the host, I want all paths derived from one canonical agent root with `assert_contained` rejecting `..`/symlinks, so that a child cwd cannot escape the workspace root.
+55. As a runner, I want containment asserted before spawn, so that the safety guarantee is unchanged.
+56. As an operator, I want the agent self-contained (agent = folder; move folder = move agent), so that the tenet survives.
+57. As an operator, I want startup errors from any extension surfaced via the existing HITL notifier, so that a misconfigured extension still pages me.
 
 ## Implementation Decisions
 
 ### Workspace layout (monorepo)
-- Cargo workspace at repo root. Members:
-  - `crates/host-api`, `crates/cap-tracker`, `crates/cap-runner`, `crates/cap-channel` — contract crates.
-  - `crates/agentropy-host` — the host (library + the boot routine).
-  - `extensions/tracker-linear`, `extensions/tracker-files`, `extensions/runner-claude`, `extensions/runner-codex`, `extensions/runner-pi`, `extensions/runner-cli`, `extensions/runner-fake`, `extensions/orchestrator`, `extensions/dashboard`.
-  - `dist/` — the bin crate (`name = "agentropy"`) that depends on host + the chosen extensions.
-- For now all live in one repo. The dependency graph is identical to the eventual multi-repo split, so extracting any crate to its own repo later is a path change in `Cargo.toml`, nothing else.
-
-### Registration mechanism
-- `inventory` crate for compile-time auto-registration. Each extension submits a `Plugin` descriptor: `{ id, role, make }` where `role ∈ {Tracker, Runner, Channel, Plain}` and `make` is a constructor closure.
-- The host reads the registry at boot, filters/constructs by role + config, and starts each. There is **no central `match` over backend names** anywhere — `tracker::build`/`RunnerKind::parse` are deleted; selection is "find the registered plugin whose `id` matches the configured `use:`".
-- Linking an extension (a `dist` dependency) is the entire registration cost.
+- Workspace members:
+  - `crates/host-api`, `crates/cap-tracker`, `crates/cap-runner`, `crates/orchestrator-api`, `crates/runner-core`.
+  - `crates/agentropy-host` (the host lib + `run()`).
+  - `extensions/{tracker-linear,tracker-files,runner-claude,runner-codex,runner-pi,runner-cli,runner-fake,orchestrator,dashboard,frontend-log,example}`.
+  - `dist/` — bin crate (`name = "agentropy"`), the composition root.
+- The dependency graph equals the eventual multi-repo split, so extracting any crate to its own repo later is a `Cargo.toml` path change.
 
 ### host-api surface (domain-free)
-- Lifecycle: a `start(ctx) -> Result<RunningExtension>` style hook each extension implements; graceful shutdown via a shared watch signal.
-- Config: typed access to the agent folder config + per-extension config sections (extensions declare and validate their own schema; host doesn't know the fields).
-- Event bus: publish/subscribe over typed topic strings (`schedule.fired`, `run.finished`, channel inbound/outbound). Producers and consumers never reference each other.
-- HTTP mount: extensions register routers onto one host-owned axum server + port.
-- Terminal, secrets/env (dotenv load), async runtime handle.
-- The `inventory` `Plugin` type + role enum.
-- **No `Issue`, no `RunStatus`, no tracker/runner knowledge** in host-api.
+- **Extension trait**: `id()`, `register(&self, &mut Registrar) -> Result<()>` (defaulted no-op), `start(&self, HostCtx) -> Result<RunningExtension>` (defaulted no-op).
+- **Typed service registry**: `registrar.service::<dyn Trait>(id, Arc<impl Trait>)`; `ctx.services().get_named::<dyn Trait>(id)`. Type-erased internally; host never names a concrete service type.
+- **Typed event bus**: publish/subscribe over typed payloads; **retained** topics (watch-like, latest-value + updates) vs broadcast. Delivery semantics documented in `host-api` docs (bounded, backpressure policy, ordering per-topic, slow-subscriber behavior, shutdown drain).
+- **Foreground slot**: `registrar.foreground(id, factory)`; config selects one; `Foreground::run(self, ctx, ExclusiveTerminal)`. At most one; conflict / unresolved selection fails at boot.
+- **HTTP mount**: extensions contribute routers; defined namespace + collision rule; optional `/` claim; HTTP disable-able.
+- **Lifecycle**: shutdown/cancellation token; two-phase boot.
+- **Paths**: canonical root + `assert_contained`; `ctx.data_dir(ext_id)`.
+- **Config**: typed access by extension id; each extension declares + validates its own schema. `dotenv` loading stays host behavior; extensions read env/config via `ctx`.
+- **NOT in host-api**: `Issue`, `RunStatus`, `Tracker`/`Runner`/`Channel`, any `Role` enum, raw `inventory` types, a shared "terminal service".
 
 ### cap-tracker
-- Moves `Issue` (from `src/domain.rs`) and the `Tracker` trait (from `src/tracker/mod.rs`) verbatim. Trait stays **read-only for issue state** + the narrow `park_issue_needs_human` default-erroring safety write. Keeps `sort_candidates_locally` and `rate_limit_remaining` default methods.
-- `Issue` is the frozen domain model — the single shape all trackers translate into.
+- `Tracker` trait = only orchestrator-called methods + defaulted `park_issue_needs_human` (errors by default) + defaulted `sort_candidates_locally`.
+- `Issue` `#[non_exhaustive]` with builder/constructors (external crates can't struct-literal a non-exhaustive type — builder is mandatory), required fields limited to what orchestration/prompting/sorting use, everything else `Option` + a `metadata` map for tracker-native fields.
+- Owns tracker provider registration helper.
 
-### cap-runner
-- Moves the `Runner`-facing types: a public `Runner` trait (`spawn(SpawnParams) -> RunnerHandle`), `SpawnParams`, `RunnerHandle`, `ExitKind`, `KillReason`. The per-backend `RunnerSpec` structs move **out** to each runner extension; the shared supervision/line-pump/`term_then_kill`/process-group/timeout logic stays in `cap-runner` (or a small shared `runner-core` helper the extensions call) so backends don't re-implement it.
-- The `AGENT_*` env contract and protocol-line classification (`classify_protocol_line`, `map_event_type`, …) are shared helpers, not per-backend.
+### cap-runner / runner-core
+- `cap-runner`: `Runner::spawn(SpawnParams) -> RunnerHandle`, `SpawnParams` (non-exhaustive/builder), `RunnerHandle`, `ExitKind`, `KillReason`, normalized output/log-row event types, `AGENT_*` constants.
+- `runner-core`: process-group setup, `supervise`, line pump, `term_then_kill`, `wait_for_pids_dead`, ANSI strip, `classify_protocol_line`/`map_event_type`/`normalize_log_row`. Backend crates own only their command/args/stdin/env/session-dir + backend-specific tests.
 
-### cap-channel (scaffold)
-- New `Channel` trait: `send(outbound)`, an inbound stream the host fans onto the bus, an `id`. No v0 implementor; exists so the host's channel registry + cardinality-N model is real and future bridges slot in.
+### orchestrator-api
+- Public payload/contract types: `RunSnapshot`, `RunStatus`, `ControlMsg` (Pause/Resume/Stop/Cancel), `RunRequested`, `DispatchRequested`, normalized log rows, history-row shape. No logic. This is how dashboard/TUI/scheduler/channels integrate without importing the orchestrator impl.
 
-### Host run-state decision
-- **Host stays fully domain-free.** Run state — `RunStatus`, the history ring, the SQLite run/event rows, `logs/history.jsonl` — lives entirely in the **orchestrator extension**. The host does NOT provide a generic store.
-- Runner output events flow over the **bus**; the orchestrator (and dashboard) subscribe and persist. This keeps persistence an orchestrator concern, consistent with "orchestrator owns run state."
-- Consequence: `src/store.rs`, `src/state.rs` (AppState/RunStatus/HistoryRing/EventRing) move into the orchestrator crate. The dashboard reads run-state snapshots the orchestrator publishes (read-only).
+### Run-state ownership
+- Host stays fully domain-free. `RunStatus`, history ring, SQLite run/event rows, `logs/history.jsonl` live in the **orchestrator** crate. Runner output flows over the bus; orchestrator (and any renderer) subscribe and persist. (`src/store.rs`, `src/state.rs` move into the orchestrator crate.)
 
-### Orchestrator extension
-- Consumes `cap-tracker` + `cap-runner`. Holds the tick loop, run-state, control-channel handling, HITL notify, SQLite persistence.
-- Tick order, sort (priority asc null-last → created_at asc → identifier), retry/backoff/continuation classification, reconcile skip-if-finished rule — all preserved exactly.
-- Subscribes to the bus for external dispatch triggers (future scheduler); publishes `run.*` snapshots/events for the dashboard.
+### Registration & boot
+- Explicit `plugins![…]` list in `dist`. No central backend `match`; `tracker::build` and `RunnerKind::parse` are deleted — selection is a registry lookup by configured id, with a boot assertion that configured ids resolved.
+- Linked ≠ started: capability providers instantiate only when selected by a consumer; background/plain extensions start only when enabled; foreground starts only when selected.
 
-### Dashboard extension
-- Owns its askama templates + `src/dashboard/` views. Mounts routes on the host http server. Reads orchestrator snapshots; sends `ControlMsg` over the control channel exposed by the orchestrator (via bus or a host-brokered control topic — control mutates run state only).
-- Keeps minijinja for `WORKFLOW.md` prompt rendering inside whichever crate renders prompts (orchestrator-side, since prompt rendering feeds dispatch).
+### Foreground / logging
+- `frontend-log` extension = default foreground, renders the current log stream. TUI = a future `frontend-tui` foreground provider. Host routes logs to a tracing layer / log-event stream the active foreground consumes; host does not print to the terminal post-handoff. Panic hook + shutdown restore terminal state.
 
-### CLI / boot
-- `agentropy run --dir` and `agentropy doctor --dir` stay. `run` boots the host, host starts all registered extensions. `doctor` asks the registry which extensions are linked and runs each extension's config-validation hook.
-- `init-workflow` / `export` are tracker-Linear-adjacent; they move with the Linear tracker extension or a small CLI extension, exposed as host subcommands the extension registers.
+### CLI
+- `agentropy run --dir` boots the host. `doctor --dir` validates enabled/selected extensions via their config hooks + asserts id resolution. `init-workflow`/`export` (Linear-adjacent) register as host subcommands from the Linear tracker (or a small CLI extension).
 
-### What core no longer knows
-- No backend names, no `Issue`, no `RunStatus`, no askama, no SQLite. Delete `tracker::build` and `RunnerKind::parse` dispatch tables. Selection is registry lookup by configured id.
+### Channels — explicitly deferred
+- No `cap-channel`, no host channel registry in this PRD. First channels ship as plain extensions over typed `ChatInbound`/`ChatOutbound` events; a `chat-api` contract is extracted only after one or two real bridges prove the shape.
 
 ## Testing Decisions
 
-A good test asserts **external behavior through the public contract**, not internals. Tests target the crate boundary (the trait, the registry, the parsed output), not private structs. Most existing tests port over with their crate; they already test behavior (arg/turn-request shape, classification, sort/backoff) rather than implementation.
+A good test asserts **external behavior through the public contract**, not internals — the trait, the registry, parsed output. Most existing tests port over with their crate (they already test arg/turn-request shape, classification, sort/backoff — behavior, not implementation).
 
 Modules to test (all four groups, per decision):
 
 1. **Contract crates**
-   - `cap-runner`: port the existing `runner.rs` tests — claude arg construction (`-p --permission-mode bypassPermissions --add-dir [--model]`), codex `app-server` + approval/sandbox/model/provider/effort/thinking flags + JSON-RPC turn request, pi turn request, CLI `AGENT_*` env, ANSI strip + `classify_protocol_line` / `normalize_log_row` row typing, JSON-RPC `result` unwrapping, stderr-always-error. These are pure functions over `SpawnParams` — ideal deep-module tests.
-   - `cap-tracker`: `Issue` parse/translation round-trips; default-method behavior (`park_issue_needs_human` errors by default, `sort_candidates_locally` defaults false).
-   - Prior art: the current `#[cfg(test)] mod tests` in `src/runner.rs` (already behavior-level).
+   - `cap-runner` + `runner-core`: port existing `runner.rs` tests — claude arg construction, codex `app-server` + approval/sandbox/model/provider/effort/thinking flags + JSON-RPC turn request, pi turn request, CLI `AGENT_*` env, ANSI strip + `classify_protocol_line`/`normalize_log_row`, JSON-RPC `result` unwrap, stderr-always-error. Backend-specific arg tests live in the backend crates, not `cap-runner`.
+   - `cap-tracker`: `Issue` builder + round-trip; defaulted `park_issue_needs_human` errors; `sort_candidates_locally` defaults false; `#[non_exhaustive]` construction via builder works from an external crate.
+   - Prior art: current `#[cfg(test)] mod tests` in `src/runner.rs`.
 
 2. **Orchestrator**
-   - Tick-loop order, candidate sort (priority null-last → created_at → identifier), backoff growth-then-cap (`backoff_grows_then_caps`), continuation-vs-backoff classification, reconcile skip-if-finished, terminal-at-reconcile → Succeeded, missing/non-active → Cancelled.
-   - Prior art: existing orchestrator unit tests (`cargo test --release backoff_grows_then_caps`).
+   - Tick order, candidate sort (priority null-last → created_at → identifier), `backoff_grows_then_caps`, continuation-vs-backoff classification, reconcile skip-if-finished, terminal-at-reconcile → Succeeded, missing/non-active → Cancelled, retained `RunSnapshot` publish.
+   - Prior art: existing orchestrator unit tests.
 
 3. **Host boot + registry**
-   - `inventory` registration discovers a test plugin; boot constructs only plugins whose `id` matches config; an unregistered configured id is a clear error (replacing the old `bail!("unsupported tracker.use …")`).
-   - Config wiring: per-extension config section parsed + validated; http mount composes multiple routers without collision.
-   - New tests (no prior art — this is the new seam). Use a `FakeRunner`/fake plugin as the registry fixture.
+   - Typed service registry: register `dyn Tracker`/`dyn Runner` and resolve by id; unregistered configured id fails loudly (replaces old `bail!`).
+   - Two-phase boot ordering: `register()` completes for all before any `start()`; foreground selected before background tasks run.
+   - **Foreground exclusivity**: exactly one selected; conflict/unresolved fails at boot; non-TTY path defined. (Highest-value new test — it guards the TUI seam.)
+   - HTTP mount composes multiple routers; collision detected.
+   - Fixtures: a fake plugin + `FakeRunner`.
 
 4. **Trackers**
-   - `tracker-files`: `./issues/*.md` frontmatter → `Issue` shape; active/terminal/blocked filtering in `poll_candidates`.
-   - `tracker-linear`: GraphQL response → `Issue` mapping; rate-limit-remaining tracking; native order preserved (`sort_candidates_locally == false`).
-   - Prior art: existing tracker tests in `src/tracker/`.
+   - `tracker-files`: `./issues/*.md` frontmatter → `Issue`; active/terminal/blocked filtering in `poll_candidates`.
+   - `tracker-linear`: GraphQL response → `Issue` mapping; rate-limit tracking; native order preserved (`sort_candidates_locally == false`).
+   - Prior art: existing tracker tests.
 
-Out of test scope: askama template rendering (compile-time checked), the bus transport itself (covered indirectly by orchestrator subscribe tests), channel extension (no implementor yet).
+Also: keep `extensions/example` compiling + a smoke test in CI — the executable proof that "creating an extension is simple."
+
+Out of test scope: askama rendering (compile-time checked), bus transport internals (covered indirectly via orchestrator subscribe/retained-snapshot tests), channels (no implementor), the TUI itself (no implementor — but the `foreground` slot mechanism IS tested).
 
 ## Out of Scope
 
-- **Runtime drop-in of extensions** (WASM, dlopen, subprocess plugins). Explicitly rejected: separate-repo *development* is the goal; the recompile step is accepted. Compile-time traits + `inventory` only.
-- **Multi-repo split.** Stays a monorepo for now. The crate graph is shaped so extraction is later a path change, but actually splitting repos is not in this PRD.
-- **New feature extensions** (scheduler, Discord/Slack/Telegram channels, web chat, TUI, admin dashboard). Out of scope as *features*; the host-api + `cap-channel` + bus seams that make them possible ARE in scope. The scheduler mirroring `~/code/aihub/packages/extensions/scheduler` is the intended first new extension *after* this refactor.
-- **Multiple concurrent trackers.** Cardinality stays 1 tracker active (N is designed-for, not built).
-- **Behavior changes.** This is a packaging refactor. The tick loop, retry math, sort, containment, permission flags, two-state invariant, and dashboard UX must be byte-for-byte equivalent. Any behavior change is a separate PRD.
-- **Changing the agent-folder on-disk layout** (`issues/`, `workspaces/`, `logs/`, `WORKFLOW.md`, `agent.yaml`). Unchanged.
+- **Runtime drop-in of extensions** (WASM, dlopen, subprocess). Rejected: separate-crate *development* is the goal; recompile is accepted. Compile-time composition only.
+- **`inventory` as the mechanism.** Demoted to explicit `dist` list. (May return later, domain-free + macro-hidden, if the explicit list becomes painful.)
+- **Multi-repo split.** Monorepo now; crate graph shaped for later extraction.
+- **`cap-channel` and a host channel registry.** Deferred until real channel bridges exist.
+- **Building the scheduler, channels, or TUI.** Out of scope as *features*. In scope: the seams that make them clean extensions — typed service registry, typed bus + `orchestrator-api` events (`DispatchRequested`/`RunRequested`/`ControlMsg`/retained `RunSnapshot`), the `foreground` slot, `ctx.data_dir`, scaffold generator, example extension.
+- **Multiple concurrent trackers.** Cardinality stays 1 active.
+- **A general UI/render framework.** The `foreground` slot is exactly-one top-level owner + an exclusive terminal handle — nothing more.
+- **HTTP replacement abstraction.** Mount + collision rules only; full HTTP-surface ownership is a later singleton-slot case, just don't hard-code host ownership in a way that blocks it.
+- **Behavior changes.** This is a packaging refactor: tick loop, retry math, sort, containment, permission flags, two-state invariant, dashboard UX must be equivalent. The one intentional behavior move: terminal log output is produced by `frontend-log` instead of inline host code (output should be equivalent in the `foreground: logs` default).
+- **Agent-folder on-disk layout.** Unchanged.
 
 ## Further Notes
 
-- **Linchpin:** keep `host-api` and each `cap-*` tiny and stable. They are the crates everyone depends on; churn there forces every extension to rebuild and risks breakage. Treat their public surface as semver-significant from day one.
-- **Footprint:** the refactor must hold the ALG-186 gate — ~8.2 MB stripped binary, ~14.9 MB idle RSS, 0% idle CPU. `inventory` + workspace splitting add negligible runtime cost (registration is a static slice walk at boot). Re-run the pilot benchmark runbook after the split to confirm no regression. The footprint is dominated by the LLM child process, not the runtime — this remains true.
-- **Migration order (suggested):** (1) extract contract crates `host-api`/`cap-tracker`/`cap-runner` with no behavior change, monolith still depends on them; (2) carve the host out, leaving a thin `dist` bin; (3) move trackers, then runners, then dashboard into `extensions/`; (4) move the orchestrator + run-state/store last (largest blast radius); (5) introduce the bus and rewire dashboard↔orchestrator over it; (6) delete the dead `match` dispatch. Each step keeps `cargo test --release` green.
-- **`inventory` caveat:** registration requires the extension crate to actually be linked. A crate listed in `dist/Cargo.toml` but never referenced can be dropped by the linker. Mitigate with the standard `inventory` pattern (the `dist` crate's reachable code path forces linkage), and add a host boot-time assertion that the configured `use:` ids resolved to a registered plugin — otherwise fail loudly (the new equivalent of today's `bail!`).
-- **Two-state invariant is the thing most likely to be silently broken** by a careless split. The `Tracker` trait must remain read-only for issue state, and run state must remain orchestrator-owned with the orchestrator as sole mutator. Call this out in review of every extracted crate.
+- **The single most important change** (both council rounds agreed): make today's terminal log stream the `frontend-log` extension occupying a `foreground` slot. If the current log stream can't be expressed as an extension, the seam isn't real and the TUI will never be clean.
+- **Linchpin:** keep `host-api`, `cap-*`, and `orchestrator-api` tiny and additive. They are depended on by everyone; churn forces rebuilds and breakage. Treat their surface as semver-significant from `0.x` — `#[non_exhaustive]` + builders + defaulted methods so they can grow without breaking. **Do not call anything "frozen"**; stabilize only after scheduler/channels/TUI have been built against the architecture and proven the shapes.
+- **Biggest risk to "creating an extension is simple"** is the bus becoming undocumented, stringly-typed integration folklore — authors guessing topic names and payload shapes by reading orchestrator source. Mitigations, cheapest-first: (1) typed events in owning API crates, not raw strings; (2) documented delivery semantics; (3) `extensions/example` green in CI; (4) the `cargo agentropy new` scaffold.
+- **Two-state invariant is the thing most likely to be silently broken** by a careless split. `Tracker` stays read-only for issue state; run state stays orchestrator-owned with the orchestrator as sole mutator; control flows as `ControlMsg` requests, never direct mutation. Call this out in review of every extracted crate.
+- **Footprint:** hold the ALG-186 gate. Static composition adds negligible runtime cost; re-run the pilot benchmark runbook after the split. Footprint is dominated by the LLM child, not the runtime.
+- **Migration order (each step keeps `cargo test --release` green):**
+  1. Extract `cap-tracker`, `cap-runner`, `runner-core` with no behavior change; monolith depends on them.
+  2. Introduce `host-api` (services, bus, lifecycle, paths) + `agentropy-host`; leave a thin `dist` bin.
+  3. Add the typed service registry + explicit `plugins![]`; delete `tracker::build` / `RunnerKind::parse`.
+  4. Move trackers, then runners, into `extensions/`.
+  5. Add the `foreground` slot; extract `frontend-log`; stop host-direct terminal writes; add panic/shutdown terminal restore.
+  6. Extract `orchestrator-api`; move the orchestrator + run-state/store into `extensions/orchestrator`; rewire dashboard ↔ orchestrator over the bus with retained `RunSnapshot` + typed `ControlMsg`.
+  7. Add `extensions/example` + the scaffold generator; document bus delivery semantics.
+- **Scheduler decision to make at build time, not now:** `DispatchRequested` (wake poll) vs `RunRequested` (inject work). Implement the one the first scheduler needs; both event types can live in `orchestrator-api` from the start so the contract is ready.
