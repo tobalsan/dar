@@ -18,5 +18,16 @@ fn main() {
 async fn main_inner() -> Result<()> {
     let root = agentropy::host_root_from_args(std::env::args_os())?;
     let options = agentropy_host::HostOptions::new(root).without_dotenv();
-    agentropy_host::boot(plugins![agentropy::MonolithExtension], options).await
+    agentropy_host::boot(
+        plugins![
+            runner_pi::PiRunnerExtension,
+            runner_claude::ClaudeRunnerExtension,
+            runner_codex::CodexRunnerExtension,
+            runner_cli::CliRunnerExtension,
+            runner_fake::FakeRunnerExtension,
+            agentropy::MonolithExtension,
+        ],
+        options,
+    )
+    .await
 }

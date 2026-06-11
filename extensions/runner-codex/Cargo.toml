@@ -1,0 +1,13 @@
+[package]
+name = "runner-codex"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+
+[dependencies]
+anyhow = "1"
+cap-runner = { path = "../../crates/cap-runner" }
+chrono = { version = "0.4", features = ["serde"] }
+host-api = { path = "../../crates/host-api" }
+runner-core = { path = "../../crates/runner-core" }
+serde_json = "1"
