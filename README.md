@@ -87,10 +87,10 @@ crate each under `extensions/`. The binary is assembled from an explicit plugin
 list in the composition root (`dist/`). Extensions import `host-api`
 (and optionally one cap/api crate) and read zero host internals.
 
-For writing your own extension, start from `extensions/example` (the living
-reference, kept green in CI) or scaffold one with
-`cargo agentropy new my-extension --kind background` (or `service` /
-`foreground`).
+For writing your own extension, see the [authoring guide](docs/extensions.md);
+start from `extensions/example` (the living reference, kept green in CI) or
+scaffold one with `cargo agentropy new my-extension --kind background`
+(or `service` / `foreground`).
 
 ### Adding an extension
 
