@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  workspace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build workspace
+        run: cargo build --workspace
+      - name: Test workspace
+        run: cargo test --workspace
+
+  # Each workspace member must build and test on its own so a break is
+  # localized to one crate (includes extensions/example, the living reference
+  # extension kept green in CI).
+  crate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - agentropy
+          - agentropy-host
+          - host-api
+          - cap-runner
+          - cap-tracker
+          - orchestrator-api
+          - runner-core
+          - dashboard
+          - example
+          - frontend-log
+          - orchestrator
+          - runner-claude
+          - runner-cli
+          - runner-codex
+          - runner-fake
+          - runner-pi
+          - tracker-files
+          - tracker-linear
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.crate }}
+      - name: Test ${{ matrix.crate }}
+        run: cargo test -p ${{ matrix.crate }}
