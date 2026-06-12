@@ -713,7 +713,27 @@ fn turn_key(msg: &Value) -> Option<(String, String)> {
     Some((thread_id, turn_id))
 }
 
+/// Return `true` when `line` is a JSON-RPC notification whose `method` ends
+/// with `/delta` (or contains `/delta/`). These are streaming token chunks:
+/// the final assembled text arrives in a separate `item/completed` line, so
+/// deltas carry no information worth logging or storing.
+fn is_delta_notification(line: &str) -> bool {
+    if let Ok(v) = serde_json::from_str::<Value>(line) {
+        if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
+            return method.ends_with("/delta") || method.contains("/delta/");
+        }
+    }
+    false
+}
+
 /// Emit one stdout line to events + store.
+///
+/// - Delta notifications (`method` ends with `/delta`): update `last_event_at`
+///   only. They are the liveness signal during long quiet turns but add no
+///   information to logs or the dashboard Events tab.
+/// - Non-delta lines with an empty classified `row_type`: push to the event
+///   sink and log, but skip the store insert (no blank cards, no DB bloat).
+/// - All other lines: full path — sink, liveness, log, and store.
 fn emit_line(
     issue_id: &str,
     run_id: &str,
@@ -725,6 +745,15 @@ fn emit_line(
 ) {
     let ts = chrono::Utc::now();
     let clean = strip_ansi(line);
+
+    // Deltas are only a liveness heartbeat; skip log/sink/store entirely.
+    if is_delta_notification(&clean) {
+        if let Ok(mut t) = last_event_at.lock() {
+            *t = ts;
+        }
+        return;
+    }
+
     let pl = classify_protocol_line(stream, &clean);
     let formatted = format!("child[{issue_id}]: {clean}");
     events.push(formatted);
@@ -732,6 +761,14 @@ fn emit_line(
         *t = ts;
     }
     log_ev(issue_id, stream, &clean);
+
+    // Skip the store for lines that classify to an empty row_type — these are
+    // protocol noise (handshake responses, intermediate notifications) that
+    // would produce blank cards in the dashboard Events tab.
+    if pl.row_type.is_empty() {
+        return;
+    }
+
     let payload = serde_json::json!({
         "type": "protocol_event",
         "stream": stream,
@@ -777,6 +814,45 @@ mod tests {
             _payload: &str,
             _ts: DateTime<Utc>,
         ) {
+        }
+    }
+
+    /// Event sink that records every pushed line.
+    #[derive(Default)]
+    struct RecordingSink {
+        lines: Mutex<Vec<String>>,
+    }
+    impl cap_runner::RunnerEventSink for RecordingSink {
+        fn push(&self, line: String) {
+            self.lines.lock().unwrap().push(line);
+        }
+    }
+    impl RecordingSink {
+        fn count(&self) -> usize {
+            self.lines.lock().unwrap().len()
+        }
+    }
+
+    /// Event store that counts insert_event calls.
+    #[derive(Default)]
+    struct CountingStore {
+        count: Mutex<usize>,
+    }
+    impl cap_runner::RunnerEventStore for CountingStore {
+        fn insert_event(
+            &self,
+            _run_id: Option<&str>,
+            _issue_identifier: &str,
+            _kind: &'static str,
+            _payload: &str,
+            _ts: DateTime<Utc>,
+        ) {
+            *self.count.lock().unwrap() += 1;
+        }
+    }
+    impl CountingStore {
+        fn count(&self) -> usize {
+            *self.count.lock().unwrap()
         }
     }
 
@@ -1198,5 +1274,68 @@ exit 0
             assert!(std::time::Instant::now() < deadline, "child {pid} still alive");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    // --- emit_line filtering tests ---
+
+    fn make_emit_line_parts() -> (
+        Arc<RecordingSink>,
+        Arc<CountingStore>,
+        Arc<Mutex<chrono::DateTime<Utc>>>,
+    ) {
+        let sink = Arc::new(RecordingSink::default());
+        let store = Arc::new(CountingStore::default());
+        let last_event_at = Arc::new(Mutex::new(Utc::now()));
+        (sink, store, last_event_at)
+    }
+
+    /// (a) Delta line: `last_event_at` is updated; nothing is logged to sink or
+    /// stored (sink.count == 0, store.count == 0).
+    #[test]
+    fn delta_line_updates_liveness_skips_sink_and_store() {
+        let delta = r#"{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"hello"}}"#;
+        assert!(is_delta_notification(delta), "test line must be a delta");
+
+        let (sink, store, last_event_at) = make_emit_line_parts();
+        let before = *last_event_at.lock().unwrap();
+
+        // Tiny sleep so `ts` is strictly after `before`.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        emit_line("ISSUE-1", "run-1", delta, "stdout", &(sink.clone() as Arc<dyn cap_runner::RunnerEventSink>), &(store.clone() as Arc<dyn cap_runner::RunnerEventStore>), &last_event_at);
+
+        let after = *last_event_at.lock().unwrap();
+        assert!(after > before, "last_event_at must advance for delta lines");
+        assert_eq!(sink.count(), 0, "delta line must not be pushed to sink");
+        assert_eq!(store.count(), 0, "delta line must not be inserted into store");
+    }
+
+    /// (b) Non-delta line with empty row_type: pushed to sink and logged, but
+    /// NOT inserted into store (store.count == 0).
+    #[test]
+    fn empty_row_type_line_is_pushed_but_not_stored() {
+        // A JSON-RPC response (id+result, no method) classifies as row_type "".
+        let rpc_response = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+        assert!(!is_delta_notification(rpc_response), "test line must not be delta");
+
+        let (sink, store, last_event_at) = make_emit_line_parts();
+        emit_line("ISSUE-1", "run-1", rpc_response, "stdout", &(sink.clone() as Arc<dyn cap_runner::RunnerEventSink>), &(store.clone() as Arc<dyn cap_runner::RunnerEventStore>), &last_event_at);
+
+        assert_eq!(sink.count(), 1, "non-delta line must be pushed to sink");
+        assert_eq!(store.count(), 0, "empty row_type must not be inserted into store");
+    }
+
+    /// (c) Normal classified line (assistant): fully stored — sink and store both
+    /// receive one entry.
+    #[test]
+    fn classified_line_is_fully_stored() {
+        // item/completed with agentMessage → row_type "assistant"
+        let assistant = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","text":"Hello world"}}}"#;
+        assert!(!is_delta_notification(assistant), "test line must not be delta");
+
+        let (sink, store, last_event_at) = make_emit_line_parts();
+        emit_line("ISSUE-1", "run-1", assistant, "stdout", &(sink.clone() as Arc<dyn cap_runner::RunnerEventSink>), &(store.clone() as Arc<dyn cap_runner::RunnerEventStore>), &last_event_at);
+
+        assert_eq!(sink.count(), 1, "classified line must be pushed to sink");
+        assert_eq!(store.count(), 1, "classified line must be inserted into store");
     }
 }
