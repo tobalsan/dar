@@ -31,10 +31,12 @@ jobs:
           - agentropy
           - agentropy-host
           - host-api
+          - cap-chat
           - cap-runner
           - cap-tracker
           - orchestrator-api
           - runner-core
+          - chat-pi
           - dashboard
           - example
           - frontend-log
@@ -46,6 +48,7 @@ jobs:
           - runner-pi
           - tracker-files
           - tracker-linear
+          - tui
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
