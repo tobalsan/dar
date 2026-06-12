@@ -37,6 +37,25 @@ pub enum KillReason {
     Reconcile,
 }
 
+/// A turn-capable runner reports this when the child has paused at a turn
+/// boundary: all in-flight work is paused, the child is idle, and it is awaiting
+/// a `TurnDecision`. The runner MUST keep honoring its kill channel while idle,
+/// and MUST still resolve `done` with the appropriate `ExitKind` if the child
+/// dies on its own at any point.
+#[derive(Debug)]
+pub struct TurnEnded;
+
+/// The orchestrator's reply to a `TurnEnded`. The issue tracker is the state
+/// machine: the orchestrator re-reads the issue and decides whether the same
+/// live session takes another turn or shuts down.
+#[derive(Debug)]
+pub enum TurnDecision {
+    /// Feed `prompt` as the next turn into the same live session.
+    Continue { prompt: String },
+    /// Shut down gracefully and resolve `done` with `ExitKind::Normal`.
+    Finish,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NormalizedOutputEvent {
     pub stream: String,
@@ -213,19 +232,61 @@ pub trait Runner: Send + Sync {
 /// Handle to a running child. Owns the kill channel and the supervising task's
 /// join handle. `wait` / `request_kill` consume the handle; the orchestrator
 /// stores it via `Option::take`.
+///
+/// A turn-capable runner (one constructed via [`RunnerHandle::with_turns`])
+/// additionally exposes a turn-boundary channel pair: the runner sends a
+/// [`TurnEnded`] when the child goes idle awaiting a decision, and the
+/// orchestrator replies with a [`TurnDecision`]. Runners that opt out (the
+/// default [`RunnerHandle::new`]) report `supports_turns() == false`; the
+/// orchestrator never polls or signals them and they behave exactly as before.
 pub struct RunnerHandle {
     pub pid: u32,
     kill_tx: oneshot::Sender<KillReason>,
     done: tokio::task::JoinHandle<ExitKind>,
+    /// Turn boundaries reported by the runner (turn-capable runners only).
+    ended_rx: Option<tokio::sync::mpsc::UnboundedReceiver<TurnEnded>>,
+    /// Decisions the orchestrator feeds back at each boundary.
+    decision_tx: Option<tokio::sync::mpsc::UnboundedSender<TurnDecision>>,
 }
 
 impl RunnerHandle {
+    /// Construct a turn-opt-out handle: `supports_turns()` is false and the
+    /// orchestrator drives it exactly as today (exit = attempt over).
     pub fn new(
         pid: u32,
         kill_tx: oneshot::Sender<KillReason>,
         done: tokio::task::JoinHandle<ExitKind>,
     ) -> Self {
-        Self { pid, kill_tx, done }
+        Self {
+            pid,
+            kill_tx,
+            done,
+            ended_rx: None,
+            decision_tx: None,
+        }
+    }
+
+    /// Construct a turn-capable handle. The runner sends a [`TurnEnded`] on
+    /// `ended_rx` each time the child parks at a turn boundary (idle, awaiting a
+    /// decision), and reads the orchestrator's reply from `decision_tx`:
+    /// `Continue` feeds the prompt as the next turn into the same live session;
+    /// `Finish` shuts the session down gracefully (resolving `done` with
+    /// `ExitKind::Normal`). The runner MUST still honor the kill channel while
+    /// idle and still resolve `done` if the child dies on its own.
+    pub fn with_turns(
+        pid: u32,
+        kill_tx: oneshot::Sender<KillReason>,
+        done: tokio::task::JoinHandle<ExitKind>,
+        ended_rx: tokio::sync::mpsc::UnboundedReceiver<TurnEnded>,
+        decision_tx: tokio::sync::mpsc::UnboundedSender<TurnDecision>,
+    ) -> Self {
+        Self {
+            pid,
+            kill_tx,
+            done,
+            ended_rx: Some(ended_rx),
+            decision_tx: Some(decision_tx),
+        }
     }
 
     pub fn pid(&self) -> u32 {
@@ -236,6 +297,35 @@ impl RunnerHandle {
     /// handle each tick, then `take()` + `wait()` to collect the `ExitKind`.
     pub fn is_finished(&self) -> bool {
         self.done.is_finished()
+    }
+
+    /// Whether this handle was constructed turn-capable. Turn-opt-out handles
+    /// (`new`) return false; the orchestrator skips turn polling for them.
+    pub fn supports_turns(&self) -> bool {
+        self.ended_rx.is_some()
+    }
+
+    /// Non-blocking drain of one pending [`TurnEnded`]. Returns true if a turn
+    /// boundary was observed (the orchestrator polls this each tick). Always
+    /// false for turn-opt-out handles. Drains any queued boundaries to the most
+    /// recent so a single tick observes at most one decision point.
+    pub fn try_recv_turn_ended(&mut self) -> bool {
+        let Some(rx) = self.ended_rx.as_mut() else {
+            return false;
+        };
+        let mut seen = false;
+        while rx.try_recv().is_ok() {
+            seen = true;
+        }
+        seen
+    }
+
+    /// Reply to a turn boundary. A send error means the child already died; that
+    /// is fine — `collect_finished` classifies the exit on the next pass.
+    pub fn send_turn_decision(&self, decision: TurnDecision) {
+        if let Some(tx) = &self.decision_tx {
+            let _ = tx.send(decision);
+        }
     }
 
     /// Await the run to completion and return its classified exit.
