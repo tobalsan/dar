@@ -5,8 +5,12 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use std::collections::HashSet;
+
 use anyhow::{Context, Result};
-use cap_runner::{ExitKind, KillReason, RunnerHandle, SpawnParams};
+use cap_runner::{
+    ExitKind, KillReason, RunnerHandle, SpawnParams, TurnDecision, TurnEnded,
+};
 use host_api::{Extension, RegisterCtx};
 use runner_core::{
     classify_protocol_line, common_env, effective_command, log_ev, scrub_loaded_env,
@@ -15,10 +19,13 @@ use runner_core::{
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
 const EVENT_KIND: &'static str = "runner.codex";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// SIGTERM-to-SIGKILL grace passed to `term_then_kill` on shutdown/kill.
+const KILL_GRACE: Duration = Duration::from_secs(5);
 
 pub struct RunnerCodexExtension;
 
@@ -210,6 +217,8 @@ async fn spawn_codex(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     );
 
     let (kill_tx, kill_rx) = oneshot::channel::<KillReason>();
+    let (ended_tx, ended_rx) = tokio::sync::mpsc::unbounded_channel::<TurnEnded>();
+    let (decision_tx, decision_rx) = tokio::sync::mpsc::unbounded_channel::<TurnDecision>();
     let timeout = Duration::from_millis(p.max_run_timeout_ms);
 
     // Clone what the async task needs.
@@ -230,6 +239,8 @@ async fn spawn_codex(p: SpawnParams<'_>) -> Result<RunnerHandle> {
             stdout,
             timeout,
             kill_rx,
+            ended_tx,
+            decision_rx,
             &issue_id,
             &run_id,
             &workspace_str,
@@ -247,14 +258,22 @@ async fn spawn_codex(p: SpawnParams<'_>) -> Result<RunnerHandle> {
         result
     });
 
-    Ok(RunnerHandle::new(pid, kill_tx, done))
+    Ok(RunnerHandle::with_turns(
+        pid,
+        kill_tx,
+        done,
+        ended_rx,
+        decision_tx,
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // Protocol driver
 // ---------------------------------------------------------------------------
 
-/// Drive the full JSON-RPC handshake and turn, then supervise the child.
+/// Drive the full JSON-RPC handshake and turn loop, then supervise the child.
+/// The hard `timeout` ceiling and the `kill_rx` channel preempt the inner turn
+/// loop in EVERY state — including while idle awaiting a [`TurnDecision`].
 #[allow(clippy::too_many_arguments)]
 async fn drive_protocol(
     pid: u32,
@@ -262,6 +281,8 @@ async fn drive_protocol(
     stdout: tokio::process::ChildStdout,
     timeout: Duration,
     kill_rx: oneshot::Receiver<KillReason>,
+    ended_tx: UnboundedSender<TurnEnded>,
+    mut decision_rx: UnboundedReceiver<TurnDecision>,
     issue_id: &str,
     run_id: &str,
     workspace: &str,
@@ -272,16 +293,17 @@ async fn drive_protocol(
     store: Arc<dyn cap_runner::RunnerEventStore>,
     last_event_at: Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
 ) -> ExitKind {
-    // We'll use a channel to pass kill_rx into the select inside run_turn.
-    // The timeout wraps the entire protocol exchange.
+    // The timeout and kill channel wrap the entire protocol exchange and turn
+    // loop. Awaiting a decision is just one suspension point inside the inner
+    // future, so both still preempt it.
     tokio::select! {
         kind = run_protocol_inner(
-            pid, stdin, stdout, issue_id, run_id, workspace,
+            pid, stdin, stdout, &ended_tx, &mut decision_rx, issue_id, run_id, workspace,
             model, effort, prompt, events, store, last_event_at,
         ) => kind,
         _ = tokio::time::sleep(timeout) => {
             log_ev(issue_id, "timeout", "turn_timeout_ms exceeded; killing");
-            term_then_kill(pid, Duration::from_secs(5));
+            term_then_kill(pid, KILL_GRACE);
             ExitKind::Interrupted { reason: "turn_timeout" }
         }
         reason = kill_rx => {
@@ -291,18 +313,20 @@ async fn drive_protocol(
                 Ok(KillReason::Reconcile) => log_ev(issue_id, "kill", "reason=reconcile"),
                 Err(_) => log_ev(issue_id, "kill", "handle dropped"),
             }
-            term_then_kill(pid, Duration::from_secs(5));
-            ExitKind::Abnormal(None)
+            term_then_kill(pid, KILL_GRACE);
+            ExitKind::Interrupted { reason: "killed" }
         }
     }
 }
 
-/// Inner protocol: handshake + turn pump. Returns ExitKind.
+/// Inner protocol: handshake + turn loop. Returns ExitKind.
 #[allow(clippy::too_many_arguments)]
 async fn run_protocol_inner(
     pid: u32,
     stdin: &mut tokio::process::ChildStdin,
     stdout: tokio::process::ChildStdout,
+    ended_tx: &UnboundedSender<TurnEnded>,
+    decision_rx: &mut UnboundedReceiver<TurnDecision>,
     issue_id: &str,
     run_id: &str,
     workspace: &str,
@@ -364,31 +388,113 @@ async fn run_protocol_inner(
         }
     };
 
-    // 4. turn/start
+    // 4. turn/start (initial turn). Fire-and-pump: the turn loop below tracks
+    // the in-flight set and reacts to the turn/started + turn/completed
+    // notifications, so we do not block on the request response here.
     let turn_id_req = next_id;
-    let _ = request!(
-        make_turn_start(turn_id_req, &thread_id, workspace, prompt, model, effort),
-        turn_id_req
-    );
+    next_id += 1;
+    send!(make_turn_start(turn_id_req, &thread_id, workspace, prompt, model, effort));
 
-    // 5. Pump until turn/completed or error notification.
-    let success = pump_until_terminal(
-        &mut lines,
-        stdin,
-        issue_id,
-        run_id,
-        &events,
-        &store,
-        &last_event_at,
-    ).await;
+    // 5. Turn loop. We keep ONE in-flight set keyed by (threadId, turnId) across
+    // ALL threads (the main thread plus any collab subagent threads). The run is
+    // never "done" at the protocol level — a turn boundary is "in-flight set just
+    // became empty", at which point we report a `TurnEnded` and ask the
+    // orchestrator (the state machine) what to do next.
+    //
+    // States:
+    //   - `Busy`: in-flight set non-empty; pump notifications.
+    //   - `Idle`: in-flight set empty; `TurnEnded` was sent; pump notifications
+    //     AND await a `TurnDecision` concurrently. A new `turn/started` here
+    //     (forwarded subagent completion injects a new parent turn) makes the
+    //     pending boundary stale → back to `Busy`; any `Continue` that then
+    //     arrives mid-turn is swallowed (never send `turn/start` mid-turn).
+    let mut in_flight: HashSet<(String, String)> = HashSet::new();
+    // Some(prompt) once a `Continue` arrives while idle and we are ready to feed
+    // it. We never feed a continuation while turns are in flight.
+    let mut idle = false; // a `TurnEnded` is outstanding (we are awaiting a decision)
 
-    if success {
-        // Give child ~5s to exit cleanly.
-        term_then_kill(pid, Duration::from_secs(5));
-        ExitKind::Normal
-    } else {
-        term_then_kill(pid, Duration::from_secs(5));
-        ExitKind::Abnormal(None)
+    loop {
+        if idle {
+            // Idle: race a stdout line against a decision. We must keep pumping
+            // so a forwarded subagent completion (new parent turn/started) can
+            // make this boundary stale before we act on a decision.
+            tokio::select! {
+                line = lines.next_line() => {
+                    match handle_pump_line(
+                        line, stdin, &mut in_flight, &thread_id,
+                        issue_id, run_id, &events, &store, &last_event_at,
+                    ).await {
+                        PumpStep::Continue => {
+                            if !in_flight.is_empty() {
+                                // A new turn started: the boundary is stale.
+                                idle = false;
+                            }
+                        }
+                        PumpStep::BoundaryReached => {
+                            // Already idle; a redundant empty transition. Stay idle.
+                        }
+                        PumpStep::Exited => {
+                            term_then_kill(pid, KILL_GRACE);
+                            return ExitKind::Normal;
+                        }
+                        PumpStep::MainTurnFailed | PumpStep::ProtocolError => {
+                            term_then_kill(pid, KILL_GRACE);
+                            return ExitKind::Abnormal(None);
+                        }
+                    }
+                }
+                decision = decision_rx.recv() => {
+                    match decision {
+                        Some(TurnDecision::Continue { prompt }) => {
+                            if in_flight.is_empty() {
+                                // Genuinely idle: feed the continuation turn.
+                                let cont_id = next_id;
+                                next_id += 1;
+                                send!(make_turn_start(cont_id, &thread_id, workspace, &prompt, model, effort));
+                                idle = false;
+                            } else {
+                                // Boundary went stale (a new turn started before
+                                // the decision arrived): swallow it. A fresh
+                                // `TurnEnded` is emitted when the set empties.
+                                log_ev(issue_id, "turn", "stale Continue swallowed (turn in flight)");
+                                idle = false;
+                            }
+                        }
+                        Some(TurnDecision::Finish) | None => {
+                            log_ev(issue_id, "finish", "graceful shutdown");
+                            term_then_kill(pid, KILL_GRACE);
+                            return ExitKind::Normal;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Busy: pump notifications until the in-flight set empties.
+            let line = lines.next_line().await;
+            match handle_pump_line(
+                line, stdin, &mut in_flight, &thread_id,
+                issue_id, run_id, &events, &store, &last_event_at,
+            ).await {
+                PumpStep::Continue => {}
+                PumpStep::BoundaryReached => {
+                    // In-flight set just emptied: report idle and park.
+                    if ended_tx.send(TurnEnded).is_err() {
+                        log_ev(issue_id, "finish", "handle dropped; graceful shutdown");
+                        term_then_kill(pid, KILL_GRACE);
+                        return ExitKind::Normal;
+                    }
+                    idle = true;
+                }
+                PumpStep::Exited => {
+                    term_then_kill(pid, KILL_GRACE);
+                    return ExitKind::Normal;
+                }
+                PumpStep::MainTurnFailed | PumpStep::ProtocolError => {
+                    term_then_kill(pid, KILL_GRACE);
+                    return ExitKind::Abnormal(None);
+                }
+            }
+        }
     }
 }
 
@@ -449,97 +555,162 @@ async fn wait_for_response(
     }
 }
 
-/// Pump lines after turn/start until turn/completed or error notification.
-/// Returns true on success (turn completed), false on failure.
-async fn pump_until_terminal(
-    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+/// What processing one pumped stdout line tells the turn loop to do next.
+enum PumpStep {
+    /// Ordinary line (delta, server request answered, subagent event). The
+    /// in-flight set may have changed but is still non-empty.
+    Continue,
+    /// A `turn/completed` removal just emptied the in-flight set — this is a turn
+    /// boundary.
+    BoundaryReached,
+    /// stdout EOF / read error: the child is exiting on its own.
+    Exited,
+    /// The MAIN thread's turn completed with a failed/errored status (abnormal).
+    MainTurnFailed,
+    /// An unrecoverable protocol error notification.
+    ProtocolError,
+}
+
+/// Read+process one stdout line: emit it, answer server requests, and maintain
+/// the cross-thread in-flight `(threadId, turnId)` set.
+///
+/// - `turn/started` → insert; `turn/completed` (any status) → remove.
+/// - A MAIN-thread `turn/completed` with a non-success status → `MainTurnFailed`.
+/// - A subagent-thread failed turn is logged and removed but does NOT end the
+///   run (the tracker-driven loop decides).
+/// - Removal that empties the set → `BoundaryReached`.
+#[allow(clippy::too_many_arguments)]
+async fn handle_pump_line(
+    line: std::io::Result<Option<String>>,
     stdin: &mut tokio::process::ChildStdin,
+    in_flight: &mut HashSet<(String, String)>,
+    main_thread_id: &str,
     issue_id: &str,
     run_id: &str,
     events: &Arc<dyn cap_runner::RunnerEventSink>,
     store: &Arc<dyn cap_runner::RunnerEventStore>,
     last_event_at: &Arc<Mutex<chrono::DateTime<chrono::Utc>>>,
-) -> bool {
-    let mut had_error = false;
-
-    loop {
-        let line = match lines.next_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => {
-                log_ev(issue_id, "error", "stdout EOF before turn/completed");
-                return false;
-            }
-            Err(e) => {
-                log_ev(issue_id, "error", &format!("stdout read error: {e}"));
-                return false;
-            }
-        };
-
-        emit_line(issue_id, run_id, &line, "stdout", events, store, last_event_at);
-
-        let msg: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let method = msg.get("method").and_then(|v| v.as_str());
-        let id = msg.get("id");
-        let has_id = id.map(|v| v.is_string() || v.is_number()).unwrap_or(false);
-
-        // Server request (has both id and method).
-        if has_id && method.is_some() {
-            let server_id = id.unwrap().clone();
-            let method_str = method.unwrap();
-            if method_str == "item/commandExecution/requestApproval"
-                || method_str == "item/fileChange/requestApproval"
-            {
-                // Respond with "cancel".
-                let response = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": server_id,
-                    "result": "cancel"
-                });
-                let resp_line = response.to_string() + "\n";
-                let _ = stdin.write_all(resp_line.as_bytes()).await;
-            } else {
-                // Unsupported server request → method not found error.
-                let response = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": server_id,
-                    "error": { "code": -32601, "message": format!("method not found: {method_str}") }
-                });
-                let resp_line = response.to_string() + "\n";
-                let _ = stdin.write_all(resp_line.as_bytes()).await;
-            }
-            continue;
+) -> PumpStep {
+    let line = match line {
+        Ok(Some(line)) => line,
+        Ok(None) => {
+            log_ev(issue_id, "exit", "stdout EOF");
+            return PumpStep::Exited;
         }
+        Err(e) => {
+            log_ev(issue_id, "error", &format!("stdout read error: {e}"));
+            return PumpStep::Exited;
+        }
+    };
 
-        // Notification: no id.
-        if !has_id {
-            match method {
-                Some("turn/completed") => {
-                    let status = msg
-                        .get("params")
-                        .and_then(|p| p.get("turn"))
-                        .and_then(|t| t.get("status"))
-                        .and_then(|s| s.as_str());
-                    if status == Some("completed") {
-                        return !had_error;
+    emit_line(issue_id, run_id, &line, "stdout", events, store, last_event_at);
+
+    let msg: Value = match serde_json::from_str(&line) {
+        Ok(v) => v,
+        Err(_) => return PumpStep::Continue,
+    };
+
+    let method = msg.get("method").and_then(|v| v.as_str());
+    let id = msg.get("id");
+    let has_id = id.map(|v| v.is_string() || v.is_number()).unwrap_or(false);
+
+    // Server request (has both id and method).
+    if let (true, Some(server_id), Some(method_str)) = (has_id, id.cloned(), method) {
+        if method_str == "item/commandExecution/requestApproval"
+            || method_str == "item/fileChange/requestApproval"
+        {
+            // Respond with "cancel".
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": server_id,
+                "result": "cancel"
+            });
+            let resp_line = response.to_string() + "\n";
+            let _ = stdin.write_all(resp_line.as_bytes()).await;
+        } else {
+            // Unsupported server request → method not found error.
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": server_id,
+                "error": { "code": -32601, "message": format!("method not found: {method_str}") }
+            });
+            let resp_line = response.to_string() + "\n";
+            let _ = stdin.write_all(resp_line.as_bytes()).await;
+        }
+        return PumpStep::Continue;
+    }
+
+    // Notification: no id.
+    if !has_id {
+        match method {
+            Some("turn/started") => {
+                if let Some(key) = turn_key(&msg) {
+                    in_flight.insert(key);
+                }
+            }
+            Some("turn/completed") => {
+                let thread_id = notification_thread_id(&msg);
+                let status = msg
+                    .get("params")
+                    .and_then(|p| p.get("turn"))
+                    .and_then(|t| t.get("status"))
+                    .and_then(|s| s.as_str());
+                if let Some(key) = turn_key(&msg) {
+                    in_flight.remove(&key);
+                }
+                let is_main = thread_id.as_deref() == Some(main_thread_id);
+                if status != Some("completed") {
+                    if is_main {
+                        log_ev(
+                            issue_id,
+                            "error",
+                            &format!("main turn/completed with non-success status: {status:?}"),
+                        );
+                        return PumpStep::MainTurnFailed;
                     } else {
-                        log_ev(issue_id, "error", &format!("turn/completed with non-success status: {:?}", status));
-                        return false;
+                        // Subagent failure: log and let the loop continue. The
+                        // tracker-driven loop decides what to do.
+                        log_ev(
+                            issue_id,
+                            "turn",
+                            &format!("subagent turn/completed status={status:?} thread={thread_id:?}"),
+                        );
                     }
                 }
-                Some("error") => {
-                    let msg_str = msg.get("params").map(|v| v.to_string()).unwrap_or_default();
-                    log_ev(issue_id, "error", &format!("server error notification: {msg_str}"));
-                    had_error = true;
-                    // Continue pumping; treat as failure when turn never completes.
+                if in_flight.is_empty() {
+                    return PumpStep::BoundaryReached;
                 }
-                _ => {}
             }
+            Some("error") => {
+                let msg_str = msg.get("params").map(|v| v.to_string()).unwrap_or_default();
+                log_ev(issue_id, "error", &format!("server error notification: {msg_str}"));
+                return PumpStep::ProtocolError;
+            }
+            _ => {}
         }
     }
+
+    PumpStep::Continue
+}
+
+/// The threadId carried by a `turn/started` / `turn/completed` notification.
+fn notification_thread_id(msg: &Value) -> Option<String> {
+    msg.get("params")
+        .and_then(|p| p.get("threadId"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// The `(threadId, turnId)` key for a turn notification, if both are present.
+fn turn_key(msg: &Value) -> Option<(String, String)> {
+    let thread_id = notification_thread_id(msg)?;
+    let turn_id = msg
+        .get("params")
+        .and_then(|p| p.get("turn"))
+        .and_then(|t| t.get("id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())?;
+    Some((thread_id, turn_id))
 }
 
 /// Emit one stdout line to events + store.
@@ -768,79 +939,264 @@ mod tests {
         assert!(req["params"]["model"].is_null());
     }
 
-    // --- integration test with fake app-server ---
+    // --- in-flight accounting helpers ---
 
-    #[tokio::test]
-    async fn fake_server_happy_path_returns_normal() {
-        use std::os::unix::fs::PermissionsExt;
-        use tokio::fs;
+    fn started(thread: &str, turn: &str) -> Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "turn/started",
+            "params": { "threadId": thread, "turn": { "id": turn } }
+        })
+    }
 
-        // Write a fake app-server shell script to a tempdir.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let script_path = dir.path().join("fake-codex");
+    fn completed(thread: &str, turn: &str, status: &str) -> Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "turn/completed",
+            "params": { "threadId": thread, "turn": { "id": turn, "status": status } }
+        })
+    }
 
-        // The script:
-        //   - reads lines from stdin
-        //   - answers initialize → success
-        //   - answers thread/start → {thread:{id:"t1"}}
-        //   - answers turn/start → {turn:{id:"u1"}}
-        //   - emits turn/completed notification
-        //   - reads until EOF, exits 0
-        let script = r#"#!/bin/sh
-set -e
-while IFS= read -r line; do
-    # Extract id and method (very naively)
-    id=$(echo "$line" | sed 's/.*"id":\([0-9]*\).*/\1/' | grep -E '^[0-9]+$' || true)
-    method=$(echo "$line" | grep -o '"method":"[^"]*"' | head -1 | sed 's/"method":"//;s/"//')
-    if [ -z "$id" ]; then
-        # notification (initialized) — ignore
-        continue
-    fi
-    case "$method" in
-        initialize)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
-            ;;
-        thread/start)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"thread":{"id":"t1"}}}\n' "$id"
-            ;;
-        turn/start)
-            printf '{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"u1"}}}\n' "$id"
-            # After responding, emit the completion notification
-            printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"u1","status":"completed"}}}\n'
-            ;;
-    esac
-done
-exit 0
-"#;
+    #[test]
+    fn turn_key_reads_thread_and_turn_id() {
+        assert_eq!(
+            turn_key(&started("t1", "u1")),
+            Some(("t1".to_string(), "u1".to_string()))
+        );
+        assert_eq!(
+            turn_key(&completed("ta", "ua", "completed")),
+            Some(("ta".to_string(), "ua".to_string()))
+        );
+        // Missing threadId → no key.
+        assert!(turn_key(&serde_json::json!({"params":{"turn":{"id":"u1"}}})).is_none());
+    }
 
-        fs::write(&script_path, script).await.expect("write script");
-        fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
-            .await
-            .expect("chmod");
+    #[test]
+    fn notification_thread_id_distinguishes_main_from_subagent() {
+        assert_eq!(notification_thread_id(&completed("t1", "u1", "completed")).as_deref(), Some("t1"));
+        assert_eq!(notification_thread_id(&completed("sub", "us", "completed")).as_deref(), Some("sub"));
+    }
 
-        let workspaces_dir = dir.path().join("workspaces");
-        fs::create_dir_all(&workspaces_dir).await.expect("create workspaces dir");
-        let workspace = workspaces_dir.join("ISSUE-1");
-        fs::create_dir_all(&workspace).await.expect("create workspace dir");
+    // --- integration tests with fake app-server (ALG-234 turn loop) ---
 
+    use std::os::unix::fs::PermissionsExt;
+
+    fn write_script(dir: &Path, body: &str) -> std::path::PathBuf {
+        let path = dir.join("fake-codex.sh");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Spawn the real codex driver against `script` with a fresh workspace.
+    async fn spawn_against(dir: &Path, script: &Path) -> RunnerHandle {
+        let workspaces = dir.join("workspaces");
+        let workspace = workspaces.join("ISSUE-1");
+        std::fs::create_dir_all(&workspace).unwrap();
         let params = SpawnParams::builder(
-            script_path.to_str().unwrap(),
+            script.to_str().unwrap(),
             "codex",
             &workspace,
-            &workspaces_dir,
-            dir.path(),
-            "Test prompt".to_string(),
+            &workspaces,
+            dir,
+            "initial prompt".to_string(),
             "ISSUE-1".to_string(),
             "run-1".to_string(),
-            10_000, // 10s timeout
+            10_000,
             Arc::new(NullSink),
             Arc::new(NullStore),
             Arc::new(Mutex::new(Utc::now())),
         )
         .build();
+        spawn_codex(params).await.expect("spawn")
+    }
 
-        let handle = spawn_codex(params).await.expect("spawn");
-        let exit = handle.wait().await;
-        assert_eq!(exit, ExitKind::Normal, "expected Normal exit, got {exit:?}");
+    async fn wait_for_turn_ended(handle: &mut RunnerHandle) {
+        for _ in 0..200 {
+            if handle.try_recv_turn_ended() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("no TurnEnded within deadline");
+    }
+
+    /// Assert NO TurnEnded arrives within a short window.
+    async fn assert_no_turn_ended_for(handle: &mut RunnerHandle, ticks: u32) {
+        for _ in 0..ticks {
+            assert!(
+                !handle.try_recv_turn_ended(),
+                "unexpected TurnEnded before in-flight set emptied"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    fn is_alive(pid: u32) -> bool {
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok()
+    }
+
+    /// Shared shell prelude: answer initialize/thread/start, log every received
+    /// line to `$AGENT_WORKSPACE/received.log`, and dispatch on method. The
+    /// caller appends the `turn/start` case body.
+    const PRELUDE: &str = r#"set -e
+log="$AGENT_WORKSPACE/received.log"
+while IFS= read -r line; do
+    printf '%s\n' "$line" >> "$log"
+    id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/' | grep -E '^[0-9]+$' || true)
+    method=$(printf '%s' "$line" | grep -o '"method":"[^"]*"' | head -1 | sed 's/"method":"//;s/"//')
+    case "$method" in
+        initialize)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+            ;;
+        thread/start)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"thread":{"id":"main"}}}\n' "$id"
+            ;;
+        turn/start)
+"#;
+
+    /// Plain happy path: one main turn starts + completes, the driver reports a
+    /// TurnEnded, and the test (acting as orchestrator) sends Finish → Normal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn happy_path_turn_then_finish_returns_normal() {
+        let body = format!(
+            "{PRELUDE}{}",
+            r#"            printf '{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"u1"}}}\n' "$id"
+            printf '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"main","turn":{"id":"u1"}}}\n'
+            printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"main","turn":{"id":"u1","status":"completed"}}}\n'
+            ;;
+    esac
+done
+exit 0
+"#
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(dir.path(), &body);
+
+        let mut handle = spawn_against(dir.path(), &script).await;
+        wait_for_turn_ended(&mut handle).await;
+        handle.send_turn_decision(TurnDecision::Finish);
+        assert_eq!(handle.wait().await, ExitKind::Normal);
+    }
+
+    /// ALG-234 regression: a collab subagent's turn/completed arrives FIRST, the
+    /// main turn completes later, and a forwarded subagent completion injects a
+    /// follow-up main turn. No TurnEnded fires until the in-flight set is empty,
+    /// the child survives the subagent completion, and Finish yields Normal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn subagent_completes_first_does_not_kill_run() {
+        let body = format!(
+            "{PRELUDE}{}",
+            r#"            printf '{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"u1"}}}\n' "$id"
+            # main turn starts, then a subagent thread starts.
+            printf '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"main","turn":{"id":"u1"}}}\n'
+            printf '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"sub","turn":{"id":"s1"}}}\n'
+            # subagent completes FIRST (must NOT end the run; main still in flight).
+            printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"sub","turn":{"id":"s1","status":"completed"}}}\n'
+            sleep 0.3
+            # main completes -> set briefly empties -> boundary.
+            printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"main","turn":{"id":"u1","status":"completed"}}}\n'
+            # forwarded subagent completion injects a follow-up main turn.
+            printf '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"main","turn":{"id":"u2"}}}\n'
+            sleep 0.2
+            printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"main","turn":{"id":"u2","status":"completed"}}}\n'
+            ;;
+    esac
+done
+exit 0
+"#
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(dir.path(), &body);
+
+        let mut handle = spawn_against(dir.path(), &script).await;
+        let pid = handle.pid();
+
+        // While the main turn (and the subagent) are in flight, no boundary.
+        assert_no_turn_ended_for(&mut handle, 6).await;
+        assert!(is_alive(pid), "child killed mid-run by subagent completion");
+
+        // Eventually the in-flight set empties for good and we get a boundary.
+        wait_for_turn_ended(&mut handle).await;
+        assert!(is_alive(pid), "child died before the final boundary");
+
+        handle.send_turn_decision(TurnDecision::Finish);
+        assert_eq!(handle.wait().await, ExitKind::Normal);
+    }
+
+    /// Continue at a boundary feeds a SECOND turn/start on the same threadId into
+    /// the same live child. The fake records received requests so we can assert
+    /// two turn/start requests landed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn continue_feeds_second_turn_start_same_thread() {
+        let body = format!(
+            "{PRELUDE}{}",
+            r#"            printf '{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"u%s"}}}\n' "$id" "$id"
+            printf '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"main","turn":{"id":"u%s"}}}\n' "$id"
+            printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"main","turn":{"id":"u%s","status":"completed"}}}\n' "$id"
+            ;;
+    esac
+done
+exit 0
+"#
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(dir.path(), &body);
+        let received = dir.path().join("workspaces/ISSUE-1/received.log");
+
+        let mut handle = spawn_against(dir.path(), &script).await;
+        wait_for_turn_ended(&mut handle).await;
+        handle.send_turn_decision(TurnDecision::Continue {
+            prompt: "second prompt".to_string(),
+        });
+        wait_for_turn_ended(&mut handle).await;
+        handle.send_turn_decision(TurnDecision::Finish);
+        assert_eq!(handle.wait().await, ExitKind::Normal);
+
+        let log = std::fs::read_to_string(&received).unwrap();
+        let starts: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("\"method\":\"turn/start\""))
+            .collect();
+        assert_eq!(starts.len(), 2, "expected two turn/start requests, got: {log}");
+        assert!(starts[0].contains("initial prompt"), "first: {}", starts[0]);
+        assert!(starts[1].contains("second prompt"), "second: {}", starts[1]);
+        // Both turn/start requests target the same main threadId.
+        assert!(starts[1].contains("\"threadId\":\"main\""), "second: {}", starts[1]);
+    }
+
+    /// Kill while idle awaiting a decision is honored: Interrupted + child reaped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn kill_while_awaiting_decision_is_interrupted() {
+        let body = format!(
+            "{PRELUDE}{}",
+            r#"            printf '{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"u1"}}}\n' "$id"
+            printf '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"main","turn":{"id":"u1"}}}\n'
+            printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"main","turn":{"id":"u1","status":"completed"}}}\n'
+            ;;
+    esac
+done
+exit 0
+"#
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(dir.path(), &body);
+
+        let mut handle = spawn_against(dir.path(), &script).await;
+        let pid = handle.pid();
+        wait_for_turn_ended(&mut handle).await;
+
+        let exit = handle.request_kill_and_wait(KillReason::OperatorStop).await;
+        assert!(matches!(exit, ExitKind::Interrupted { .. }), "got {exit:?}");
+
+        let pgid = nix::unistd::Pid::from_raw(-(pid as i32));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if nix::sys::signal::kill(pgid, None).is_err() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "child {pid} still alive");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }
