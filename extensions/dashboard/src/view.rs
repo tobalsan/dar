@@ -36,10 +36,13 @@ impl ContentTemplate {
             .map(|ts| fmt_age((Utc::now() - ts).num_seconds().max(0)))
             .unwrap_or_else(|| "never".to_string());
         let last_tick_at = tick_at.map(|ts| ts.to_rfc3339()).unwrap_or_default();
+        let active_ids: std::collections::HashSet<&str> =
+            s.active_runs.iter().map(|r| r.run_id.as_str()).collect();
         let history = s
             .runs
             .into_iter()
             .filter(|run| run.outcome.as_deref() != Some("park_barrier"))
+            .filter(|run| !active_ids.contains(run.run_id.as_str()))
             .map(history_row)
             .collect::<Vec<_>>();
         Self {
