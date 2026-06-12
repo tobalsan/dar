@@ -1757,6 +1757,7 @@ dependencies = [
  "cap-runner",
  "chrono",
  "host-api",
+ "nix",
  "runner-core",
  "serde_json",
  "tempfile",
@@ -1796,8 +1797,11 @@ dependencies = [
  "cap-runner",
  "chrono",
  "host-api",
+ "nix",
  "runner-core",
  "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
