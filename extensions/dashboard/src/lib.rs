@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::json;
 use orchestrator_api::{ControlMsg, RunQuery, RunSnapshot, CONTROL_TOPIC, RUN_SNAPSHOT_TOPIC};
 use std::sync::{Arc, OnceLock};
-use view::{DashboardTemplate, RunDetailTemplate, RUN_DETAIL_EVENT_CAP};
+use view::{DashboardTemplate, RunDetailTemplate};
 
 #[derive(rust_embed::Embed)]
 #[folder = "assets/"]
@@ -132,7 +132,7 @@ async fn run_detail(State(api): State<BusApiState>, Path(run_id): Path<String>) 
     let Some(run) = runs.run(&run_id) else {
         return (StatusCode::NOT_FOUND, "run not found").into_response();
     };
-    let events = runs.events_for_run(&run_id, 0, RUN_DETAIL_EVENT_CAP);
+    let events = runs.events_for_run(&run_id, 0, i64::MAX as usize);
     match RunDetailTemplate::build(run, events).render() {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
@@ -168,6 +168,7 @@ fn send_control(_api: &BusApiState, msg: ControlMsg) -> StatusCode {
 struct LogsQuery {
     since: Option<i64>,
     limit: Option<usize>,
+    view: Option<String>,
 }
 
 async fn run_logs(
@@ -181,8 +182,41 @@ async fn run_logs(
     };
     let since = q.since.unwrap_or(0);
     if headers.contains_key("hx-request") {
-        // htmx poll from the drawer logs tab: replace the full capped list.
-        let events = runs.events_for_run(&run_id, since, RUN_DETAIL_EVENT_CAP);
+        if q.view.as_deref() == Some("events") {
+            // Events tab incremental poll: append only new ev-row divs.
+            let events = runs.events_for_run(&run_id, since, i64::MAX as usize);
+            let mut html = String::new();
+            for e in &events {
+                let (row_type, text) = if let Ok(serde_json::Value::Object(map)) =
+                    serde_json::from_str::<serde_json::Value>(&e.payload)
+                {
+                    if map.get("type").and_then(|v| v.as_str()) == Some("protocol_event") {
+                        let rt = map.get("log_row").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let tx = map.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        (rt, tx)
+                    } else {
+                        (e.kind.clone(), e.payload.clone())
+                    }
+                } else {
+                    (e.kind.clone(), e.payload.clone())
+                };
+                if row_type.is_empty() && text.is_empty() {
+                    continue;
+                }
+                let tag = if row_type.is_empty() { view::he(&e.kind) } else { view::he(&row_type) };
+                html.push_str(&format!(
+                    "<div class=\"ev-row\" data-event-id=\"{}\"><span class=\"ev-meta\"><span class=\"ev-tag\">{}</span><span class=\"ev-ts\">{}</span></span><span class=\"ev-text\">{}</span></div>",
+                    e.event_id,
+                    tag,
+                    view::he(&view::fmt_event_ts(&e.ts)),
+                    view::he(&text),
+                ));
+            }
+            // Empty body = no-op for hx-swap="beforeend".
+            return Html(html).into_response();
+        }
+        // Logs tab incremental poll: append only new log rows after `since`.
+        let events = runs.events_for_run(&run_id, since, i64::MAX as usize);
         let mut html = String::new();
         for e in &events {
             if let Ok(serde_json::Value::Object(map)) =
@@ -206,9 +240,7 @@ async fn run_logs(
                 }
             }
         }
-        if html.is_empty() {
-            html.push_str("<p class=\"empty\">No log events yet.</p>");
-        }
+        // Empty body = no-op for hx-swap="beforeend".
         return Html(html).into_response();
     }
     let limit = q.limit.unwrap_or(100).min(500);
@@ -394,6 +426,20 @@ mod tests {
             axum::extract::Path("ALG-1-123".to_string()),
         )
         .await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn htmx_poll_returns_503_when_runs_absent() {
+        let state = make_state();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("hx-request", "true".parse().unwrap());
+        let resp = run_logs(
+            axum::extract::State(state),
+            axum::extract::Path("r1".to_string()),
+            axum::extract::Query(LogsQuery { since: Some(0), limit: None, view: None }),
+            headers,
+        ).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

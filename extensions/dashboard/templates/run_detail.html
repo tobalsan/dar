@@ -40,7 +40,8 @@
          {% if process_alive %}
          hx-get="/runs/{{ run_id }}/logs"
          hx-trigger="every 2s"
-         hx-swap="innerHTML"
+         hx-swap="beforeend"
+         hx-vals='js:{since: document.getElementById("log-stream-{{ run_id }}").dataset.last}'
          {% endif %}>
       {% if log_events.is_empty() %}
       <p class="empty">No log events yet.</p>
@@ -54,18 +55,28 @@
 
   <!-- Events tab -->
   <div id="tab-events" class="tab-panel" style="display:none">
-    <div class="drawer-events">
+    <div class="drawer-events"
+         id="ev-stream-{{ run_id }}"
+         data-last="{{ last_event_id }}"
+         {% if process_alive %}
+         hx-get="/runs/{{ run_id }}/logs?view=events"
+         hx-trigger="every 2s"
+         hx-swap="beforeend"
+         hx-vals='js:{since: document.getElementById("ev-stream-{{ run_id }}").dataset.last}'
+         {% endif %}>
       {% if events.is_empty() %}
       <p class="empty">No persisted events for this run.</p>
       {% else %}
       {% for ev in events %}
-      <div class="ev-row">
+      {% if !ev.row_type.is_empty() || !ev.text.is_empty() %}
+      <div class="ev-row" data-event-id="{{ ev.event_id }}">
         <span class="ev-meta">
           <span class="ev-tag">{% if ev.row_type.is_empty() %}{{ ev.kind }}{% else %}{{ ev.row_type }}{% endif %}</span>
           <span class="ev-ts">{{ ev.ts }}</span>
         </span>
         <span class="ev-text">{{ ev.text }}</span>
       </div>
+      {% endif %}
       {% endfor %}
       {% endif %}
     </div>
@@ -134,12 +145,18 @@
     });
     document.body.addEventListener('htmx:afterSwap', function(ev) {
       var tgt = ev.detail && ev.detail.target;
-      if (tgt && tgt.id && tgt.id.startsWith('log-stream-') && _openEids.length > 0) {
-        _openEids.forEach(function(eid) {
-          var el = tgt.querySelector('details[data-eid="' + eid + '"]');
-          if (el) el.open = true;
-        });
-        _openEids = [];
+      if (tgt && tgt.id && (tgt.id.startsWith('log-stream-') || tgt.id.startsWith('ev-stream-'))) {
+        var children = tgt.querySelectorAll('[data-event-id]');
+        if (children.length > 0) {
+          tgt.dataset.last = children[children.length - 1].getAttribute('data-event-id');
+        }
+        if (_openEids.length > 0 && tgt.id.startsWith('log-stream-')) {
+          _openEids.forEach(function(eid) {
+            var el = tgt.querySelector('details[data-eid="' + eid + '"]');
+            if (el) el.open = true;
+          });
+          _openEids = [];
+        }
       }
     });
   }

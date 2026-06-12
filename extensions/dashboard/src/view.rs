@@ -2,9 +2,6 @@ use askama::Template;
 use chrono::{DateTime, Utc};
 use orchestrator_api::{ActiveRun, AgentInfo, EventRow, HistoryRow, RunRow, RunSnapshot};
 
-/// Max events rendered in the run-detail drawer.
-pub const RUN_DETAIL_EVENT_CAP: usize = 500;
-
 #[derive(Template)]
 #[template(path = "index.html")]
 pub struct DashboardTemplate {
@@ -234,7 +231,7 @@ fn history_bucket(run: &RunRow) -> (&'static str, &'static str) {
     }
 }
 
-fn he(s: &str) -> String {
+pub(crate) fn he(s: &str) -> String {
     s.replace('&', "&amp;")
      .replace('<', "&lt;")
      .replace('>', "&gt;")
@@ -262,14 +259,14 @@ pub(crate) fn render_log_row(ev: &EventLine) -> String {
         "assistant" => {
             let md = render_markdown(&ev.text);
             format!(
-                "<div class=\"log-assistant\"><span class=\"log-ts\">{}</span><div class=\"log-md\">{}</div></div>",
-                time_part, md
+                "<div class=\"log-assistant\" data-event-id=\"{}\"><span class=\"log-ts\">{}</span><div class=\"log-md\">{}</div></div>",
+                ev.event_id, time_part, md
             )
         }
         "thinking" => {
             format!(
-                "<details class=\"log-think\" data-eid=\"{}\"><summary>Thinking</summary><pre class=\"log-pre\">{}</pre></details>",
-                ev.event_id, he(&ev.text)
+                "<details class=\"log-think\" data-eid=\"{}\" data-event-id=\"{}\"><summary>Thinking</summary><pre class=\"log-pre\">{}</pre></details>",
+                ev.event_id, ev.event_id, he(&ev.text)
             )
         }
         "tool_call" => {
@@ -279,32 +276,32 @@ pub(crate) fn render_log_row(ev: &EventLine) -> String {
                 format!("$ {}\n\n{}", he(&ev.text), he(&ev.detail))
             };
             format!(
-                "<details class=\"log-tool\" data-eid=\"{}\"><summary><span class=\"log-pill\">tool</span><span class=\"log-cmd\">{}</span></summary><pre class=\"log-pre\">{}</pre></details>",
-                ev.event_id, he(&ev.text), body
+                "<details class=\"log-tool\" data-eid=\"{}\" data-event-id=\"{}\"><summary><span class=\"log-pill\">tool</span><span class=\"log-cmd\">{}</span></summary><pre class=\"log-pre\">{}</pre></details>",
+                ev.event_id, ev.event_id, he(&ev.text), body
             )
         }
         "tool_output" => {
             format!(
-                "<details class=\"log-tool\" data-eid=\"{}\"><summary><span class=\"log-pill\">output</span><span class=\"log-cmd\">{}</span></summary><pre class=\"log-pre\">{}</pre></details>",
-                ev.event_id, he(&ev.text), he(&ev.text)
+                "<details class=\"log-tool\" data-eid=\"{}\" data-event-id=\"{}\"><summary><span class=\"log-pill\">output</span><span class=\"log-cmd\">{}</span></summary><pre class=\"log-pre\">{}</pre></details>",
+                ev.event_id, ev.event_id, he(&ev.text), he(&ev.text)
             )
         }
         "error" => {
             format!(
-                "<div class=\"log-error\"><span class=\"log-ts\">{}</span><pre class=\"log-pre\">{}</pre></div>",
-                time_part, he(&ev.text)
+                "<div class=\"log-error\" data-event-id=\"{}\"><span class=\"log-ts\">{}</span><pre class=\"log-pre\">{}</pre></div>",
+                ev.event_id, time_part, he(&ev.text)
             )
         }
         "user" => {
             format!(
-                "<div class=\"log-user\"><pre class=\"log-pre\">{}</pre></div>",
-                he(&ev.text)
+                "<div class=\"log-user\" data-event-id=\"{}\"><pre class=\"log-pre\">{}</pre></div>",
+                ev.event_id, he(&ev.text)
             )
         }
         other => {
             format!(
-                "<div class=\"log-line\"><span class=\"kind\">{}</span><span class=\"ev-text\">{}</span></div>",
-                he(other), he(&ev.text)
+                "<div class=\"log-line\" data-event-id=\"{}\"><span class=\"kind\">{}</span><span class=\"ev-text\">{}</span></div>",
+                ev.event_id, he(other), he(&ev.text)
             )
         }
     }
