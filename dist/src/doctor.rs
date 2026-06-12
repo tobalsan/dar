@@ -10,6 +10,7 @@
 //!   3. The configured tracker builds and its issues dir can be polled.
 
 use std::path::Path;
+use std::process::Command;
 
 use host_api::ServiceRegistry;
 use orchestrator::config;
@@ -109,6 +110,16 @@ pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyho
                 ok = false;
             }
         }
+
+        if runner_id == "opencode" {
+            match check_opencode(&cfg.runner.command) {
+                Ok(msg) => pass(&msg),
+                Err(e) => {
+                    fail(&format!("opencode setup unusable: {e:#}"));
+                    ok = false;
+                }
+            }
+        }
     }
 
     if ok {
@@ -120,10 +131,53 @@ pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyho
     }
 }
 
+fn check_opencode(command: &str) -> anyhow::Result<String> {
+    let command = if command.trim().is_empty() {
+        "opencode"
+    } else {
+        command
+    };
+    let output = Command::new(command)
+        .arg("--version")
+        .output()
+        .map_err(|e| anyhow::anyhow!("cannot run `{command} --version`: {e}"))?;
+    if !output.status.success() {
+        anyhow::bail!("`{command} --version` exited with {}", output.status);
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(if version.is_empty() {
+        format!("opencode CLI available ({command})")
+    } else {
+        format!("opencode CLI available ({command} {version})")
+    })
+}
+
 fn pass(msg: &str) {
     eprintln!("  ok   {msg}");
 }
 
 fn fail(msg: &str) {
     eprintln!("  FAIL {msg}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn opencode_check_reports_missing_command() {
+        let err = check_opencode("__missing_opencode_for_agentropy_test__").unwrap_err();
+        assert!(err.to_string().contains("cannot run"));
+    }
+
+    #[test]
+    fn opencode_check_reports_version_from_configured_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("opencode");
+        std::fs::write(&script, "#!/bin/sh\necho 9.9.9\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let msg = check_opencode(script.to_str().unwrap()).unwrap();
+        assert!(msg.contains("9.9.9"), "{msg}");
+    }
 }

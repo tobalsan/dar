@@ -1,5 +1,7 @@
 //! OpenCode runner extension: one `opencode serve` child, one live session.
 
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -11,7 +13,9 @@ use cap_runner::{
 use chrono::{DateTime, Utc};
 use host_api::{Extension, RegisterCtx};
 use opencode_client::{OpenCodeEvent, OpenCodeServer};
-use runner_core::{classify_protocol_line, effective_command, log_ev};
+use runner_core::{
+    classify_protocol_line, common_env, effective_command, env_with_session_dir, log_ev,
+};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
@@ -51,8 +55,15 @@ async fn spawn_opencode(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     host_api::assert_contained(p.workspace_root, p.workspace)
         .context("workspace containment check failed; refusing to spawn opencode")?;
 
+    let session_dir = session_dir(&p);
+    std::fs::create_dir_all(session_dir.join("config"))
+        .with_context(|| format!("creating opencode config dir {}", session_dir.display()))?;
+    write_opencode_config(&session_dir, p.model.as_deref())?;
+
     let command = effective_command(p.command, "opencode");
-    let server = OpenCodeServer::spawn(command.clone(), p.workspace).await?;
+    let args = opencode_args(0);
+    let env = opencode_env(&p, &session_dir);
+    let server = OpenCodeServer::spawn(command.clone(), args.clone(), env, p.workspace).await?;
     let pid = server.pid().context("opencode serve has no pid")?;
 
     log_ev(
@@ -73,8 +84,11 @@ async fn spawn_opencode(p: SpawnParams<'_>) -> Result<RunnerHandle> {
             "runner": p.runner_kind,
             "pid": pid,
             "command": command.to_string_lossy(),
-            "args": ["serve", "--hostname", "127.0.0.1", "--port", "<ephemeral>"],
+            "args": args.iter().map(|a| {
+                if a == "0" { "<ephemeral>".to_string() } else { a.to_string_lossy().to_string() }
+            }).collect::<Vec<_>>(),
             "base_url": server.base_url(),
+            "session_dir": session_dir.display().to_string(),
         }),
     );
 
@@ -105,6 +119,86 @@ async fn spawn_opencode(p: SpawnParams<'_>) -> Result<RunnerHandle> {
         ended_rx,
         decision_tx,
     ))
+}
+
+fn session_dir(p: &SpawnParams<'_>) -> PathBuf {
+    p.agent_root.join("opencode-sessions").join(&p.issue_id)
+}
+
+fn opencode_args(port: u16) -> Vec<OsString> {
+    vec![
+        OsString::from("serve"),
+        OsString::from("--hostname"),
+        OsString::from("127.0.0.1"),
+        OsString::from("--port"),
+        OsString::from(port.to_string()),
+    ]
+}
+
+fn opencode_env(p: &SpawnParams<'_>, session_dir: &Path) -> Vec<(OsString, OsString)> {
+    let config_dir = session_dir.join("config");
+    let mut env = env_with_session_dir(common_env(p), session_dir);
+    env.push((
+        OsString::from("OPENCODE_CONFIG"),
+        config_dir.join("opencode.json").as_os_str().to_os_string(),
+    ));
+    env.push((
+        OsString::from("OPENCODE_CONFIG_DIR"),
+        config_dir.as_os_str().to_os_string(),
+    ));
+    env.push((
+        OsString::from("OPENCODE_CONFIG_CONTENT"),
+        OsString::from(opencode_config(p.model.as_deref()).to_string()),
+    ));
+    env.push((
+        OsString::from("XDG_DATA_HOME"),
+        session_dir.join("data").as_os_str().to_os_string(),
+    ));
+    env.push((
+        OsString::from("XDG_STATE_HOME"),
+        session_dir.join("state").as_os_str().to_os_string(),
+    ));
+    env.push((
+        OsString::from("XDG_CACHE_HOME"),
+        session_dir.join("cache").as_os_str().to_os_string(),
+    ));
+    env
+}
+
+fn opencode_config(model: Option<&str>) -> serde_json::Value {
+    let mut config = serde_json::json!({
+        "$schema": "https://opencode.ai/config.json",
+        "permission": {
+            "*": "allow",
+            "bash": "allow",
+            "doom_loop": "allow",
+            "edit": "allow",
+            "external_directory": "allow",
+            "glob": "allow",
+            "grep": "allow",
+            "list": "allow",
+            "lsp": "allow",
+            "question": "allow",
+            "read": "allow",
+            "skill": "allow",
+            "task": "allow",
+            "todowrite": "allow",
+            "todoread": "allow",
+            "webfetch": "allow",
+            "websearch": "allow",
+            "write": "allow",
+        },
+    });
+    if let Some(model) = model {
+        config["model"] = serde_json::Value::String(model.to_string());
+    }
+    config
+}
+
+fn write_opencode_config(session_dir: &Path, model: Option<&str>) -> Result<()> {
+    let path = session_dir.join("config").join("opencode.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&opencode_config(model))?)
+        .with_context(|| format!("writing opencode config {}", path.display()))
 }
 
 struct TurnLoopCtx {
@@ -182,6 +276,20 @@ async fn run_turn_loop(ctx: &TurnLoopCtx, io: TurnIo, timeout: Duration) -> Exit
             event = events.next_event() => match event {
                 Ok(Some(event)) => {
                     emit_event(ctx, &event);
+                    if let Some(permission_id) = permission_request_id(&event, &session_id) {
+                        if let Err(e) = client
+                            .respond_permission(&session_id, &permission_id, "once", false)
+                            .await
+                        {
+                            log_ev(
+                                &ctx.issue_id,
+                                "error",
+                                &format!("permission auto-response failed: {e:#}"),
+                            );
+                            server.kill_and_wait(SHUTDOWN_GRACE).await;
+                            return ExitKind::Abnormal(None);
+                        }
+                    }
                     is_turn_boundary(&event, &session_id)
                 }
                 Ok(None) => {
@@ -297,6 +405,28 @@ fn is_turn_boundary(event: &OpenCodeEvent, session_id: &str) -> bool {
             == Some(session_id)
 }
 
+fn permission_request_id(event: &OpenCodeEvent, session_id: &str) -> Option<String> {
+    let value = event_payload(event)?;
+    let type_name = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if !type_name.contains("permission") {
+        return None;
+    }
+    let properties = value.get("properties").unwrap_or(&value);
+    let event_session = properties
+        .get("sessionID")
+        .or_else(|| properties.get("sessionId"))
+        .and_then(|id| id.as_str());
+    if event_session.is_some() && event_session != Some(session_id) {
+        return None;
+    }
+    properties
+        .get("permissionID")
+        .or_else(|| properties.get("permissionId"))
+        .or_else(|| properties.get("id"))
+        .and_then(|id| id.as_str())
+        .map(str::to_string)
+}
+
 fn event_payload(event: &OpenCodeEvent) -> Option<serde_json::Value> {
     let value = serde_json::from_str::<serde_json::Value>(&event.data).ok()?;
     if let Some(payload) = value.get("payload") {
@@ -348,7 +478,6 @@ fn persist_event(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::{Path, PathBuf};
 
     struct NullSink;
     impl cap_runner::RunnerEventSink for NullSink {
@@ -389,11 +518,131 @@ mod tests {
         assert!(is_turn_boundary(&event, "s1"));
     }
 
+    #[test]
+    fn permission_event_for_current_session_returns_permission_id() {
+        let event = OpenCodeEvent {
+            event: Some("permission.updated".to_string()),
+            data: r#"{"type":"permission.updated","properties":{"sessionID":"s1","permissionID":"perm-1"}}"#.to_string(),
+        };
+        assert_eq!(
+            permission_request_id(&event, "s1").as_deref(),
+            Some("perm-1")
+        );
+        assert_eq!(permission_request_id(&event, "other"), None);
+    }
+
+    #[test]
+    fn session_dir_is_per_issue_under_agent_root() {
+        let workspace_root = Path::new("/tmp/agent/workspaces");
+        let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
+        let p = params(None, workspace, workspace_root);
+        assert_eq!(
+            session_dir(&p),
+            PathBuf::from("/tmp/agent/opencode-sessions/ISSUE-1")
+        );
+    }
+
+    #[test]
+    fn opencode_args_use_headless_server_only() {
+        assert_eq!(
+            opencode_args(4179),
+            vec![
+                OsString::from("serve"),
+                OsString::from("--hostname"),
+                OsString::from("127.0.0.1"),
+                OsString::from("--port"),
+                OsString::from("4179"),
+            ]
+        );
+    }
+
+    #[test]
+    fn opencode_env_points_storage_and_config_at_issue_dir() {
+        let workspace_root = Path::new("/tmp/agent/workspaces");
+        let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
+        let p = params(
+            Some("anthropic/claude-sonnet".into()),
+            workspace,
+            workspace_root,
+        );
+        let session_dir = session_dir(&p);
+        let env = opencode_env(&p, &session_dir);
+        assert!(env.contains(&(
+            OsString::from("OPENCODE_CONFIG"),
+            OsString::from("/tmp/agent/opencode-sessions/ISSUE-1/config/opencode.json")
+        )));
+        assert!(env.contains(&(
+            OsString::from("OPENCODE_CONFIG_DIR"),
+            OsString::from("/tmp/agent/opencode-sessions/ISSUE-1/config")
+        )));
+        let content = env
+            .iter()
+            .find(|(key, _)| key == "OPENCODE_CONFIG_CONTENT")
+            .map(|(_, value)| value.to_string_lossy().to_string())
+            .expect("OPENCODE_CONFIG_CONTENT missing");
+        let config: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(config["permission"]["*"], "allow");
+        assert_eq!(config["permission"]["bash"], "allow");
+        assert_eq!(config["permission"]["external_directory"], "allow");
+        assert_eq!(config["permission"]["edit"], "allow");
+        assert_eq!(config["permission"]["question"], "allow");
+        assert_eq!(config["permission"]["webfetch"], "allow");
+        assert_eq!(config["model"], "anthropic/claude-sonnet");
+        assert!(env.contains(&(
+            OsString::from("XDG_DATA_HOME"),
+            OsString::from("/tmp/agent/opencode-sessions/ISSUE-1/data")
+        )));
+        assert!(env.contains(&(
+            OsString::from("AGENT_SESSION_DIR"),
+            OsString::from("/tmp/agent/opencode-sessions/ISSUE-1")
+        )));
+        assert!(env.contains(&(
+            OsString::from("AGENT_MODEL"),
+            OsString::from("anthropic/claude-sonnet")
+        )));
+    }
+
+    #[test]
+    fn opencode_config_allows_permissions_and_uses_model_when_set() {
+        let config = opencode_config(Some("anthropic/claude-sonnet"));
+        assert_eq!(config["permission"]["*"], "allow");
+        assert_eq!(config["permission"]["bash"], "allow");
+        assert_eq!(config["permission"]["external_directory"], "allow");
+        assert_eq!(config["permission"]["edit"], "allow");
+        assert_eq!(config["permission"]["question"], "allow");
+        assert_eq!(config["permission"]["webfetch"], "allow");
+        assert_eq!(config["model"], "anthropic/claude-sonnet");
+        assert!(opencode_config(None).get("model").is_none());
+    }
+
     fn write_script(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("fake-opencode.sh");
         std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+
+    fn params<'a>(
+        model: Option<String>,
+        workspace: &'a Path,
+        workspace_root: &'a Path,
+    ) -> SpawnParams<'a> {
+        SpawnParams::builder(
+            "",
+            "opencode",
+            workspace,
+            workspace_root,
+            Path::new("/tmp/agent"),
+            "prompt".to_string(),
+            "ISSUE-1".to_string(),
+            "run-1".to_string(),
+            10_000,
+            Arc::new(NullSink),
+            Arc::new(NullStore),
+            Arc::new(Mutex::new(Utc::now())),
+        )
+        .model(model)
+        .build()
     }
 
     /// Retries up to 3 times on ETXTBSY (os error 26): under parallel `cargo
