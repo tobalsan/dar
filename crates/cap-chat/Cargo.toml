@@ -1,0 +1,9 @@
+[package]
+name = "cap-chat"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1.43", features = ["sync"] }

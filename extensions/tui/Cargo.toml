@@ -1,0 +1,25 @@
+[package]
+name = "tui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+
+[dependencies]
+anyhow = "1"
+cap-chat = { path = "../../crates/cap-chat" }
+chrono = { version = "0.4", features = ["serde"] }
+# crossterm pinned to the workspace lock (agentropy-host has 0.28.x) and
+# ratatui 0.29's own crossterm backend matches 0.28 — one copy in tree.
+crossterm = "0.28"
+host-api = { path = "../../crates/host-api" }
+orchestrator-api = { path = "../../crates/orchestrator-api" }
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.43", features = ["macros", "rt", "sync", "time"] }
+
+[dev-dependencies]
+chat-pi = { path = "../chat-pi" }
+frontend-log = { path = "../frontend-log" }
+tempfile = "3"
+tokio = { version = "1.43", features = ["macros", "rt-multi-thread"] }

@@ -30,6 +30,8 @@ runner-claude = { path = "../extensions/runner-claude" }
 runner-codex = { path = "../extensions/runner-codex" }
 runner-cli = { path = "../extensions/runner-cli" }
 runner-fake = { path = "../extensions/runner-fake" }
+chat-pi = { path = "../extensions/chat-pi" }
+tui = { path = "../extensions/tui" }
 
 [dev-dependencies]
 tempfile = "3"
