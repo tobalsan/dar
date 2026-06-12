@@ -533,7 +533,11 @@ impl HttpRegistry {
         for route in &mount.routes {
             self.claim(&format!("{prefix}{}", normalize_route(route)?))?;
         }
-        self.routers.push(Router::new().nest(&prefix, mount.router));
+        if prefix == "/" {
+            self.routers.push(mount.router);
+        } else {
+            self.routers.push(Router::new().nest(&prefix, mount.router));
+        }
         Ok(())
     }
 

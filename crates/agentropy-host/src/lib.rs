@@ -664,6 +664,19 @@ mod tests {
     }
 
     #[test]
+    fn http_mount_at_root_does_not_panic() {
+        let mut http = host_api::HttpRegistry::default();
+        http.mount(HttpMount {
+            namespace: "/".to_string(),
+            router: Router::new().route("/content", get(|| async { "root" })),
+            routes: vec!["/content".to_string()],
+            claim_root: true,
+        })
+        .unwrap();
+        let _ = http.into_router();
+    }
+
+    #[test]
     fn data_dir_is_contained_and_assert_contained_rejects_escapes() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir(temp.path().join("data")).unwrap();
