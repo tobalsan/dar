@@ -142,6 +142,13 @@ mod tests {
     }
 
     #[test]
+    fn opencode_runner_uses_native_chat_backend_without_fallback_notice() {
+        let services = registry(&["pi", "opencode"]);
+        let bus = bus_with_snapshot(3, "opencode");
+        assert_eq!(resolve(None, &services, &bus), backend("opencode"));
+    }
+
+    #[test]
     fn version_zero_snapshot_falls_back_to_pi_silently() {
         // The runner would be followable, but no tick has published yet.
         let services = registry(&["pi", "codex"]);

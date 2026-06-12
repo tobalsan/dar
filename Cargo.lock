@@ -10,6 +10,7 @@ dependencies = [
  "anyhow",
  "cap-runner",
  "chat-codex",
+ "chat-opencode",
  "chat-pi",
  "clap",
  "dashboard",
@@ -427,6 +428,21 @@ dependencies = [
  "cap-chat",
  "host-api",
  "nix",
+ "runner-core",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "chat-opencode"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cap-chat",
+ "host-api",
+ "nix",
+ "opencode-client",
  "runner-core",
  "serde_json",
  "tempfile",
