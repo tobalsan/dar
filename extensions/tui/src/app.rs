@@ -218,13 +218,16 @@ mod tests {
     }
 
     #[test]
-    fn enter_is_gated_while_in_flight() {
+    fn enter_accepts_steering_while_in_flight() {
         let mut app = App::new();
         app.chat.input = "first".to_string();
         app.handle_event(key(KeyCode::Enter));
         app.chat.input = "second".to_string();
-        assert_eq!(app.handle_event(key(KeyCode::Enter)), Action::None);
-        assert_eq!(app.chat.input, "second");
+        assert_eq!(
+            app.handle_event(key(KeyCode::Enter)),
+            Action::Submit("second".to_string())
+        );
+        assert!(app.chat.input.is_empty());
     }
 
     #[test]
