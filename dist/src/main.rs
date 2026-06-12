@@ -75,6 +75,7 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
             runner_pi::RunnerPiExtension,
             runner_claude::RunnerClaudeExtension,
             runner_codex::RunnerCodexExtension,
+            runner_opencode::RunnerOpenCodeExtension,
             runner_cli::RunnerCliExtension,
             runner_fake::RunnerFakeExtension,
             chat_pi::ChatPiExtension,
@@ -166,6 +167,7 @@ async fn default_services(root: &std::path::Path) -> Result<ServiceRegistry> {
     runner_pi::RunnerPiExtension.register(&mut ctx).await?;
     runner_claude::RunnerClaudeExtension.register(&mut ctx).await?;
     runner_codex::RunnerCodexExtension.register(&mut ctx).await?;
+    runner_opencode::RunnerOpenCodeExtension.register(&mut ctx).await?;
     runner_cli::RunnerCliExtension.register(&mut ctx).await?;
     runner_fake::RunnerFakeExtension.register(&mut ctx).await?;
     Ok(ctx.services)

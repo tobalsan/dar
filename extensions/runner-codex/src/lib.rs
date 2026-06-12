@@ -1065,26 +1065,47 @@ mod tests {
     }
 
     /// Spawn the real codex driver against `script` with a fresh workspace.
+    ///
+    /// Retries up to 3 times on ETXTBSY (os error 26): under parallel `cargo
+    /// test` a sibling fork may briefly hold the script's fd open.
     async fn spawn_against(dir: &Path, script: &Path) -> RunnerHandle {
         let workspaces = dir.join("workspaces");
         let workspace = workspaces.join("ISSUE-1");
         std::fs::create_dir_all(&workspace).unwrap();
-        let params = SpawnParams::builder(
-            script.to_str().unwrap(),
-            "codex",
-            &workspace,
-            &workspaces,
-            dir,
-            "initial prompt".to_string(),
-            "ISSUE-1".to_string(),
-            "run-1".to_string(),
-            10_000,
-            Arc::new(NullSink),
-            Arc::new(NullStore),
-            Arc::new(Mutex::new(Utc::now())),
-        )
-        .build();
-        spawn_codex(params).await.expect("spawn")
+        for attempt in 0u8..3 {
+            let params = SpawnParams::builder(
+                script.to_str().unwrap(),
+                "codex",
+                &workspace,
+                &workspaces,
+                dir,
+                "initial prompt".to_string(),
+                "ISSUE-1".to_string(),
+                "run-1".to_string(),
+                10_000,
+                Arc::new(NullSink),
+                Arc::new(NullStore),
+                Arc::new(Mutex::new(Utc::now())),
+            )
+            .build();
+            match spawn_codex(params).await {
+                Ok(h) => return h,
+                Err(e) if attempt < 2 && is_etxtbsy(&e) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("spawn: {e:#}"),
+            }
+        }
+        unreachable!()
+    }
+
+    /// Returns true when `e` (or any source in its chain) is ETXTBSY (os error 26).
+    fn is_etxtbsy(e: &anyhow::Error) -> bool {
+        e.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .map_or(false, |io| io.raw_os_error() == Some(26))
+        })
     }
 
     async fn wait_for_turn_ended(handle: &mut RunnerHandle) {

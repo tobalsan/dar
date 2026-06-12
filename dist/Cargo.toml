@@ -30,6 +30,7 @@ runner-claude = { path = "../extensions/runner-claude" }
 runner-codex = { path = "../extensions/runner-codex" }
 runner-cli = { path = "../extensions/runner-cli" }
 runner-fake = { path = "../extensions/runner-fake" }
+runner-opencode = { path = "../extensions/runner-opencode" }
 chat-pi = { path = "../extensions/chat-pi" }
 tui = { path = "../extensions/tui" }
 
