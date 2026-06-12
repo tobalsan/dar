@@ -98,7 +98,7 @@
 .log-ts { color: var(--muted); font-size: .68rem; display: block; margin-bottom: .2rem; }
 .log-md { overflow-wrap: anywhere; }
 .log-md p { margin: .2rem 0; }
-.log-md pre { background: var(--panel-2); padding: .4rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; }
+.log-md pre { background: var(--panel-2); padding: .4rem; border-radius: 4px; overflow-x: hidden; white-space: pre-wrap; }
 .log-md code { background: var(--panel-2); padding: .1rem .3rem; border-radius: 3px; font: inherit; }
 .log-think { border: 1px solid var(--border); border-radius: 5px; margin: .2rem 0; }
 .log-think > summary { padding: .3rem .5rem; cursor: pointer; font-style: italic; color: var(--muted); list-style: disclosure-closed; }
@@ -119,5 +119,28 @@
     drawer.querySelectorAll('.tab-panel').forEach(function(p) { p.style.display = 'none'; });
     btn.classList.add('active');
     document.getElementById(tabId).style.display = 'flex';
+  }
+  if (!window.__logSwapListenerRegistered) {
+    window.__logSwapListenerRegistered = true;
+    var _openEids = [];
+    document.body.addEventListener('htmx:beforeSwap', function(ev) {
+      var tgt = ev.detail && ev.detail.target;
+      if (tgt && tgt.id && tgt.id.startsWith('log-stream-')) {
+        _openEids = [];
+        tgt.querySelectorAll('details[data-eid][open]').forEach(function(d) {
+          _openEids.push(d.getAttribute('data-eid'));
+        });
+      }
+    });
+    document.body.addEventListener('htmx:afterSwap', function(ev) {
+      var tgt = ev.detail && ev.detail.target;
+      if (tgt && tgt.id && tgt.id.startsWith('log-stream-') && _openEids.length > 0) {
+        _openEids.forEach(function(eid) {
+          var el = tgt.querySelector('details[data-eid="' + eid + '"]');
+          if (el) el.open = true;
+        });
+        _openEids = [];
+      }
+    });
   }
 </script>

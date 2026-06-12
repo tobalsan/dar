@@ -194,6 +194,7 @@ async fn run_logs(
                         continue;
                     }
                     let el = view::EventLine {
+                        event_id: e.event_id,
                         ts: view::fmt_event_ts(&e.ts),
                         kind: e.kind.clone(),
                         row_type: rt.to_string(),

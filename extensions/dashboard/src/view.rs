@@ -92,6 +92,7 @@ fn fmt_run_age(ts: &str) -> String {
 /// One event line rendered in the run-detail drawer. `protocol_event` payloads
 /// are unwrapped to their `log_row` type + `text`; any other payload renders raw.
 pub struct EventLine {
+    pub event_id: i64,
     pub ts: String,
     pub kind: String,
     pub row_type: String,
@@ -139,6 +140,7 @@ impl RunDetailTemplate {
             .map(|e| {
                 let rendered = render_log_row(e);
                 EventLine {
+                    event_id: e.event_id,
                     ts: e.ts.clone(),
                     kind: e.kind.clone(),
                     row_type: e.row_type.clone(),
@@ -194,6 +196,7 @@ fn event_line(e: EventRow) -> EventLine {
                 .to_string();
             let detail = map.get("detail").and_then(|v| v.as_str()).unwrap_or("").to_string();
             return EventLine {
+                event_id: e.event_id,
                 ts: fmt_event_ts(&e.ts),
                 kind: e.kind,
                 row_type,
@@ -204,6 +207,7 @@ fn event_line(e: EventRow) -> EventLine {
         }
     }
     EventLine {
+        event_id: e.event_id,
         ts: fmt_event_ts(&e.ts),
         kind: e.kind,
         row_type: String::new(),
@@ -264,8 +268,8 @@ pub(crate) fn render_log_row(ev: &EventLine) -> String {
         }
         "thinking" => {
             format!(
-                "<details class=\"log-think\"><summary>Thinking</summary><pre class=\"log-pre\">{}</pre></details>",
-                he(&ev.text)
+                "<details class=\"log-think\" data-eid=\"{}\"><summary>Thinking</summary><pre class=\"log-pre\">{}</pre></details>",
+                ev.event_id, he(&ev.text)
             )
         }
         "tool_call" => {
@@ -275,14 +279,14 @@ pub(crate) fn render_log_row(ev: &EventLine) -> String {
                 format!("$ {}\n\n{}", he(&ev.text), he(&ev.detail))
             };
             format!(
-                "<details class=\"log-tool\"><summary><span class=\"log-pill\">tool</span><span class=\"log-cmd\">{}</span></summary><pre class=\"log-pre\">{}</pre></details>",
-                he(&ev.text), body
+                "<details class=\"log-tool\" data-eid=\"{}\"><summary><span class=\"log-pill\">tool</span><span class=\"log-cmd\">{}</span></summary><pre class=\"log-pre\">{}</pre></details>",
+                ev.event_id, he(&ev.text), body
             )
         }
         "tool_output" => {
             format!(
-                "<details class=\"log-tool\"><summary><span class=\"log-pill\">output</span><span class=\"log-cmd\">{}</span></summary><pre class=\"log-pre\">{}</pre></details>",
-                he(&ev.text), he(&ev.text)
+                "<details class=\"log-tool\" data-eid=\"{}\"><summary><span class=\"log-pill\">output</span><span class=\"log-cmd\">{}</span></summary><pre class=\"log-pre\">{}</pre></details>",
+                ev.event_id, he(&ev.text), he(&ev.text)
             )
         }
         "error" => {
@@ -419,6 +423,7 @@ mod tests {
     #[test]
     fn assistant_markdown_renders() {
         let ev = EventLine {
+            event_id: 0,
             ts: "2026-06-12 10:30:45".to_string(),
             kind: "runner.codex".to_string(),
             row_type: "assistant".to_string(),
@@ -433,6 +438,7 @@ mod tests {
     #[test]
     fn assistant_html_in_text_is_escaped() {
         let ev = EventLine {
+            event_id: 0,
             ts: "2026-06-12 10:30:45".to_string(),
             kind: "runner.codex".to_string(),
             row_type: "assistant".to_string(),
@@ -454,6 +460,7 @@ mod tests {
     #[test]
     fn tool_call_renders_details_block() {
         let ev = EventLine {
+            event_id: 0,
             ts: "2026-06-12 10:30:45".to_string(),
             kind: "runner.codex".to_string(),
             row_type: "tool_call".to_string(),
@@ -471,6 +478,7 @@ mod tests {
     #[test]
     fn error_renders_callout() {
         let ev = EventLine {
+            event_id: 0,
             ts: "2026-06-12 10:30:45".to_string(),
             kind: "runner.codex".to_string(),
             row_type: "error".to_string(),

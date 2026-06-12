@@ -65,7 +65,7 @@
     .kv .k { color: var(--muted); text-transform: uppercase; font-size: .68rem; letter-spacing: .06em; padding-top: .1rem; }
     .kv .v { overflow-wrap: anywhere; }
     .drawer-events-head { display: flex; align-items: center; gap: .5rem; margin: .2rem 0 0; }
-    .drawer-events { flex: 1; overflow-y: auto; display: grid; gap: .3rem; align-content: start; padding-right: .25rem; }
+    .drawer-events { flex: 1; overflow-y: auto; overflow-x: hidden; display: grid; gap: .3rem; align-content: start; padding-right: .25rem; }
     .ev-row {
       display: grid; grid-template-columns: auto 1fr; gap: .5rem; align-items: baseline;
       padding: .35rem .5rem; background: #171b21; border: 1px solid var(--border); border-radius: 5px;
@@ -74,6 +74,11 @@
     .ev-ts { color: var(--muted); font-size: .68rem; white-space: nowrap; }
     .ev-tag { color: var(--accent); font-size: .68rem; white-space: nowrap; }
     .ev-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+    * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+    ::-webkit-scrollbar-track { background: transparent; }
     @media (max-width: 760px) {
       header, main { padding-left: .8rem; padding-right: .8rem; }
       main { grid-template-columns: 1fr; }
