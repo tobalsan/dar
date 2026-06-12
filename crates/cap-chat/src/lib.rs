@@ -55,7 +55,11 @@ pub struct ChatSessionParams {
 }
 
 impl ChatSessionParams {
-    pub fn builder(command: &str, agent_root: &Path, session_dir: &Path) -> ChatSessionParamsBuilder {
+    pub fn builder(
+        command: &str,
+        agent_root: &Path,
+        session_dir: &Path,
+    ) -> ChatSessionParamsBuilder {
         ChatSessionParamsBuilder {
             command: command.to_string(),
             agent_root: agent_root.to_path_buf(),
@@ -97,10 +101,15 @@ pub trait ChatBackend: Send + Sync {
 }
 
 pub trait ChatSession: Send {
-    /// One turn at a time (caller enforces). Returns once the turn is ACCEPTED;
-    /// completion arrives as ChatEvent::TurnFinished on tx.
+    /// Accept a user message. This must also accept messages while a turn is
+    /// already in flight: backends either inject immediately or queue until
+    /// the next turn boundary. Completion arrives as one
+    /// `ChatEvent::TurnFinished` per accepted message on tx. If `abort`
+    /// cancels backend-held queued messages, those accepted messages finish
+    /// as aborted.
     fn send_turn(&mut self, prompt: String) -> BoxFuture<'_, anyhow::Result<()>>;
-    /// Graceful cancel of the in-flight turn. Session stays usable.
+    /// Graceful cancel of the in-flight turn. Session stays usable; queued
+    /// accepted messages that cannot survive the abort finish as aborted.
     fn abort(&mut self) -> BoxFuture<'_, anyhow::Result<()>>;
     /// Close stdin, wait briefly, term-then-kill the process group on overrun.
     fn close(self: Box<Self>) -> BoxFuture<'static, anyhow::Result<()>>;

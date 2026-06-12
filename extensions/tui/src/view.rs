@@ -136,11 +136,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
-    let title = if app.chat.in_flight {
-        " message (turn in flight - Enter disabled) "
-    } else {
-        " message (Enter sends, Ctrl+C quits) "
-    };
+    let title = " message (Enter sends, Ctrl+C quits) ";
     let block = Block::bordered().title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -171,9 +167,7 @@ fn transcript_lines(chat: &ChatState, width: usize) -> Vec<Line<'static>> {
                 Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                 width,
             ),
-            ChatBlock::Assistant(text) => {
-                push_wrapped(&mut lines, "", text, Style::new(), width)
-            }
+            ChatBlock::Assistant(text) => push_wrapped(&mut lines, "", text, Style::new(), width),
             ChatBlock::Thinking(text) => push_wrapped(
                 &mut lines,
                 "",
@@ -206,20 +200,12 @@ fn transcript_lines(chat: &ChatState, width: usize) -> Vec<Line<'static>> {
                     push_wrapped(&mut lines, "  ", output, style, width);
                 }
             }
-            ChatBlock::Error(text) => push_wrapped(
-                &mut lines,
-                "! ",
-                text,
-                Style::new().fg(Color::Red),
-                width,
-            ),
-            ChatBlock::Notice(text) => push_wrapped(
-                &mut lines,
-                "~ ",
-                text,
-                Style::new().fg(Color::Blue),
-                width,
-            ),
+            ChatBlock::Error(text) => {
+                push_wrapped(&mut lines, "! ", text, Style::new().fg(Color::Red), width)
+            }
+            ChatBlock::Notice(text) => {
+                push_wrapped(&mut lines, "~ ", text, Style::new().fg(Color::Blue), width)
+            }
         }
     }
     lines
@@ -326,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn in_flight_turn_shows_spinner_and_gates_the_input() {
+    fn in_flight_turn_shows_spinner_without_gating_the_input() {
         let mut app = App::new();
         app.chat.input = "hello".to_string();
         assert_eq!(
@@ -335,12 +321,16 @@ mod tests {
         );
         let screen = rendered(&app);
         assert!(screen.contains("waiting for reply... (Esc aborts)"));
-        assert!(screen.contains("message (turn in flight - Enter disabled)"));
+        assert!(screen.contains("message "));
+        assert!(!screen.contains("Enter disabled"));
 
-        // The gate: Enter while in flight submits nothing.
+        // Steering: Enter while in flight accepts and renders the user input.
         app.chat.input = "queued".to_string();
-        assert_eq!(app.handle_event(key(KeyCode::Enter)), Action::None);
-        assert!(rendered(&app).contains("turn in flight"));
+        assert_eq!(
+            app.handle_event(key(KeyCode::Enter)),
+            Action::Submit("queued".to_string())
+        );
+        assert!(rendered(&app).contains("> queued"));
     }
 
     #[test]
@@ -569,8 +559,9 @@ mod tests {
         // DashFeed::subscribe succeeded, so an unregistered snapshot topic
         // leaves the tab out of the bar entirely (no placeholder).
         let mut app = App::new();
-        assert!(crate::dash::DashFeed::subscribe(&host_api::EventBus::new(), &mut app.dash)
-            .is_none());
+        assert!(
+            crate::dash::DashFeed::subscribe(&host_api::EventBus::new(), &mut app.dash).is_none()
+        );
         assert!(!rendered(&app).contains("Dash"));
 
         let mut bus = host_api::EventBus::new();
