@@ -79,6 +79,7 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
             runner_cli::RunnerCliExtension,
             runner_fake::RunnerFakeExtension,
             chat_pi::ChatPiExtension,
+            chat_codex::ChatCodexExtension,
             tui::TuiExtension,
         ],
         options,
