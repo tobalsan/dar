@@ -26,3 +26,13 @@ workspace:
 dashboard:
   bind: 127.0.0.1
   port: 7878
+
+# Terminal UI instead of the plain log stream (Chat / Logs / Dash tabs):
+# foreground: tui
+#
+# extensions:
+#   tui:
+#     chat:
+#       backend: pi          # optional; default: follow runner.use, then pi
+#       command: pi          # optional binary override
+#       model: gpt-5         # optional, forwarded to the backend

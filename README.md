@@ -82,7 +82,7 @@ and authenticated on the host. Agentropy does not bundle, install, or auth it.
 
 The codebase is a cargo workspace: a domain-free host (`crates/agentropy-host`)
 plus small contract crates (`crates/host-api`, `crates/cap-tracker`,
-`crates/cap-runner`, `crates/orchestrator-api`), with features living as one
+`crates/cap-runner`, `crates/cap-chat`, `crates/orchestrator-api`), with features living as one
 crate each under `extensions/`. The binary is assembled from an explicit plugin
 list in the composition root (`dist/`). Extensions import `host-api`
 (and optionally one cap/api crate) and read zero host internals.
@@ -114,6 +114,8 @@ scaffold one with `cargo agentropy new my-extension --kind background`
        runner_codex::RunnerCodexExtension,
        runner_cli::RunnerCliExtension,
        runner_fake::RunnerFakeExtension,
+       chat_pi::ChatPiExtension,
+       tui::TuiExtension,
        my_extension::MyExtension,           // <- new
    ],
    ```
@@ -140,8 +142,9 @@ runner:
 Background extensions in `plugins![]` (orchestrator, dashboard, frontend-log)
 start unconditionally. The foreground extension — the one that owns terminal
 output — is selected per agent via the top-level `foreground:` key in
-`agent.yaml` (default `"logs"`, the frontend-log extension). An unknown id
-causes a clean boot error and exit 1.
+`agent.yaml` (default `"logs"`, the frontend-log extension; `"tui"` selects the
+[terminal UI](#terminal-ui-foreground-tui)). An unknown id causes a clean boot
+error and exit 1.
 
 Per-extension config is passed via the top-level `extensions:` map in
 `agent.yaml`, keyed by extension id. The host delivers each value to the
@@ -435,6 +438,47 @@ curl -X POST http://127.0.0.1:7878/webhook \
   -H 'Linear-Signature: sha256=<sig>' \
   -d '<linear-payload>'
 ```
+
+## Terminal UI (`foreground: tui`)
+
+Set `foreground: tui` in `agent.yaml` to replace the plain log stream with an
+in-terminal UI: a **Chat** tab (interactive operator chat with an AI agent
+running inside the agent folder), a **Logs** tab (the same lines `foreground:
+logs` would print), and a **Dash** tab (run snapshot + Stop/Pause/Resume —
+present only when the orchestrator extension is linked).
+
+```yaml
+foreground: tui
+
+extensions:
+  tui:
+    chat:
+      backend: pi       # optional; default: follow runner.use, then pi
+      command: pi       # optional binary override
+      model: gpt-5      # optional, forwarded to the backend
+```
+
+**Chat.** Backed by a long-lived `pi --mode rpc` child (cwd = the agent
+folder, so it can read issues, workspaces, and logs with its own tools), with
+session transcripts kept under `data/tui/sessions/`. The first message is
+prepended with a context preamble (run snapshot summary + `issues/` listing).
+Backend resolution at first message: `extensions.tui.chat.backend` if set,
+else the configured `runner.use` when it has a registered chat backend, else
+`pi` (with a transcript notice when the runner had no chat backend; chat is
+disabled with a banner when nothing is registered).
+
+**Keys:** `Tab`/`Shift+Tab` cycle tabs. Chat: `Enter` send, `Esc` abort the
+in-flight turn, `PgUp`/`PgDn`/`End` scroll. Logs: arrow/page keys scroll,
+`End` re-follows the tail. Dash: `p` pause, `r` resume, `s` stop (run state
+only — issue files are never touched).
+
+**Quitting quits the whole agent:** `Ctrl-C` anywhere, or `q` on the
+Logs/Dash tabs (on Chat it types a "q"), exits the foreground — which shuts
+agentropy down and kills running children, exactly like Ctrl-C on
+`foreground: logs`.
+
+When stdout is not a terminal (piped/CI), the TUI degrades to the exact
+`foreground: logs` line stream.
 
 ## Persistence
 

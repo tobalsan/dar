@@ -9,9 +9,11 @@ and "Enabling & configuring extensions" sections — this guide is about
 ## What an extension is
 
 An extension is one crate under `extensions/`. It depends on `host-api` plus at
-most one capability/api crate (`cap-tracker`, `cap-runner`, `orchestrator-api`,
-...) and reads zero host internals — all integration goes through the contracts
-in `crates/host-api/src/lib.rs`. A crate is *linked* when it's in the `plugins![]`
+most one *capability* crate (`cap-tracker`, `cap-runner`, `cap-chat`, ...);
+shared bus-payload crates like `orchestrator-api` don't count against that limit
+(the dashboard and `tui` both import it alongside their other deps). It reads
+zero host internals — all integration goes through the contracts in
+`crates/host-api/src/lib.rs`. A crate is *linked* when it's in the `plugins![]`
 list (`dist/src/main.rs`); that is not the same as *enabled* — tracker/runner
 services only run when `agent.yaml` `tracker.use` / `runner.use` selects them,
 and the foreground only runs when `foreground:` selects it.
@@ -92,7 +94,9 @@ let runner = ctx.host.services.get::<dyn Runner>("fake")?;
 
 Real ids in the shipped mix: runners `dyn Runner` under `pi` / `claude` /
 `claude-code` / `codex` / `cli` / `fake`; trackers `dyn TrackerFactory` under
-`files` / `linear`. (`register` is an alias for `service`.)
+`files` / `linear`; chat backends `dyn ChatBackend` under `pi`. Id and type
+form the key, so `dyn ChatBackend @ "pi"` coexists with `dyn Runner @ "pi"`.
+(`register` is an alias for `service`.)
 
 ### Event bus
 
@@ -102,6 +106,11 @@ Two topic classes (semantics documented at the top of `crates/host-api/src/lib.r
   before subscription are not replayed. For events.
 - **retained** — keeps exactly one current value; new subscribers see the latest
   immediately; `read_retained` reads without subscribing. For state snapshots.
+
+Every topic has exactly one owner — the extension that registers it; everyone
+else is a consumer. E.g. `frontend-log` owns `host.log-events`,
+`host.app-done`, and `host.startup-banner`; the `tui` foreground registers no
+topics at all and only consumes those (plus the orchestrator's two).
 
 Register topics in `register`, subscribe/publish in `start`:
 
@@ -211,8 +220,9 @@ tokio::spawn(async move {
   foreground; registering a second provider without selection fails boot.
 - **Don't block `register`/`start`.** They run inline in the boot sequence; do
   long work in a spawned task, not in the method body.
-- **No host internals.** Depend on `host-api` (+ at most one cap/api crate) only;
-  integrate through services, the bus, and the registries.
+- **No host internals.** Depend on `host-api` (+ at most one capability crate;
+  bus-payload crates like `orchestrator-api` don't count) only; integrate
+  through services, the bus, and the registries.
 
 ## Testing
 
@@ -225,9 +235,10 @@ Existing extensions use two layers:
 - **Boot-level tests** in `crates/agentropy-host/src/lib.rs` that boot a list of
   fake extensions and assert lifecycle ordering and foreground selection.
 
-Capability-contract behavior (the `Runner` / `Tracker` builders your service must
-satisfy) is exercised in `crates/cap-runner/tests/builder.rs` and
-`crates/cap-tracker/tests/builder.rs` — mirror those when implementing a service.
+Capability-contract behavior (the `Runner` / `Tracker` / `ChatBackend` builders
+your service must satisfy) is exercised in `crates/cap-runner/tests/builder.rs`,
+`crates/cap-tracker/tests/builder.rs`, and `crates/cap-chat/tests/builder.rs` —
+mirror those when implementing a service.
 
 Run a single test by name:
 

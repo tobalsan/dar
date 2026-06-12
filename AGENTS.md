@@ -21,13 +21,17 @@ cargo test --release backoff_grows_then_caps   # a single test by name
 
 ### Extension architecture
 
-Domain-free host (`crates/agentropy-host`) + contract crates (`crates/host-api`, `cap-tracker`, `cap-runner`, `orchestrator-api`, `runner-core`); every feature is one crate under `extensions/`. The composition root is `dist/`: the `plugins![]` list in `dist/src/main.rs` is the only place naming the shipped extension mix — adding/removing an extension = one list line + a `dist/Cargo.toml` dependency, then rebuild. Extensions import `host-api` (plus at most one cap/api crate) and read zero host internals. Integration surfaces:
+Domain-free host (`crates/agentropy-host`) + contract crates (`crates/host-api`, `cap-tracker`, `cap-runner`, `cap-chat`, `orchestrator-api`, `runner-core`); every feature is one crate under `extensions/`. The composition root is `dist/`: the `plugins![]` list in `dist/src/main.rs` is the only place naming the shipped extension mix — adding/removing an extension = one list line + a `dist/Cargo.toml` dependency, then rebuild. Extensions import `host-api` (plus at most one cap/api crate) and read zero host internals. Integration surfaces:
 
-- **Typed service registry** — named services, e.g. runners register `dyn Runner` under `"pi"`/`"claude"`/`"claude-code"`/`"codex"`/`"cli"`/`"fake"`, trackers register `dyn TrackerFactory` under `"files"`/`"linear"`. Linked ≠ enabled: `agent.yaml` `tracker.use` / `runner.use` picks which registered service actually runs.
+- **Typed service registry** — named services, e.g. runners register `dyn Runner` under `"pi"`/`"claude"`/`"claude-code"`/`"codex"`/`"cli"`/`"fake"`, trackers register `dyn TrackerFactory` under `"files"`/`"linear"`, chat backends register `dyn ChatBackend` under `"pi"` (id + Rust type form the key, so it coexists with the runner's `"pi"`). Linked ≠ enabled: `agent.yaml` `tracker.use` / `runner.use` picks which registered service actually runs.
 - **Typed event bus** — broadcast + retained topics. Orchestration payloads live in `crates/orchestrator-api`: `RunSnapshot` (retained), `ControlMsg`, `RunRequested`, `DispatchRequested`. Semantics documented in `crates/host-api/src/lib.rs`.
 - **Foreground slot** — at most one extension owns the terminal; selected per agent via top-level `foreground:` key in `agent.yaml` (default `"logs"`); unknown id → clean boot error, exit 1. Per-extension config: top-level `extensions:` map in `agent.yaml`, keyed by extension id, delivered via `ConfigStore`.
 
 `extensions/example` is the living reference; `cargo agentropy new <name> --kind background|service|foreground` scaffolds a compiling extension.
+
+### TUI foreground (`extensions/tui` + `extensions/chat-pi` + `crates/cap-chat`)
+
+`foreground: tui` renders Chat / Logs / Dash tabs in the terminal. `cap-chat` is the chat contract (`ChatBackend`/`ChatSession`); `chat-pi` registers `dyn ChatBackend @ "pi"` driving one long-lived `pi --mode rpc` child (cwd = agent root, sessions under `data/tui/sessions/`). The chat backend is resolved lazily at first submit: `extensions.tui.chat.backend` config → follow `runner.use` (via the retained snapshot's `agent.runner`) when that id has a registered chat backend → fallback `"pi"` with a transcript notice — never a boot failure (`extensions/tui/src/backend.rs`). `tui` registers NO topics — pure consumer of `frontend-log`'s (`host.log-events`/`host.app-done`/`host.startup-banner`) and the orchestrator's two; the Dash tab is absent entirely when the snapshot topic isn't registered, and its `p`/`r`/`s` keys only publish `ControlMsg` (single-writer preserved). **Quitting quits the whole agent**: `Ctrl-C` anywhere or `q` on Logs/Dash (foreground return = host shutdown, children killed). Non-TTY stdout degrades to the exact `foreground: logs` line stream.
 
 ### Two state layers (the core invariant)
 
