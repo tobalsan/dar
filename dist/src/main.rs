@@ -70,7 +70,7 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
             frontend_log::FrontendLogExtension,
             tracker_files::TrackerFilesExtension,
             tracker_linear::TrackerLinearExtension,
-            orchestrator::OrchestratorExtension,
+            orchestrator::OrchestratorExtension::default(),
             dashboard::DashboardExtension::default(),
             runner_pi::RunnerPiExtension,
             runner_claude::RunnerClaudeExtension,

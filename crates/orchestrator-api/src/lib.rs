@@ -1,8 +1,8 @@
 //! Public orchestration bus contract.
 //!
-//! This crate intentionally contains payload shapes only. It is shared by the
-//! orchestrator extension and dashboard extension without either importing the
-//! other's implementation.
+//! This crate contains the payload shapes plus the [`RunQuery`] service trait
+//! shared by the orchestrator extension and dashboard extension without either
+//! importing the other's implementation.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -107,6 +107,16 @@ pub struct EventRow {
     pub kind: String,
     pub payload: String,
     pub ts: String,
+}
+
+/// Read-only query surface over persisted runs and their events, exposed by the
+/// orchestrator as a named service (`"orchestrator"`) so the dashboard can
+/// render a run-detail drawer without importing the orchestrator crate.
+pub trait RunQuery: Send + Sync {
+    /// Fetch one persisted run by id, or `None` if unknown / store not ready.
+    fn run(&self, run_id: &str) -> Option<RunRow>;
+    /// List events for `run_id` with `event_id > since`, ascending, up to `limit`.
+    fn events_for_run(&self, run_id: &str, since: i64, limit: usize) -> Vec<EventRow>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

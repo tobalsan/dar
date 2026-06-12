@@ -1,0 +1,107 @@
+<aside class="drawer" id="run-detail-inner">
+  <div class="drawer-head">
+    <span class="drawer-title">{{ identifier }}</span>
+    <span class="dim" style="font-size:.78rem;color:var(--muted);margin-left:.3rem">{{ run_id }}</span>
+    <span class="pill {{ status_class }}" style="margin-left:.4rem">{{ status }}</span>
+    <span class="spacer"></span>
+    <button class="drawer-act{% if !process_alive %} dim{% endif %}"
+            {% if !process_alive %}disabled{% endif %}
+            hx-post="/runs/{{ run_id }}/interrupt"
+            hx-swap="none">Interrupt</button>
+    <button class="drawer-act danger{% if !process_alive %} dim{% endif %}"
+            {% if !process_alive %}disabled{% endif %}
+            hx-post="/runs/{{ run_id }}/kill"
+            hx-swap="none">Kill</button>
+    <button class="drawer-close" onclick="document.getElementById('run-detail').innerHTML=''">Close</button>
+  </div>
+
+  <div class="drawer-meta">
+    <div class="kv"><span class="k">Issue</span><span class="v">{{ identifier }}</span></div>
+    <div class="kv"><span class="k">Run ID</span><span class="v">{{ run_id }}</span></div>
+    <div class="kv"><span class="k">Outcome</span><span class="v">{% if outcome.is_empty() %}-{% else %}{{ outcome }}{% endif %}</span></div>
+    <div class="kv"><span class="k">Exit code</span><span class="v">{{ exit_code }}</span></div>
+    <div class="kv"><span class="k">PID</span><span class="v">{{ pid }}</span></div>
+    <div class="kv"><span class="k">Workspace</span><span class="v">{% if workspace.is_empty() %}-{% else %}{{ workspace }}{% endif %}</span></div>
+    <div class="kv"><span class="k">Started</span><span class="v">{{ started_at }}</span></div>
+    <div class="kv"><span class="k">Finished</span><span class="v">{% if finished_at.is_empty() %}-{% else %}{{ finished_at }}{% endif %}</span></div>
+  </div>
+
+  <div class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab(this,'tab-logs')">Logs</button>
+    <button class="tab-btn" onclick="switchTab(this,'tab-events')">Events</button>
+    <button class="tab-btn" onclick="switchTab(this,'tab-workflow')">Workflow</button>
+  </div>
+
+  <!-- Logs tab -->
+  <div id="tab-logs" class="tab-panel" style="display:flex">
+    <div class="drawer-events"
+         id="log-stream-{{ run_id }}"
+         data-last="{{ last_event_id }}"
+         {% if process_alive %}
+         hx-get="/runs/{{ run_id }}/logs"
+         hx-trigger="every 2s"
+         hx-swap="innerHTML"
+         {% endif %}>
+      {% if log_events.is_empty() %}
+      <p class="empty">No log events yet.</p>
+      {% else %}
+      {% for ev in log_events %}
+      <div class="log-line">
+        <span class="kind">{{ ev.row_type }}</span>
+        <span class="ev-text">{{ ev.text }}</span>
+      </div>
+      {% endfor %}
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Events tab -->
+  <div id="tab-events" class="tab-panel" style="display:none">
+    <div class="drawer-events">
+      {% if events.is_empty() %}
+      <p class="empty">No persisted events for this run.</p>
+      {% else %}
+      {% for ev in events %}
+      <div class="ev-row">
+        <span class="ev-ts">{{ ev.ts }}</span>
+        <span class="ev-tag">{% if ev.row_type.is_empty() %}{{ ev.kind }}{% else %}{{ ev.row_type }}{% endif %}</span>
+        <span class="ev-text">{{ ev.text }}</span>
+      </div>
+      {% endfor %}
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Workflow tab -->
+  <div id="tab-workflow" class="tab-panel" style="display:none">
+    <div class="drawer-events">
+      {% if workflow_content.is_empty() %}
+      <p class="empty">Workflow unavailable.</p>
+      {% else %}
+      <pre class="workflow-pre">{{ workflow_content }}</pre>
+      {% endif %}
+    </div>
+  </div>
+</aside>
+<style>
+  .drawer-title { font-weight: 700; }
+  .dim { opacity: .65; }
+  .drawer-act { font-size: .8rem; padding: .3rem .6rem; }
+  .tab-bar { display: flex; gap: .4rem; border-bottom: 1px solid var(--border); padding-bottom: .4rem; }
+  .tab-btn { border: none; background: none; color: var(--muted); padding: .3rem .6rem; border-radius: 5px 5px 0 0; cursor: pointer; font: inherit; font-size: .8rem; }
+  .tab-btn:hover { color: var(--fg); background: var(--panel-2); }
+  .tab-btn.active { color: var(--accent); border-bottom: 2px solid var(--accent); }
+  .tab-panel { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+  .log-line { display: grid; grid-template-columns: auto 1fr; gap: .5rem; align-items: baseline; padding: .25rem .4rem; }
+  .log-line .kind { color: var(--accent); font-size: .68rem; white-space: nowrap; }
+  .workflow-pre { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); font: inherit; margin: 0; padding: .5rem; background: var(--panel-2); border-radius: 6px; }
+</style>
+<script>
+  function switchTab(btn, tabId) {
+    var drawer = btn.closest('.drawer');
+    drawer.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+    drawer.querySelectorAll('.tab-panel').forEach(function(p) { p.style.display = 'none'; });
+    btn.classList.add('active');
+    document.getElementById(tabId).style.display = 'flex';
+  }
+</script>

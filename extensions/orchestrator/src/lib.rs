@@ -63,6 +63,7 @@ pub mod hitl;
 pub mod logging;
 pub mod paths;
 pub mod prompt;
+pub mod run_query;
 pub mod runner;
 pub mod state;
 pub mod store;
@@ -74,7 +75,13 @@ const BACKOFF_CAP: Duration = Duration::from_secs(30 * 60);
 /// Short continuation retry delay for normal-exit-but-still-active (1s).
 const CONTINUATION_DELAY: Duration = Duration::from_secs(1);
 
-pub struct OrchestratorExtension;
+#[derive(Default)]
+pub struct OrchestratorExtension {
+    /// Shared late-bound store cell behind the registered `RunQuery` service.
+    /// `register()` creates the wrapper from this cell; `start()` fills it once
+    /// the SQLite store is opened.
+    store_cell: Arc<std::sync::OnceLock<Arc<Store>>>,
+}
 
 impl Extension for OrchestratorExtension {
     fn id(&self) -> &'static str {
@@ -94,6 +101,11 @@ impl Extension for OrchestratorExtension {
                 .register_broadcast::<RunRequested>(RUN_REQUESTED_TOPIC, 64)?;
             ctx.bus
                 .register_broadcast::<DispatchRequested>(DISPATCH_REQUESTED_TOPIC, 64)?;
+            let run_query: Arc<dyn orchestrator_api::RunQuery> = Arc::new(
+                crate::run_query::RunQueryWrapper::new(Arc::clone(&self.store_cell)),
+            );
+            ctx.services
+                .service::<dyn orchestrator_api::RunQuery>("orchestrator", run_query)?;
             Ok(())
         })
     }
@@ -130,6 +142,9 @@ impl Extension for OrchestratorExtension {
             let store = Arc::new(
                 Store::open(&paths.store_db()).context("opening SQLite persistence store")?,
             );
+            // Bind the late-bound store cell so the registered `RunQuery`
+            // service (dashboard run-detail drawer) can read persisted runs.
+            let _ = self.store_cell.set(Arc::clone(&store));
             match store.open_run_pids() {
                 Ok(pids) if !pids.is_empty() => {
                     for &pid in &pids {
@@ -3290,7 +3305,10 @@ mod tests {
             shutdown: host_api::ShutdownToken::new(rx),
         };
 
-        OrchestratorExtension.register(&mut ctx).await.unwrap();
+        OrchestratorExtension::default()
+            .register(&mut ctx)
+            .await
+            .unwrap();
         let mut snapshot = orchestrator_api::RunSnapshot::empty();
         snapshot.agent.id = "agent-a".to_string();
         snapshot.version = 7;

@@ -22,7 +22,7 @@
         <p class="empty">Idle, nothing running.</p>
         {% else %}
         {% for a in active_runs %}
-        <div class="run-row">
+        <div class="run-row clickable" hx-get="/runs/{{ a.run_id }}" hx-target="#run-detail" hx-swap="innerHTML">
           <span class="run-title">{{ a.identifier }}</span>
           <span class="pill live">Live</span>
           <span class="meta">{{ a.workspace }}</span>
@@ -41,7 +41,7 @@
       <p class="empty">No recent runs yet.</p>
       {% else %}
       {% for h in history %}
-      <div class="run-row">
+      <div class="run-row clickable" hx-get="/runs/{{ h.run_id }}" hx-target="#run-detail" hx-swap="innerHTML">
         <span class="run-title">{{ h.identifier }}</span>
         <span class="pill {{ h.status_class }}">{{ h.status }}</span>
         <span class="meta">{{ h.run }}</span>

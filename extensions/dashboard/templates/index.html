@@ -48,9 +48,35 @@
     .interrupted { background: rgba(242,184,75,.15); color: var(--warn); }
     .other { background: rgba(155,166,181,.15); color: var(--muted); }
     .live { background: rgba(122,162,247,.15); color: var(--info); }
+    .run-row.clickable { cursor: pointer; }
+    .run-row.clickable:hover { border-color: var(--accent); }
+    #run-detail:empty { display: none; }
+    .drawer {
+      position: fixed; top: 0; right: 0; bottom: 0; width: min(34rem, 100%);
+      background: var(--panel); border-left: 1px solid var(--border);
+      box-shadow: -8px 0 24px rgba(0,0,0,.45); padding: 1rem 1.1rem;
+      display: flex; flex-direction: column; gap: .8rem; overflow: hidden; z-index: 50;
+    }
+    .drawer-head { display: flex; align-items: center; gap: .6rem; }
+    .drawer-head h2 { margin: 0; }
+    .drawer-close { margin-left: auto; }
+    .drawer-meta { display: grid; gap: .3rem; }
+    .kv { display: grid; grid-template-columns: 7rem 1fr; gap: .5rem; }
+    .kv .k { color: var(--muted); text-transform: uppercase; font-size: .68rem; letter-spacing: .06em; padding-top: .1rem; }
+    .kv .v { overflow-wrap: anywhere; }
+    .drawer-events-head { display: flex; align-items: center; gap: .5rem; margin: .2rem 0 0; }
+    .drawer-events { flex: 1; overflow-y: auto; display: grid; gap: .3rem; align-content: start; padding-right: .25rem; }
+    .ev-row {
+      display: grid; grid-template-columns: auto auto 1fr; gap: .5rem; align-items: baseline;
+      padding: .35rem .5rem; background: #171b21; border: 1px solid var(--border); border-radius: 5px;
+    }
+    .ev-ts { color: var(--muted); font-size: .68rem; white-space: nowrap; }
+    .ev-tag { color: var(--accent); font-size: .68rem; white-space: nowrap; }
+    .ev-text { overflow-wrap: anywhere; white-space: pre-wrap; }
     @media (max-width: 760px) {
       header, main { padding-left: .8rem; padding-right: .8rem; }
       main { grid-template-columns: 1fr; }
+      .drawer { width: 100%; }
     }
   </style>
 </head>
@@ -58,5 +84,6 @@
   <div id="content" hx-get="/content" hx-trigger="every 2s" hx-swap="innerHTML">
     {{ content|safe }}
   </div>
+  <div id="run-detail"></div>
 </body>
 </html>
