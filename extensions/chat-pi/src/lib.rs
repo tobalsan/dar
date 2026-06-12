@@ -11,6 +11,7 @@
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
+use std::io;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -30,6 +31,8 @@ use tokio::sync::Mutex;
 
 /// How long `close` waits for a clean exit after stdin EOF before escalating.
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
+const SPAWN_RETRY_WAIT: Duration = Duration::from_millis(25);
+const SPAWN_RETRIES: usize = 10;
 /// SIGTERM-to-SIGKILL grace passed to `term_then_kill` on close overrun.
 const KILL_GRACE: Duration = Duration::from_secs(5);
 
@@ -96,7 +99,7 @@ impl PiChatSession {
             .stderr(Stdio::piped());
         setup_process_group(&mut cmd);
 
-        let mut child = cmd.spawn().with_context(|| {
+        let mut child = spawn_child(cmd).await.with_context(|| {
             format!(
                 "spawning `{}` in {}",
                 command.to_string_lossy(),
@@ -162,6 +165,22 @@ impl PiChatSession {
         }
         Ok(())
     }
+}
+
+async fn spawn_child(mut cmd: Command) -> io::Result<tokio::process::Child> {
+    for attempt in 0..SPAWN_RETRIES {
+        match cmd.spawn() {
+            Err(err) if is_executable_busy(&err) && attempt + 1 < SPAWN_RETRIES => {
+                tokio::time::sleep(SPAWN_RETRY_WAIT).await;
+            }
+            result => return result,
+        }
+    }
+    cmd.spawn()
+}
+
+fn is_executable_busy(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(26)
 }
 
 impl ChatSession for PiChatSession {
@@ -829,6 +848,27 @@ mod tests {
         std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spawn_retries_while_stub_script_is_busy() {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("stub-pi.sh");
+        let mut file = std::fs::File::create(&script).unwrap();
+        file.write_all(b"#!/bin/sh\nwhile IFS= read -r line; do :; done\n")
+            .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let params = stub_params(temp.path(), &script);
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+
+        let task = tokio::spawn(async move { PiChatSession::spawn(&params, tx).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(file);
+
+        let session = task.await.unwrap().unwrap();
+        ChatSession::close(Box::new(session)).await.unwrap();
     }
 
     fn stub_params(temp: &Path, script: &Path) -> ChatSessionParams {
