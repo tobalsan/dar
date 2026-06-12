@@ -80,6 +80,7 @@ async fn run(root: std::path::PathBuf) -> Result<()> {
             runner_fake::RunnerFakeExtension,
             chat_opencode::ChatOpenCodeExtension,
             chat_pi::ChatPiExtension,
+            chat_codex::ChatCodexExtension,
             tui::TuiExtension,
         ],
         options,
