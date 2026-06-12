@@ -130,17 +130,31 @@
     drawer.querySelectorAll('.tab-panel').forEach(function(p) { p.style.display = 'none'; });
     btn.classList.add('active');
     document.getElementById(tabId).style.display = 'flex';
+    document.getElementById(tabId).querySelectorAll('.drawer-events').forEach(function(el) {
+      if (!el.dataset.initScrolled) {
+        el.scrollTop = el.scrollHeight;
+        el.dataset.initScrolled = '1';
+      }
+    });
   }
+  document.querySelectorAll('#run-detail-inner .drawer-events').forEach(function(el) {
+    el.scrollTop = el.scrollHeight;
+    if (el.scrollHeight > 0) el.dataset.initScrolled = '1';
+  });
   if (!window.__logSwapListenerRegistered) {
     window.__logSwapListenerRegistered = true;
     var _openEids = [];
+    var _stickBottom = false;
     document.body.addEventListener('htmx:beforeSwap', function(ev) {
       var tgt = ev.detail && ev.detail.target;
-      if (tgt && tgt.id && tgt.id.startsWith('log-stream-')) {
-        _openEids = [];
-        tgt.querySelectorAll('details[data-eid][open]').forEach(function(d) {
-          _openEids.push(d.getAttribute('data-eid'));
-        });
+      if (tgt && tgt.id && (tgt.id.startsWith('log-stream-') || tgt.id.startsWith('ev-stream-'))) {
+        _stickBottom = tgt.scrollHeight - tgt.scrollTop - tgt.clientHeight < 4;
+        if (tgt.id.startsWith('log-stream-')) {
+          _openEids = [];
+          tgt.querySelectorAll('details[data-eid][open]').forEach(function(d) {
+            _openEids.push(d.getAttribute('data-eid'));
+          });
+        }
       }
     });
     document.body.addEventListener('htmx:afterSwap', function(ev) {
@@ -156,6 +170,9 @@
             if (el) el.open = true;
           });
           _openEids = [];
+        }
+        if (_stickBottom) {
+          tgt.scrollTop = tgt.scrollHeight;
         }
       }
     });
