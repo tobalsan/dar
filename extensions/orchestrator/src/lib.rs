@@ -42,7 +42,7 @@ use crate::domain::Issue;
 use crate::hitl::{HitlNotification, HitlNotify, NoopHitlNotifier};
 use crate::paths::{issue_workspace, issue_workspace_path, resolve_workspace_root, AgentPaths};
 use crate::prompt::PromptRenderer;
-use crate::runner::{ExitKind, KillReason, RunnerHandle, SpawnParams};
+use crate::runner::{ExitKind, KillReason, RunnerHandle, SpawnParams, TurnDecision};
 use crate::state::{
     ActiveRun, AgentInfo, AppState, ControlMsg, ControlReply, HistoryEntry, QueueItem, RetryItem,
     RunStatus,
@@ -74,6 +74,9 @@ pub mod workflow_config;
 const BACKOFF_CAP: Duration = Duration::from_secs(30 * 60);
 /// Short continuation retry delay for normal-exit-but-still-active (1s).
 const CONTINUATION_DELAY: Duration = Duration::from_secs(1);
+/// Static nudge fed to a turn-capable runner when the issue is still active at a
+/// turn boundary: continue the same live session for another turn.
+const TURN_CONTINUE_PROMPT: &str = "Continue working on this issue. Re-read the issue file; if the work is complete, update the issue state accordingly, otherwise keep going.";
 
 #[derive(Default)]
 pub struct OrchestratorExtension {
@@ -368,6 +371,10 @@ struct RunSlot {
     workspace: String,
     handle: Option<RunnerHandle>,
     attempt: u32,
+    /// Turn boundaries already consumed for this run (turn-capable runners). The
+    /// orchestrator stops asking the runner to continue once this reaches
+    /// `max_turns`; one run row spans all turns.
+    turns_used: u32,
     /// SQLite run_id for this dispatch attempt. Used for finish_run / event writes.
     run_id: String,
     started_at: DateTime<Utc>,
@@ -550,6 +557,12 @@ impl Orchestrator {
         // Step 2: detect stalled/released runs before observing child exits.
         self.reconcile().await;
 
+        // Step 2b: drive turn boundaries for turn-capable runs (symphony loop):
+        // at each boundary the issue tracker decides continue-same-session vs
+        // finish. Runs reconcile() removed or whose child already exited are
+        // skipped so collect_finished can classify them.
+        self.poll_turns();
+
         // Step 3: observe child completions.
         self.collect_finished().await;
 
@@ -712,6 +725,78 @@ impl Orchestrator {
                     "workflow_reload",
                     &format!("WORKFLOW.md reload error: {e:#}"),
                 );
+            }
+        }
+    }
+
+    /// Step 2b. Drive turn boundaries for turn-capable, still-running slots.
+    ///
+    /// The tracker is the state machine: at each boundary re-read the issue and
+    /// either continue the SAME live session (next turn, same run row) or finish
+    /// it gracefully. No protocol signal decides "run done" — `Finish` lets the
+    /// child exit normally and `collect_finished` classifies it.
+    ///
+    /// Decision rules per boundary:
+    ///   issue left active (terminal or any non-active)  -> Finish
+    ///   active && turns_used <  max_turns               -> Continue (turns_used++)
+    ///   active && turns_used >= max_turns               -> Finish (backstop;
+    ///       normal-exit-still-active then hits the existing continuation path)
+    ///
+    /// Slots whose handle is finished are skipped so `collect_finished` can
+    /// classify the clean exit (same rule `reconcile` follows).
+    fn poll_turns(&mut self) {
+        let active = self.effective_cfg.active_states.clone();
+        let max_turns = self.effective_cfg.max_turns;
+
+        for idx in 0..self.slots.len() {
+            let boundary = match self.slots[idx].handle.as_mut() {
+                Some(h) if h.supports_turns() && !h.is_finished() => h.try_recv_turn_ended(),
+                _ => false,
+            };
+            if !boundary {
+                continue;
+            }
+
+            let identifier = self.slots[idx].identifier.clone();
+            // Re-read the issue: active state decides continue vs finish.
+            let state_now = self
+                .tracker
+                .fetch_one(&identifier)
+                .ok()
+                .flatten()
+                .map(|i| i.state);
+            let still_active = state_now.as_ref().is_some_and(|st| active.contains(st));
+
+            let decision = if !still_active {
+                logging::ev(&identifier, "turn", "issue left active; finishing run");
+                TurnDecision::Finish
+            } else if self.slots[idx].turns_used < max_turns {
+                // Counts boundaries observed, not turns executed: a runner may
+                // swallow a Continue whose boundary went stale (codex), so the
+                // cap can only under-run, never over-run.
+                self.slots[idx].turns_used += 1;
+                logging::ev(
+                    &identifier,
+                    "turn",
+                    &format!(
+                        "still active; continuing same session (turn {}/{max_turns})",
+                        self.slots[idx].turns_used
+                    ),
+                );
+                TurnDecision::Continue {
+                    prompt: TURN_CONTINUE_PROMPT.to_string(),
+                }
+            } else {
+                logging::ev(
+                    &identifier,
+                    "turn",
+                    &format!("max_turns reached ({max_turns}); finishing run"),
+                );
+                TurnDecision::Finish
+            };
+
+            if let Some(h) = self.slots[idx].handle.as_ref() {
+                h.send_turn_decision(decision);
             }
         }
     }
@@ -1089,6 +1174,12 @@ impl Orchestrator {
         }
         due_retries.reverse();
 
+        // Issues parked during THIS dispatch pass. The retry path's park inserts
+        // a ParkBarrier run row that breaks the consecutive-completed streak, so
+        // without this the same identifier would re-dispatch from the stale
+        // fresh-candidate list in the same pass.
+        let mut parked_this_pass: HashSet<String> = HashSet::new();
+
         for retry in due_retries {
             if self.slots.len() >= max {
                 self.retries.push(retry);
@@ -1100,6 +1191,8 @@ impl Orchestrator {
             match self.tracker.fetch_one(&retry.identifier) {
                 Ok(Some(issue)) if self.effective_cfg.active_states.contains(&issue.state) => {
                     if self.park_if_active_run_barrier_reached(&issue) {
+                        parked_this_pass.insert(issue.id.clone());
+                        parked_this_pass.insert(issue.identifier.clone());
                         continue;
                     }
                     if self.claims.contains(&issue.id) {
@@ -1141,6 +1234,8 @@ impl Orchestrator {
                     && !retry_ids.contains(&i.identifier)
                     && !retry_ids.contains(&i.id)
                     && !self.claims.contains(&i.id)
+                    && !parked_this_pass.contains(&i.id)
+                    && !parked_this_pass.contains(&i.identifier)
             })
             .cloned()
             .collect();
@@ -1157,6 +1252,8 @@ impl Orchestrator {
                 continue;
             }
             if self.park_if_active_run_barrier_reached(&issue) {
+                parked_this_pass.insert(issue.id.clone());
+                parked_this_pass.insert(issue.identifier.clone());
                 continue;
             }
             logging::ev(&issue.identifier, "dispatch", "fresh candidate");
@@ -1442,6 +1539,7 @@ impl Orchestrator {
                     issue,
                     handle: Some(handle),
                     attempt,
+                    turns_used: 0,
                     run_id,
                     started_at,
                     claim_id,
@@ -2391,6 +2489,63 @@ mod tests {
         RunnerHandle::new(pid, kill_tx, done)
     }
 
+    /// Test-side controls for a turn-capable handle: inject a turn boundary and
+    /// observe the orchestrator's decision.
+    struct TurnHarness {
+        ended_tx: mpsc::UnboundedSender<crate::runner::TurnEnded>,
+        decision_rx: mpsc::UnboundedReceiver<TurnDecision>,
+    }
+
+    impl TurnHarness {
+        /// Await the next decision the orchestrator sent (the supervisor task
+        /// forwards it). Panics if none arrives promptly.
+        async fn recv_decision(&mut self) -> TurnDecision {
+            tokio::time::timeout(Duration::from_secs(1), self.decision_rx.recv())
+                .await
+                .expect("decision not observed in time")
+                .expect("decision channel closed")
+        }
+    }
+
+    /// A turn-capable handle modelling an opt-in runner with a long-lived
+    /// session: it stays alive across `Continue` decisions and resolves `done`
+    /// with `ExitKind::Normal` on `Finish` (or on kill). The returned harness
+    /// lets the test drive turn boundaries.
+    fn turn_handle_for_test(pid: u32) -> (RunnerHandle, TurnHarness) {
+        let (kill_tx, mut kill_rx) = oneshot::channel::<KillReason>();
+        let (ended_tx, ended_rx) = mpsc::unbounded_channel::<crate::runner::TurnEnded>();
+        let (decision_tx, mut decision_rx_internal) = mpsc::unbounded_channel::<TurnDecision>();
+        // Bridge so the test can observe decisions while the supervisor task also
+        // consumes them to decide when to finish.
+        let (obs_tx, obs_rx) = mpsc::unbounded_channel::<TurnDecision>();
+        let done = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut kill_rx => return ExitKind::Normal,
+                    decision = decision_rx_internal.recv() => match decision {
+                        Some(TurnDecision::Finish) => {
+                            let _ = obs_tx.send(TurnDecision::Finish);
+                            return ExitKind::Normal;
+                        }
+                        Some(TurnDecision::Continue { prompt }) => {
+                            let _ = obs_tx.send(TurnDecision::Continue { prompt });
+                            // Same live session continues; keep waiting.
+                        }
+                        None => return ExitKind::Normal,
+                    },
+                }
+            }
+        });
+        let handle = RunnerHandle::with_turns(pid, kill_tx, done, ended_rx, decision_tx);
+        (
+            handle,
+            TurnHarness {
+                ended_tx,
+                decision_rx: obs_rx,
+            },
+        )
+    }
+
     struct StaticTracker {
         issue: Issue,
         parks: Option<Arc<Mutex<Vec<String>>>>,
@@ -2446,6 +2601,47 @@ mod tests {
 
         fn fetch_one(&self, _id: &str) -> Result<Option<Issue>> {
             Ok(None)
+        }
+    }
+
+    /// Tracker whose single issue's state can be flipped mid-test (e.g. to a
+    /// terminal state) so the turn loop observes a state change at a boundary.
+    struct MutableTracker {
+        issue: Mutex<Issue>,
+    }
+
+    impl MutableTracker {
+        fn new(issue: Issue) -> Self {
+            Self {
+                issue: Mutex::new(issue),
+            }
+        }
+
+        fn set_state(&self, state: &str) {
+            self.issue.lock().unwrap().state = state.to_string();
+        }
+    }
+
+    impl Tracker for MutableTracker {
+        fn poll_candidates(&self) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_states(&self, _ids: &[String]) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_terminal(&self) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_one(&self, id: &str) -> Result<Option<Issue>> {
+            let issue = self.issue.lock().unwrap();
+            if id == issue.identifier || id == issue.id {
+                Ok(Some(issue.clone()))
+            } else {
+                Ok(None)
+            }
         }
     }
 
@@ -2510,6 +2706,7 @@ mod tests {
                 model: None,
                 max_run_timeout_ms: 1000,
                 stall_timeout_ms: 300_000,
+                max_turns: 20,
             },
             orchestrator: OrchestratorConfig {
                 poll_interval_ms: 100,
@@ -2603,6 +2800,7 @@ mod tests {
             workspace: "workspace".to_string(),
             handle: Some(finished_handle_for_test(42, ExitKind::Abnormal(Some(17)))),
             attempt: 1,
+            turns_used: 0,
             run_id: run_id.clone(),
             started_at,
             claim_id,
@@ -2668,6 +2866,7 @@ mod tests {
             workspace: "workspace".to_string(),
             handle: Some(finished_handle_for_test(42, ExitKind::Abnormal(None))),
             attempt: 1,
+            turns_used: 0,
             run_id,
             started_at,
             claim_id: None,
@@ -2744,6 +2943,7 @@ mod tests {
             workspace: "workspace".to_string(),
             handle: Some(finished_handle_for_test(42, ExitKind::Normal)),
             attempt: 0,
+            turns_used: 0,
             run_id: run_id.clone(),
             started_at,
             claim_id: None,
@@ -2825,6 +3025,7 @@ mod tests {
                 },
             )),
             attempt: 1,
+            turns_used: 0,
             run_id: run_id.clone(),
             started_at,
             claim_id: None,
@@ -2916,6 +3117,7 @@ mod tests {
                 ExitKind::Interrupted { reason: "stalled" },
             )),
             attempt: 0,
+            turns_used: 0,
             run_id: run_id.clone(),
             started_at,
             claim_id,
@@ -2983,6 +3185,7 @@ mod tests {
             workspace: "workspace".to_string(),
             handle: Some(finished_handle_for_test(42, ExitKind::Abnormal(None))),
             attempt: 1,
+            turns_used: 0,
             run_id,
             started_at,
             claim_id: None,
@@ -3060,6 +3263,7 @@ mod tests {
             workspace: "workspace".to_string(),
             handle: Some(finished_handle_for_test(42, ExitKind::Abnormal(Some(1)))),
             attempt: 3,
+            turns_used: 0,
             run_id,
             started_at,
             claim_id: None,
@@ -3347,6 +3551,7 @@ mod tests {
                 model: None,
                 max_run_timeout_ms: 30_000,
                 stall_timeout_ms: 300_000,
+                max_turns: 20,
             },
             orchestrator: OrchestratorConfig {
                 poll_interval_ms: 10,
@@ -3705,5 +3910,296 @@ mod tests {
         // A retry must be queued (attempt < max_retries).
         assert_eq!(orchestrator.retries.len(), 1);
         assert_eq!(orchestrator.retries[0].identifier, "ISSUE-1");
+    }
+
+    // ---------------------------------------------------------------------------
+    // ALG-234: tracker-driven turn loop
+    // ---------------------------------------------------------------------------
+
+    /// Build an orchestrator wired to `tracker` with a single live turn-capable
+    /// slot for `active_issue`, plus its persisted run row. Returns the
+    /// orchestrator, the shared state, and the turn harness.
+    async fn turn_loop_fixture(
+        temp: &TempDir,
+        tracker: Arc<dyn Tracker>,
+        active_issue: &Issue,
+        mut effective_cfg: EffectiveLoopConfig,
+    ) -> (Orchestrator, AppState, TurnHarness, Arc<Store>, String) {
+        std::fs::create_dir_all(temp.path().join("logs")).unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+        // Keep the stall guard out of the way for these tests.
+        effective_cfg.stall_timeout_ms = 60_000;
+
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let state = AppState::new(
+            AgentInfo {
+                id: "test-agent".to_string(),
+                folder: temp.path().display().to_string(),
+                tracker: "files".to_string(),
+                runner: "fake".to_string(),
+            },
+            control_tx,
+            Arc::clone(&store),
+            Vec::new(),
+        );
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let mut orchestrator = Orchestrator::new(
+            test_agent_config(),
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state.clone(),
+            control_rx,
+        );
+
+        let started_at = Utc::now();
+        let run_id = new_run_id(&active_issue.identifier, &started_at);
+        store
+            .insert_run(&NewRun {
+                run_id: &run_id,
+                issue_id: &active_issue.id,
+                issue_identifier: &active_issue.identifier,
+                workspace: "workspace",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 42,
+                worker_id: None,
+                started_at,
+            })
+            .unwrap();
+        let (handle, harness) = turn_handle_for_test(42);
+        orchestrator.claims.insert(active_issue.id.clone());
+        orchestrator.slots.push(RunSlot {
+            identifier: active_issue.identifier.clone(),
+            issue: active_issue.clone(),
+            workspace: "workspace".to_string(),
+            handle: Some(handle),
+            attempt: 0,
+            turns_used: 0,
+            run_id: run_id.clone(),
+            started_at,
+            claim_id: None,
+            last_event_at: Arc::new(Mutex::new(started_at)),
+        });
+        (orchestrator, state, harness, store, run_id)
+    }
+
+    #[tokio::test]
+    async fn turn_end_still_active_continues_same_run() {
+        let temp = TempDir::new().unwrap();
+        let active_issue = issue("ISSUE-1", None, None);
+        let tracker = Arc::new(MutableTracker::new(active_issue.clone()));
+        let agent_cfg = test_agent_config();
+        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let (mut orch, _state, mut harness, store, _run_id) =
+            turn_loop_fixture(&temp, tracker, &active_issue, effective_cfg).await;
+
+        // Runner reports a turn boundary; issue is still active.
+        harness.ended_tx.send(crate::runner::TurnEnded).unwrap();
+        tokio::task::yield_now().await;
+
+        orch.poll_turns();
+
+        // Same run still live, one extra turn, exactly one run row.
+        assert_eq!(orch.slots.len(), 1, "run must keep running across the turn");
+        assert_eq!(orch.slots[0].turns_used, 1);
+        let decision = harness.recv_decision().await;
+        assert!(
+            matches!(decision, TurnDecision::Continue { .. }),
+            "expected Continue, got {decision:?}"
+        );
+        orch.collect_finished().await;
+        assert_eq!(orch.slots.len(), 1, "Continue keeps the run live");
+        assert_eq!(store.list_runs_paged(0, 10).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn turn_end_terminal_finishes_run_succeeded() {
+        let temp = TempDir::new().unwrap();
+        let active_issue = issue("ISSUE-1", None, None);
+        let tracker = Arc::new(MutableTracker::new(active_issue.clone()));
+        let agent_cfg = test_agent_config();
+        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let (mut orch, state, mut harness, store, _run_id) =
+            turn_loop_fixture(&temp, Arc::clone(&tracker) as Arc<dyn Tracker>, &active_issue, effective_cfg)
+                .await;
+
+        // Issue moved to terminal before the boundary is processed.
+        tracker.set_state("done");
+        harness.ended_tx.send(crate::runner::TurnEnded).unwrap();
+        tokio::task::yield_now().await;
+
+        // poll_turns sends Finish; the supervisor resolves done with Normal.
+        orch.poll_turns();
+        let decision = harness.recv_decision().await;
+        assert!(
+            matches!(decision, TurnDecision::Finish),
+            "expected Finish, got {decision:?}"
+        );
+        // Let the supervisor task observe Finish and resolve.
+        for _ in 0..100 {
+            if orch.slots[0].handle.as_ref().unwrap().is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        orch.collect_finished().await;
+
+        assert!(orch.slots.is_empty(), "finished run must be collected");
+        assert!(orch.retries.is_empty(), "terminal finish does not retry");
+        let history = state.history.snapshot();
+        assert_eq!(history[0].status, RunStatus::Terminal);
+        assert_eq!(store.list_runs_paged(0, 10).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn turn_end_at_max_turns_finishes_and_continuation_path_engages() {
+        let temp = TempDir::new().unwrap();
+        let active_issue = issue("ISSUE-1", None, None);
+        let tracker = Arc::new(MutableTracker::new(active_issue.clone()));
+        let agent_cfg = test_agent_config();
+        let mut effective_cfg =
+            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        effective_cfg.max_turns = 1;
+        let (mut orch, _state, mut harness, _store, _run_id) =
+            turn_loop_fixture(&temp, tracker, &active_issue, effective_cfg).await;
+
+        // First boundary: under max_turns -> Continue (turns_used 0 -> 1).
+        harness.ended_tx.send(crate::runner::TurnEnded).unwrap();
+        tokio::task::yield_now().await;
+        orch.poll_turns();
+        assert!(matches!(
+            harness.recv_decision().await,
+            TurnDecision::Continue { .. }
+        ));
+        assert_eq!(orch.slots[0].turns_used, 1);
+
+        // Second boundary: turns_used >= max_turns -> Finish (issue still active).
+        harness.ended_tx.send(crate::runner::TurnEnded).unwrap();
+        tokio::task::yield_now().await;
+        orch.poll_turns();
+        assert!(matches!(harness.recv_decision().await, TurnDecision::Finish));
+        // Supervisor resolves Normal; issue is still active -> existing
+        // continuation-retry path engages (the backstop).
+        for _ in 0..100 {
+            if orch.slots[0].handle.as_ref().unwrap().is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        orch.collect_finished().await;
+
+        assert!(orch.slots.is_empty());
+        assert_eq!(orch.retries.len(), 1, "still-active normal exit -> continuation retry");
+        assert!(orch.retries[0].continuation);
+    }
+
+    /// Park-race regression (ALG-234 part 3): when the retry path parks an
+    /// identifier this pass, the fresh-candidate loop must NOT re-dispatch it,
+    /// even though the inserted ParkBarrier row breaks the completed streak.
+    #[tokio::test]
+    async fn same_tick_park_does_not_redispatch_parked_identifier() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("logs")).unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+
+        let active_issue = issue("ISSUE-1", None, None);
+        let parks = Arc::new(Mutex::new(Vec::new()));
+        let tracker = Arc::new(CandidateTracker {
+            issue: active_issue.clone(),
+            parks: Arc::clone(&parks),
+            park_ok: true,
+        });
+        let agent_cfg = test_agent_config();
+        let mut effective_cfg =
+            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        effective_cfg.max_active_runs = 2;
+
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        // Two prior completed-but-still-active runs reach the barrier.
+        for idx in 0..2 {
+            let started_at = Utc::now() + chrono::Duration::milliseconds(idx);
+            let run_id = format!("ISSUE-1-completed-{idx}");
+            store
+                .insert_run(&NewRun {
+                    run_id: &run_id,
+                    issue_id: &active_issue.id,
+                    issue_identifier: &active_issue.identifier,
+                    workspace: "workspace",
+                    profile_json: None,
+                    workflow_path: None,
+                    workflow_sha: None,
+                    pid: 42,
+                    worker_id: None,
+                    started_at,
+                })
+                .unwrap();
+            store
+                .finish_run(
+                    &run_id,
+                    &RunFinish {
+                        outcome: RunStatus::Succeeded,
+                        exit_code: Some(0),
+                        finished_at: started_at,
+                    },
+                )
+                .unwrap();
+            store
+                .insert_event(&NewEvent {
+                    run_id: Some(&run_id),
+                    issue_identifier: &active_issue.identifier,
+                    kind: "lifecycle",
+                    payload: ACTIVE_CONTINUATION_EVENT,
+                    ts: started_at,
+                })
+                .unwrap();
+        }
+        let state = AppState::new(
+            AgentInfo {
+                id: "test-agent".to_string(),
+                folder: temp.path().display().to_string(),
+                tracker: "files".to_string(),
+                runner: "claude-code".to_string(),
+            },
+            control_tx,
+            Arc::clone(&store),
+            Vec::new(),
+        );
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state.clone(),
+            control_rx,
+        );
+
+        // Queue a DUE retry for the same identifier so the retry path parks it,
+        // while the same issue is also a fresh candidate this pass.
+        orchestrator.retries.push(Retry {
+            identifier: active_issue.identifier.clone(),
+            attempt: 1,
+            due_at: Utc::now() - chrono::Duration::seconds(1),
+            last_error: String::new(),
+            continuation: true,
+        });
+
+        orchestrator
+            .dispatch(std::slice::from_ref(&active_issue))
+            .await;
+
+        // Parked exactly once, never dispatched into a slot.
+        assert!(
+            orchestrator.slots.is_empty(),
+            "parked identifier must not be re-dispatched in the same pass"
+        );
+        assert_eq!(parks.lock().unwrap().len(), 1, "issue parked exactly once");
+        assert!(orchestrator.claims.is_empty());
     }
 }

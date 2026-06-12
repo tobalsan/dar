@@ -76,10 +76,18 @@ pub struct RunnerConfig {
     pub max_run_timeout_ms: u64,
     #[serde(default = "default_stall_timeout_ms")]
     pub stall_timeout_ms: u64,
+    /// Max turns a single run may take before the orchestrator stops asking a
+    /// turn-capable runner to continue (turn-loop backstop). Default 20.
+    #[serde(default = "default_max_turns")]
+    pub max_turns: u32,
 }
 
 fn default_turn_timeout_ms() -> u64 {
     60 * 60 * 1000
+}
+
+fn default_max_turns() -> u32 {
+    20
 }
 
 fn default_stall_timeout_ms() -> u64 {

@@ -13,6 +13,7 @@ runner:
   command: claude
   max_run_timeout_ms: 3600000
   stall_timeout_ms: 300000
+  max_turns: 20
 
 orchestrator:
   poll_interval_ms: 10000
@@ -28,8 +29,8 @@ dashboard:
   port: 7878
 
 # Terminal UI instead of the plain log stream (Chat / Logs / Dash tabs):
-# foreground: tui
-#
+foreground: tui
+
 # extensions:
 #   tui:
 #     chat:

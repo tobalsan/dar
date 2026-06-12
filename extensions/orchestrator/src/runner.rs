@@ -8,7 +8,7 @@
 
 use chrono::{DateTime, Utc};
 
-pub use cap_runner::{ExitKind, KillReason, RunnerHandle, SpawnParams};
+pub use cap_runner::{ExitKind, KillReason, RunnerHandle, SpawnParams, TurnDecision, TurnEnded};
 pub use runner_core::{term_then_kill, wait_for_pids_dead};
 
 use crate::state::EventRing;

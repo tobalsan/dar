@@ -131,6 +131,9 @@ pub struct WfAgentConfig {
     pub turn_timeout_ms: Option<u64>,
     pub stall_timeout_ms: Option<u64>,
     pub max_active_runs: Option<u32>,
+    /// Max turns a turn-capable run may take before the orchestrator stops
+    /// asking it to continue. Overrides agent.yaml `runner.max_turns`.
+    pub max_turns: Option<u32>,
 }
 
 impl WfAgentConfig {
@@ -291,6 +294,9 @@ pub struct EffectiveLoopConfig {
     pub effort: Option<String>,
     pub max_run_timeout_ms: u64,
     pub stall_timeout_ms: u64,
+    /// Max turns a turn-capable run may take before the orchestrator finishes it
+    /// (the turn-loop backstop).
+    pub max_turns: u32,
     // Dashboard
     pub dashboard_bind: IpAddr,
     pub dashboard_port: u16,
@@ -393,6 +399,7 @@ impl EffectiveLoopConfig {
         let stall_timeout_ms = a
             .and_then(|a| a.stall_timeout_ms)
             .unwrap_or(base.runner.stall_timeout_ms);
+        let max_turns = a.and_then(|a| a.max_turns).unwrap_or(base.runner.max_turns);
 
         // --- Dashboard ---
         let dashboard_bind = wf
@@ -436,6 +443,7 @@ impl EffectiveLoopConfig {
             effort,
             max_run_timeout_ms,
             stall_timeout_ms,
+            max_turns,
             dashboard_bind,
             dashboard_port,
             webhook_secret,
@@ -520,6 +528,7 @@ mod tests {
                 model: None,
                 max_run_timeout_ms: 1_800_000,
                 stall_timeout_ms: 300_000,
+                max_turns: 20,
             },
             orchestrator: OrchestratorConfig {
                 poll_interval_ms: 10_000,
@@ -891,6 +900,7 @@ body"#;
             model: None,
             max_run_timeout_ms: 3_600_000,
             stall_timeout_ms: 300_000,
+            max_turns: 20,
         };
         // sdk field in agent.yaml should map to runner kind via the `use_` alias
         let wf = WorkflowFrontmatter::default();
