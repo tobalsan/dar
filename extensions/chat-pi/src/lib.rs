@@ -9,6 +9,7 @@
 //! protocol drift. Note: the `jsonrpc/turn` shape in `runner-pi` is NOT stock
 //! pi's protocol and is deliberately not used here.
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,13 +67,21 @@ impl ChatBackend for PiChatBackend {
 pub struct PiChatSession {
     pid: u32,
     next_turn: u64,
+    tx: Sender<ChatEvent>,
     /// Shared with the stdout pump (extension_ui_request auto-answers).
     /// `close` takes it; dropping the writer is pi's clean-quit signal.
     stdin: Arc<Mutex<Option<ChildStdin>>>,
+    queue: Arc<Mutex<TurnQueue>>,
     /// Set before the deliberate stdin close so the wait task does not
     /// classify the resulting exit as a crash (`SessionClosed`).
     closing: Arc<AtomicBool>,
     wait_handle: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct TurnQueue {
+    busy: bool,
+    pending: VecDeque<String>,
 }
 
 impl PiChatSession {
@@ -99,20 +108,16 @@ impl PiChatSession {
             .context("chat child has no pid immediately after spawn")?;
 
         let stdin = Arc::new(Mutex::new(child.stdin.take()));
-        let stdout = child
-            .stdout
-            .take()
-            .context("chat child stdout not piped")?;
-        let stderr = child
-            .stderr
-            .take()
-            .context("chat child stderr not piped")?;
-        spawn_stdout_pump(stdout, tx.clone(), Arc::clone(&stdin));
+        let stdout = child.stdout.take().context("chat child stdout not piped")?;
+        let stderr = child.stderr.take().context("chat child stderr not piped")?;
+        let queue = Arc::new(Mutex::new(TurnQueue::default()));
+        spawn_stdout_pump(stdout, tx.clone(), Arc::clone(&stdin), Arc::clone(&queue));
         spawn_stderr_pump(stderr, tx.clone());
 
         let closing = Arc::new(AtomicBool::new(false));
         let wait_handle = {
             let closing = Arc::clone(&closing);
+            let tx = tx.clone();
             tokio::spawn(async move {
                 let status = child.wait().await;
                 if !closing.load(Ordering::SeqCst) {
@@ -130,17 +135,31 @@ impl PiChatSession {
         Ok(Self {
             pid,
             next_turn: 0,
+            tx,
             stdin,
+            queue,
             closing,
             wait_handle,
         })
     }
 
     async fn write_line(&self, line: String) -> Result<()> {
-        let mut guard = self.stdin.lock().await;
-        let stdin = guard.as_mut().context("chat session stdin is closed")?;
-        stdin.write_all(line.as_bytes()).await?;
-        stdin.flush().await?;
+        write_line_to(&self.stdin, line).await
+    }
+
+    async fn accept_turn(&self, line: String) -> Result<()> {
+        {
+            let mut queue = self.queue.lock().await;
+            if queue.busy {
+                queue.pending.push_back(line);
+                return Ok(());
+            }
+            queue.busy = true;
+        }
+        if let Err(error) = self.write_line(line).await {
+            self.queue.lock().await.busy = false;
+            return Err(error);
+        }
         Ok(())
     }
 }
@@ -149,11 +168,15 @@ impl ChatSession for PiChatSession {
     fn send_turn(&mut self, prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
         self.next_turn += 1;
         let line = prompt_command(&format!("t{}", self.next_turn), &prompt);
-        Box::pin(async move { self.write_line(line).await })
+        Box::pin(async move { self.accept_turn(line).await })
     }
 
     fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
-        Box::pin(async move { self.write_line(abort_command()).await })
+        Box::pin(async move {
+            self.write_line(abort_command()).await?;
+            abort_queued_turns(&self.queue, &self.tx, false).await;
+            Ok(())
+        })
     }
 
     fn close(self: Box<Self>) -> cap_chat::BoxFuture<'static, Result<()>> {
@@ -194,12 +217,23 @@ fn abort_command() -> String {
     serde_json::json!({ "type": "abort" }).to_string() + "\n"
 }
 
+async fn write_line_to(stdin: &Arc<Mutex<Option<ChildStdin>>>, line: String) -> Result<()> {
+    let mut guard = stdin.lock().await;
+    let stdin = guard.as_mut().context("chat session stdin is closed")?;
+    stdin.write_all(line.as_bytes()).await?;
+    stdin.flush().await?;
+    Ok(())
+}
+
 /// What one stdout line asks of the pump.
 enum Mapped {
     Emit(ChatEvent),
     /// Blocking `extension_ui_request` dialog: answer on stdin so the turn
     /// keeps moving, and surface a notice in the transcript.
-    AutoRespond { reply: String, notice: String },
+    AutoRespond {
+        reply: String,
+        notice: String,
+    },
     Ignore,
 }
 
@@ -216,7 +250,10 @@ fn map_stdout_line(line: &str) -> Mapped {
             id: tool_call_id(&value),
             // partialResult is ACCUMULATED output: each update replaces the
             // prior text for this id (ChatEvent::ToolOutput contract).
-            text: value.get("partialResult").map(result_text).unwrap_or_default(),
+            text: value
+                .get("partialResult")
+                .map(result_text)
+                .unwrap_or_default(),
             is_error: false,
             done: false,
         }),
@@ -380,6 +417,7 @@ fn spawn_stdout_pump(
     stdout: ChildStdout,
     tx: Sender<ChatEvent>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
+    queue: Arc<Mutex<TurnQueue>>,
 ) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
@@ -387,15 +425,21 @@ fn spawn_stdout_pump(
             let clean = strip_ansi(line.trim_end_matches('\r'));
             match map_stdout_line(&clean) {
                 Mapped::Emit(event) => {
+                    let turn_finished = match &event {
+                        ChatEvent::TurnFinished { ok, .. } => Some(*ok),
+                        _ => None,
+                    };
                     if tx.send(event).await.is_err() {
                         return;
                     }
+                    match turn_finished {
+                        Some(true) => send_next_queued_turn(&stdin, &queue, &tx).await,
+                        Some(false) => abort_queued_turns(&queue, &tx, true).await,
+                        None => {}
+                    }
                 }
                 Mapped::AutoRespond { reply, notice } => {
-                    if let Some(stdin) = stdin.lock().await.as_mut() {
-                        let _ = stdin.write_all(reply.as_bytes()).await;
-                        let _ = stdin.flush().await;
-                    }
+                    let _ = write_line_to(&stdin, reply).await;
                     if tx.send(ChatEvent::Error(notice)).await.is_err() {
                         return;
                     }
@@ -404,6 +448,67 @@ fn spawn_stdout_pump(
             }
         }
     });
+}
+
+async fn abort_queued_turns(
+    queue: &Arc<Mutex<TurnQueue>>,
+    tx: &Sender<ChatEvent>,
+    clear_busy: bool,
+) {
+    let dropped = {
+        let mut queue = queue.lock().await;
+        let dropped = queue.pending.len();
+        queue.pending.clear();
+        if clear_busy {
+            queue.busy = false;
+        }
+        dropped
+    };
+    send_failed_finishes(tx, dropped, "aborted").await;
+}
+
+async fn send_failed_finishes(tx: &Sender<ChatEvent>, count: usize, error: &str) {
+    for _ in 0..count {
+        if tx
+            .send(ChatEvent::TurnFinished {
+                ok: false,
+                error: Some(error.to_string()),
+            })
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+async fn send_next_queued_turn(
+    stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    queue: &Arc<Mutex<TurnQueue>>,
+    tx: &Sender<ChatEvent>,
+) {
+    let next = {
+        let mut queue = queue.lock().await;
+        match queue.pending.pop_front() {
+            Some(line) => Some(line),
+            None => {
+                queue.busy = false;
+                None
+            }
+        }
+    };
+    if let Some(line) = next {
+        if write_line_to(stdin, line).await.is_err() {
+            let dropped = {
+                let mut queue = queue.lock().await;
+                let dropped = 1 + queue.pending.len();
+                queue.busy = false;
+                queue.pending.clear();
+                dropped
+            };
+            send_failed_finishes(tx, dropped, "send failed").await;
+        }
+    }
 }
 
 fn spawn_stderr_pump(stderr: ChildStderr, tx: Sender<ChatEvent>) {
@@ -659,7 +764,10 @@ mod tests {
                     assert!(reply.ends_with('\n'));
                     let value: Value = serde_json::from_str(reply.trim_end()).unwrap();
                     assert_eq!(value["type"], "extension_ui_response");
-                    assert_eq!(value["id"], serde_json::from_str::<Value>(line).unwrap()["id"]);
+                    assert_eq!(
+                        value["id"],
+                        serde_json::from_str::<Value>(line).unwrap()["id"]
+                    );
                     assert_eq!(value["value"], expected_value);
                     assert!(notice.starts_with("auto-answered dialog: "));
                 }
@@ -670,7 +778,9 @@ mod tests {
 
     #[test]
     fn fire_and_forget_and_unknown_events_are_ignored() {
-        assert_ignored(r#"{"type":"extension_ui_request","id":"n1","method":"notify","message":"hi"}"#);
+        assert_ignored(
+            r#"{"type":"extension_ui_request","id":"n1","method":"notify","message":"hi"}"#,
+        );
         assert_ignored(r#"{"type":"extension_ui_request","id":"n2","method":"setStatus"}"#);
         assert_ignored(r#"{"type":"extension_ui_request","id":"n3","method":"setWidget"}"#);
         assert_ignored(r#"{"type":"extension_ui_request","id":"n4","method":"setTitle"}"#);
@@ -822,6 +932,171 @@ done"#;
         // Session survives the abort: the next turn can still be written.
         session.send_turn("again".to_string()).await.unwrap();
         ChatSession::close(Box::new(session)).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_turn_while_busy_is_queued_until_turn_finished() {
+        let stub = r#"while IFS= read -r line; do
+  case "$line" in
+    *'"type":"prompt"'*)
+      printf '%s\n' '{"type":"message_update","message":{},"assistantMessageEvent":{"type":"text_delta","delta":"turn"}}'
+      ( sleep 0.1; printf '%s\n' '{"type":"agent_end"}' ) &
+      ;;
+  esac
+done
+wait"#;
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_stub(temp.path(), stub);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+
+        let mut session = PiChatSession::spawn(&stub_params(temp.path(), &script), tx)
+            .await
+            .unwrap();
+        session.send_turn("first".to_string()).await.unwrap();
+        session.send_turn("second".to_string()).await.unwrap();
+
+        match next_event(&mut rx).await {
+            ChatEvent::Delta { text, .. } => assert_eq!(text, "turn"),
+            other => panic!("expected first turn delta, got {other:?}"),
+        }
+        match next_event(&mut rx).await {
+            ChatEvent::TurnFinished { ok, .. } => assert!(ok),
+            other => panic!("expected first TurnFinished, got {other:?}"),
+        }
+        match next_event(&mut rx).await {
+            ChatEvent::Delta { text, .. } => assert_eq!(text, "turn"),
+            other => panic!("expected queued turn delta, got {other:?}"),
+        }
+        match next_event(&mut rx).await {
+            ChatEvent::TurnFinished { ok, .. } => assert!(ok),
+            other => panic!("expected queued TurnFinished, got {other:?}"),
+        }
+
+        ChatSession::close(Box::new(session)).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_turn_does_not_release_queued_turn() {
+        let stub = r#"while IFS= read -r line; do
+  case "$line" in
+    *'"type":"prompt"'*)
+      printf '%s\n' '{"type":"message_update","message":{},"assistantMessageEvent":{"type":"error","reason":"boom"}}'
+      ;;
+  esac
+done"#;
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_stub(temp.path(), stub);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+
+        let mut session = PiChatSession::spawn(&stub_params(temp.path(), &script), tx)
+            .await
+            .unwrap();
+        session.send_turn("first".to_string()).await.unwrap();
+        session.send_turn("second".to_string()).await.unwrap();
+
+        match next_event(&mut rx).await {
+            ChatEvent::TurnFinished { ok, error } => {
+                assert!(!ok);
+                assert_eq!(error.as_deref(), Some("boom"));
+            }
+            other => panic!("expected failed TurnFinished, got {other:?}"),
+        }
+        match next_event(&mut rx).await {
+            ChatEvent::TurnFinished { ok, error } => {
+                assert!(!ok);
+                assert_eq!(error.as_deref(), Some("aborted"));
+            }
+            other => panic!("expected queued aborted TurnFinished, got {other:?}"),
+        }
+        assert!(tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .is_err());
+
+        ChatSession::close(Box::new(session)).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn abort_reports_queued_turns_as_aborted() {
+        let stub = r#"while IFS= read -r line; do
+  case "$line" in
+    *'"type":"abort"'*)
+      printf '%s\n' '{"type":"message_update","message":{},"assistantMessageEvent":{"type":"error","reason":"aborted"}}'
+      ;;
+  esac
+done"#;
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_stub(temp.path(), stub);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+
+        let mut session = PiChatSession::spawn(&stub_params(temp.path(), &script), tx)
+            .await
+            .unwrap();
+        session.send_turn("first".to_string()).await.unwrap();
+        session.send_turn("second".to_string()).await.unwrap();
+        session.abort().await.unwrap();
+
+        for _ in 0..2 {
+            match next_event(&mut rx).await {
+                ChatEvent::TurnFinished { ok, error } => {
+                    assert!(!ok);
+                    assert_eq!(error.as_deref(), Some("aborted"));
+                }
+                other => panic!("expected aborted TurnFinished, got {other:?}"),
+            }
+        }
+
+        ChatSession::close(Box::new(session)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_write_failure_reports_dropped_turns_finished() {
+        let stdin = Arc::new(Mutex::new(None));
+        let queue = Arc::new(Mutex::new(TurnQueue {
+            busy: true,
+            pending: VecDeque::from([
+                prompt_command("t2", "second"),
+                prompt_command("t3", "third"),
+            ]),
+        }));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+
+        send_next_queued_turn(&stdin, &queue, &tx).await;
+
+        for _ in 0..2 {
+            match next_event(&mut rx).await {
+                ChatEvent::TurnFinished { ok, error } => {
+                    assert!(!ok);
+                    assert_eq!(error.as_deref(), Some("send failed"));
+                }
+                other => panic!("expected failed TurnFinished, got {other:?}"),
+            }
+        }
+        assert!(tokio::time::timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .is_err());
+        let queue = queue.lock().await;
+        assert!(!queue.busy);
+        assert!(queue.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn first_write_failure_resets_busy_state() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let queue = Arc::new(Mutex::new(TurnQueue::default()));
+        let session = PiChatSession {
+            pid: 0,
+            next_turn: 0,
+            tx,
+            stdin: Arc::new(Mutex::new(None)),
+            queue: Arc::clone(&queue),
+            closing: Arc::new(AtomicBool::new(true)),
+            wait_handle: tokio::spawn(async {}),
+        };
+
+        assert!(session.accept_turn(prompt_command("t1", "first")).await.is_err());
+        let queue = queue.lock().await;
+        assert!(!queue.busy);
+        assert!(queue.pending.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

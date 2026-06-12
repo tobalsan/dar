@@ -1,6 +1,6 @@
-//! Chat pane state: transcript blocks, the single-line input, the
-//! one-turn-in-flight gate, the TUI-side turn timer, and the one-shot
-//! context preamble prepended to the first outbound prompt.
+//! Chat pane state: transcript blocks, the single-line input, the in-flight
+//! turn counter, the TUI-side turn timer, and the one-shot context preamble
+//! prepended to the first outbound prompt.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -66,7 +66,8 @@ fn snapshot_summary(snapshot: &RunSnapshot) -> String {
                 "- {} state={} priority={} {}",
                 item.identifier,
                 item.state,
-                item.priority.map_or_else(|| "-".to_string(), |p| p.to_string()),
+                item.priority
+                    .map_or_else(|| "-".to_string(), |p| p.to_string()),
                 item.title
             )
         }),
@@ -188,6 +189,7 @@ pub struct ChatState {
     pub blocks: Vec<ChatBlock>,
     pub input: String,
     pub in_flight: bool,
+    pub pending_turns: usize,
     pub turn_started_at: Option<Instant>,
     /// Turns abandoned TUI-side (timeout) whose backend `TurnFinished` has not
     /// arrived yet. While non-zero, `submit` stays gated and `apply_event`
@@ -203,12 +205,11 @@ pub struct ChatState {
 }
 
 impl ChatState {
-    /// Take the input as a new user turn. Returns `None` (and leaves the
-    /// input untouched) while a turn is in flight, an abandoned turn's
-    /// `TurnFinished` is still outstanding, or the input is blank — the
-    /// one-turn-at-a-time gate the `ChatSession` contract requires.
+    /// Take the input as a user message. While a turn is already in flight,
+    /// this still accepts the message and leaves backend queuing/injection to
+    /// `ChatSession::send_turn`.
     pub fn submit(&mut self) -> Option<String> {
-        if self.disabled || self.in_flight || self.stale_finishes > 0 {
+        if self.disabled || self.stale_finishes > 0 {
             return None;
         }
         let prompt = self.input.trim().to_string();
@@ -217,8 +218,11 @@ impl ChatState {
         }
         self.input.clear();
         self.blocks.push(ChatBlock::User(prompt.clone()));
-        self.in_flight = true;
-        self.turn_started_at = Some(Instant::now());
+        self.pending_turns += 1;
+        if !self.in_flight {
+            self.in_flight = true;
+            self.turn_started_at = Some(Instant::now());
+        }
         self.scroll_back = 0;
         Some(prompt)
     }
@@ -227,6 +231,7 @@ impl ChatState {
     /// never emit a `TurnFinished` (open/send error) with an error block.
     pub fn fail_turn(&mut self, message: String) {
         self.in_flight = false;
+        self.pending_turns = 0;
         self.turn_started_at = None;
         self.blocks.push(ChatBlock::Error(message));
     }
@@ -236,8 +241,9 @@ impl ChatState {
     /// stale so `submit` stays gated until it arrives and `apply_event`
     /// swallows it instead of attributing it to the next turn.
     pub fn abandon_turn(&mut self, message: String) {
+        let stale_finishes = self.pending_turns.max(1);
         self.fail_turn(message);
-        self.stale_finishes += 1;
+        self.stale_finishes += stale_finishes;
     }
 
     /// Backend resolution found no registered chat backend at all: reject
@@ -246,6 +252,7 @@ impl ChatState {
     pub fn disable(&mut self, banner: String) {
         self.disabled = true;
         self.in_flight = false;
+        self.pending_turns = 0;
         self.turn_started_at = None;
         self.blocks.push(ChatBlock::Notice(banner));
     }
@@ -302,19 +309,31 @@ impl ChatState {
                 if !self.in_flight {
                     return;
                 }
-                self.in_flight = false;
-                self.turn_started_at = None;
                 if !ok {
+                    let remaining = self.pending_turns.saturating_sub(1);
+                    self.pending_turns = 0;
+                    self.in_flight = false;
+                    self.turn_started_at = None;
+                    self.stale_finishes += remaining;
                     let error = error.unwrap_or_else(|| "unknown error".to_string());
                     self.blocks.push(ChatBlock::Error(if error == "aborted" {
                         "turn aborted".to_string()
                     } else {
                         format!("turn failed: {error}")
                     }));
+                    return;
+                }
+                self.pending_turns = self.pending_turns.saturating_sub(1);
+                if self.pending_turns == 0 {
+                    self.in_flight = false;
+                    self.turn_started_at = None;
+                } else {
+                    self.turn_started_at = Some(Instant::now());
                 }
             }
             ChatEvent::SessionClosed { error } => {
                 self.in_flight = false;
+                self.pending_turns = 0;
                 self.turn_started_at = None;
                 // The process is gone; no stale TurnFinished is coming.
                 self.stale_finishes = 0;
@@ -346,9 +365,10 @@ impl ChatState {
     fn set_tool_output(&mut self, id: &str, text: String, is_error: bool, done: bool) {
         // ToolOutput text REPLACES prior output for the same id (cap-chat
         // contract: pi streams the accumulated partialResult, not deltas).
-        let existing = self.blocks.iter_mut().rev().find(
-            |block| matches!(block, ChatBlock::Tool { id: block_id, .. } if block_id == id),
-        );
+        let existing =
+            self.blocks.iter_mut().rev().find(
+                |block| matches!(block, ChatBlock::Tool { id: block_id, .. } if block_id == id),
+            );
         if let Some(ChatBlock::Tool {
             output,
             is_error: block_is_error,
@@ -490,20 +510,41 @@ mod tests {
         assert!(chat.in_flight);
         assert!(chat.turn_started_at.is_some());
         assert!(chat.input.is_empty());
-        assert_eq!(chat.blocks, vec![ChatBlock::User("hello there".to_string())]);
+        assert_eq!(
+            chat.blocks,
+            vec![ChatBlock::User("hello there".to_string())]
+        );
     }
 
     #[test]
-    fn submit_is_rejected_while_in_flight_and_on_blank_input() {
+    fn submit_accepts_steering_while_in_flight_and_acknowledges_it() {
         let mut chat = ChatState {
             input: "first".to_string(),
             ..Default::default()
         };
         chat.submit().unwrap();
         chat.input = "second".to_string();
-        assert!(chat.submit().is_none());
-        assert_eq!(chat.input, "second"); // input preserved, not swallowed
-        assert_eq!(chat.blocks.len(), 1);
+        assert_eq!(chat.submit().as_deref(), Some("second"));
+        assert!(chat.input.is_empty());
+        assert_eq!(
+            chat.blocks,
+            vec![
+                ChatBlock::User("first".to_string()),
+                ChatBlock::User("second".to_string()),
+            ]
+        );
+        assert!(chat.in_flight);
+
+        chat.apply_event(ChatEvent::TurnFinished {
+            ok: true,
+            error: None,
+        });
+        assert!(chat.in_flight);
+        chat.apply_event(ChatEvent::TurnFinished {
+            ok: true,
+            error: None,
+        });
+        assert!(!chat.in_flight);
 
         let mut chat = ChatState {
             input: "   ".to_string(),
@@ -552,16 +593,14 @@ mod tests {
         });
         assert_eq!(
             chat.blocks,
-            vec![
-                ChatBlock::Tool {
-                    id: "call_1".to_string(),
-                    name: "bash".to_string(),
-                    args: "ls".to_string(),
-                    output: "total 48\nsrc".to_string(),
-                    is_error: false,
-                    done: true,
-                },
-            ]
+            vec![ChatBlock::Tool {
+                id: "call_1".to_string(),
+                name: "bash".to_string(),
+                args: "ls".to_string(),
+                output: "total 48\nsrc".to_string(),
+                is_error: false,
+                done: true,
+            },]
         );
     }
 
@@ -629,6 +668,58 @@ mod tests {
             chat.blocks.last(),
             Some(&ChatBlock::Error("turn failed: boom".to_string()))
         );
+    }
+
+    #[test]
+    fn failed_finishes_for_queued_turns_do_not_reopen_submit_until_all_are_seen() {
+        let mut chat = ChatState {
+            input: "first".to_string(),
+            ..Default::default()
+        };
+        chat.submit().unwrap();
+        chat.input = "second".to_string();
+        chat.submit().unwrap();
+
+        chat.apply_event(ChatEvent::TurnFinished {
+            ok: false,
+            error: Some("aborted".to_string()),
+        });
+        assert!(!chat.in_flight);
+        chat.input = "too early".to_string();
+        assert!(chat.submit().is_none());
+        assert_eq!(chat.input, "too early");
+
+        chat.apply_event(ChatEvent::TurnFinished {
+            ok: false,
+            error: Some("aborted".to_string()),
+        });
+        assert!(!chat.in_flight);
+        assert_eq!(chat.submit().as_deref(), Some("too early"));
+    }
+
+    #[test]
+    fn timeout_with_queued_turns_gates_submit_until_all_stale_finishes_arrive() {
+        let mut chat = ChatState {
+            input: "first".to_string(),
+            ..Default::default()
+        };
+        chat.submit().unwrap();
+        chat.input = "second".to_string();
+        chat.submit().unwrap();
+
+        chat.abandon_turn("turn timed out".to_string());
+        chat.input = "next".to_string();
+        chat.apply_event(ChatEvent::TurnFinished {
+            ok: false,
+            error: Some("aborted".to_string()),
+        });
+        assert!(chat.submit().is_none());
+
+        chat.apply_event(ChatEvent::TurnFinished {
+            ok: false,
+            error: Some("aborted".to_string()),
+        });
+        assert_eq!(chat.submit().as_deref(), Some("next"));
     }
 
     #[test]
