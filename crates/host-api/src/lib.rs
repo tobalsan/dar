@@ -59,6 +59,12 @@ use tokio::sync::{broadcast, watch};
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub const APP_DONE_TOPIC: &str = "host.app-done";
 pub const LOG_EVENTS_TOPIC: &str = "host.log-events";
+/// Retained `Option<LogEvent>` holding the one-shot startup banner. Retained
+/// (not broadcast) so a foreground that subscribes only when its `run` begins
+/// still observes a banner published earlier during another extension's
+/// `start` — broadcast topics do not replay values published before
+/// subscription.
+pub const STARTUP_BANNER_TOPIC: &str = "host.startup-banner";
 
 pub trait Extension: Send + Sync {
     fn id(&self) -> &'static str;
@@ -89,9 +95,11 @@ pub struct LogEvent {
     pub message: String,
 }
 
+pub type SharedPanicHook = Arc<Mutex<Option<Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>>>>;
+
 pub struct ExclusiveTerminal {
     interactive: bool,
-    panic_hook: Option<Arc<Mutex<Option<Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>>>>>,
+    panic_hook: Option<SharedPanicHook>,
     restore: Option<Arc<dyn Fn() + Send + Sync>>,
     stdout: Box<dyn Write + Send>,
 }
@@ -138,10 +146,7 @@ impl ExclusiveTerminal {
         }
     }
 
-    pub fn set_previous_panic_hook(
-        &mut self,
-        hook: Arc<Mutex<Option<Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>>>>,
-    ) {
+    pub fn set_previous_panic_hook(&mut self, hook: SharedPanicHook) {
         self.panic_hook = Some(hook);
     }
 }

@@ -171,10 +171,13 @@ async fn boot_inner(
     let http_task = if options.http_enabled {
         let bind = options.http_bind;
         let port = options.http_port;
+        // Bind synchronously so an occupied port fails the boot before any
+        // extension starts (and before anything can announce the HTTP URL).
+        let listener = tokio::net::TcpListener::bind((bind, port))
+            .await
+            .with_context(|| format!("binding host HTTP on {bind}:{port}"))
+            .inspect_err(|e| report("-", e))?;
         Some(tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind((bind, port))
-                .await
-                .with_context(|| format!("binding host HTTP on {bind}:{port}"))?;
             axum::serve(listener, http_router.as_ref().clone().into_make_service())
                 .with_graceful_shutdown(async move {
                     let mut shutdown = http_shutdown;
@@ -276,6 +279,14 @@ mod tests {
 
     use super::*;
 
+    /// Boot options for tests: HTTP on an ephemeral port so the synchronous
+    /// listener bind never collides across concurrently running tests.
+    fn test_options(root: &std::path::Path) -> HostOptions {
+        HostOptions::new(root)
+            .without_dotenv()
+            .http_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0)
+    }
+
     struct RecordingExt {
         id: &'static str,
         log: Arc<Mutex<Vec<String>>>,
@@ -373,7 +384,7 @@ mod tests {
                     log: Arc::clone(&log),
                 }),
             ],
-            HostOptions::new(temp.path()).without_dotenv(),
+            test_options(temp.path()),
         )
         .await
         .unwrap();
@@ -440,12 +451,9 @@ mod tests {
         }
 
         let temp = tempfile::tempdir().unwrap();
-        boot(
-            vec![Arc::new(ServiceExt)],
-            HostOptions::new(temp.path()).without_dotenv(),
-        )
-        .await
-        .unwrap();
+        boot(vec![Arc::new(ServiceExt)], test_options(temp.path()))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -475,9 +483,7 @@ mod tests {
             vec![Arc::new(ConfigReadingExt {
                 seen: Arc::clone(&seen),
             })],
-            HostOptions::new(temp.path())
-                .without_dotenv()
-                .config(ConfigStore::from_values(values)),
+            test_options(temp.path()).config(ConfigStore::from_values(values)),
         )
         .await
         .unwrap();
@@ -504,9 +510,7 @@ mod tests {
                     log: Arc::clone(&log),
                 }),
             ],
-            HostOptions::new(temp.path())
-                .without_dotenv()
-                .interactive(false),
+            test_options(temp.path()).interactive(false),
         )
         .await
         .unwrap();
@@ -538,8 +542,7 @@ mod tests {
                     log: Arc::clone(&log),
                 }),
             ],
-            HostOptions::new(temp.path())
-                .without_dotenv()
+            test_options(temp.path())
                 .interactive(false)
                 .foreground("tui"),
         )
@@ -569,7 +572,7 @@ mod tests {
                     log,
                 }),
             ],
-            HostOptions::new(temp.path()).without_dotenv(),
+            test_options(temp.path()),
         )
         .await
         .unwrap_err();
@@ -596,13 +599,11 @@ mod tests {
         let sink = Arc::clone(&captured);
         let err = boot(
             vec![Arc::new(FailingStartExt)],
-            HostOptions::new(temp.path())
-                .without_dotenv()
-                .on_startup_error(move |id, message| {
-                    sink.lock()
-                        .unwrap()
-                        .push((id.to_string(), message.to_string()));
-                }),
+            test_options(temp.path()).on_startup_error(move |id, message| {
+                sink.lock()
+                    .unwrap()
+                    .push((id.to_string(), message.to_string()));
+            }),
         )
         .await
         .unwrap_err();
@@ -612,6 +613,29 @@ mod tests {
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].0, "failing");
         assert!(captured[0].1.contains("boom on start"));
+    }
+
+    #[tokio::test]
+    async fn occupied_http_port_fails_boot_before_extensions_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocker = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = blocker.local_addr().unwrap().port();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let err = boot(
+            vec![Arc::new(RecordingExt {
+                id: "a",
+                log: Arc::clone(&log),
+            })],
+            HostOptions::new(temp.path())
+                .without_dotenv()
+                .http_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("binding host HTTP"));
+        // Fail-fast: extensions registered but never started.
+        assert_eq!(*log.lock().unwrap(), vec!["register:a"]);
     }
 
     #[test]

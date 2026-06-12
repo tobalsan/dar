@@ -197,6 +197,8 @@ impl Extension for OrchestratorExtension {
                 let _ = shutdown_tx.send(true);
             });
 
+            let bind = effective_cfg.dashboard_bind;
+            let port = effective_cfg.dashboard_port;
             let orchestrator = Orchestrator::with_hitl_notifier(
                 agent_cfg,
                 paths,
@@ -209,7 +211,10 @@ impl Extension for OrchestratorExtension {
                 control_rx,
                 hitl,
             )
-            .with_snapshot_bus(ctx.host.bus.clone());
+            .with_snapshot_bus(ctx.host.bus.clone())
+            .with_startup_banner(format!(
+                "agentropy running; dashboard on http://{bind}:{port}/"
+            ));
             tokio::spawn(async move {
                 let _guard = log_guard;
                 if let Err(e) = orchestrator.run(shutdown_rx).await {
@@ -386,6 +391,8 @@ pub struct Orchestrator {
     claims: HashSet<String>,
     retries: Vec<Retry>,
     snapshot_bus: Option<Arc<host_api::EventBus>>,
+    /// One-shot startup banner, emitted after the first tick completes.
+    startup_banner: Option<String>,
 }
 
 impl Orchestrator {
@@ -441,11 +448,22 @@ impl Orchestrator {
             claims: HashSet::new(),
             retries: Vec::new(),
             snapshot_bus: None,
+            startup_banner: None,
         }
     }
 
     pub fn with_snapshot_bus(mut self, bus: Arc<host_api::EventBus>) -> Self {
         self.snapshot_bus = Some(bus);
+        self
+    }
+
+    /// Set the one-shot startup banner. It is emitted only after the first
+    /// tick completes — i.e. once the loop is demonstrably running — not at
+    /// spawn time, and is delivered via the retained
+    /// `host_api::STARTUP_BANNER_TOPIC` (not the broadcast log topic) so a
+    /// foreground that subscribes after `start()` returned still observes it.
+    pub fn with_startup_banner(mut self, message: String) -> Self {
+        self.startup_banner = Some(message);
         self
     }
 
@@ -455,6 +473,7 @@ impl Orchestrator {
         loop {
             // One full tick of the loop.
             self.tick().await;
+            self.emit_startup_banner();
             let poll = self.next_poll_delay();
 
             // Inter-tick sleep, but stay responsive to control + shutdown.
@@ -484,6 +503,28 @@ impl Orchestrator {
         self.kill_all(KillReason::OperatorStop).await;
         self.hitl.stop();
         Ok(())
+    }
+
+    /// Emit the one-shot startup banner after the first tick has completed,
+    /// so it only announces a loop that is actually running (the host already
+    /// bound the dashboard's HTTP listener before any extension started).
+    /// Published on the retained banner topic, which replays to a foreground
+    /// that subscribes later; the broadcast log topic would drop it.
+    fn emit_startup_banner(&mut self) {
+        let Some(message) = self.startup_banner.take() else {
+            return;
+        };
+        tracing::info!(issue = %"-", event = %"startup", "{message}");
+        if let Some(bus) = &self.snapshot_bus {
+            let _ = bus.publish(
+                host_api::STARTUP_BANNER_TOPIC,
+                Some(host_api::LogEvent {
+                    level: "INFO".to_string(),
+                    target: "issue=- event=startup".to_string(),
+                    message,
+                }),
+            );
+        }
     }
 
     /// PRD steps 1-9 for one tick, prefixed with a WORKFLOW.md reload check.
@@ -3100,7 +3141,9 @@ mod tests {
             control_rx,
         );
 
-        orchestrator.dispatch(&[active_issue.clone()]).await;
+        orchestrator
+            .dispatch(std::slice::from_ref(&active_issue))
+            .await;
 
         assert!(orchestrator.slots.is_empty());
         let parked = parks.lock().unwrap();
@@ -3190,7 +3233,9 @@ mod tests {
             control_rx,
         );
 
-        orchestrator.dispatch(&[active_issue.clone()]).await;
+        orchestrator
+            .dispatch(std::slice::from_ref(&active_issue))
+            .await;
 
         assert!(orchestrator.slots.is_empty());
         assert!(parks.lock().unwrap().is_empty());
@@ -3509,6 +3554,54 @@ mod tests {
             2,
             "poll_candidates must be called exactly once per tick (second tick)"
         );
+    }
+
+    #[tokio::test]
+    async fn startup_banner_is_published_retained_after_the_first_tick() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("logs")).unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+
+        let mut bus = host_api::EventBus::new();
+        bus.register_retained::<Option<host_api::LogEvent>>(host_api::STARTUP_BANNER_TOPIC, None)
+            .unwrap();
+        let bus = Arc::new(bus);
+        let mut banner = bus
+            .subscribe_retained::<Option<host_api::LogEvent>>(host_api::STARTUP_BANNER_TOPIC)
+            .unwrap();
+
+        let agent_cfg = test_agent_config();
+        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let (state, control_rx) = test_state(Arc::clone(&store));
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            Arc::new(MissingTracker),
+            prompt,
+            effective_cfg,
+            state,
+            control_rx,
+        )
+        .with_snapshot_bus(Arc::clone(&bus))
+        .with_startup_banner("agentropy running; dashboard on http://127.0.0.1:7878/".to_string());
+
+        assert!(banner.borrow().is_none(), "no banner before run started");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(orchestrator.run(shutdown_rx));
+
+        banner.changed().await.unwrap();
+        let event = banner.borrow().clone().expect("banner retained");
+        assert_eq!(event.level, "INFO");
+        assert_eq!(event.target, "issue=- event=startup");
+        assert_eq!(
+            event.message,
+            "agentropy running; dashboard on http://127.0.0.1:7878/"
+        );
+
+        shutdown_tx.send(true).unwrap();
+        task.await.unwrap().unwrap();
     }
 
     #[test]
