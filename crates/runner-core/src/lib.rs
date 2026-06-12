@@ -22,6 +22,13 @@ pub fn setup_process_group(cmd: &mut Command) -> &mut Command {
     cmd.process_group(0)
 }
 
+/// Classified output from one protocol line.
+pub struct ProtocolLine {
+    pub row_type: &'static str,
+    pub text: String,
+    pub detail: String,
+}
+
 // ---------------------------------------------------------------------------
 // Structured event logging hook
 // ---------------------------------------------------------------------------
@@ -341,17 +348,202 @@ fn persist_runner_event(
 /// Classify a protocol output line into a UI log row type and display text.
 /// Tries JSON parsing first (for pi/claude/codex protocol events); falls back
 /// to text heuristics for plain text output.
-pub fn classify_protocol_line(stream: &str, text: &str) -> (&'static str, String) {
+pub fn classify_protocol_line(stream: &str, text: &str) -> ProtocolLine {
     if stream == "stderr" {
-        return ("error", text.to_string());
+        return ProtocolLine { row_type: "error", text: text.to_string(), detail: String::new() };
     }
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+        // Codex JSON-RPC path: has "method" OR has "id" + ("result"|"error") without top-level "type"
+        let is_jsonrpc = value.get("method").is_some()
+            || (value.get("id").is_some()
+                && (value.get("result").is_some() || value.get("error").is_some())
+                && value.get("type").is_none());
+        if is_jsonrpc {
+            return classify_jsonrpc_line(&value);
+        }
         let row_type = map_event_type(&value);
         let display = extract_display_text(&value).unwrap_or_else(|| text.to_string());
-        (row_type, display)
+        ProtocolLine { row_type, text: display, detail: String::new() }
     } else {
-        (normalize_log_row(stream, text), text.to_string())
+        ProtocolLine { row_type: normalize_log_row(stream, text), text: text.to_string(), detail: String::new() }
     }
+}
+
+/// Join text entries from a JSON array. Each entry may be a plain string or an
+/// object with a `"text"` field. Returns `None` when the array is absent or all
+/// entries produce empty text.
+fn join_text_entries(arr: Option<&serde_json::Value>) -> Option<String> {
+    let parts: Vec<&str> = arr?
+        .as_array()?
+        .iter()
+        .filter_map(|entry| {
+            if let Some(s) = entry.as_str() {
+                if !s.is_empty() { Some(s) } else { None }
+            } else {
+                entry.get("text").and_then(|t| t.as_str()).filter(|s| !s.is_empty())
+            }
+        })
+        .collect();
+    if parts.is_empty() { None } else { Some(parts.join("\n")) }
+}
+
+fn classify_jsonrpc_line(v: &serde_json::Value) -> ProtocolLine {
+    let method = v.get("method").and_then(|m| m.as_str());
+    let params = v.get("params");
+
+    // RPC response: has "id" but no "method"
+    if method.is_none() {
+        if let Some(err) = v.get("error") {
+            let msg = err.get("message").and_then(|m| m.as_str())
+                .unwrap_or_else(|| "rpc error")
+                .to_string();
+            return ProtocolLine { row_type: "error", text: msg, detail: String::new() };
+        }
+        // id+result or anything else with id → hidden
+        return ProtocolLine { row_type: "", text: String::new(), detail: String::new() };
+    }
+
+    let method = method.unwrap();
+    let params_obj = params.and_then(|p| p.as_object());
+
+    // Extract item and item_type from params
+    let item = params_obj.and_then(|p| p.get("item")).and_then(|i| i.as_object());
+    let item_type = item.and_then(|i| i.get("type")).and_then(|t| t.as_str()).unwrap_or("");
+
+    // Hidden conditions
+    if method.starts_with("turn/")
+        || method.starts_with("thread/")
+        || method.starts_with("remoteControl/")
+        || method.ends_with("/started")
+        || method.ends_with("/created")
+        || method.ends_with("/delta")
+        || method.contains("/delta/")
+        || method == "item/started"
+    {
+        return ProtocolLine { row_type: "", text: String::new(), detail: String::new() };
+    }
+
+    // agentMessage that is NOT /completed → hidden
+    if item_type == "agentMessage" && !method.ends_with("/completed") {
+        return ProtocolLine { row_type: "", text: String::new(), detail: String::new() };
+    }
+
+    // error notification
+    if method == "error" {
+        let msg = params_obj
+            .and_then(|p| p.get("error"))
+            .and_then(|e| e.get("message").and_then(|m| m.as_str()))
+            .or_else(|| params_obj.and_then(|p| p.get("message")).and_then(|m| m.as_str()))
+            .unwrap_or("server error");
+        return ProtocolLine { row_type: "error", text: msg.to_string(), detail: String::new() };
+    }
+    if let Some(p) = params_obj {
+        if p.contains_key("error") {
+            let msg = p.get("error")
+                .and_then(|e| e.get("message").and_then(|m| m.as_str()))
+                .unwrap_or("server error");
+            return ProtocolLine { row_type: "error", text: msg.to_string(), detail: String::new() };
+        }
+    }
+
+    // assistant: /completed + agentMessage
+    if method.ends_with("/completed") && item_type == "agentMessage" {
+        let text = item
+            .and_then(|i| i.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("")
+            .to_string();
+        return ProtocolLine { row_type: "assistant", text: strip_ansi(&text), detail: String::new() };
+    }
+
+    // thinking: summary/content are arrays of strings or {text} objects
+    if item_type == "reasoning" {
+        let item_val = item.map(|i| serde_json::Value::Object(i.clone()));
+        let text = item
+            .and_then(|i| i.get("text").and_then(|t| t.as_str()))
+            .map(|s| s.to_string())
+            .or_else(|| join_text_entries(item_val.as_ref().and_then(|v| v.get("summary"))))
+            .or_else(|| join_text_entries(item_val.as_ref().and_then(|v| v.get("content"))))
+            .unwrap_or_default();
+        if text.is_empty() {
+            return ProtocolLine { row_type: "", text: String::new(), detail: String::new() };
+        }
+        return ProtocolLine { row_type: "thinking", text: strip_ansi(&text), detail: String::new() };
+    }
+
+    // userMessage: content is array of {type:"text", text:…}
+    if item_type == "userMessage" {
+        let item_val = item.map(|i| serde_json::Value::Object(i.clone()));
+        let text = join_text_entries(item_val.as_ref().and_then(|v| v.get("content")))
+            .unwrap_or_default();
+        if text.is_empty() {
+            return ProtocolLine { row_type: "", text: String::new(), detail: String::new() };
+        }
+        return ProtocolLine { row_type: "user", text: strip_ansi(&text), detail: String::new() };
+    }
+
+    // tool_call
+    let tool_types = ["commandExecution", "fileChange", "mcpToolCall", "webSearch", "dynamicToolCall", "collabToolCall", "collabAgentToolCall"];
+    if tool_types.contains(&item_type) {
+        let (text, detail) = if item_type == "commandExecution" {
+            let cmd = item.and_then(|i| i.get("command").and_then(|c| c.as_str())).unwrap_or("").to_string();
+            // camelCase first, snake_case fallback
+            let raw_out = item.and_then(|i| {
+                i.get("aggregatedOutput")
+                    .or_else(|| i.get("aggregated_output"))
+                    .and_then(|o| o.as_str())
+            }).unwrap_or("").to_string();
+            let exit_code = item.and_then(|i| {
+                i.get("exitCode")
+                    .or_else(|| i.get("exit_code"))
+                    .and_then(|e| e.as_i64())
+            });
+            let mut out = raw_out;
+            if let Some(code) = exit_code {
+                if code != 0 {
+                    out.push_str(&format!(" [exit {}]", code));
+                }
+            }
+            (strip_ansi(&cmd), strip_ansi(&out))
+        } else if item_type == "mcpToolCall" {
+            let server = item.and_then(|i| i.get("server").and_then(|s| s.as_str()));
+            let tool = item.and_then(|i| i.get("tool").and_then(|t| t.as_str()));
+            let label = match (server, tool) {
+                (Some(s), Some(t)) => format!("{}.{}", s, t),
+                (None, Some(t)) => t.to_string(),
+                _ => item.and_then(|i| i.get("name").or_else(|| i.get("toolName")).and_then(|n| n.as_str())).unwrap_or(item_type).to_string(),
+            };
+            let item_val = item.map(|i| serde_json::Value::Object(i.clone()));
+            let detail = item_val.as_ref()
+                .and_then(|v| v.get("result"))
+                .and_then(|r| r.get("content"))
+                .and_then(|c| join_text_entries(Some(c)))
+                .or_else(|| {
+                    item.and_then(|i| i.get("arguments")).map(|a| {
+                        serde_json::to_string(a).unwrap_or_default()
+                    })
+                })
+                .unwrap_or_default();
+            (strip_ansi(&label), strip_ansi(&detail))
+        } else if item_type == "collabAgentToolCall" {
+            let label = item.and_then(|i| i.get("tool").and_then(|t| t.as_str())).unwrap_or(item_type).to_string();
+            let detail = item.and_then(|i| i.get("prompt").and_then(|p| p.as_str())).unwrap_or("").to_string();
+            (strip_ansi(&label), strip_ansi(&detail))
+        } else {
+            let label = match item_type {
+                "fileChange" => item.and_then(|i| i.get("filename").or_else(|| i.get("path")).and_then(|n| n.as_str())).unwrap_or(item_type).to_string(),
+                "webSearch" => item.and_then(|i| i.get("query").and_then(|q| q.as_str())).unwrap_or(item_type).to_string(),
+                _ => item.and_then(|i| i.get("name").and_then(|n| n.as_str())).unwrap_or(item_type).to_string(),
+            };
+            let detail = item.and_then(|i| i.get("output").or_else(|| i.get("result")))
+                .map(|v| if v.is_string() { v.as_str().unwrap().to_string() } else { v.to_string() })
+                .unwrap_or_default();
+            (strip_ansi(&label), strip_ansi(&detail))
+        };
+        return ProtocolLine { row_type: "tool_call", text, detail };
+    }
+
+    // Default: hidden for unrecognized
+    ProtocolLine { row_type: "", text: String::new(), detail: String::new() }
 }
 
 /// Map a parsed JSON protocol event's `type` field to a normalized UI row type.
@@ -503,7 +695,7 @@ pub fn spawn_line_pump<R, F>(
                 Ok(Some(line)) => {
                     let ts = Utc::now();
                     let clean = strip_ansi(&line);
-                    let (row_type, display) = classify_protocol_line(stream, &clean);
+                    let pl = classify_protocol_line(stream, &clean);
                     let formatted = format!("child[{issue_id}]: {clean}");
                     events.push(formatted);
                     if let Ok(mut t) = last_event_at.lock() {
@@ -513,8 +705,9 @@ pub fn spawn_line_pump<R, F>(
                     let payload = serde_json::json!({
                         "type": "protocol_event",
                         "stream": stream,
-                        "log_row": row_type,
-                        "text": display,
+                        "log_row": pl.row_type,
+                        "text": pl.text,
+                        "detail": pl.detail,
                     })
                     .to_string();
                     store.insert_event(Some(&run_id), &issue_id, runner_event_kind, &payload, ts);
@@ -582,47 +775,193 @@ mod tests {
 
     #[test]
     fn json_protocol_events_normalized_by_type_field() {
-        let (row, display) =
-            classify_protocol_line("stdout", r#"{"type":"assistant","text":"Hello"}"#);
-        assert_eq!(row, "assistant");
-        assert_eq!(display, "Hello");
+        let pl = classify_protocol_line("stdout", r#"{"type":"assistant","text":"Hello"}"#);
+        assert_eq!(pl.row_type, "assistant");
+        assert_eq!(pl.text, "Hello");
 
-        let (row, _) = classify_protocol_line("stdout", r#"{"type":"thinking","text":"hmm"}"#);
-        assert_eq!(row, "thinking");
+        let pl = classify_protocol_line("stdout", r#"{"type":"thinking","text":"hmm"}"#);
+        assert_eq!(pl.row_type, "thinking");
 
-        let (row, _) = classify_protocol_line("stdout", r#"{"type":"tool_use","name":"bash"}"#);
-        assert_eq!(row, "tool_call");
+        let pl = classify_protocol_line("stdout", r#"{"type":"tool_use","name":"bash"}"#);
+        assert_eq!(pl.row_type, "tool_call");
 
-        let (row, display) =
-            classify_protocol_line("stdout", r#"{"type":"tool_result","content":"ok"}"#);
-        assert_eq!(row, "tool_output");
-        assert_eq!(display, "ok");
+        let pl = classify_protocol_line("stdout", r#"{"type":"tool_result","content":"ok"}"#);
+        assert_eq!(pl.row_type, "tool_output");
+        assert_eq!(pl.text, "ok");
 
-        let (row, _) = classify_protocol_line("stdout", r#"{"type":"error","message":"oops"}"#);
-        assert_eq!(row, "error");
+        let pl = classify_protocol_line("stdout", r#"{"type":"error","message":"oops"}"#);
+        assert_eq!(pl.row_type, "error");
     }
 
     #[test]
     fn stderr_lines_always_classified_as_error() {
-        let (row, _) = classify_protocol_line("stderr", r#"{"type":"assistant","text":"x"}"#);
-        assert_eq!(row, "error");
-        let (row, _) = classify_protocol_line("stderr", "plain text");
-        assert_eq!(row, "error");
+        let pl = classify_protocol_line("stderr", r#"{"type":"assistant","text":"x"}"#);
+        assert_eq!(pl.row_type, "error");
+        let pl = classify_protocol_line("stderr", "plain text");
+        assert_eq!(pl.row_type, "error");
     }
 
     #[test]
     fn jsonrpc_result_unwrapped_for_type_mapping() {
+        // JSON-RPC result (no top-level type) → hidden in new classification
         let rpc = r#"{"jsonrpc":"2.0","id":"r1","result":{"type":"assistant","text":"Done"}}"#;
-        let (row, display) = classify_protocol_line("stdout", rpc);
-        assert_eq!(row, "assistant");
-        assert_eq!(display, "Done");
+        let pl = classify_protocol_line("stdout", rpc);
+        assert_eq!(pl.row_type, "");
     }
 
     #[test]
     fn non_json_falls_back_to_heuristic() {
-        let (row, _) = classify_protocol_line("stdout", "thinking about the problem");
-        assert_eq!(row, "thinking");
-        let (row, _) = classify_protocol_line("stdout", "tool_call: bash");
-        assert_eq!(row, "tool_call");
+        let pl = classify_protocol_line("stdout", "thinking about the problem");
+        assert_eq!(pl.row_type, "thinking");
+        let pl = classify_protocol_line("stdout", "tool_call: bash");
+        assert_eq!(pl.row_type, "tool_call");
+    }
+
+    #[test]
+    fn jsonrpc_agentmessage_completed_is_assistant() {
+        let line = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","text":"Done with task"}}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "assistant");
+        assert_eq!(pl.text, "Done with task");
+    }
+
+    #[test]
+    fn jsonrpc_command_execution_camel_case_output_and_exit_code() {
+        // real camelCase shape with non-zero exitCode
+        let line = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"commandExecution","command":"ls -la","aggregatedOutput":"total 4\nfile1","exitCode":1}}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "tool_call");
+        assert_eq!(pl.text, "ls -la");
+        assert!(pl.detail.contains("total 4"), "detail={}", pl.detail);
+        assert!(pl.detail.contains("[exit 1]"), "detail={}", pl.detail);
+    }
+
+    #[test]
+    fn jsonrpc_command_execution_snake_case_fallback() {
+        // old snake_case shape still works
+        let line = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"commandExecution","command":"ls -la","aggregated_output":"total 4\nfile1"}}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "tool_call");
+        assert_eq!(pl.text, "ls -la");
+        assert!(pl.detail.contains("total 4"));
+    }
+
+    #[test]
+    fn jsonrpc_command_execution_exit_zero_no_suffix() {
+        let line = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"commandExecution","command":"echo hi","aggregatedOutput":"hi","exitCode":0}}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "tool_call");
+        assert!(!pl.detail.contains("[exit"), "detail should not have exit suffix: {}", pl.detail);
+    }
+
+    #[test]
+    fn jsonrpc_item_started_is_hidden() {
+        let line = r#"{"jsonrpc":"2.0","method":"item/started","params":{"item":{"type":"agentMessage"}}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "");
+    }
+
+    #[test]
+    fn jsonrpc_turn_started_is_hidden() {
+        let line = r#"{"jsonrpc":"2.0","method":"turn/started","params":{}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "");
+    }
+
+    #[test]
+    fn jsonrpc_id_result_no_type_is_hidden() {
+        let line = r#"{"jsonrpc":"2.0","id":1,"result":{"foo":"bar"}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "");
+    }
+
+    #[test]
+    fn jsonrpc_id_error_is_error() {
+        let line = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid request"}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "error");
+        assert!(pl.text.contains("Invalid request"));
+    }
+
+    #[test]
+    fn jsonrpc_delta_is_hidden() {
+        let line = r#"{"jsonrpc":"2.0","method":"item/delta","params":{"item":{"type":"agentMessage","delta":{"text":"par"}}}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "");
+    }
+
+    #[test]
+    fn jsonrpc_reasoning_empty_arrays_is_hidden() {
+        let line = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"reasoning","summary":[],"content":[]}}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "");
+    }
+
+    #[test]
+    fn jsonrpc_reasoning_summary_object_entries() {
+        let line = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"reasoning","summary":[{"text":"thinking..."}],"content":[]}}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "thinking");
+        assert_eq!(pl.text, "thinking...");
+    }
+
+    #[test]
+    fn jsonrpc_reasoning_falls_back_to_content() {
+        let line = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"reasoning","summary":[],"content":[{"text":"from content"}]}}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "thinking");
+        assert_eq!(pl.text, "from content");
+    }
+
+    #[test]
+    fn jsonrpc_reasoning_text_field_wins() {
+        // if item has a top-level `text` string, it takes priority
+        let line = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"reasoning","text":"direct text","summary":[{"text":"summary text"}]}}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "thinking");
+        assert_eq!(pl.text, "direct text");
+    }
+
+    #[test]
+    fn jsonrpc_user_message_is_user_row() {
+        let line = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"userMessage","content":[{"type":"text","text":"prompt text"}]}}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "user");
+        assert_eq!(pl.text, "prompt text");
+    }
+
+    #[test]
+    fn jsonrpc_user_message_empty_is_hidden() {
+        let line = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"userMessage","content":[]}}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "");
+    }
+
+    #[test]
+    fn jsonrpc_mcp_tool_call_server_dot_tool_label() {
+        let line = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"mcpToolCall","server":"codex_apps","tool":"linear_fetch","arguments":{"id":"LIN-1"},"result":{"content":[{"type":"text","text":"issue body"}]}}}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "tool_call");
+        assert_eq!(pl.text, "codex_apps.linear_fetch");
+        assert_eq!(pl.detail, "issue body");
+    }
+
+    #[test]
+    fn jsonrpc_mcp_tool_call_no_server_falls_back_to_tool() {
+        let line = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"mcpToolCall","tool":"search","arguments":{"q":"foo"}}}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "tool_call");
+        assert_eq!(pl.text, "search");
+        // no result → arguments as JSON
+        assert!(pl.detail.contains("foo"), "detail={}", pl.detail);
+    }
+
+    #[test]
+    fn jsonrpc_collab_agent_tool_call() {
+        let line = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"collabAgentToolCall","tool":"spawnAgent","prompt":"do the thing"}}}"#;
+        let pl = classify_protocol_line("stdout", line);
+        assert_eq!(pl.row_type, "tool_call");
+        assert_eq!(pl.text, "spawnAgent");
+        assert_eq!(pl.detail, "do the thing");
     }
 }

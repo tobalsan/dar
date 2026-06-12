@@ -96,6 +96,8 @@ pub struct EventLine {
     pub kind: String,
     pub row_type: String,
     pub text: String,
+    pub detail: String,
+    pub rendered: String,
 }
 
 #[derive(Template)]
@@ -134,11 +136,16 @@ impl RunDetailTemplate {
         let log_events: Vec<EventLine> = event_lines
             .iter()
             .filter(|e| !e.row_type.is_empty())
-            .map(|e| EventLine {
-                ts: e.ts.clone(),
-                kind: e.kind.clone(),
-                row_type: e.row_type.clone(),
-                text: e.text.clone(),
+            .map(|e| {
+                let rendered = render_log_row(e);
+                EventLine {
+                    ts: e.ts.clone(),
+                    kind: e.kind.clone(),
+                    row_type: e.row_type.clone(),
+                    text: e.text.clone(),
+                    detail: e.detail.clone(),
+                    rendered,
+                }
             })
             .collect();
         Self {
@@ -165,6 +172,12 @@ impl RunDetailTemplate {
     }
 }
 
+pub(crate) fn fmt_event_ts(ts: &str) -> String {
+    DateTime::parse_from_rfc3339(ts)
+        .map(|dt| dt.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|_| ts.to_string())
+}
+
 fn event_line(e: EventRow) -> EventLine {
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&e.payload)
     {
@@ -179,19 +192,24 @@ fn event_line(e: EventRow) -> EventLine {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let detail = map.get("detail").and_then(|v| v.as_str()).unwrap_or("").to_string();
             return EventLine {
-                ts: e.ts,
+                ts: fmt_event_ts(&e.ts),
                 kind: e.kind,
                 row_type,
                 text,
+                detail,
+                rendered: String::new(),
             };
         }
     }
     EventLine {
-        ts: e.ts,
+        ts: fmt_event_ts(&e.ts),
         kind: e.kind,
         row_type: String::new(),
         text: e.payload,
+        detail: String::new(),
+        rendered: String::new(),
     }
 }
 
@@ -209,6 +227,82 @@ fn history_bucket(run: &RunRow) -> (&'static str, &'static str) {
         | "stalled"
         | "needs_human" => ("Interrupted", "interrupted"),
         _ => ("Other", "other"),
+    }
+}
+
+fn he(s: &str) -> String {
+    s.replace('&', "&amp;")
+     .replace('<', "&lt;")
+     .replace('>', "&gt;")
+     .replace('"', "&quot;")
+     .replace('\'', "&#39;")
+}
+
+fn render_markdown(md: &str) -> String {
+    use pulldown_cmark::{html, Event, Options, Parser};
+    let parser = Parser::new_ext(md, Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES);
+    let safe_parser = parser.map(|event| match event {
+        Event::Html(s) | Event::InlineHtml(s) => {
+            Event::Text(pulldown_cmark::CowStr::Boxed(he(&s).into_boxed_str()))
+        }
+        other => other,
+    });
+    let mut output = String::new();
+    html::push_html(&mut output, safe_parser);
+    output
+}
+
+pub(crate) fn render_log_row(ev: &EventLine) -> String {
+    let time_part = ev.ts.get(11..19).unwrap_or("");
+    match ev.row_type.as_str() {
+        "assistant" => {
+            let md = render_markdown(&ev.text);
+            format!(
+                "<div class=\"log-assistant\"><span class=\"log-ts\">{}</span><div class=\"log-md\">{}</div></div>",
+                time_part, md
+            )
+        }
+        "thinking" => {
+            format!(
+                "<details class=\"log-think\"><summary>Thinking</summary><pre class=\"log-pre\">{}</pre></details>",
+                he(&ev.text)
+            )
+        }
+        "tool_call" => {
+            let body = if ev.detail.is_empty() {
+                format!("$ {}", he(&ev.text))
+            } else {
+                format!("$ {}\n\n{}", he(&ev.text), he(&ev.detail))
+            };
+            format!(
+                "<details class=\"log-tool\"><summary><span class=\"log-pill\">tool</span><span class=\"log-cmd\">{}</span></summary><pre class=\"log-pre\">{}</pre></details>",
+                he(&ev.text), body
+            )
+        }
+        "tool_output" => {
+            format!(
+                "<details class=\"log-tool\"><summary><span class=\"log-pill\">output</span><span class=\"log-cmd\">{}</span></summary><pre class=\"log-pre\">{}</pre></details>",
+                he(&ev.text), he(&ev.text)
+            )
+        }
+        "error" => {
+            format!(
+                "<div class=\"log-error\"><span class=\"log-ts\">{}</span><pre class=\"log-pre\">{}</pre></div>",
+                time_part, he(&ev.text)
+            )
+        }
+        "user" => {
+            format!(
+                "<div class=\"log-user\"><pre class=\"log-pre\">{}</pre></div>",
+                he(&ev.text)
+            )
+        }
+        other => {
+            format!(
+                "<div class=\"log-line\"><span class=\"kind\">{}</span><span class=\"ev-text\">{}</span></div>",
+                he(other), he(&ev.text)
+            )
+        }
     }
 }
 
@@ -269,9 +363,12 @@ mod tests {
         assert!(html.contains("completed"), "outcome shown");
         // protocol_event unwrapped to log_row + text.
         assert!(html.contains("tool_call"), "log_row tag shown");
+        assert!(html.contains("<details"), "tool_call renders as details block");
         assert!(html.contains("ran bash"), "protocol text shown");
         // Non-protocol payload rendered raw.
         assert!(html.contains("dispatch attempt=0 pid=4242"), "raw payload shown");
+        // Formatted timestamp.
+        assert!(html.contains("2026-06-12 00:00:30"), "formatted ts shown");
         // Close button clears the drawer.
         assert!(html.contains("getElementById('run-detail')"), "close button present");
     }
@@ -317,5 +414,72 @@ mod tests {
             .expect("renders");
         // process_alive=false in sample_run, so buttons should have disabled
         assert!(html.contains("disabled"), "buttons disabled for finished run");
+    }
+
+    #[test]
+    fn assistant_markdown_renders() {
+        let ev = EventLine {
+            ts: "2026-06-12 10:30:45".to_string(),
+            kind: "runner.codex".to_string(),
+            row_type: "assistant".to_string(),
+            text: "**bold** text".to_string(),
+            detail: String::new(),
+            rendered: String::new(),
+        };
+        let html = render_log_row(&ev);
+        assert!(html.contains("<strong>bold</strong>"), "markdown rendered: {html}");
+    }
+
+    #[test]
+    fn assistant_html_in_text_is_escaped() {
+        let ev = EventLine {
+            ts: "2026-06-12 10:30:45".to_string(),
+            kind: "runner.codex".to_string(),
+            row_type: "assistant".to_string(),
+            text: "<script>alert(1)</script>".to_string(),
+            detail: String::new(),
+            rendered: String::new(),
+        };
+        let html = render_log_row(&ev);
+        assert!(!html.contains("<script>"), "raw script tag not in output: {html}");
+        // pulldown-cmark treats bare angle brackets as inline HTML and escapes them;
+        // the Rust string will contain either &lt;script&gt; or &amp;lt;script — both
+        // indicate the tag is neutralised and will not execute in a browser.
+        assert!(
+            html.contains("&lt;script") || html.contains("&amp;lt;script"),
+            "escaped: {html}"
+        );
+    }
+
+    #[test]
+    fn tool_call_renders_details_block() {
+        let ev = EventLine {
+            ts: "2026-06-12 10:30:45".to_string(),
+            kind: "runner.codex".to_string(),
+            row_type: "tool_call".to_string(),
+            text: "ls -la".to_string(),
+            detail: "total 42\nfile1".to_string(),
+            rendered: String::new(),
+        };
+        let html = render_log_row(&ev);
+        assert!(html.contains("<details"), "details block: {html}");
+        assert!(!html.contains(" open"), "not open by default: {html}");
+        assert!(html.contains("ls -la"), "command shown: {html}");
+        assert!(html.contains("total 42"), "output shown: {html}");
+    }
+
+    #[test]
+    fn error_renders_callout() {
+        let ev = EventLine {
+            ts: "2026-06-12 10:30:45".to_string(),
+            kind: "runner.codex".to_string(),
+            row_type: "error".to_string(),
+            text: "connection refused".to_string(),
+            detail: String::new(),
+            rendered: String::new(),
+        };
+        let html = render_log_row(&ev);
+        assert!(html.contains("log-error"), "error class: {html}");
+        assert!(html.contains("connection refused"), "message shown: {html}");
     }
 }

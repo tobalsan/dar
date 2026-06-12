@@ -554,7 +554,7 @@ fn emit_line(
 ) {
     let ts = chrono::Utc::now();
     let clean = strip_ansi(line);
-    let (row_type, display) = classify_protocol_line(stream, &clean);
+    let pl = classify_protocol_line(stream, &clean);
     let formatted = format!("child[{issue_id}]: {clean}");
     events.push(formatted);
     if let Ok(mut t) = last_event_at.lock() {
@@ -564,8 +564,9 @@ fn emit_line(
     let payload = serde_json::json!({
         "type": "protocol_event",
         "stream": stream,
-        "log_row": row_type,
-        "text": display,
+        "log_row": pl.row_type,
+        "text": pl.text,
+        "detail": pl.detail,
     })
     .to_string();
     store.insert_event(Some(run_id), issue_id, EVENT_KIND, &payload, ts);

@@ -67,9 +67,10 @@
     .drawer-events-head { display: flex; align-items: center; gap: .5rem; margin: .2rem 0 0; }
     .drawer-events { flex: 1; overflow-y: auto; display: grid; gap: .3rem; align-content: start; padding-right: .25rem; }
     .ev-row {
-      display: grid; grid-template-columns: auto auto 1fr; gap: .5rem; align-items: baseline;
+      display: grid; grid-template-columns: auto 1fr; gap: .5rem; align-items: baseline;
       padding: .35rem .5rem; background: #171b21; border: 1px solid var(--border); border-radius: 5px;
     }
+    .ev-meta { display: flex; flex-direction: column; gap: .1rem; }
     .ev-ts { color: var(--muted); font-size: .68rem; white-space: nowrap; }
     .ev-tag { color: var(--accent); font-size: .68rem; white-space: nowrap; }
     .ev-text { overflow-wrap: anywhere; white-space: pre-wrap; }

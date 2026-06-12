@@ -164,13 +164,6 @@ fn send_control(_api: &BusApiState, msg: ControlMsg) -> StatusCode {
     }
 }
 
-fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 #[derive(Deserialize)]
 struct LogsQuery {
     since: Option<i64>,
@@ -200,12 +193,15 @@ async fn run_logs(
                     if rt.is_empty() {
                         continue;
                     }
-                    let tx = map.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    html.push_str(&format!(
-                        "<div class=\"log-line\"><span class=\"kind\">{}</span><span class=\"ev-text\">{}</span></div>",
-                        escape_html(rt),
-                        escape_html(tx)
-                    ));
+                    let el = view::EventLine {
+                        ts: view::fmt_event_ts(&e.ts),
+                        kind: e.kind.clone(),
+                        row_type: rt.to_string(),
+                        text: map.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        detail: map.get("detail").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        rendered: String::new(),
+                    };
+                    html.push_str(&view::render_log_row(&el));
                 }
             }
         }
