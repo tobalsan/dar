@@ -32,6 +32,7 @@ runner-cli = { path = "../extensions/runner-cli" }
 runner-fake = { path = "../extensions/runner-fake" }
 runner-opencode = { path = "../extensions/runner-opencode" }
 chat-pi = { path = "../extensions/chat-pi" }
+chat-codex = { path = "../extensions/chat-codex" }
 tui = { path = "../extensions/tui" }
 
 [dev-dependencies]
