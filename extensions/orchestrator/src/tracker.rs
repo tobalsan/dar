@@ -20,5 +20,8 @@ pub fn build_configured(
         project_slug: cfg.project_slug.clone(),
         endpoint: cfg.endpoint.clone(),
         needs_human: cfg.needs_human.clone(),
+        team: cfg.team.clone(),
+        assignee: cfg.assignee.clone(),
+        labels: cfg.labels(),
     })
 }

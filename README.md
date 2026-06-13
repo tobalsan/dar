@@ -204,6 +204,12 @@ tracker:
   terminal_states: [done, cancelled]
   # needs_human: "Needs Human"    # state that stops re-dispatch (default: "Needs Human")
   # project_slug: abc123          # Linear project slugId (use: linear only)
+  # team: ALG                     # Linear team key (use: linear only)
+  # assignee: "@thinh"            # UUID / @displayName / name / email (use: linear only)
+  # label: [bug, urgent]          # single label or list; OR within labels (use: linear only)
+
+# Linear filters (project_slug / team / assignee / label) combine with strict AND;
+# at least one must resolve or the daemon refuses to boot.
 
 runner:
   use: claude-code            # pi | claude | claude-code | codex | cli | fake
@@ -257,6 +263,9 @@ tracker:
   terminal_states: [Done, Cancelled]
   needs_human: "Needs Human"
   project_slug: abc123            # Linear project slugId
+  # team: ALG                     # Linear team key
+  # assignee: "@thinh"            # UUID / @displayName / name / email
+  # label: [bug, urgent]          # single label or list; OR within labels
   # endpoint: https://api.linear.app/graphql
 
 polling:
