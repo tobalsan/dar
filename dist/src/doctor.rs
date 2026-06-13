@@ -79,6 +79,10 @@ pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyho
         tracker_cfg.project_slug = effective_cfg.tracker_project_slug.clone();
         tracker_cfg.endpoint = Some(effective_cfg.tracker_endpoint.clone());
         tracker_cfg.needs_human = effective_cfg.needs_human.clone();
+        tracker_cfg.team = effective_cfg.tracker_team.clone();
+        tracker_cfg.assignee = effective_cfg.tracker_assignee.clone();
+        tracker_cfg.label = (!effective_cfg.tracker_labels.is_empty())
+            .then(|| orchestrator::config::StringOrVec::List(effective_cfg.tracker_labels.clone()));
 
         match tracker::build_configured(&services, &tracker_cfg, paths.root.clone()) {
             Ok(t) => match t.poll_candidates() {

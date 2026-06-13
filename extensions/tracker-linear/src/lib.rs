@@ -33,7 +33,10 @@ const PAGE_SIZE: u64 = 50;
 pub struct LinearTrackerConfig {
     pub endpoint: String,
     pub api_key: String,
-    pub project_slug: String,
+    pub project_slug: String, // "" = unconstrained
+    pub team: Option<String>,
+    pub assignee_id: Option<String>, // already-resolved Linear user id
+    pub labels: Vec<String>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
     pub needs_human: Option<String>,
@@ -117,14 +120,49 @@ impl TrackerFactory for LinearTrackerFactory {
                 String::new()
             }
         };
-        Ok(Arc::new(LinearTracker::new(LinearTrackerConfig {
+        let project_slug = cfg.project_slug.clone().unwrap_or_default();
+        let team = cfg.team.clone().filter(|t| !t.is_empty());
+        let assignee_raw = cfg.assignee.clone().filter(|a| !a.is_empty());
+        let labels = cfg.labels.clone();
+
+        // Empty-filter guard: refuse to poll the whole workspace. The assignee is
+        // not yet resolved here, so a configured-but-unresolved assignee still
+        // counts as a constraining dimension.
+        let configured = ResolvedDims {
+            project_slug: Some(project_slug.clone()).filter(|s| !s.is_empty()),
+            team_key: team.clone(),
+            assignee_id: assignee_raw.clone(),
+            labels: labels.clone(),
+        };
+        if configured.is_empty() {
+            bail!(
+                "Linear tracker has no filter configured; set at least one of tracker.project_slug, tracker.team, tracker.assignee, tracker.label"
+            );
+        }
+
+        let mut tracker = LinearTracker::new(LinearTrackerConfig {
             endpoint: cfg.endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
             api_key,
-            project_slug: cfg.project_slug.unwrap_or_default(),
+            project_slug,
+            team,
+            assignee_id: None,
+            labels,
             active_states: cfg.active_states,
             terminal_states: cfg.terminal_states,
             needs_human: cfg.needs_human,
-        })?))
+        })?;
+
+        // Resolve assignee to a canonical user id once, at boot (fail fast).
+        if let Some(raw) = &assignee_raw {
+            let users = tracker
+                .run_async(tracker.fetch_users_async())
+                .context("fetching Linear users to resolve tracker.assignee")?;
+            let id = resolve_assignee_id(raw, &users)
+                .with_context(|| format!("resolving tracker.assignee {raw:?}"))?;
+            tracker.assignee_id = Some(id);
+        }
+
+        Ok(Arc::new(tracker))
     }
 }
 
@@ -292,6 +330,9 @@ fn export_linear_project(
             .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
         api_key,
         project_slug,
+        team: None,
+        assignee_id: None,
+        labels: vec![],
         active_states: tracker_cfg.active_states.clone(),
         terminal_states: tracker_cfg.terminal_states.clone(),
         needs_human: tracker_cfg.needs_human.clone(),
@@ -472,6 +513,9 @@ pub struct LinearTracker {
     endpoint: String,
     api_key: String,
     project_slug: String,
+    team: Option<String>,
+    assignee_id: Option<String>,
+    labels: Vec<String>,
     active: Vec<String>,
     terminal: Vec<String>,
     needs_human: Option<String>,
@@ -494,6 +538,9 @@ impl LinearTracker {
             },
             api_key: cfg.api_key,
             project_slug: cfg.project_slug,
+            team: cfg.team,
+            assignee_id: cfg.assignee_id,
+            labels: cfg.labels,
             active: cfg.active_states,
             terminal: cfg.terminal_states,
             needs_human: cfg.needs_human,
@@ -503,25 +550,62 @@ impl LinearTracker {
 
     // --- async internals ---
 
-    /// Fetch every issue in the project (all states), paginated.
-    async fn fetch_all_issues_async(&self) -> Result<Vec<RawIssue>> {
-        Ok(self.fetch_all_issues_with_project_async().await?.issues)
+    /// Resolved filter dimensions for this tracker (project_slug "" → None).
+    fn dims(&self) -> ResolvedDims {
+        ResolvedDims {
+            project_slug: Some(self.project_slug.clone()).filter(|s| !s.is_empty()),
+            team_key: self.team.clone(),
+            assignee_id: self.assignee_id.clone(),
+            labels: self.labels.clone(),
+        }
     }
 
-    async fn fetch_all_issues_with_project_async(&self) -> Result<RawProjectIssues> {
-        let mut all: Vec<RawIssue> = Vec::new();
+    /// Fetch every Linear user (all pages) to resolve `tracker.assignee`.
+    async fn fetch_users_async(&self) -> Result<Vec<LinearUser>> {
+        let query = r#"
+query AgentropyUsers($after: String, $first: Int!) {
+  users(first: $first, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { id name displayName email }
+  }
+}
+"#;
+        let mut all = Vec::new();
         let mut cursor: Option<String> = None;
-        let mut project_name: Option<String> = None;
-        let mut project_slug: Option<String> = None;
-
         loop {
-            let page = self.fetch_page_async(cursor.as_deref()).await?;
-            if project_name.is_none() {
-                project_name = page.project_name.clone();
+            let vars = json!({ "after": cursor, "first": 250 });
+            let body = json!({ "query": query, "variables": vars });
+            let response = self.send_with_rate_limit_async(body).await?;
+            let conn = response
+                .pointer("/data/users")
+                .ok_or_else(|| anyhow!("missing users in Linear response"))?;
+            for node in conn["nodes"].as_array().cloned().unwrap_or_default() {
+                if let Ok(u) = serde_json::from_value::<LinearUser>(node) {
+                    all.push(u);
+                }
             }
-            if project_slug.is_none() {
-                project_slug = page.project_slug.clone();
+            if conn
+                .pointer("/pageInfo/hasNextPage")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                cursor = conn
+                    .pointer("/pageInfo/endCursor")
+                    .and_then(Value::as_str)
+                    .map(String::from);
+            } else {
+                break;
             }
+        }
+        Ok(all)
+    }
+
+    /// Fetch every issue matching `filter` (AND across dimensions), paginated.
+    async fn fetch_issues_async(&self, filter: &Value) -> Result<Vec<RawIssue>> {
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self.fetch_page_async(filter, cursor.as_deref()).await?;
             all.extend(page.issues);
             if page.has_next_page {
                 cursor = page.end_cursor;
@@ -529,72 +613,47 @@ impl LinearTracker {
                 break;
             }
         }
-        Ok(RawProjectIssues {
-            project_name,
-            project_slug,
-            issues: all,
-        })
+        Ok(all)
     }
 
-    async fn fetch_page_async(&self, after: Option<&str>) -> Result<IssuePage> {
-        // Language note: Linear uses `after: String` (nullable String, not
-        // String!) so we pass null when absent.
+    /// All issues in the configured dimension, regardless of state.
+    async fn fetch_all_in_dimension(&self) -> Result<Vec<RawIssue>> {
+        self.fetch_issues_async(&build_issue_filter(&self.dims(), &[]))
+            .await
+    }
+
+    async fn fetch_page_async(&self, filter: &Value, after: Option<&str>) -> Result<IssuePage> {
         let query = r#"
-query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
-  projects(filter: { slugId: { eq: $slug } }, first: 1) {
+query AgentropyCandidates($filter: IssueFilter, $after: String, $first: Int!) {
+  issues(filter: $filter, first: $first, after: $after) {
+    pageInfo { hasNextPage endCursor }
     nodes {
-      name
-      slugId
-      issues(first: $first, after: $after) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          id
-          identifier
-          title
-          description
-          url
-          priority
-          createdAt
-          updatedAt
-          state { name type }
-          labels { nodes { name } }
-          parent { id identifier }
-          inverseRelations(first: 50) {
-            nodes {
-              type
-              issue { id identifier state { name type } }
-            }
-          }
-        }
+      id
+      identifier
+      title
+      description
+      url
+      priority
+      createdAt
+      updatedAt
+      state { name type }
+      assignee { id displayName }
+      labels { nodes { name } }
+      project { name slugId }
+      parent { id identifier }
+      inverseRelations(first: 50) {
+        nodes { type issue { id identifier } }
       }
     }
   }
 }
 "#;
-
-        let vars = json!({
-            "slug": self.project_slug,
-            "after": after,
-            "first": PAGE_SIZE,
-        });
-
+        let vars = json!({ "filter": filter, "after": after, "first": PAGE_SIZE });
         let body = json!({ "query": query, "variables": vars });
         let response = self.send_with_rate_limit_async(body).await?;
-
-        let project_node = response.pointer("/data/projects/nodes/0").ok_or_else(|| {
-            anyhow!(
-                "project {:?} not found in Linear response",
-                self.project_slug
-            )
-        })?;
-
-        let project_name = project_node["name"].as_str().map(String::from);
-        let project_slug = project_node["slugId"].as_str().map(String::from);
-
-        let issues_obj = project_node
-            .get("issues")
-            .ok_or_else(|| anyhow!("missing 'issues' node in project response"))?;
-
+        let issues_obj = response
+            .pointer("/data/issues")
+            .ok_or_else(|| anyhow!("missing 'issues' node in Linear response"))?;
         let has_next_page = issues_obj
             .pointer("/pageInfo/hasNextPage")
             .and_then(Value::as_bool)
@@ -603,26 +662,15 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
             .pointer("/pageInfo/endCursor")
             .and_then(Value::as_str)
             .map(String::from);
-
         let nodes = issues_obj["nodes"].as_array().cloned().unwrap_or_default();
-
         let mut issues = Vec::with_capacity(nodes.len());
         for node in nodes {
             match serde_json::from_value::<RawIssue>(node) {
-                Ok(mut ri) => {
-                    ri.project_name = project_name.clone();
-                    ri.project_slug = project_slug.clone();
-                    issues.push(ri);
-                }
-                Err(e) => {
-                    tracing::warn!("LinearTracker: skipping unparseable issue node: {e}");
-                }
+                Ok(ri) => issues.push(ri),
+                Err(e) => tracing::warn!("LinearTracker: skipping unparseable issue node: {e}"),
             }
         }
-
         Ok(IssuePage {
-            project_name,
-            project_slug,
             issues,
             has_next_page,
             end_cursor,
@@ -769,9 +817,14 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
     }
 
     async fn do_poll_candidates(&self) -> Result<Vec<Issue>> {
-        let raw = self.fetch_all_issues_async().await?;
+        // Fetch the full in-dimension set (all states) so blocked-by can see
+        // dependencies in any non-terminal state, not just active ones. Active
+        // filtering is applied client-side below.
+        let raw = self.fetch_all_in_dimension().await?;
 
-        // Build state lookup: identifier -> state_name
+        // identifier -> state name, over the in-dimension set. A blocker absent
+        // from this map is outside the configured dimension and is ignored
+        // (treated as not blocking), consistent with the prior cross-project rule.
         let state_map: std::collections::HashMap<&str, &str> = raw
             .iter()
             .map(|r| (r.identifier.as_str(), r.state.name.as_str()))
@@ -782,19 +835,9 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
             if !self.active.contains(&r.state.name) {
                 continue;
             }
-            // Skip if any blocker is not terminal.
-            let blocked = r.blocked_by().iter().any(|b| {
-                b.state
-                    .as_ref()
-                    .map(|s| !self.terminal.contains(&s.name))
-                    .or_else(|| {
-                        state_map
-                            .get(b.identifier.as_str())
-                            .map(|s| !self.terminal.contains(&s.to_string()))
-                    })
-                    .unwrap_or(false) // unknown / cross-project blocker = not blocking
-            });
-            if !blocked {
+            let blocker_ids: Vec<&str> =
+                r.blocked_by().iter().map(|b| b.identifier.as_str()).collect();
+            if !is_blocked(&blocker_ids, &state_map, &self.terminal) {
                 out.push(raw_to_issue(r));
             }
         }
@@ -803,21 +846,24 @@ query AgentropyCandidates($slug: String!, $after: String, $first: Int!) {
 
     fn fetch_all_inner(&self) -> Result<Vec<Issue>> {
         self.run_async(async {
-            let raw = self.fetch_all_issues_async().await?;
+            let raw = self.fetch_all_in_dimension().await?;
             Ok(raw.iter().map(raw_to_issue).collect())
         })
     }
 
     pub fn export_snapshot(&self) -> Result<LinearExport> {
         self.run_async(async {
-            let raw = self.fetch_all_issues_with_project_async().await?;
-            let issues: Vec<Issue> = raw.issues.iter().map(raw_to_issue).collect();
+            let raw = self.fetch_all_in_dimension().await?;
+            let issues: Vec<Issue> = raw.iter().map(raw_to_issue).collect();
+            let (pname, pslug) = raw
+                .first()
+                .and_then(|r| r.project.as_ref())
+                .map(|p| (p.name.clone(), p.slug_id.clone()))
+                .unwrap_or((None, None));
             Ok(LinearExport {
                 project: LinearProjectExport {
-                    name: raw.project_name,
-                    slug: raw
-                        .project_slug
-                        .unwrap_or_else(|| self.project_slug.clone()),
+                    name: pname,
+                    slug: pslug.unwrap_or_else(|| self.project_slug.clone()),
                     endpoint: self.endpoint.clone(),
                     exported_at: Utc::now(),
                     issue_count: issues.len(),
@@ -889,12 +935,13 @@ query AgentropyFetchOne($id: String!) {
     createdAt
     updatedAt
     state { name type }
+    assignee { id displayName }
     labels { nodes { name } }
     parent { id identifier }
     inverseRelations(first: 50) {
       nodes {
         type
-        issue { id identifier state { name type } }
+        issue { id identifier }
       }
     }
     project { name slugId }
@@ -911,21 +958,8 @@ query AgentropyFetchOne($id: String!) {
             Some(n) => n.clone(),
         };
 
-        // Extract project fields before consuming the node into RawIssue
-        // (they are #[serde(skip)] on RawIssue and must be injected manually).
-        let project_name = node
-            .pointer("/project/name")
-            .and_then(Value::as_str)
-            .map(String::from);
-        let project_slug = node
-            .pointer("/project/slugId")
-            .and_then(Value::as_str)
-            .map(String::from);
-
-        let mut raw: RawIssue =
+        let raw: RawIssue =
             serde_json::from_value(node).context("parsing Linear issue node in fetch_one")?;
-        raw.project_name = project_name;
-        raw.project_slug = project_slug;
         Ok(Some(raw_to_issue(&raw)))
     }
 
@@ -1026,6 +1060,12 @@ fn raw_to_issue(r: &RawIssue) -> Issue {
     .description(r.description.clone())
     .url(r.url.clone())
     .priority(r.priority)
+    .assignees(
+        r.assignee
+            .as_ref()
+            .map(|a| vec![a.display_name.clone().unwrap_or_else(|| a.id.clone())])
+            .unwrap_or_default(),
+    )
     .labels(r.labels.nodes.iter().map(|l| l.name.clone()).collect())
     .created_at(r.created_at)
     .updated_at(r.updated_at)
@@ -1036,9 +1076,119 @@ fn raw_to_issue(r: &RawIssue) -> Issue {
             .map(|b| b.identifier.clone())
             .collect(),
     )
-    .project_name(r.project_name.clone())
-    .project_slug(r.project_slug.clone())
+    .project_name(r.project.as_ref().and_then(|p| p.name.clone()))
+    .project_slug(r.project.as_ref().and_then(|p| p.slug_id.clone()))
     .build()
+}
+
+// ---------------------------------------------------------------------------
+// Filter dimensions
+// ---------------------------------------------------------------------------
+
+/// Resolved filter dimensions for one tracker. Empty fields = unconstrained.
+#[derive(Debug, Clone, Default)]
+struct ResolvedDims {
+    project_slug: Option<String>,
+    team_key: Option<String>,
+    assignee_id: Option<String>,
+    labels: Vec<String>,
+}
+
+impl ResolvedDims {
+    /// True when no dimension constrains the poll (whole-workspace risk).
+    fn is_empty(&self) -> bool {
+        self.project_slug.is_none()
+            && self.team_key.is_none()
+            && self.assignee_id.is_none()
+            && self.labels.is_empty()
+    }
+}
+
+/// Build a Linear `IssueFilter` (AND across dimensions). `active_states`, when
+/// non-empty, adds a `state.name.in` clause. Pure: no I/O.
+fn build_issue_filter(dims: &ResolvedDims, active_states: &[String]) -> Value {
+    let mut and: Vec<Value> = Vec::new();
+    if let Some(slug) = dims.project_slug.as_deref().filter(|s| !s.is_empty()) {
+        and.push(json!({ "project": { "slugId": { "eq": slug } } }));
+    }
+    if let Some(key) = dims.team_key.as_deref().filter(|s| !s.is_empty()) {
+        and.push(json!({ "team": { "key": { "eq": key } } }));
+    }
+    if let Some(id) = dims.assignee_id.as_deref().filter(|s| !s.is_empty()) {
+        and.push(json!({ "assignee": { "id": { "eq": id } } }));
+    }
+    if !dims.labels.is_empty() {
+        and.push(json!({ "labels": { "some": { "name": { "in": dims.labels } } } }));
+    }
+    if !active_states.is_empty() {
+        and.push(json!({ "state": { "name": { "in": active_states } } }));
+    }
+    json!({ "and": and })
+}
+
+/// A candidate is blocked iff one of its blockers is an in-dimension issue
+/// (present in `state_map`) whose state is not terminal. Blockers outside the
+/// configured dimension are absent from the map and treated as not blocking.
+fn is_blocked(
+    blocker_ids: &[&str],
+    state_map: &std::collections::HashMap<&str, &str>,
+    terminal: &[String],
+) -> bool {
+    blocker_ids.iter().any(|b| {
+        state_map
+            .get(b)
+            .map(|s| !terminal.iter().any(|t| t == s))
+            .unwrap_or(false)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Assignee resolution
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+struct LinearUser {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "displayName")]
+    display_name: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+fn is_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, &c)| match i {
+            8 | 13 | 18 | 23 => c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// Resolve a raw assignee config value to a canonical Linear user id.
+/// UUID passes through. Otherwise matches displayName / name / email
+/// case-insensitively (a leading `@` is stripped). Zero or multiple matches
+/// are errors (fail fast at boot). Pure: no I/O.
+fn resolve_assignee_id(raw: &str, users: &[LinearUser]) -> Result<String> {
+    let needle = raw.trim().strip_prefix('@').unwrap_or_else(|| raw.trim());
+    if is_uuid(needle) {
+        return Ok(needle.to_string());
+    }
+    let matches: std::collections::BTreeSet<String> = users
+        .iter()
+        .filter(|u| {
+            let eq =
+                |f: &Option<String>| f.as_deref().is_some_and(|v| v.eq_ignore_ascii_case(needle));
+            eq(&u.display_name) || eq(&u.name) || eq(&u.email)
+        })
+        .map(|u| u.id.clone())
+        .collect();
+    match matches.len() {
+        0 => bail!("assignee {needle:?} matched no Linear user (by displayName, name, or email)"),
+        1 => Ok(matches.into_iter().next().unwrap()),
+        n => bail!("assignee {needle:?} is ambiguous: matched {n} Linear users"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,17 +1196,9 @@ fn raw_to_issue(r: &RawIssue) -> Issue {
 // ---------------------------------------------------------------------------
 
 struct IssuePage {
-    project_name: Option<String>,
-    project_slug: Option<String>,
     issues: Vec<RawIssue>,
     has_next_page: bool,
     end_cursor: Option<String>,
-}
-
-struct RawProjectIssues {
-    project_name: Option<String>,
-    project_slug: Option<String>,
-    issues: Vec<RawIssue>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1072,15 +1214,28 @@ struct RawIssue {
     #[serde(rename = "updatedAt")]
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
     state: RawState,
+    #[serde(default)]
+    assignee: Option<RawAssignee>,
     labels: RawLabelConnection,
+    #[serde(default)]
+    project: Option<RawProjectRef>,
     parent: Option<RawRef>,
     #[serde(rename = "inverseRelations", default)]
     inverse_relations: RawRelationConnection,
-    // injected after deserialization
-    #[serde(skip)]
-    project_name: Option<String>,
-    #[serde(skip)]
-    project_slug: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawAssignee {
+    id: String,
+    #[serde(rename = "displayName")]
+    display_name: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawProjectRef {
+    name: Option<String>,
+    #[serde(rename = "slugId")]
+    slug_id: Option<String>,
 }
 
 impl RawIssue {
@@ -1130,7 +1285,6 @@ struct RawRef {
     #[allow(dead_code)]
     id: String,
     identifier: String,
-    state: Option<RawState>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1150,6 +1304,9 @@ mod tests {
             endpoint: "http://localhost".to_string(),
             api_key: "test".to_string(),
             project_slug: "test".to_string(),
+            team: None,
+            assignee_id: None,
+            labels: vec![],
             active_states: vec![],
             terminal_states: vec![],
             needs_human: None,
@@ -1264,7 +1421,7 @@ mod tests {
 
     #[test]
     fn raw_graphql_issue_maps_to_portable_issue() {
-        let mut issue: RawIssue = serde_json::from_str(
+        let issue: RawIssue = serde_json::from_str(
             r#"{
               "id": "issue-1",
               "identifier": "ALG-1",
@@ -1275,14 +1432,14 @@ mod tests {
               "createdAt": "2026-06-11T10:00:00Z",
               "updatedAt": "2026-06-11T11:00:00Z",
               "state": { "name": "Todo", "type": "unstarted" },
+              "assignee": { "id": "u1", "displayName": "thinh" },
               "labels": { "nodes": [{ "name": "backend" }] },
+              "project": { "name": "Agentropy", "slugId": "agentropy" },
               "parent": { "id": "parent-1", "identifier": "ALG-0" },
               "inverseRelations": { "nodes": [] }
             }"#,
         )
         .unwrap();
-        issue.project_name = Some("Agentropy".to_string());
-        issue.project_slug = Some("agentropy".to_string());
 
         let mapped = super::raw_to_issue(&issue);
 
@@ -1296,6 +1453,7 @@ mod tests {
         );
         assert_eq!(mapped.state, "Todo");
         assert_eq!(mapped.priority, Some(2));
+        assert_eq!(mapped.assignees, vec!["thinh"]);
         assert_eq!(mapped.labels, vec!["backend"]);
         assert_eq!(mapped.parent_id.as_deref(), Some("parent-1"));
         assert_eq!(mapped.project_name.as_deref(), Some("Agentropy"));
@@ -1443,6 +1601,232 @@ mod tests {
         assert!(result.issues_path.starts_with(dir.path().join("data")));
         assert!(result.project_path.exists());
         assert!(result.issues_path.exists());
+    }
+
+    // --- Filter builder ---
+
+    use super::{
+        build_issue_filter, is_blocked, is_uuid, resolve_assignee_id, LinearUser, ResolvedDims,
+    };
+    use serde_json::json;
+
+    fn dims_project() -> ResolvedDims {
+        ResolvedDims {
+            project_slug: Some("agentropy".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn filter_project_only_with_active_states() {
+        let active = vec!["Todo".to_string()];
+        let f = build_issue_filter(&dims_project(), &active);
+        assert_eq!(
+            f,
+            json!({ "and": [
+                { "project": { "slugId": { "eq": "agentropy" } } },
+                { "state": { "name": { "in": ["Todo"] } } }
+            ]})
+        );
+    }
+
+    #[test]
+    fn filter_team_only() {
+        let dims = ResolvedDims {
+            team_key: Some("ALG".into()),
+            ..Default::default()
+        };
+        let f = build_issue_filter(&dims, &[]);
+        assert_eq!(f, json!({ "and": [{ "team": { "key": { "eq": "ALG" } } }] }));
+    }
+
+    #[test]
+    fn filter_assignee_only() {
+        let dims = ResolvedDims {
+            assignee_id: Some("u1".into()),
+            ..Default::default()
+        };
+        let f = build_issue_filter(&dims, &[]);
+        assert_eq!(
+            f,
+            json!({ "and": [{ "assignee": { "id": { "eq": "u1" } } }] })
+        );
+    }
+
+    #[test]
+    fn filter_label_single() {
+        let dims = ResolvedDims {
+            labels: vec!["bug".into()],
+            ..Default::default()
+        };
+        let f = build_issue_filter(&dims, &[]);
+        assert_eq!(
+            f,
+            json!({ "and": [{ "labels": { "some": { "name": { "in": ["bug"] } } } }] })
+        );
+    }
+
+    #[test]
+    fn filter_label_list() {
+        let dims = ResolvedDims {
+            labels: vec!["bug".into(), "urgent".into()],
+            ..Default::default()
+        };
+        let f = build_issue_filter(&dims, &[]);
+        assert_eq!(
+            f,
+            json!({ "and": [
+                { "labels": { "some": { "name": { "in": ["bug", "urgent"] } } } }
+            ]})
+        );
+    }
+
+    #[test]
+    fn filter_all_dimensions_combined() {
+        let dims = ResolvedDims {
+            project_slug: Some("agentropy".into()),
+            team_key: Some("ALG".into()),
+            assignee_id: Some("u1".into()),
+            labels: vec!["bug".into()],
+        };
+        let f = build_issue_filter(&dims, &["Todo".to_string()]);
+        assert_eq!(
+            f,
+            json!({ "and": [
+                { "project": { "slugId": { "eq": "agentropy" } } },
+                { "team": { "key": { "eq": "ALG" } } },
+                { "assignee": { "id": { "eq": "u1" } } },
+                { "labels": { "some": { "name": { "in": ["bug"] } } } },
+                { "state": { "name": { "in": ["Todo"] } } }
+            ]})
+        );
+    }
+
+    #[test]
+    fn filter_empty_dims_only_state_clause() {
+        let f = build_issue_filter(&ResolvedDims::default(), &["Todo".to_string()]);
+        assert_eq!(
+            f,
+            json!({ "and": [{ "state": { "name": { "in": ["Todo"] } } }] })
+        );
+    }
+
+    #[test]
+    fn filter_empty_active_states_has_no_state_clause() {
+        let f = build_issue_filter(&dims_project(), &[]);
+        assert_eq!(
+            f,
+            json!({ "and": [{ "project": { "slugId": { "eq": "agentropy" } } }] })
+        );
+    }
+
+    // --- Empty-filter guard ---
+
+    #[test]
+    fn resolved_dims_default_is_empty() {
+        assert!(ResolvedDims::default().is_empty());
+    }
+
+    #[test]
+    fn resolved_dims_any_single_field_is_non_empty() {
+        assert!(!ResolvedDims {
+            project_slug: Some("p".into()),
+            ..Default::default()
+        }
+        .is_empty());
+        assert!(!ResolvedDims {
+            team_key: Some("ALG".into()),
+            ..Default::default()
+        }
+        .is_empty());
+        assert!(!ResolvedDims {
+            assignee_id: Some("u1".into()),
+            ..Default::default()
+        }
+        .is_empty());
+        assert!(!ResolvedDims {
+            labels: vec!["bug".into()],
+            ..Default::default()
+        }
+        .is_empty());
+    }
+
+    // --- Blocked-by scope ---
+
+    #[test]
+    fn is_blocked_when_in_dimension_blocker_non_terminal() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("ALG-1", "Backlog");
+        let terminal = vec!["Done".to_string(), "Cancelled".to_string()];
+        assert!(is_blocked(&["ALG-1"], &map, &terminal));
+    }
+
+    #[test]
+    fn not_blocked_when_in_dimension_blocker_terminal() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("ALG-1", "Done");
+        let terminal = vec!["Done".to_string()];
+        assert!(!is_blocked(&["ALG-1"], &map, &terminal));
+    }
+
+    #[test]
+    fn not_blocked_when_blocker_outside_dimension() {
+        let map = std::collections::HashMap::<&str, &str>::new();
+        let terminal = vec!["Done".to_string()];
+        assert!(!is_blocked(&["ALG-9"], &map, &terminal));
+    }
+
+    // --- Assignee resolver ---
+
+    fn users() -> Vec<LinearUser> {
+        serde_json::from_value(json!([
+            { "id": "u1", "name": "Thinh Dinh", "displayName": "thinh", "email": "thinh@x.io" },
+            { "id": "u2", "name": "Alex", "displayName": "alex", "email": "alex@x.io" },
+            { "id": "u3", "name": "Thinh Dinh", "displayName": "thinh2", "email": "thinh@dup.io" }
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn is_uuid_recognizes_canonical_form() {
+        assert!(is_uuid("3b9d8f2e-1c4a-4d6b-8e2f-7a1b2c3d4e5f"));
+        assert!(!is_uuid("not-a-uuid"));
+        assert!(!is_uuid("thinh"));
+    }
+
+    #[test]
+    fn resolve_assignee_uuid_passthrough() {
+        let id = "3b9d8f2e-1c4a-4d6b-8e2f-7a1b2c3d4e5f";
+        assert_eq!(resolve_assignee_id(id, &users()).unwrap(), id);
+    }
+
+    #[test]
+    fn resolve_assignee_display_name_with_and_without_at() {
+        assert_eq!(resolve_assignee_id("@thinh", &users()).unwrap(), "u1");
+        assert_eq!(resolve_assignee_id("thinh", &users()).unwrap(), "u1");
+    }
+
+    #[test]
+    fn resolve_assignee_by_name_is_ambiguous() {
+        // "Thinh Dinh" matches two users by name.
+        let err = resolve_assignee_id("Thinh Dinh", &users()).unwrap_err();
+        assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn resolve_assignee_by_email() {
+        assert_eq!(resolve_assignee_id("alex@x.io", &users()).unwrap(), "u2");
+    }
+
+    #[test]
+    fn resolve_assignee_case_insensitive() {
+        assert_eq!(resolve_assignee_id("ALEX", &users()).unwrap(), "u2");
+    }
+
+    #[test]
+    fn resolve_assignee_no_match_errors() {
+        let err = resolve_assignee_id("nobody", &users()).unwrap_err();
+        assert!(err.to_string().contains("matched no Linear user"));
     }
 
     #[test]

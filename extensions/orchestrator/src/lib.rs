@@ -142,6 +142,10 @@ impl Extension for OrchestratorExtension {
             tracker_cfg.project_slug = effective_cfg.tracker_project_slug.clone();
             tracker_cfg.endpoint = Some(effective_cfg.tracker_endpoint.clone());
             tracker_cfg.needs_human = effective_cfg.needs_human.clone();
+            tracker_cfg.team = effective_cfg.tracker_team.clone();
+            tracker_cfg.assignee = effective_cfg.tracker_assignee.clone();
+            tracker_cfg.label = (!effective_cfg.tracker_labels.is_empty())
+                .then(|| crate::config::StringOrVec::List(effective_cfg.tracker_labels.clone()));
             let services = ctx.host.services.clone();
             let tracker = tracker::build_configured(&services, &tracker_cfg, paths.root.clone())?;
             let runner_id = runner_service_id(&effective_cfg.runner_kind);
@@ -637,7 +641,10 @@ impl Orchestrator {
                     || new_eff.needs_human != self.effective_cfg.needs_human
                     || new_eff.tracker_kind != self.effective_cfg.tracker_kind
                     || new_eff.tracker_project_slug != self.effective_cfg.tracker_project_slug
-                    || new_eff.tracker_endpoint != self.effective_cfg.tracker_endpoint;
+                    || new_eff.tracker_endpoint != self.effective_cfg.tracker_endpoint
+                    || new_eff.tracker_team != self.effective_cfg.tracker_team
+                    || new_eff.tracker_assignee != self.effective_cfg.tracker_assignee
+                    || new_eff.tracker_labels != self.effective_cfg.tracker_labels;
 
                 if tracker_changed {
                     let mut tracker_cfg = self.agent_cfg.tracker.clone();
@@ -647,6 +654,10 @@ impl Orchestrator {
                     tracker_cfg.project_slug = new_eff.tracker_project_slug.clone();
                     tracker_cfg.endpoint = Some(new_eff.tracker_endpoint.clone());
                     tracker_cfg.needs_human = new_eff.needs_human.clone();
+                    tracker_cfg.team = new_eff.tracker_team.clone();
+                    tracker_cfg.assignee = new_eff.tracker_assignee.clone();
+                    tracker_cfg.label = (!new_eff.tracker_labels.is_empty())
+                        .then(|| crate::config::StringOrVec::List(new_eff.tracker_labels.clone()));
                     match tracker::build_configured(
                         &self.runner_services,
                         &tracker_cfg,
@@ -675,6 +686,9 @@ impl Orchestrator {
                             new_eff.tracker_project_slug =
                                 self.effective_cfg.tracker_project_slug.clone();
                             new_eff.tracker_endpoint = self.effective_cfg.tracker_endpoint.clone();
+                            new_eff.tracker_team = self.effective_cfg.tracker_team.clone();
+                            new_eff.tracker_assignee = self.effective_cfg.tracker_assignee.clone();
+                            new_eff.tracker_labels = self.effective_cfg.tracker_labels.clone();
                             logging::ev(
                                 "-",
                                 "workflow_reload",
@@ -2739,6 +2753,9 @@ mod tests {
                 project_slug: None,
                 endpoint: None,
                 needs_human: None,
+                team: None,
+                assignee: None,
+                label: None,
             },
             runner: RunnerConfig {
                 use_: "claude-code".to_string(),
@@ -3586,6 +3603,9 @@ mod tests {
                 project_slug: None,
                 endpoint: None,
                 needs_human: None,
+                team: None,
+                assignee: None,
+                label: None,
             },
             runner: RunnerConfig {
                 use_: "claude-code".to_string(),
