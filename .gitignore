@@ -9,6 +9,7 @@ example-agent/workspaces/*
 !example-agent/workspaces/.gitkeep
 example-agent/logs/*
 !example-agent/logs/.gitkeep
+data/
 
 # Local Claude Code config dropped into agent folders
 **/.claude/settings.local.json
