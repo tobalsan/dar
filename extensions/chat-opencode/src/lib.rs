@@ -57,14 +57,16 @@ pub struct OpenCodeChatSession {
 impl OpenCodeChatSession {
     async fn spawn(params: &ChatSessionParams, tx: Sender<ChatEvent>) -> Result<Self> {
         let dir = session_dir(params);
+        let model = effective_model(params.model.as_deref(), params.provider.as_deref());
         std::fs::create_dir_all(dir.join("config"))
             .with_context(|| format!("creating opencode chat dir {}", dir.display()))?;
-        write_opencode_config(&dir, params.model.as_deref())?;
+        seed_opencode_auth(&dir)?;
+        write_opencode_config(&dir, model.as_deref())?;
 
         let mut server = OpenCodeServer::spawn(
             effective_command(&params.command, "opencode"),
             opencode_args(0),
-            opencode_env(&dir, params.model.as_deref()),
+            opencode_env(&dir, model.as_deref()),
             &params.agent_root,
         )
         .await?;
@@ -117,7 +119,7 @@ impl OpenCodeChatSession {
         Ok(Self {
             client,
             session_id,
-            model: params.model.clone(),
+            model: model.clone(),
             server: Some(server),
             pump,
         })
@@ -154,6 +156,53 @@ impl ChatSession for OpenCodeChatSession {
 
 fn session_dir(params: &ChatSessionParams) -> PathBuf {
     params.session_dir.join("opencode")
+}
+
+/// opencode wants `provider/model`. Fold the separate provider field in when the
+/// model isn't already qualified with a `/`.
+fn effective_model(model: Option<&str>, provider: Option<&str>) -> Option<String> {
+    let model = model?;
+    match provider {
+        Some(p) if !p.is_empty() && !model.contains('/') => Some(format!("{p}/{model}")),
+        _ => Some(model.to_string()),
+    }
+}
+
+/// opencode reads credentials from `$XDG_DATA_HOME/opencode`, defaulting to
+/// `~/.local/share/opencode`. The chat backend isolates XDG_DATA_HOME per session,
+/// so we resolve the *host* location here to copy global auth into the sandbox.
+fn host_opencode_data_dir() -> Option<PathBuf> {
+    if let Some(x) = std::env::var_os("XDG_DATA_HOME") {
+        let p = PathBuf::from(x);
+        if !p.as_os_str().is_empty() {
+            return Some(p.join("opencode"));
+        }
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/opencode"))
+}
+
+/// Copy the host's global opencode credentials into the isolated XDG_DATA_HOME
+/// so custom providers (e.g. `opencode-go`) authenticate. Best-effort: missing
+/// source files are skipped, not an error.
+fn seed_opencode_auth(session_dir: &Path) -> Result<()> {
+    let Some(src) = host_opencode_data_dir() else {
+        return Ok(());
+    };
+    seed_opencode_auth_from(&src, session_dir)
+}
+
+fn seed_opencode_auth_from(src: &Path, session_dir: &Path) -> Result<()> {
+    let dst = session_dir.join("data").join("opencode");
+    for file in ["auth.json", "account.json"] {
+        let from = src.join(file);
+        if from.exists() {
+            std::fs::create_dir_all(&dst)
+                .with_context(|| format!("creating opencode data dir {}", dst.display()))?;
+            std::fs::copy(&from, dst.join(file))
+                .with_context(|| format!("seeding opencode {file}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn opencode_args(port: u16) -> Vec<OsString> {
@@ -391,6 +440,47 @@ mod tests {
             event: None,
             data: data.to_string(),
         })
+    }
+
+    #[test]
+    fn effective_model_folds_provider_in() {
+        assert_eq!(
+            effective_model(Some("minimax-m3"), Some("opencode-go")),
+            Some("opencode-go/minimax-m3".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_model_leaves_already_qualified_model_alone() {
+        assert_eq!(
+            effective_model(Some("anthropic/claude-sonnet"), Some("opencode-go")),
+            Some("anthropic/claude-sonnet".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_model_no_model_returns_none() {
+        assert_eq!(effective_model(None, Some("x")), None);
+    }
+
+    #[test]
+    fn seed_opencode_auth_from_copies_auth_and_skips_missing_account() {
+        let host_dir = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+
+        let src = host_dir.path().join("opencode");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("auth.json"), r#"{"token":"fake"}"#).unwrap();
+
+        seed_opencode_auth_from(&src, session_dir.path()).unwrap();
+
+        let dst_auth = session_dir.path().join("data/opencode/auth.json");
+        assert!(dst_auth.exists(), "auth.json should be copied");
+        let contents = std::fs::read_to_string(&dst_auth).unwrap();
+        assert!(contents.contains("fake"), "auth.json contents should match");
+
+        let dst_account = session_dir.path().join("data/opencode/account.json");
+        assert!(!dst_account.exists(), "account.json should not be created when source is absent");
     }
 
     #[test]

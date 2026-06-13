@@ -41,6 +41,10 @@ pub struct AgentInfo {
     pub folder: String,
     pub tracker: String,
     pub runner: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +169,8 @@ impl RunSnapshot {
                 folder: String::new(),
                 tracker: String::new(),
                 runner: String::new(),
+                model: None,
+                provider: None,
             },
             paused: false,
             active: None,

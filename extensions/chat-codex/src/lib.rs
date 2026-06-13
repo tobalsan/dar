@@ -254,6 +254,10 @@ fn codex_args(params: &ChatSessionParams) -> Vec<OsString> {
         args.push(OsString::from("-c"));
         args.push(OsString::from(format!("model={model:?}")));
     }
+    if let Some(provider) = &params.provider {
+        args.push(OsString::from("-c"));
+        args.push(OsString::from(format!("model_provider={provider:?}")));
+    }
     args
 }
 
@@ -1032,6 +1036,27 @@ mod tests {
         assert_eq!(req["method"], "turn/interrupt");
         assert_eq!(req["params"]["threadId"], "thread-1");
         assert_eq!(req["params"]["turnId"], "turn-1");
+    }
+
+    #[test]
+    fn codex_provider_is_passed_as_config_flag() {
+        let root = Path::new("/agent");
+        let sessions = Path::new("/agent/data/tui/sessions");
+        let params = ChatSessionParams::builder("", root, sessions)
+            .model(Some("o4-mini".into()))
+            .provider(Some("azure".into()))
+            .build();
+        let args = codex_args(&params);
+        assert!(args.iter().any(|a| a == "-c"), "must contain -c flags");
+        let provider_flag_idx = args
+            .windows(2)
+            .position(|w| w[0] == "-c" && w[1].to_string_lossy().starts_with("model_provider="));
+        assert!(
+            provider_flag_idx.is_some(),
+            "model_provider flag missing: {args:?}"
+        );
+        let flag = args[provider_flag_idx.unwrap() + 1].to_string_lossy();
+        assert!(flag.contains("azure"), "provider value missing: {flag}");
     }
 
     #[tokio::test]

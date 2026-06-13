@@ -52,6 +52,7 @@ pub struct ChatSessionParams {
     /// Persistence home, caller-owned & pre-created.
     pub session_dir: PathBuf,
     pub model: Option<String>,
+    pub provider: Option<String>,
 }
 
 impl ChatSessionParams {
@@ -65,6 +66,7 @@ impl ChatSessionParams {
             agent_root: agent_root.to_path_buf(),
             session_dir: session_dir.to_path_buf(),
             model: None,
+            provider: None,
         }
     }
 }
@@ -74,11 +76,17 @@ pub struct ChatSessionParamsBuilder {
     agent_root: PathBuf,
     session_dir: PathBuf,
     model: Option<String>,
+    provider: Option<String>,
 }
 
 impl ChatSessionParamsBuilder {
     pub fn model(mut self, value: Option<String>) -> Self {
         self.model = value;
+        self
+    }
+
+    pub fn provider(mut self, value: Option<String>) -> Self {
+        self.provider = value;
         self
     }
 
@@ -88,6 +96,7 @@ impl ChatSessionParamsBuilder {
             agent_root: self.agent_root,
             session_dir: self.session_dir,
             model: self.model,
+            provider: self.provider,
         }
     }
 }

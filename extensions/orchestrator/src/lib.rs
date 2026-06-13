@@ -2204,6 +2204,8 @@ impl Orchestrator {
                 folder: self.state.agent.folder.clone(),
                 tracker: self.state.agent.tracker.clone(),
                 runner: self.state.agent.runner.clone(),
+                model: self.effective_cfg.model.clone(),
+                provider: self.effective_cfg.provider.clone(),
             },
             paused: self.state.paused.load(Ordering::SeqCst),
             active: self.state.active.read().await.clone().map(api_active_run),

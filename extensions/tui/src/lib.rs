@@ -53,8 +53,6 @@ pub struct ChatConfig {
     pub backend: Option<String>,
     /// Backend binary override; empty/absent uses the backend default.
     pub command: Option<String>,
-    /// Model forwarded to the backend.
-    pub model: Option<String>,
 }
 
 pub struct TuiExtension;
@@ -125,7 +123,7 @@ mod tests {
         values.insert(
             "tui".to_string(),
             serde_json::json!({
-                "chat": { "backend": "pi", "command": "pi", "model": "gpt-5" }
+                "chat": { "backend": "pi", "command": "pi" }
             }),
         );
         let mut ctx = register_ctx(host_api::ConfigStore::from_values(values));

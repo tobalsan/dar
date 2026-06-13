@@ -312,12 +312,21 @@ async fn open_session(
     std::fs::create_dir_all(ctx.paths.root().join("data"))?;
     let session_dir = ctx.paths.data_dir("tui")?.join("sessions");
     std::fs::create_dir_all(&session_dir)?;
+    let snap = ctx
+        .host
+        .bus
+        .read_retained::<RunSnapshot>(RUN_SNAPSHOT_TOPIC)
+        .ok()
+        .filter(|s| s.version > 0);
+    let model = snap.as_ref().and_then(|s| s.agent.model.clone());
+    let provider = snap.as_ref().and_then(|s| s.agent.provider.clone());
     let params = ChatSessionParams::builder(
         config.command.as_deref().unwrap_or(""),
         ctx.paths.root(),
         &session_dir,
     )
-    .model(config.model.clone())
+    .model(model)
+    .provider(provider)
     .build();
     backend.open(params, tx).await
 }
@@ -518,7 +527,6 @@ done"#;
         let config = ChatConfig {
             backend: None, // exercises the "pi" fallback
             command: Some(script.to_str().unwrap().to_string()),
-            model: None,
         };
         let (chat_tx, mut chat_rx) = tokio::sync::mpsc::channel::<ChatEvent>(64);
         let mut session: Option<Box<dyn ChatSession>> = None;
@@ -592,7 +600,6 @@ done"#;
         let config = ChatConfig {
             backend: None,
             command: Some(script.to_str().unwrap().to_string()),
-            model: None,
         };
         let (chat_tx, mut chat_rx) = tokio::sync::mpsc::channel::<ChatEvent>(64);
         let mut session: Option<Box<dyn ChatSession>> = None;
@@ -647,7 +654,6 @@ done"#;
         let config = ChatConfig {
             backend: None,
             command: None,
-            model: None,
         };
         let (chat_tx, _chat_rx) = tokio::sync::mpsc::channel::<ChatEvent>(64);
         let mut session: Option<Box<dyn ChatSession>> = None;

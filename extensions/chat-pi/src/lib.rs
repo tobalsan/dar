@@ -225,6 +225,10 @@ fn pi_args(params: &ChatSessionParams) -> Vec<OsString> {
         args.push(OsString::from("--model"));
         args.push(OsString::from(model));
     }
+    if let Some(provider) = &params.provider {
+        args.push(OsString::from("--provider"));
+        args.push(OsString::from(provider));
+    }
     args
 }
 
@@ -597,6 +601,21 @@ mod tests {
         let args = pi_args(&with_model);
         assert_eq!(args[4], OsString::from("--model"));
         assert_eq!(args[5], OsString::from("gpt-5"));
+    }
+
+    #[test]
+    fn pi_args_appends_provider_when_set() {
+        let root = Path::new("/agent");
+        let sessions = Path::new("/agent/data/tui/sessions");
+        let params = ChatSessionParams::builder("", root, sessions)
+            .model(Some("gpt-5".into()))
+            .provider(Some("my-provider".into()))
+            .build();
+        let args = pi_args(&params);
+        // --model gpt-5 --provider my-provider
+        assert!(args.contains(&OsString::from("--provider")));
+        let provider_idx = args.iter().position(|a| a == "--provider").unwrap();
+        assert_eq!(args[provider_idx + 1], OsString::from("my-provider"));
     }
 
     // -- event mapping --------------------------------------------------------
