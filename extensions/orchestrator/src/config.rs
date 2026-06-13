@@ -5,7 +5,24 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+/// A YAML scalar or list, normalised to `Vec<String>`. Used by tracker `label`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum StringOrVec {
+    Scalar(String),
+    List(Vec<String>),
+}
+
+impl StringOrVec {
+    pub fn to_vec(&self) -> Vec<String> {
+        match self {
+            StringOrVec::Scalar(s) => vec![s.clone()],
+            StringOrVec::List(v) => v.clone(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentConfig {
@@ -51,6 +68,22 @@ pub struct TrackerConfig {
     /// State name used by orchestrator safety/parking writes.
     #[serde(default)]
     pub needs_human: Option<String>,
+    /// Linear team key (e.g. "ALG"); unconstrained when absent.
+    #[serde(default)]
+    pub team: Option<String>,
+    /// Linear assignee: UUID, displayName (@thinh), name, or email; resolved at boot.
+    #[serde(default)]
+    pub assignee: Option<String>,
+    /// Linear label name(s): a single string or a list (OR within labels).
+    #[serde(default)]
+    pub label: Option<StringOrVec>,
+}
+
+impl TrackerConfig {
+    /// Configured label names, empty when unset.
+    pub fn labels(&self) -> Vec<String> {
+        self.label.as_ref().map(StringOrVec::to_vec).unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -300,5 +333,21 @@ mod tests {
         let raw = format!("{BASE}foreground: tui\n");
         let cfg: AgentConfig = serde_yaml::from_str(&raw).unwrap();
         assert_eq!(cfg.foreground, "tui");
+    }
+
+    #[test]
+    fn tracker_dimensions_parse_with_scalar_label() {
+        let raw = "id: a\nname: A\ntracker:\n  use: linear\n  active_states: [todo]\n  terminal_states: [done]\n  team: ALG\n  assignee: \"@thinh\"\n  label: bug\nrunner:\n  use: claude-code\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
+        let cfg: AgentConfig = serde_yaml::from_str(raw).unwrap();
+        assert_eq!(cfg.tracker.team.as_deref(), Some("ALG"));
+        assert_eq!(cfg.tracker.assignee.as_deref(), Some("@thinh"));
+        assert_eq!(cfg.tracker.labels(), vec!["bug"]);
+    }
+
+    #[test]
+    fn tracker_label_parses_as_list() {
+        let raw = "id: a\nname: A\ntracker:\n  use: linear\n  active_states: [todo]\n  terminal_states: [done]\n  label: [bug, urgent]\nrunner:\n  use: claude-code\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
+        let cfg: AgentConfig = serde_yaml::from_str(raw).unwrap();
+        assert_eq!(cfg.tracker.labels(), vec!["bug", "urgent"]);
     }
 }

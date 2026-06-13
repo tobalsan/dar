@@ -200,6 +200,9 @@ pub struct TrackerBuildConfig {
     pub project_slug: Option<String>,
     pub endpoint: Option<String>,
     pub needs_human: Option<String>,
+    pub team: Option<String>,
+    pub assignee: Option<String>,
+    pub labels: Vec<String>,
 }
 
 pub trait TrackerFactory: Send + Sync {

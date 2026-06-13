@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, StringOrVec};
 
 const DEFAULT_NEEDS_HUMAN_STATE: &str = "Needs Human";
 
@@ -70,6 +70,12 @@ pub struct WfTrackerConfig {
     pub project_slug: Option<String>,
     /// Linear GraphQL endpoint override (default `https://api.linear.app/graphql`).
     pub endpoint: Option<String>,
+    /// Linear team key override.
+    pub team: Option<String>,
+    /// Linear assignee override (UUID / @displayName / name / email).
+    pub assignee: Option<String>,
+    /// Linear label override (scalar or list).
+    pub label: Option<crate::config::StringOrVec>,
 }
 
 /// Legacy `tracker.states.*` nesting.
@@ -269,6 +275,12 @@ pub struct EffectiveLoopConfig {
     pub tracker_project_slug: Option<String>,
     /// Linear GraphQL endpoint (only relevant when tracker_kind == "linear").
     pub tracker_endpoint: String,
+    /// Linear team key filter (only relevant when tracker_kind == "linear").
+    pub tracker_team: Option<String>,
+    /// Linear assignee filter (raw config value; resolved by the tracker at boot).
+    pub tracker_assignee: Option<String>,
+    /// Linear label filters (OR within; empty = unconstrained).
+    pub tracker_labels: Vec<String>,
     // Polling
     pub poll_interval_ms: u64,
     pub poll_jitter_ms: u64,
@@ -332,6 +344,21 @@ impl EffectiveLoopConfig {
             .and_then(|t| t.endpoint.clone())
             .or_else(|| base.tracker.endpoint.clone())
             .unwrap_or_else(|| "https://api.linear.app/graphql".to_string());
+        let tracker_team = wf
+            .tracker
+            .as_ref()
+            .and_then(|t| t.team.clone())
+            .or_else(|| base.tracker.team.clone());
+        let tracker_assignee = wf
+            .tracker
+            .as_ref()
+            .and_then(|t| t.assignee.clone())
+            .or_else(|| base.tracker.assignee.clone());
+        let tracker_labels = wf
+            .tracker
+            .as_ref()
+            .and_then(|t| t.label.as_ref().map(StringOrVec::to_vec))
+            .unwrap_or_else(|| base.tracker.labels());
 
         // --- Polling ---
         let p = wf.polling.as_ref();
@@ -431,6 +458,9 @@ impl EffectiveLoopConfig {
             needs_human,
             tracker_project_slug,
             tracker_endpoint,
+            tracker_team,
+            tracker_assignee,
+            tracker_labels,
             poll_interval_ms,
             poll_jitter_ms,
             max_concurrent,
@@ -526,6 +556,9 @@ mod tests {
                 project_slug: None,
                 endpoint: None,
                 needs_human: None,
+                team: None,
+                assignee: None,
+                label: None,
             },
             runner: RunnerConfig {
                 use_: "claude-code".into(),
@@ -967,6 +1000,41 @@ body"#;
         let base = base_config();
         let eff = EffectiveLoopConfig::merge(&base, &WorkflowFrontmatter::default());
         assert_eq!(eff.thinking, None);
+    }
+
+    #[test]
+    fn merge_tracker_dimensions_frontmatter_overrides_base() {
+        let mut base = base_config();
+        base.tracker.team = Some("BASE".into());
+        base.tracker.assignee = Some("base-user".into());
+        base.tracker.label = Some(StringOrVec::Scalar("base-label".into()));
+        let raw = "---\ntracker:\n  team: ALG\n  assignee: \"@thinh\"\n  label: [bug, urgent]\n---";
+        let snap = parse_workflow_md(raw).unwrap();
+        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        assert_eq!(eff.tracker_team, Some("ALG".into()));
+        assert_eq!(eff.tracker_assignee, Some("@thinh".into()));
+        assert_eq!(eff.tracker_labels, vec!["bug", "urgent"]);
+    }
+
+    #[test]
+    fn merge_tracker_label_scalar_in_frontmatter() {
+        let base = base_config();
+        let raw = "---\ntracker:\n  label: bug\n---";
+        let snap = parse_workflow_md(raw).unwrap();
+        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        assert_eq!(eff.tracker_labels, vec!["bug"]);
+    }
+
+    #[test]
+    fn merge_tracker_dimensions_fall_back_to_base() {
+        let mut base = base_config();
+        base.tracker.team = Some("ALG".into());
+        base.tracker.assignee = Some("base-user".into());
+        base.tracker.label = Some(StringOrVec::List(vec!["bug".into(), "urgent".into()]));
+        let eff = EffectiveLoopConfig::merge(&base, &WorkflowFrontmatter::default());
+        assert_eq!(eff.tracker_team, Some("ALG".into()));
+        assert_eq!(eff.tracker_assignee, Some("base-user".into()));
+        assert_eq!(eff.tracker_labels, vec!["bug", "urgent"]);
     }
 
     #[test]
