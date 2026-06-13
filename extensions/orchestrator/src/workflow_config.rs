@@ -122,10 +122,12 @@ pub struct WfAgentConfig {
     pub model: Option<String>,
     /// Model provider override (e.g. "openai", "anthropic"). Forwarded to runners that accept one.
     pub provider: Option<String>,
-    /// Thinking/reasoning budget token limit. Forwarded to pi runner as `--thinking`.
+    /// Canonical reasoning level on the scale `none | minimal | low | medium |
+    /// high | xhigh`. Overrides agent.yaml `runner.thinking`. Accepts `thinking`
+    /// (canonical) or `effort` (alias). Validated against the resolved runner's
+    /// supported subset at config-load time.
+    #[serde(alias = "effort")]
     pub thinking: Option<String>,
-    /// Reasoning effort level (e.g. "low", "medium", "high"). Forwarded to runners that accept one.
-    pub effort: Option<String>,
     /// Per-attempt timeout override (ms).
     pub max_run_timeout_ms: Option<u64>,
     pub turn_timeout_ms: Option<u64>,
@@ -288,10 +290,9 @@ pub struct EffectiveLoopConfig {
     pub model: Option<String>,
     /// Model provider passed to the runner (None = runner default).
     pub provider: Option<String>,
-    /// Thinking/reasoning budget token limit passed to the runner (None = runner default).
+    /// Canonical reasoning level passed to the runner (None = runner default).
+    /// Validated against the runner's supported subset; see `thinking` module.
     pub thinking: Option<String>,
-    /// Reasoning effort level passed to the runner (None = runner default).
-    pub effort: Option<String>,
     pub max_run_timeout_ms: u64,
     pub stall_timeout_ms: u64,
     /// Max turns a turn-capable run may take before the orchestrator finishes it
@@ -393,8 +394,11 @@ impl EffectiveLoopConfig {
         let provider = a
             .and_then(|a| a.provider.clone())
             .or_else(|| base.runner.provider.clone());
-        let thinking = a.and_then(|a| a.thinking.clone());
-        let effort = a.and_then(|a| a.effort.clone());
+        // Canonical reasoning level: WORKFLOW.md `agent.thinking`/`agent.effort`
+        // overrides agent.yaml `runner.thinking`/`runner.effort`.
+        let thinking = a
+            .and_then(|a| a.thinking.clone())
+            .or_else(|| base.runner.thinking.clone());
         let max_run_timeout_ms = a
             .and_then(|a| a.turn_timeout_ms.or(a.max_run_timeout_ms))
             .unwrap_or(base.runner.max_run_timeout_ms);
@@ -442,7 +446,6 @@ impl EffectiveLoopConfig {
             model,
             provider,
             thinking,
-            effort,
             max_run_timeout_ms,
             stall_timeout_ms,
             max_turns,
@@ -529,6 +532,7 @@ mod tests {
                 command: "claude".into(),
                 model: None,
                 provider: None,
+            thinking: None,
                 max_run_timeout_ms: 1_800_000,
                 stall_timeout_ms: 300_000,
                 max_turns: 20,
@@ -902,6 +906,7 @@ body"#;
             command: String::new(),
             model: None,
             provider: None,
+            thinking: None,
             max_run_timeout_ms: 3_600_000,
             stall_timeout_ms: 300_000,
             max_turns: 20,
@@ -921,6 +926,47 @@ body"#;
         let wf = WorkflowFrontmatter::default();
         let eff = EffectiveLoopConfig::merge(&base, &wf);
         assert_eq!(eff.model, Some("claude-opus-4-6".into()));
+    }
+
+    #[test]
+    fn thinking_falls_back_to_agent_yaml_runner_thinking() {
+        let mut base = base_config();
+        base.runner.thinking = Some("medium".into());
+        let eff = EffectiveLoopConfig::merge(&base, &WorkflowFrontmatter::default());
+        assert_eq!(eff.thinking, Some("medium".into()));
+    }
+
+    #[test]
+    fn workflow_thinking_overrides_agent_yaml() {
+        let mut base = base_config();
+        base.runner.thinking = Some("low".into());
+        let raw = "---\nagent:\n  thinking: high\n---";
+        let snap = parse_workflow_md(raw).unwrap();
+        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        assert_eq!(eff.thinking, Some("high".into()));
+    }
+
+    #[test]
+    fn workflow_effort_alias_is_accepted_as_thinking() {
+        let base = base_config();
+        let raw = "---\nagent:\n  effort: medium\n---";
+        let snap = parse_workflow_md(raw).unwrap();
+        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        assert_eq!(eff.thinking, Some("medium".into()));
+    }
+
+    #[test]
+    fn agent_yaml_effort_alias_parses_as_thinking() {
+        let raw = "id: a\nname: A\ntracker:\n  use: files\n  config:\n    path: ./issues\n  active_states: [todo]\n  terminal_states: [done]\nrunner:\n  use: pi\n  effort: high\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
+        let cfg: AgentConfig = serde_yaml::from_str(raw).unwrap();
+        assert_eq!(cfg.runner.thinking, Some("high".into()));
+    }
+
+    #[test]
+    fn thinking_absent_yields_none() {
+        let base = base_config();
+        let eff = EffectiveLoopConfig::merge(&base, &WorkflowFrontmatter::default());
+        assert_eq!(eff.thinking, None);
     }
 
     #[test]

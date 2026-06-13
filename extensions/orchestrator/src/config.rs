@@ -71,6 +71,11 @@ pub struct RunnerConfig {
     /// Optional provider identifier forwarded to runners that accept one.
     #[serde(default)]
     pub provider: Option<String>,
+    /// Canonical reasoning level on the scale `none | minimal | low | medium |
+    /// high | xhigh`. Accepts `thinking` (canonical) or `effort` (alias).
+    /// Validated against the resolved runner's supported subset at boot.
+    #[serde(default, alias = "effort")]
+    pub thinking: Option<String>,
     #[serde(
         default = "default_turn_timeout_ms",
         alias = "turn_timeout_ms",
