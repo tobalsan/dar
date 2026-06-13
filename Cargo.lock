@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentropy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agentropy-host",
  "anyhow",
@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "agentropy-host"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -355,7 +355,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cap-chat"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "tokio",
@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "cap-runner"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -374,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "cap-tracker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -422,7 +422,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chat-codex"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cap-chat",
@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "chat-opencode"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cap-chat",
@@ -451,7 +451,7 @@ dependencies = [
 
 [[package]]
 name = "chat-pi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cap-chat",
@@ -638,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "dashboard"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "askama",
@@ -728,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "example"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "host-api",
@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "frontend-log"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "host-api",
@@ -966,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "host-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -1488,7 +1488,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opencode-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "orchestrator"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "orchestrator-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1863,7 +1863,7 @@ dependencies = [
 
 [[package]]
 name = "runner-claude"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -1874,7 +1874,7 @@ dependencies = [
 
 [[package]]
 name = "runner-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -1885,7 +1885,7 @@ dependencies = [
 
 [[package]]
 name = "runner-codex"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -1900,7 +1900,7 @@ dependencies = [
 
 [[package]]
 name = "runner-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -1914,7 +1914,7 @@ dependencies = [
 
 [[package]]
 name = "runner-fake"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -1925,7 +1925,7 @@ dependencies = [
 
 [[package]]
 name = "runner-opencode"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -1941,7 +1941,7 @@ dependencies = [
 
 [[package]]
 name = "runner-pi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "tracker-files"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cap-tracker",
@@ -2654,7 +2654,7 @@ dependencies = [
 
 [[package]]
 name = "tracker-linear"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cap-tracker",
@@ -2677,7 +2677,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cap-chat",
