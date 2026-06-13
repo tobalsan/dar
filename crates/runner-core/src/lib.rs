@@ -389,6 +389,7 @@ fn is_pi_event(v: &serde_json::Value) -> bool {
         "message_update"
             | "message_start"
             | "message_end"
+            | "turn_start"
             | "turn_end"
             | "agent_start"
             | "agent_end"
@@ -423,7 +424,7 @@ fn classify_pi_line(v: &serde_json::Value) -> Option<ProtocolLine> {
     let pl = match t {
         // Turn boundary / lifecycle: hidden. `runner-pi`'s turn loop also
         // watches these for `agent_end` to end the current turn.
-        "agent_start" | "agent_end" | "turn_end" => hidden(),
+        "agent_start" | "agent_end" | "turn_start" | "turn_end" => hidden(),
         // Queue / compaction / retry: noise.
         "queue_update"
         | "compaction_start"
@@ -1352,6 +1353,7 @@ mod tests {
         for line in [
             r#"{"type":"agent_start"}"#,
             r#"{"type":"agent_end"}"#,
+            r#"{"type":"turn_start"}"#,
             r#"{"type":"turn_end"}"#,
             r#"{"type":"queue_update","queued":2}"#,
             r#"{"type":"compaction_start"}"#,
