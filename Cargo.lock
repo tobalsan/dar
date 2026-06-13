@@ -38,18 +38,12 @@ dependencies = [
  "clap",
  "host-api",
  "orchestrator",
- "runner-claude",
- "runner-cli",
- "runner-codex",
- "runner-fake",
- "runner-opencode",
- "runner-pi",
+ "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tokio",
  "toml",
- "tracker-files",
- "tracker-linear",
 ]
 
 [[package]]

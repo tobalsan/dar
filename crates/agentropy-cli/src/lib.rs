@@ -33,7 +33,7 @@ async fn run_inner(plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Run(args) => run_host(args.resolve_root()?, plugins).await,
-        other => run_non_run_command(other).await,
+        other => run_non_run_command(other, plugins).await,
     }
 }
 
@@ -77,13 +77,13 @@ fn dashboard_addr_for_root(root: &std::path::Path) -> Result<(std::net::IpAddr, 
     Ok((effective_cfg.dashboard_bind, effective_cfg.dashboard_port))
 }
 
-async fn run_non_run_command(command: Command) -> Result<()> {
+async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
     match command {
         Command::Run(_) => unreachable!("run is handled by run_host()"),
         Command::Doctor(args) => {
             let root = args.resolve_root()?;
             let dotenv_report = dotenv::load_agent_env(&root)?;
-            let services = default_services(&root).await?;
+            let services = plugin_services(&root, plugins).await?;
             let code = doctor::run(&root, &dotenv_report, services)?;
             std::process::exit(code);
         }
@@ -92,7 +92,7 @@ async fn run_non_run_command(command: Command) -> Result<()> {
         Command::InitWorkflow(args) => {
             let root = args.resolve_root()?;
             dotenv::load_agent_env(&root)?;
-            let services = default_services(&root).await?;
+            let services = plugin_services(&root, plugins).await?;
             services
                 .get_named::<dyn HostCommand>("init-workflow")?
                 .run(serde_json::json!({
@@ -106,7 +106,7 @@ async fn run_non_run_command(command: Command) -> Result<()> {
         Command::Export(args) => {
             let root = args.resolve_root()?;
             dotenv::load_agent_env(&root)?;
-            let services = default_services(&root).await?;
+            let services = plugin_services(&root, plugins).await?;
             services
                 .get_named::<dyn HostCommand>("export")?
                 .run(serde_json::json!({ "dir": root }))
@@ -114,7 +114,10 @@ async fn run_non_run_command(command: Command) -> Result<()> {
     }
 }
 
-async fn default_services(root: &std::path::Path) -> Result<ServiceRegistry> {
+async fn plugin_services(
+    root: &std::path::Path,
+    plugins: Vec<Arc<dyn Extension>>,
+) -> Result<ServiceRegistry> {
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut ctx = RegisterCtx {
         bus: EventBus::new(),
@@ -125,24 +128,9 @@ async fn default_services(root: &std::path::Path) -> Result<ServiceRegistry> {
         config: ConfigStore::default(),
         shutdown: ShutdownToken::new(shutdown_rx),
     };
-    tracker_files::TrackerFilesExtension
-        .register(&mut ctx)
-        .await?;
-    tracker_linear::TrackerLinearExtension
-        .register(&mut ctx)
-        .await?;
-    runner_pi::RunnerPiExtension.register(&mut ctx).await?;
-    runner_claude::RunnerClaudeExtension
-        .register(&mut ctx)
-        .await?;
-    runner_codex::RunnerCodexExtension
-        .register(&mut ctx)
-        .await?;
-    runner_opencode::RunnerOpenCodeExtension
-        .register(&mut ctx)
-        .await?;
-    runner_cli::RunnerCliExtension.register(&mut ctx).await?;
-    runner_fake::RunnerFakeExtension.register(&mut ctx).await?;
+    for plugin in plugins {
+        plugin.register(&mut ctx).await?;
+    }
     Ok(ctx.services)
 }
 
