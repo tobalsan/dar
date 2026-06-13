@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "dist",
+    "crates/agentropy-cli",
     "crates/agentropy-host",
     "crates/cap-chat",
     "crates/cap-tracker",

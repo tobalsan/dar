@@ -6,9 +6,8 @@ version = 4
 name = "agentropy"
 version = "0.2.1"
 dependencies = [
- "agentropy-host",
+ "agentropy-cli",
  "anyhow",
- "cap-runner",
  "chat-codex",
  "chat-opencode",
  "chat-pi",
@@ -23,12 +22,33 @@ dependencies = [
  "runner-fake",
  "runner-opencode",
  "runner-pi",
+ "tokio",
+ "tracker-files",
+ "tracker-linear",
+ "tui",
+]
+
+[[package]]
+name = "agentropy-cli"
+version = "0.2.1"
+dependencies = [
+ "agentropy-host",
+ "anyhow",
+ "cap-runner",
+ "clap",
+ "host-api",
+ "orchestrator",
+ "runner-claude",
+ "runner-cli",
+ "runner-codex",
+ "runner-fake",
+ "runner-opencode",
+ "runner-pi",
  "serde_json",
  "tempfile",
  "tokio",
  "tracker-files",
  "tracker-linear",
- "tui",
 ]
 
 [[package]]
