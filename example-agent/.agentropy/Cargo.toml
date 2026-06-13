@@ -12,21 +12,21 @@ path = "src/main.rs"
 [workspace]
 
 [dependencies]
-host-api = { path = "../../crates/host-api" }
-agentropy-cli = { path = "../../crates/agentropy-cli" }
+host-api = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
+agentropy-cli = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal"] }
-frontend-log = { path = "../../extensions/frontend-log" }
-tracker-files = { path = "../../extensions/tracker-files" }
-tracker-linear = { path = "../../extensions/tracker-linear" }
-orchestrator = { path = "../../extensions/orchestrator" }
-dashboard = { path = "../../extensions/dashboard" }
-runner-pi = { path = "../../extensions/runner-pi" }
-runner-claude = { path = "../../extensions/runner-claude" }
-runner-codex = { path = "../../extensions/runner-codex" }
-runner-opencode = { path = "../../extensions/runner-opencode" }
-runner-cli = { path = "../../extensions/runner-cli" }
-runner-fake = { path = "../../extensions/runner-fake" }
-chat-opencode = { path = "../../extensions/chat-opencode" }
-chat-pi = { path = "../../extensions/chat-pi" }
-chat-codex = { path = "../../extensions/chat-codex" }
-tui = { path = "../../extensions/tui" }
+frontend-log = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
+tracker-files = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
+tracker-linear = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
+orchestrator = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
+dashboard = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
+runner-pi = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
+runner-claude = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
+runner-codex = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
+runner-opencode = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
+runner-cli = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
+runner-fake = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
+chat-opencode = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
+chat-pi = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
+chat-codex = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
+tui = { git = "https://github.com/tobalsan/dar.git", rev = "0e707c874f7cdaa2d74331936250906100c72b22" }
