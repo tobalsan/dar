@@ -68,6 +68,9 @@ pub struct RunnerConfig {
     /// Optional model identifier forwarded to runners that accept one.
     #[serde(default)]
     pub model: Option<String>,
+    /// Optional provider identifier forwarded to runners that accept one.
+    #[serde(default)]
+    pub provider: Option<String>,
     #[serde(
         default = "default_turn_timeout_ms",
         alias = "turn_timeout_ms",

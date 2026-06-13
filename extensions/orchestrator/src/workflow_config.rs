@@ -390,7 +390,9 @@ impl EffectiveLoopConfig {
         let model = a
             .and_then(|a| a.model.clone())
             .or_else(|| base.runner.model.clone());
-        let provider = a.and_then(|a| a.provider.clone());
+        let provider = a
+            .and_then(|a| a.provider.clone())
+            .or_else(|| base.runner.provider.clone());
         let thinking = a.and_then(|a| a.thinking.clone());
         let effort = a.and_then(|a| a.effort.clone());
         let max_run_timeout_ms = a
@@ -526,6 +528,7 @@ mod tests {
                 use_: "claude-code".into(),
                 command: "claude".into(),
                 model: None,
+                provider: None,
                 max_run_timeout_ms: 1_800_000,
                 stall_timeout_ms: 300_000,
                 max_turns: 20,
@@ -898,6 +901,7 @@ body"#;
             use_: "pi".into(),
             command: String::new(),
             model: None,
+            provider: None,
             max_run_timeout_ms: 3_600_000,
             stall_timeout_ms: 300_000,
             max_turns: 20,
