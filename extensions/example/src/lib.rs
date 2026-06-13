@@ -31,6 +31,10 @@ pub struct ExampleConfig {
 
 pub struct ExampleExtension;
 
+pub fn extension() -> Box<dyn Extension> {
+    Box::new(ExampleExtension)
+}
+
 impl Extension for ExampleExtension {
     fn id(&self) -> &'static str {
         "example"
