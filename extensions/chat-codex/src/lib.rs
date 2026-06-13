@@ -83,11 +83,45 @@ struct Turn {
     model: Option<String>,
 }
 
+/// codex reads credentials/config from `$CODEX_HOME`, defaulting to `~/.codex`.
+/// The chat backend points CODEX_HOME at an isolated per-session dir, so we
+/// resolve the *host* location here to copy global auth into the sandbox.
+fn host_codex_home() -> Option<std::path::PathBuf> {
+    if let Some(home) = std::env::var_os("CODEX_HOME") {
+        let p = std::path::PathBuf::from(home);
+        if !p.as_os_str().is_empty() {
+            return Some(p);
+        }
+    }
+    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".codex"))
+}
+
+/// Copy the host's global codex credentials into the isolated CODEX_HOME so the
+/// chat child authenticates. Only `auth.json` is seeded — NOT `config.toml`,
+/// which would drag the user's plugins/skills/MCP/personality into the chat
+/// session (the model recites skill docs instead of replying). The model comes
+/// from `agent.yaml` via the `-c model=` flag, so no host config is needed.
+/// Best-effort: a missing source file is skipped, not an error.
+fn seed_codex_auth(session_dir: &std::path::Path) -> Result<()> {
+    let Some(src) = host_codex_home() else {
+        return Ok(());
+    };
+    for file in ["auth.json"] {
+        let from = src.join(file);
+        if from.exists() {
+            std::fs::copy(&from, session_dir.join(file))
+                .with_context(|| format!("seeding codex {file}"))?;
+        }
+    }
+    Ok(())
+}
+
 impl CodexChatSession {
     async fn spawn(params: &ChatSessionParams, tx: Sender<ChatEvent>) -> Result<Self> {
         host_api::assert_contained(&params.agent_root, &params.session_dir)
             .context("session_dir containment check failed; refusing to spawn codex chat")?;
         std::fs::create_dir_all(&params.session_dir)?;
+        seed_codex_auth(&params.session_dir)?;
 
         let command = effective_command(&params.command, "codex");
         let mut cmd = Command::new(&command);
@@ -532,7 +566,16 @@ fn map_stdout_line(line: &str) -> Vec<ChatEvent> {
         .and_then(Value::as_str)
         .unwrap_or("");
     if method.unwrap_or("").ends_with("/delta") {
-        return match item_type {
+        let delta_type = if !item_type.is_empty() {
+            item_type
+        } else {
+            method
+                .unwrap_or("")
+                .strip_suffix("/delta")
+                .and_then(|s| s.rsplit('/').next())
+                .unwrap_or("")
+        };
+        return match delta_type {
             "agentMessage" => text_from_delta(&value)
                 .map(|text| ChatEvent::Delta {
                     role: ChatRole::Assistant,
@@ -893,6 +936,34 @@ mod tests {
     fn maps_thinking_delta() {
         let event = one(
             r#"{"jsonrpc":"2.0","method":"item/delta","params":{"item":{"type":"reasoning"},"delta":"thinking"}}"#,
+        );
+        match event {
+            ChatEvent::Delta { role, text } => {
+                assert_eq!(role, ChatRole::Thinking);
+                assert_eq!(text, "thinking");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_new_schema_assistant_delta() {
+        let event = one(
+            r#"{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"t","turnId":"u","itemId":"m","delta":"Hi"}}"#,
+        );
+        match event {
+            ChatEvent::Delta { role, text } => {
+                assert_eq!(role, ChatRole::Assistant);
+                assert_eq!(text, "Hi");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_new_schema_reasoning_delta() {
+        let event = one(
+            r#"{"jsonrpc":"2.0","method":"item/reasoning/delta","params":{"delta":"thinking"}}"#,
         );
         match event {
             ChatEvent::Delta { role, text } => {
