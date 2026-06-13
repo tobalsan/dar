@@ -85,6 +85,10 @@ struct LocalExtension {
 }
 
 pub fn init_build(agent: &Path) -> Result<()> {
+    compose(agent).map(|_| ())
+}
+
+pub fn compose(agent: &Path) -> Result<bool> {
     let agent = agent
         .canonicalize()
         .with_context(|| format!("resolving agent folder {}", agent.display()))?;
@@ -93,17 +97,20 @@ pub fn init_build(agent: &Path) -> Result<()> {
         .with_context(|| format!("creating {}", crate_dir.join("src").display()))?;
 
     let locals = discover_extensions(&agent)?;
-    write_if_changed(
+    let mut changed = write_if_changed(
         &crate_dir.join("Cargo.toml"),
         &cargo_toml(&crate_dir, &locals)?,
     )?;
-    write_if_changed(&crate_dir.join("src/main.rs"), &main_rs(&locals))?;
-    write_if_changed(
+    changed |= write_if_changed(&crate_dir.join("src/main.rs"), &main_rs(&locals))?;
+    changed |= write_if_changed(
         &crate_dir.join("rust-toolchain.toml"),
         "[toolchain]\nchannel = \"1.83\"\n",
     )?;
+    let lockfile = crate_dir.join("Cargo.lock");
+    let lock_before = fs::read(&lockfile).ok();
     refresh_lockfile(&crate_dir)?;
-    Ok(())
+    changed |= fs::read(&lockfile).ok() != lock_before;
+    Ok(changed)
 }
 
 pub fn build(agent: &Path) -> Result<()> {
@@ -121,6 +128,43 @@ pub fn build(agent: &Path) -> Result<()> {
         .join(binary_name("agentropy"));
     fs::copy(&binary, agent.join("bin").join(binary_name("agentropy")))
         .with_context(|| format!("copying {}", binary.display()))?;
+    Ok(())
+}
+
+pub fn build_to(agent: &Path, dest: &Path) -> Result<()> {
+    let agent = agent
+        .canonicalize()
+        .with_context(|| format!("resolving agent folder {}", agent.display()))?;
+    let crate_dir = agent.join(".agentropy");
+    run_cargo_with_stderr(&crate_dir, ["build", "--release", "--locked"])?;
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let binary = crate_dir
+        .join("target")
+        .join("release")
+        .join(binary_name("agentropy"));
+    fs::copy(&binary, dest).with_context(|| {
+        format!(
+            "copying built agentropy binary from {} to {}",
+            binary.display(),
+            dest.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn run_cargo_with_stderr<const N: usize>(crate_dir: &Path, args: [&str; N]) -> Result<()> {
+    let output = Command::new("cargo")
+        .args(args)
+        .current_dir(crate_dir)
+        .output()
+        .with_context(|| format!("running cargo in {}", crate_dir.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprint!("{stderr}");
+        bail!("cargo exited with {}", output.status);
+    }
     Ok(())
 }
 
