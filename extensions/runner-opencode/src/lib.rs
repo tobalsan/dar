@@ -51,18 +51,30 @@ impl cap_runner::Runner for OpenCodeRunner {
     }
 }
 
+/// opencode wants `provider/model`. Fold the separate provider field in when the
+/// model isn't already qualified with a `/`.
+fn effective_model(model: Option<&str>, provider: Option<&str>) -> Option<String> {
+    let model = model?;
+    match provider {
+        Some(p) if !p.is_empty() && !model.contains('/') => Some(format!("{p}/{model}")),
+        _ => Some(model.to_string()),
+    }
+}
+
 async fn spawn_opencode(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     host_api::assert_contained(p.workspace_root, p.workspace)
         .context("workspace containment check failed; refusing to spawn opencode")?;
 
+    let model = effective_model(p.model.as_deref(), p.provider.as_deref());
     let session_dir = session_dir(&p);
     std::fs::create_dir_all(session_dir.join("config"))
         .with_context(|| format!("creating opencode config dir {}", session_dir.display()))?;
-    write_opencode_config(&session_dir, p.model.as_deref())?;
+    seed_opencode_auth(&session_dir)?;
+    write_opencode_config(&session_dir, model.as_deref())?;
 
     let command = effective_command(p.command, "opencode");
     let args = opencode_args(0);
-    let env = opencode_env(&p, &session_dir);
+    let env = opencode_env(&p, &session_dir, model.as_deref());
     let server = OpenCodeServer::spawn(command.clone(), args.clone(), env, p.workspace).await?;
     let pid = server.pid().context("opencode serve has no pid")?;
 
@@ -99,7 +111,7 @@ async fn spawn_opencode(p: SpawnParams<'_>) -> Result<RunnerHandle> {
         issue_id: p.issue_id.clone(),
         run_id: p.run_id.clone(),
         prompt: p.prompt.clone(),
-        model: p.model.clone(),
+        model: model.clone(),
         events: Arc::clone(&p.events),
         store: Arc::clone(&p.store),
         last_event_at: Arc::clone(&p.last_event_at),
@@ -135,7 +147,11 @@ fn opencode_args(port: u16) -> Vec<OsString> {
     ]
 }
 
-fn opencode_env(p: &SpawnParams<'_>, session_dir: &Path) -> Vec<(OsString, OsString)> {
+fn opencode_env(
+    p: &SpawnParams<'_>,
+    session_dir: &Path,
+    model: Option<&str>,
+) -> Vec<(OsString, OsString)> {
     let config_dir = session_dir.join("config");
     let mut env = env_with_session_dir(common_env(p), session_dir);
     env.push((
@@ -148,7 +164,7 @@ fn opencode_env(p: &SpawnParams<'_>, session_dir: &Path) -> Vec<(OsString, OsStr
     ));
     env.push((
         OsString::from("OPENCODE_CONFIG_CONTENT"),
-        OsString::from(opencode_config(p.model.as_deref()).to_string()),
+        OsString::from(opencode_config(model).to_string()),
     ));
     env.push((
         OsString::from("XDG_DATA_HOME"),
@@ -199,6 +215,43 @@ fn write_opencode_config(session_dir: &Path, model: Option<&str>) -> Result<()> 
     let path = session_dir.join("config").join("opencode.json");
     std::fs::write(&path, serde_json::to_vec_pretty(&opencode_config(model))?)
         .with_context(|| format!("writing opencode config {}", path.display()))
+}
+
+/// opencode reads credentials from `$XDG_DATA_HOME/opencode`, defaulting to
+/// `~/.local/share/opencode`. The runner isolates XDG_DATA_HOME per issue, so
+/// we resolve the *host* location here to copy global auth into the sandbox.
+fn host_opencode_data_dir() -> Option<PathBuf> {
+    if let Some(x) = std::env::var_os("XDG_DATA_HOME") {
+        let p = PathBuf::from(x);
+        if !p.as_os_str().is_empty() {
+            return Some(p.join("opencode"));
+        }
+    }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/opencode"))
+}
+
+/// Copy the host's global opencode credentials into the isolated XDG_DATA_HOME
+/// so custom providers (e.g. `opencode-go`) authenticate. Best-effort: missing
+/// source files are skipped, not an error.
+fn seed_opencode_auth(session_dir: &Path) -> Result<()> {
+    let Some(src) = host_opencode_data_dir() else {
+        return Ok(());
+    };
+    seed_opencode_auth_from(&src, session_dir)
+}
+
+fn seed_opencode_auth_from(src: &Path, session_dir: &Path) -> Result<()> {
+    let dst = session_dir.join("data").join("opencode");
+    for file in ["auth.json", "account.json"] {
+        let from = src.join(file);
+        if from.exists() {
+            std::fs::create_dir_all(&dst)
+                .with_context(|| format!("creating opencode data dir {}", dst.display()))?;
+            std::fs::copy(&from, dst.join(file))
+                .with_context(|| format!("seeding opencode {file}"))?;
+        }
+    }
+    Ok(())
 }
 
 struct TurnLoopCtx {
@@ -566,7 +619,8 @@ mod tests {
             workspace_root,
         );
         let session_dir = session_dir(&p);
-        let env = opencode_env(&p, &session_dir);
+        let model = effective_model(p.model.as_deref(), p.provider.as_deref());
+        let env = opencode_env(&p, &session_dir, model.as_deref());
         assert!(env.contains(&(
             OsString::from("OPENCODE_CONFIG"),
             OsString::from("/tmp/agent/opencode-sessions/ISSUE-1/config/opencode.json")
@@ -613,6 +667,35 @@ mod tests {
         assert_eq!(config["permission"]["webfetch"], "allow");
         assert_eq!(config["model"], "anthropic/claude-sonnet");
         assert!(opencode_config(None).get("model").is_none());
+    }
+
+    #[test]
+    fn effective_model_folds_provider_in() {
+        assert_eq!(
+            effective_model(Some("minimax-m3"), Some("opencode-go")),
+            Some("opencode-go/minimax-m3".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_model_leaves_already_qualified_model_alone() {
+        assert_eq!(
+            effective_model(Some("anthropic/claude-sonnet"), Some("opencode-go")),
+            Some("anthropic/claude-sonnet".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_model_no_provider_returns_model_unchanged() {
+        assert_eq!(
+            effective_model(Some("minimax-m3"), None),
+            Some("minimax-m3".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_model_no_model_returns_none() {
+        assert_eq!(effective_model(None, Some("x")), None);
     }
 
     fn write_script(dir: &Path, body: &str) -> PathBuf {
@@ -755,6 +838,58 @@ class H(BaseHTTPRequestHandler):
 
 ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
 PY"#;
+
+    #[test]
+    fn seed_opencode_auth_from_copies_auth_and_skips_missing_account() {
+        let host_dir = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+
+        // Write only auth.json into fake host opencode dir.
+        let src = host_dir.path().join("opencode");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("auth.json"), r#"{"token":"fake"}"#).unwrap();
+        // account.json intentionally absent.
+
+        seed_opencode_auth_from(&src, session_dir.path()).unwrap();
+
+        let dst_auth = session_dir.path().join("data/opencode/auth.json");
+        assert!(dst_auth.exists(), "auth.json should be copied");
+        let contents = std::fs::read_to_string(&dst_auth).unwrap();
+        assert!(contents.contains("fake"), "auth.json contents should match");
+
+        let dst_account = session_dir.path().join("data/opencode/account.json");
+        assert!(!dst_account.exists(), "account.json should not be created when source is absent");
+    }
+
+    #[test]
+    fn seed_opencode_auth_from_copies_both_when_present() {
+        let host_dir = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+
+        let src = host_dir.path().join("opencode");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("auth.json"), r#"{"token":"a"}"#).unwrap();
+        std::fs::write(src.join("account.json"), r#"{"id":"u1"}"#).unwrap();
+
+        seed_opencode_auth_from(&src, session_dir.path()).unwrap();
+
+        assert!(session_dir.path().join("data/opencode/auth.json").exists());
+        assert!(session_dir.path().join("data/opencode/account.json").exists());
+    }
+
+    #[test]
+    fn seed_opencode_auth_from_is_noop_when_source_empty() {
+        let host_dir = tempfile::tempdir().unwrap();
+        let session_dir = tempfile::tempdir().unwrap();
+
+        // src dir exists but has no auth files.
+        let src = host_dir.path().join("opencode");
+        std::fs::create_dir_all(&src).unwrap();
+
+        seed_opencode_auth_from(&src, session_dir.path()).unwrap();
+
+        assert!(!session_dir.path().join("data/opencode").exists());
+    }
 
     async fn wait_for_turn_ended(handle: &mut RunnerHandle) {
         for _ in 0..200 {
