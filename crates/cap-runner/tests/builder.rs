@@ -59,7 +59,6 @@ fn spawn_params_builder_round_trips_all_fields() {
         .model(Some("model-a".into()))
         .provider(Some("anthropic".into()))
         .thinking(Some("high".into()))
-        .effort(Some("medium".into()))
         .expose_linear_graphql_tool(true)
         .build();
 
@@ -68,7 +67,6 @@ fn spawn_params_builder_round_trips_all_fields() {
     assert_eq!(params.model.as_deref(), Some("model-a"));
     assert_eq!(params.provider.as_deref(), Some("anthropic"));
     assert_eq!(params.thinking.as_deref(), Some("high"));
-    assert_eq!(params.effort.as_deref(), Some("medium"));
     assert_eq!(params.workspace, Path::new("/agent/workspaces/ISSUE-1"));
     assert_eq!(params.workspace_root, Path::new("/agent/workspaces"));
     assert_eq!(params.agent_root, Path::new("/agent"));
@@ -93,7 +91,6 @@ fn spawn_params_builder_defaults_optional_fields() {
     assert_eq!(params.model, None);
     assert_eq!(params.provider, None);
     assert_eq!(params.thinking, None);
-    assert_eq!(params.effort, None);
     assert!(!params.expose_linear_graphql_tool);
 }
 

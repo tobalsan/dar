@@ -67,6 +67,7 @@ pub mod run_query;
 pub mod runner;
 pub mod state;
 pub mod store;
+pub mod thinking;
 pub mod tracker;
 pub mod workflow_config;
 
@@ -128,6 +129,11 @@ impl Extension for OrchestratorExtension {
             let prompt = PromptRenderer::load(&paths.workflow_md())?;
             let effective_cfg =
                 EffectiveLoopConfig::merge(&agent_cfg, &prompt.snapshot().frontmatter);
+            thinking::validate_thinking_for_runner(
+                runner_service_id(&effective_cfg.runner_kind),
+                effective_cfg.thinking.as_deref(),
+            )
+            .context("invalid thinking/effort level")?;
 
             let mut tracker_cfg = agent_cfg.tracker.clone();
             tracker_cfg.use_ = effective_cfg.tracker_kind.clone();
@@ -705,6 +711,39 @@ impl Orchestrator {
                             );
                         }
                     }
+                }
+
+                // Validate the reloaded thinking/effort level against the
+                // (possibly new) runner as a pair. On failure, revert the whole
+                // runner + thinking change as a unit so a bad live edit never
+                // reaches a dispatched child: reverting only the level can still
+                // leave an invalid combo (e.g. switching to codex while the
+                // inherited level is `none`).
+                if let Err(e) = thinking::validate_thinking_for_runner(
+                    runner_service_id(&new_eff.runner_kind),
+                    new_eff.thinking.as_deref(),
+                ) {
+                    if new_eff.runner_kind != self.effective_cfg.runner_kind {
+                        // Re-resolve the previous runner so the live instance
+                        // matches the reverted runner_kind.
+                        let prev_id = runner_service_id(&self.effective_cfg.runner_kind);
+                        if let Ok(runner) = self
+                            .runner_services
+                            .get_named::<dyn cap_runner::Runner>(prev_id)
+                        {
+                            self.runner = runner;
+                        }
+                        new_eff.runner_kind = self.effective_cfg.runner_kind.clone();
+                        new_eff.runner_command = self.effective_cfg.runner_command.clone();
+                    }
+                    new_eff.thinking = self.effective_cfg.thinking.clone();
+                    logging::ev(
+                        "-",
+                        "workflow_reload",
+                        &format!(
+                            "runner/thinking unchanged (invalid combo on reload): {e:#}"
+                        ),
+                    );
                 }
 
                 self.effective_cfg = new_eff;
@@ -1467,7 +1506,6 @@ impl Orchestrator {
         .model(self.effective_cfg.model.clone())
         .provider(self.effective_cfg.provider.clone())
         .thinking(self.effective_cfg.thinking.clone())
-        .effort(self.effective_cfg.effort.clone())
         .expose_linear_graphql_tool(self.effective_cfg.linear.worker_tool.unwrap_or(false))
         .build();
 
@@ -2707,6 +2745,7 @@ mod tests {
                 command: "claude".to_string(),
                 model: None,
                 provider: None,
+            thinking: None,
                 max_run_timeout_ms: 1000,
                 stall_timeout_ms: 300_000,
                 max_turns: 20,
@@ -3553,6 +3592,7 @@ mod tests {
                 command,
                 model: None,
                 provider: None,
+            thinking: None,
                 max_run_timeout_ms: 30_000,
                 stall_timeout_ms: 300_000,
                 max_turns: 20,

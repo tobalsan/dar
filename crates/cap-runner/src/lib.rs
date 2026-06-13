@@ -79,10 +79,11 @@ pub struct SpawnParams<'a> {
     pub model: Option<String>,
     /// Model provider override (e.g. "openai", "anthropic"); forwarded to pi runner as `--provider`.
     pub provider: Option<String>,
-    /// Thinking/reasoning budget; forwarded to pi runner as `--thinking`.
+    /// Canonical reasoning level on the scale `none | minimal | low | medium |
+    /// high | xhigh`. Forwarded per-runner: pi `--thinking` (none→off), codex
+    /// `-c model_reasoning_effort=<level>`, claude `--effort <level>`. Already
+    /// validated against the runner's supported subset before dispatch.
     pub thinking: Option<String>,
-    /// Reasoning effort level (e.g. "low", "medium", "high"); forwarded to codex runner.
-    pub effort: Option<String>,
     pub workspace: &'a Path,
     pub workspace_root: &'a Path,
     pub agent_root: &'a Path,
@@ -114,7 +115,6 @@ pub struct SpawnParamsBuilder<'a> {
     model: Option<String>,
     provider: Option<String>,
     thinking: Option<String>,
-    effort: Option<String>,
     expose_linear_graphql_tool: bool,
 }
 
@@ -150,7 +150,6 @@ impl<'a> SpawnParams<'a> {
             model: None,
             provider: None,
             thinking: None,
-            effort: None,
             expose_linear_graphql_tool: false,
         }
     }
@@ -172,11 +171,6 @@ impl<'a> SpawnParamsBuilder<'a> {
         self
     }
 
-    pub fn effort(mut self, value: Option<String>) -> Self {
-        self.effort = value;
-        self
-    }
-
     pub fn expose_linear_graphql_tool(mut self, value: bool) -> Self {
         self.expose_linear_graphql_tool = value;
         self
@@ -189,7 +183,6 @@ impl<'a> SpawnParamsBuilder<'a> {
             model: self.model,
             provider: self.provider,
             thinking: self.thinking,
-            effort: self.effort,
             workspace: self.workspace,
             workspace_root: self.workspace_root,
             agent_root: self.agent_root,

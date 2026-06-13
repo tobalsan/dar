@@ -73,10 +73,26 @@ fn session_dir(p: &SpawnParams<'_>) -> PathBuf {
     p.agent_root.join("pi-sessions").join(&p.issue_id)
 }
 
+/// Map a canonical reasoning level to pi's `--thinking` value: `none` becomes
+/// pi's `off`; every other level passes through unchanged.
+fn pi_thinking_value(level: &str) -> &str {
+    if level == "none" {
+        "off"
+    } else {
+        level
+    }
+}
+
 /// Build args for `pi --mode rpc`. Sessions are stored/resumed under
 /// `--session-dir`; `--model` forwards the configured model when set;
-/// `--provider` forwards the configured provider when set.
-fn pi_args(session_dir: &Path, model: Option<&str>, provider: Option<&str>) -> Vec<OsString> {
+/// `--provider` forwards the configured provider when set; `--thinking`
+/// forwards the canonical reasoning level (with `none` mapped to `off`).
+fn pi_args(
+    session_dir: &Path,
+    model: Option<&str>,
+    provider: Option<&str>,
+    thinking: Option<&str>,
+) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("--mode"),
         OsString::from("rpc"),
@@ -90,6 +106,10 @@ fn pi_args(session_dir: &Path, model: Option<&str>, provider: Option<&str>) -> V
     if let Some(provider) = provider {
         args.push(OsString::from("--provider"));
         args.push(OsString::from(provider));
+    }
+    if let Some(level) = thinking.map(str::trim).filter(|s| !s.is_empty()) {
+        args.push(OsString::from("--thinking"));
+        args.push(OsString::from(pi_thinking_value(level)));
     }
     args
 }
@@ -112,7 +132,12 @@ async fn spawn_pi(p: SpawnParams<'_>) -> Result<RunnerHandle> {
         .with_context(|| format!("creating pi session dir {}", session_dir.display()))?;
 
     let command = effective_command(p.command, "pi");
-    let args = pi_args(&session_dir, p.model.as_deref(), p.provider.as_deref());
+    let args = pi_args(
+        &session_dir,
+        p.model.as_deref(),
+        p.provider.as_deref(),
+        p.thinking.as_deref(),
+    );
 
     let mut cmd = Command::new(&command);
     for arg in &args {
@@ -599,7 +624,7 @@ mod tests {
     fn pi_args_carry_rpc_mode_session_dir_and_optional_model() {
         let dir = Path::new("/agent/pi-sessions/ISSUE-1");
         assert_eq!(
-            pi_args(dir, None, None),
+            pi_args(dir, None, None, None),
             vec![
                 OsString::from("--mode"),
                 OsString::from("rpc"),
@@ -607,7 +632,7 @@ mod tests {
                 OsString::from("/agent/pi-sessions/ISSUE-1"),
             ]
         );
-        let args = pi_args(dir, Some("gpt-5"), None);
+        let args = pi_args(dir, Some("gpt-5"), None, None);
         assert_eq!(args[4], OsString::from("--model"));
         assert_eq!(args[5], OsString::from("gpt-5"));
     }
@@ -615,15 +640,42 @@ mod tests {
     #[test]
     fn pi_args_appends_provider_when_set() {
         let dir = Path::new("/agent/pi-sessions/ISSUE-1");
-        let args = pi_args(dir, None, Some("openai"));
+        let args = pi_args(dir, None, Some("openai"), None);
         assert_eq!(args[4], OsString::from("--provider"));
         assert_eq!(args[5], OsString::from("openai"));
 
-        let args = pi_args(dir, Some("gpt-5"), Some("openai"));
+        let args = pi_args(dir, Some("gpt-5"), Some("openai"), None);
         assert_eq!(args[4], OsString::from("--model"));
         assert_eq!(args[5], OsString::from("gpt-5"));
         assert_eq!(args[6], OsString::from("--provider"));
         assert_eq!(args[7], OsString::from("openai"));
+    }
+
+    #[test]
+    fn pi_args_appends_thinking_level_when_set() {
+        let dir = Path::new("/agent/pi-sessions/ISSUE-1");
+        let args = pi_args(dir, None, None, Some("high"));
+        assert_eq!(args[4], OsString::from("--thinking"));
+        assert_eq!(args[5], OsString::from("high"));
+    }
+
+    #[test]
+    fn pi_args_maps_none_to_off() {
+        let dir = Path::new("/agent/pi-sessions/ISSUE-1");
+        let args = pi_args(dir, None, None, Some("none"));
+        assert_eq!(args[4], OsString::from("--thinking"));
+        assert_eq!(args[5], OsString::from("off"));
+    }
+
+    #[test]
+    fn pi_args_omits_thinking_when_absent_or_blank() {
+        let dir = Path::new("/agent/pi-sessions/ISSUE-1");
+        assert!(!pi_args(dir, None, None, None)
+            .iter()
+            .any(|a| a == &OsString::from("--thinking")));
+        assert!(!pi_args(dir, None, None, Some("  "))
+            .iter()
+            .any(|a| a == &OsString::from("--thinking")));
     }
 
     #[test]

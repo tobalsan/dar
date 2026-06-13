@@ -111,6 +111,30 @@ pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyho
             }
         }
 
+        match orchestrator::thinking::validate_thinking_for_runner(
+            runner_id,
+            effective_cfg.thinking.as_deref(),
+        ) {
+            Ok(()) => match effective_cfg.thinking.as_deref() {
+                Some(level) if !level.trim().is_empty() => {
+                    if matches!(runner_id, "cli" | "fake") {
+                        pass(&format!(
+                            "thinking level '{level}' ignored by runner '{runner_id}'"
+                        ))
+                    } else {
+                        pass(&format!(
+                            "thinking level '{level}' valid for runner '{runner_id}'"
+                        ))
+                    }
+                }
+                _ => pass("thinking level not set (runner default applies)"),
+            },
+            Err(e) => {
+                fail(&format!("{e:#}"));
+                ok = false;
+            }
+        }
+
         if runner_id == "opencode" {
             match check_opencode(&cfg.runner.command) {
                 Ok(msg) => pass(&msg),

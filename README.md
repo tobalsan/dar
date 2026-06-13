@@ -209,6 +209,8 @@ runner:
   use: claude-code            # pi | claude | claude-code | codex | cli | fake
   command: claude             # executable; defaults to runner kind's canonical command
   # model: claude-opus-4-6   # passed to runners that accept --model
+  # provider: anthropic       # passed to runners that accept a provider flag
+  # thinking: high            # reasoning level (alias: effort); see "Thinking / reasoning level"
   max_run_timeout_ms: 3600000 # 1 h hard cap per attempt (alias: turn_timeout_ms)
   stall_timeout_ms: 300000    # 5 min silence → stall kill
 
@@ -275,8 +277,7 @@ agent:
   command: claude
   model: claude-opus-4-6
   # provider: anthropic           # passed to runners that accept a provider flag
-  # thinking: "8000"              # thinking budget; passed to pi runner
-  # effort: high                  # reasoning effort; passed to codex runner
+  # thinking: high                # reasoning level (alias: effort); overrides runner.thinking
   max_run_timeout_ms: 1800000
   stall_timeout_ms: 300000
   max_active_runs: 3              # park barrier
@@ -323,6 +324,34 @@ The child must eventually leave the issue in a non-active state (or set it to
 All runners spawn in their own process group so SIGTERM reaches the whole
 subprocess tree. `pi` and `claude` persist per-issue session dirs under
 `pi-sessions/ISSUE-N/` and `claude-sessions/ISSUE-N/` respectively.
+
+## Thinking / reasoning level
+
+A single canonical reasoning-level knob, `runner.thinking` in `agent.yaml`
+(overridable per run via WORKFLOW.md `agent.thinking`). `effort` is accepted as
+an alias in both places. The value is a level word on the canonical scale:
+
+```
+none | minimal | low | medium | high | xhigh
+```
+
+The level is validated against the resolved runner's supported subset at
+config-load / `doctor` time. An unsupported or unknown level fails with a clean
+error naming the runner and its allowed values (it is never clamped or passed
+through), and no dispatch is attempted. Absent → no flag is emitted and the
+runner default applies.
+
+| Runner | Mechanism | Supported levels |
+|---|---|---|
+| `pi` | `--thinking <level>` | `none` (mapped to pi's `off`), `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `codex` | `-c model_reasoning_effort=<level>` | `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `claude` / `claude-code` | `--effort <level>` | `low`, `medium`, `high`, `xhigh` |
+| `cli` / `fake` | ignored | — |
+
+> **Breaking change:** the previous WORKFLOW.md `agent.thinking` semantics — a
+> pi token-budget string like `"8000"` — have been removed. Only level words are
+> accepted; a numeric value is a validation error. The OpenCode runner mapping
+> (`reasoningEffort`) is a follow-up tracked under ALG-226.
 
 ## Environment variables exported to children
 

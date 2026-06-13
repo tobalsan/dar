@@ -77,6 +77,10 @@ fn claude_args(p: &SpawnParams<'_>) -> Vec<OsString> {
         args.push(OsString::from("--model"));
         args.push(OsString::from(model));
     }
+    if let Some(level) = p.thinking.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        args.push(OsString::from("--effort"));
+        args.push(OsString::from(level));
+    }
     args
 }
 
@@ -158,6 +162,42 @@ mod tests {
                 "claude-opus-4-6"
             ]
         );
+    }
+
+    #[test]
+    fn claude_effort_is_passed_as_flag_when_set() {
+        let workspace_root = Path::new("/tmp/agent/workspaces");
+        let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
+        let p = SpawnParams::builder(
+            "runner",
+            "claude-code",
+            workspace,
+            workspace_root,
+            workspace_root.parent().unwrap_or(workspace_root),
+            String::new(),
+            "ISSUE-1".to_string(),
+            "ISSUE-1-test".to_string(),
+            1000,
+            Arc::new(NullSink),
+            Arc::new(NullStore),
+            Arc::new(Mutex::new(Utc::now())),
+        )
+        .thinking(Some("high".to_string()))
+        .build();
+        let args = arg_strings(claude_args(&p));
+        assert!(
+            args.windows(2).any(|w| w[0] == "--effort" && w[1] == "high"),
+            "--effort flag missing: {args:?}"
+        );
+    }
+
+    #[test]
+    fn claude_omits_effort_when_absent() {
+        let workspace_root = Path::new("/tmp/agent/workspaces");
+        let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
+        let p = params(None, workspace, workspace_root);
+        let args = arg_strings(claude_args(&p));
+        assert!(!args.iter().any(|a| a == "--effort"), "{args:?}");
     }
 
     #[test]

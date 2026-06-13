@@ -73,7 +73,7 @@ fn codex_args(p: &SpawnParams<'_>) -> Vec<OsString> {
         args.push(OsString::from("-c"));
         args.push(OsString::from(format!("model_provider={provider:?}")));
     }
-    if let Some(ref effort) = p.effort {
+    if let Some(effort) = p.thinking.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         args.push(OsString::from("-c"));
         args.push(OsString::from(format!("model_reasoning_effort={effort:?}")));
     }
@@ -226,7 +226,7 @@ async fn spawn_codex(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     let run_id = p.run_id.clone();
     let workspace_str = p.workspace.to_string_lossy().into_owned();
     let model = p.model.clone();
-    let effort = p.effort.clone();
+    let effort = p.thinking.clone();
     let prompt = p.prompt.clone();
     let events = Arc::clone(&p.events);
     let store = Arc::clone(&p.store);
@@ -914,7 +914,7 @@ mod tests {
         let workspace_root = Path::new("/tmp/agent/workspaces");
         let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
         let mut p = params(Some("o3".to_string()), workspace, workspace_root);
-        p.effort = Some("high".to_string());
+        p.thinking = Some("high".to_string());
         let args = arg_strings(codex_args(&p));
         assert!(
             args.windows(2).any(|w| w[0] == "-c" && w[1].contains("model_reasoning_effort")),
