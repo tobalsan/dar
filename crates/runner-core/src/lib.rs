@@ -559,6 +559,88 @@ fn classify_tool_execution_end(v: &serde_json::Value) -> ProtocolLine {
     ProtocolLine { row_type: "tool_output", text: strip_ansi(&text), detail: String::new() }
 }
 
+/// Classify an opencode SSE event payload (the UNWRAPPED value returned by the
+/// runner's `event_payload`, shaped `{id, type, properties:{sessionID, part}}`).
+///
+/// Returns:
+/// - `Some(pl)` with `row_type: ""` for anything the dashboard should hide
+///   (streaming text/reasoning still in flight, pending/running tools, lifecycle
+///   `step-*` events, and any non-`message.part.updated` event such as
+///   `session.idle` / permission churn). The caller still pushes these to the
+///   live log as a liveness signal but skips the store insert.
+/// - `Some(pl)` with a real `row_type` for a finalized part that should render
+///   as a card (`assistant`, `thinking`, `tool_call`, `error`). The matching
+///   `tool_output` row for a completed tool is emitted separately by the caller.
+/// - `None` is never returned: an unrecognized payload collapses to hidden so a
+///   raw JSON dump never reaches the dashboard.
+pub fn classify_opencode_event(payload: &serde_json::Value) -> Option<ProtocolLine> {
+    let inner_type = payload.get("type").and_then(serde_json::Value::as_str);
+    if inner_type != Some("message.part.updated") {
+        return Some(hidden());
+    }
+    let Some(part) = payload
+        .get("properties")
+        .and_then(|p| p.get("part"))
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Some(hidden());
+    };
+    let part_type = part.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+    let pl = match part_type {
+        "text" => {
+            if part_time_ended(part) {
+                let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
+                ProtocolLine { row_type: "assistant", text: strip_ansi(text), detail: String::new() }
+            } else {
+                hidden()
+            }
+        }
+        "reasoning" => {
+            if part_time_ended(part) {
+                let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
+                ProtocolLine { row_type: "thinking", text: strip_ansi(text), detail: String::new() }
+            } else {
+                hidden()
+            }
+        }
+        "tool" => {
+            let state = part.get("state").and_then(serde_json::Value::as_object);
+            let status = state
+                .and_then(|s| s.get("status"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            match status {
+                "completed" => {
+                    let tool = part.get("tool").and_then(serde_json::Value::as_str).unwrap_or("tool");
+                    let detail = state
+                        .and_then(|s| s.get("input"))
+                        .map(serde_json::Value::to_string)
+                        .unwrap_or_default();
+                    ProtocolLine { row_type: "tool_call", text: strip_ansi(tool), detail }
+                }
+                "error" => {
+                    let msg = state
+                        .and_then(|s| s.get("output").and_then(serde_json::Value::as_str))
+                        .or_else(|| state.and_then(|s| s.get("error").and_then(serde_json::Value::as_str)))
+                        .unwrap_or("error");
+                    ProtocolLine { row_type: "error", text: strip_ansi(msg), detail: String::new() }
+                }
+                _ => hidden(),
+            }
+        }
+        _ => hidden(),
+    };
+    Some(pl)
+}
+
+/// Whether an opencode part has a non-null `time.end`, marking it as finalized
+/// (text/reasoning stream `time.end` only once the part is complete).
+fn part_time_ended(part: &serde_json::Map<String, serde_json::Value>) -> bool {
+    part.get("time")
+        .and_then(|t| t.get("end"))
+        .is_some_and(|e| !e.is_null())
+}
+
 fn role_of(v: &serde_json::Value) -> Option<String> {
     v.get("message")
         .and_then(|m| m.get("role"))
@@ -599,7 +681,7 @@ fn classify_jsonrpc_line(v: &serde_json::Value) -> ProtocolLine {
     if method.is_none() {
         if let Some(err) = v.get("error") {
             let msg = err.get("message").and_then(|m| m.as_str())
-                .unwrap_or_else(|| "rpc error")
+                .unwrap_or("rpc error")
                 .to_string();
             return ProtocolLine { row_type: "error", text: msg, detail: String::new() };
         }
@@ -1298,5 +1380,77 @@ mod tests {
         // an assistant card; let the dashboard filter it out.
         let line = r#"{"type":"message_update","message":{},"assistantMessageEvent":{"type":"future_kind","foo":1}}"#;
         assert_eq!(pi_pl(line).row_type, "");
+    }
+
+    // -----------------------------------------------------------------
+    // opencode SSE protocol events
+    // -----------------------------------------------------------------
+
+    fn oc_pl(json: &str) -> ProtocolLine {
+        let payload: serde_json::Value = serde_json::from_str(json).unwrap();
+        classify_opencode_event(&payload).unwrap()
+    }
+
+    #[test]
+    fn opencode_text_streaming_no_end_is_hidden() {
+        let line = r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p1","type":"text","text":"par","time":{"start":1}}}}"#;
+        assert_eq!(oc_pl(line).row_type, "");
+    }
+
+    #[test]
+    fn opencode_text_final_is_assistant() {
+        let line = r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p1","type":"text","text":"all done","time":{"start":1,"end":2}}}}"#;
+        let pl = oc_pl(line);
+        assert_eq!(pl.row_type, "assistant");
+        assert_eq!(pl.text, "all done");
+    }
+
+    #[test]
+    fn opencode_reasoning_final_is_thinking() {
+        let line = r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p1","type":"reasoning","text":"let me think","time":{"start":1,"end":2}}}}"#;
+        let pl = oc_pl(line);
+        assert_eq!(pl.row_type, "thinking");
+        assert_eq!(pl.text, "let me think");
+    }
+
+    #[test]
+    fn opencode_tool_running_is_hidden() {
+        let line = r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p1","type":"tool","tool":"bash","state":{"status":"running"}}}}"#;
+        assert_eq!(oc_pl(line).row_type, "");
+    }
+
+    #[test]
+    fn opencode_tool_completed_is_tool_call_with_input_detail() {
+        let line = r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p1","type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"ls"},"output":"file1"}}}}"#;
+        let pl = oc_pl(line);
+        assert_eq!(pl.row_type, "tool_call");
+        assert_eq!(pl.text, "bash");
+        assert!(pl.detail.contains("ls"), "detail={}", pl.detail);
+    }
+
+    #[test]
+    fn opencode_tool_error_is_error_row() {
+        let line = r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p1","type":"tool","tool":"bash","state":{"status":"error","output":"boom"}}}}"#;
+        let pl = oc_pl(line);
+        assert_eq!(pl.row_type, "error");
+        assert_eq!(pl.text, "boom");
+    }
+
+    #[test]
+    fn opencode_step_start_is_hidden() {
+        let line = r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p1","type":"step-start"}}}"#;
+        assert_eq!(oc_pl(line).row_type, "");
+    }
+
+    #[test]
+    fn opencode_unknown_inner_part_type_is_hidden() {
+        let line = r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p1","type":"future_part"}}}"#;
+        assert_eq!(oc_pl(line).row_type, "");
+    }
+
+    #[test]
+    fn opencode_non_message_part_updated_event_is_hidden() {
+        let line = r#"{"id":"e1","type":"session.idle","properties":{"sessionID":"s1"}}"#;
+        assert_eq!(oc_pl(line).row_type, "");
     }
 }

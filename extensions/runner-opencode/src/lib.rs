@@ -1,5 +1,6 @@
 //! OpenCode runner extension: one `opencode serve` child, one live session.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -14,7 +15,7 @@ use chrono::{DateTime, Utc};
 use host_api::{Extension, RegisterCtx};
 use opencode_client::{OpenCodeEvent, OpenCodeServer};
 use runner_core::{
-    classify_protocol_line, common_env, effective_command, env_with_session_dir, log_ev,
+    classify_opencode_event, common_env, effective_command, env_with_session_dir, log_ev,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -115,6 +116,7 @@ async fn spawn_opencode(p: SpawnParams<'_>) -> Result<RunnerHandle> {
         events: Arc::clone(&p.events),
         store: Arc::clone(&p.store),
         last_event_at: Arc::clone(&p.last_event_at),
+        seen_parts: Mutex::new(HashSet::new()),
     };
     let timeout = Duration::from_millis(p.max_run_timeout_ms);
     let io = TurnIo {
@@ -262,6 +264,10 @@ struct TurnLoopCtx {
     events: Arc<dyn RunnerEventSink>,
     store: Arc<dyn RunnerEventStore>,
     last_event_at: Arc<Mutex<DateTime<Utc>>>,
+    /// Part ids whose finalized card has already been stored, keyed
+    /// `"{part_id}:call"` / `"{part_id}:out"` so a re-sent terminal snapshot
+    /// for the same opencode part never duplicates its dashboard rows.
+    seen_parts: Mutex<HashSet<String>>,
 }
 
 struct TurnIo {
@@ -498,19 +504,74 @@ fn emit_event(ctx: &TurnLoopCtx, event: &OpenCodeEvent) {
     } else {
         event.data.clone()
     };
-    let pl = classify_protocol_line("stdout", &event.data);
+    // Liveness + live log always fire, even for hidden/streaming events, so the
+    // stall timer and the frontend-log feed see every SSE frame.
     ctx.events.push(format!("child[{}]: {clean}", ctx.issue_id));
     if let Ok(mut t) = ctx.last_event_at.lock() {
         *t = ts;
     }
     log_ev(&ctx.issue_id, "sse", &clean);
+
+    // Only finalized parts become dashboard cards; streaming snapshots and
+    // lifecycle noise classify to an empty row_type and are skipped here.
+    let Some(payload) = event_payload(event) else {
+        return;
+    };
+    let Some(pl) = classify_opencode_event(&payload) else {
+        return;
+    };
+    if pl.row_type.is_empty() {
+        return;
+    }
+
+    // opencode re-sends a part's terminal snapshot multiple times; store each
+    // finalized row once, keyed by the part id.
+    let part_id = payload
+        .get("properties")
+        .and_then(|p| p.get("part"))
+        .and_then(|part| part.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    store_card(ctx, event, &format!("{part_id}:call"), pl.row_type, &pl.text, &pl.detail, ts);
+
+    // A completed tool needs a second tool_output row carrying its output.
+    if pl.row_type == "tool_call" {
+        let output = payload
+            .get("properties")
+            .and_then(|p| p.get("part"))
+            .and_then(|part| part.get("state"))
+            .and_then(|s| s.get("output"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        store_card(ctx, event, &format!("{part_id}:out"), "tool_output", output, "", ts);
+    }
+}
+
+/// Store one protocol-event card, deduped by `dedup_key`. A key already present
+/// in `seen_parts` is a re-sent snapshot and is dropped.
+fn store_card(
+    ctx: &TurnLoopCtx,
+    event: &OpenCodeEvent,
+    dedup_key: &str,
+    log_row: &str,
+    text: &str,
+    detail: &str,
+    ts: DateTime<Utc>,
+) {
+    if let Ok(mut seen) = ctx.seen_parts.lock() {
+        if !seen.insert(dedup_key.to_string()) {
+            return;
+        }
+    }
     let payload = serde_json::json!({
         "type": "protocol_event",
         "stream": "sse",
         "event": event.event,
-        "log_row": pl.row_type,
-        "text": pl.text,
-        "detail": pl.detail,
+        "log_row": log_row,
+        "text": text,
+        "detail": detail,
         "raw": event.data,
     })
     .to_string();
@@ -582,6 +643,133 @@ mod tests {
             Some("perm-1")
         );
         assert_eq!(permission_request_id(&event, "other"), None);
+    }
+
+    #[derive(Default)]
+    struct RecordingStore {
+        events: Mutex<Vec<String>>,
+    }
+    impl cap_runner::RunnerEventStore for RecordingStore {
+        fn insert_event(
+            &self,
+            _run_id: Option<&str>,
+            _issue_identifier: &str,
+            _kind: &'static str,
+            payload: &str,
+            _ts: DateTime<Utc>,
+        ) {
+            self.events.lock().unwrap().push(payload.to_string());
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        lines: Mutex<Vec<String>>,
+    }
+    impl cap_runner::RunnerEventSink for RecordingSink {
+        fn push(&self, line: String) {
+            self.lines.lock().unwrap().push(line);
+        }
+    }
+
+    fn recording_ctx() -> (TurnLoopCtx, Arc<RecordingSink>, Arc<RecordingStore>) {
+        let sink = Arc::new(RecordingSink::default());
+        let store = Arc::new(RecordingStore::default());
+        let ctx = TurnLoopCtx {
+            issue_id: "ISSUE-1".to_string(),
+            run_id: "run-1".to_string(),
+            prompt: String::new(),
+            model: None,
+            events: Arc::clone(&sink) as Arc<dyn cap_runner::RunnerEventSink>,
+            store: Arc::clone(&store) as Arc<dyn cap_runner::RunnerEventStore>,
+            last_event_at: Arc::new(Mutex::new(Utc::now())),
+            seen_parts: Mutex::new(HashSet::new()),
+        };
+        (ctx, sink, store)
+    }
+
+    fn sse(data: &str) -> OpenCodeEvent {
+        OpenCodeEvent { event: Some("message.part.updated".to_string()), data: data.to_string() }
+    }
+
+    fn stored_rows(store: &RecordingStore) -> Vec<serde_json::Value> {
+        store
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|p| serde_json::from_str(p).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn emit_streaming_text_part_pushes_live_log_but_stores_nothing() {
+        let (ctx, sink, store) = recording_ctx();
+        let ev = sse(r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p1","type":"text","text":"par","time":{"start":1}}}}"#);
+        emit_event(&ctx, &ev);
+        assert_eq!(sink.lines.lock().unwrap().len(), 1);
+        assert_eq!(store.events.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn emit_final_text_part_stores_assistant_once() {
+        let (ctx, _sink, store) = recording_ctx();
+        let ev = sse(r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p1","type":"text","text":"all done","time":{"start":1,"end":2}}}}"#);
+        emit_event(&ctx, &ev);
+        emit_event(&ctx, &ev);
+        let rows = stored_rows(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["log_row"], "assistant");
+        assert_eq!(rows[0]["text"], "all done");
+    }
+
+    #[test]
+    fn emit_completed_tool_stores_call_and_output() {
+        let (ctx, _sink, store) = recording_ctx();
+        let ev = sse(r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p2","type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"ls"},"output":"file1"}}}}"#);
+        emit_event(&ctx, &ev);
+        let rows = stored_rows(&store);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["log_row"], "tool_call");
+        assert_eq!(rows[0]["text"], "bash");
+        assert!(rows[0]["detail"].as_str().unwrap_or("").contains("ls"));
+        assert_eq!(rows[1]["log_row"], "tool_output");
+        assert_eq!(rows[1]["text"], "file1");
+        // emit again — still 2 rows (dedup)
+        emit_event(&ctx, &ev);
+        assert_eq!(stored_rows(&store).len(), 2);
+    }
+
+    #[test]
+    fn emit_tool_running_stores_nothing() {
+        let (ctx, sink, store) = recording_ctx();
+        let ev = sse(r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p3","type":"tool","tool":"bash","state":{"status":"running","input":{"command":"ls"}}}}}"#);
+        emit_event(&ctx, &ev);
+        assert_eq!(store.events.lock().unwrap().len(), 0);
+        assert_eq!(sink.lines.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn emit_reasoning_final_stores_thinking() {
+        let (ctx, _sink, store) = recording_ctx();
+        let ev = sse(r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p4","type":"reasoning","text":"ponder","time":{"start":1,"end":2}}}}"#);
+        emit_event(&ctx, &ev);
+        let rows = stored_rows(&store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["log_row"], "thinking");
+        assert_eq!(rows[0]["text"], "ponder");
+    }
+
+    #[test]
+    fn emit_noise_event_pushes_live_log_but_stores_nothing() {
+        let (ctx, sink, store) = recording_ctx();
+        let ev = OpenCodeEvent {
+            event: Some("session.idle".to_string()),
+            data: r#"{"type":"session.idle","properties":{"sessionID":"s1"}}"#.to_string(),
+        };
+        emit_event(&ctx, &ev);
+        assert_eq!(store.events.lock().unwrap().len(), 0);
+        assert_eq!(sink.lines.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -766,7 +954,7 @@ mod tests {
         e.chain().any(|cause| {
             cause
                 .downcast_ref::<std::io::Error>()
-                .map_or(false, |io| io.raw_os_error() == Some(26))
+                .is_some_and(|io| io.raw_os_error() == Some(26))
         })
     }
 
