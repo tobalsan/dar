@@ -211,7 +211,12 @@ async fn boot_inner(
             config: config.clone(),
             host: host.clone(),
         };
-        let terminal = acquire_terminal(options.interactive.unwrap_or_else(stdout_is_terminal))
+        let interactive = options.interactive.unwrap_or_else(stdout_is_terminal);
+        // Only foregrounds that asked for raw mode (e.g. the TUI) get a
+        // raw-mode/alt-screen terminal. A cooked foreground (the logs line
+        // stream) stays in cooked mode even on a tty so the terminal driver
+        // keeps turning Ctrl-C into SIGINT for the host's shutdown path.
+        let terminal = acquire_terminal(interactive && provider.raw_mode)
             .inspect_err(|e| report(&provider.id, e))?;
         foreground
             .run(ctx, terminal)
@@ -321,6 +326,7 @@ mod tests {
     struct ForegroundExt {
         id: &'static str,
         foreground_id: &'static str,
+        raw_mode: bool,
         log: Arc<Mutex<Vec<String>>>,
     }
 
@@ -333,15 +339,17 @@ mod tests {
             Box::pin(async move {
                 let id = self.foreground_id;
                 let log = Arc::clone(&self.log);
-                ctx.foreground.foreground(
-                    id,
-                    Arc::new(move || {
-                        Box::new(RecordingForeground {
-                            id,
-                            log: Arc::clone(&log),
-                        })
-                    }),
-                )?;
+                let factory = Arc::new(move || {
+                    Box::new(RecordingForeground {
+                        id,
+                        log: Arc::clone(&log),
+                    }) as Box<dyn host_api::Foreground>
+                });
+                if self.raw_mode {
+                    ctx.foreground.foreground_raw_mode(id, factory)?;
+                } else {
+                    ctx.foreground.foreground(id, factory)?;
+                }
                 Ok(())
             })
         }
@@ -507,6 +515,7 @@ mod tests {
                 Arc::new(ForegroundExt {
                     id: "frontend",
                     foreground_id: "logs",
+                    raw_mode: false,
                     log: Arc::clone(&log),
                 }),
             ],
@@ -534,11 +543,13 @@ mod tests {
                 Arc::new(ForegroundExt {
                     id: "frontend-a",
                     foreground_id: "logs",
+                    raw_mode: false,
                     log: Arc::clone(&log),
                 }),
                 Arc::new(ForegroundExt {
                     id: "frontend-b",
                     foreground_id: "tui",
+                    raw_mode: false,
                     log: Arc::clone(&log),
                 }),
             ],
@@ -564,11 +575,13 @@ mod tests {
                 Arc::new(ForegroundExt {
                     id: "frontend-a",
                     foreground_id: "logs",
+                    raw_mode: false,
                     log: Arc::clone(&log),
                 }),
                 Arc::new(ForegroundExt {
                     id: "frontend-b",
                     foreground_id: "tui",
+                    raw_mode: false,
                     log,
                 }),
             ],
@@ -578,6 +591,30 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("multiple foreground providers"));
+    }
+
+    #[tokio::test]
+    async fn cooked_foreground_stays_non_interactive_even_when_tty() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        boot(
+            vec![Arc::new(ForegroundExt {
+                id: "frontend",
+                foreground_id: "logs",
+                raw_mode: false,
+                log: Arc::clone(&log),
+            })],
+            test_options(temp.path()).interactive(true),
+        )
+        .await
+        .unwrap();
+
+        // raw_mode=false => host must NOT enable raw mode even though the boot
+        // is interactive, so the foreground receives a cooked terminal.
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["foreground:logs interactive=false"]
+        );
     }
 
     struct FailingStartExt;

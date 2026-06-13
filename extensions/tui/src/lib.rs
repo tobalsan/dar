@@ -73,7 +73,7 @@ impl Extension for TuiExtension {
                     .context("invalid extensions.tui config")?,
                 None => TuiConfig::default(),
             };
-            ctx.foreground.foreground(
+            ctx.foreground.foreground_raw_mode(
                 "tui",
                 Arc::new(move || Box::new(foreground::TuiForeground::new(config.clone()))),
             )?;

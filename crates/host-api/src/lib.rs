@@ -163,12 +163,37 @@ pub struct ForegroundRegistry {
 }
 
 impl ForegroundRegistry {
+    /// Register a cooked-mode foreground (plain line stream). The tty stays in
+    /// cooked mode so Ctrl-C is delivered as SIGINT.
     pub fn foreground(&mut self, id: impl Into<String>, factory: ForegroundFactory) -> Result<()> {
+        self.register(id, false, factory)
+    }
+
+    /// Register a foreground that needs an exclusive raw-mode/alt-screen
+    /// terminal (e.g. a full-screen TUI that reads key events itself).
+    pub fn foreground_raw_mode(
+        &mut self,
+        id: impl Into<String>,
+        factory: ForegroundFactory,
+    ) -> Result<()> {
+        self.register(id, true, factory)
+    }
+
+    fn register(
+        &mut self,
+        id: impl Into<String>,
+        raw_mode: bool,
+        factory: ForegroundFactory,
+    ) -> Result<()> {
         let id = id.into();
         if self.providers.iter().any(|provider| provider.id == id) {
             bail!("foreground provider {id} is already registered");
         }
-        self.providers.push(ForegroundProvider { id, factory });
+        self.providers.push(ForegroundProvider {
+            id,
+            raw_mode,
+            factory,
+        });
         Ok(())
     }
 
@@ -191,6 +216,10 @@ impl ForegroundRegistry {
 #[derive(Clone)]
 pub struct ForegroundProvider {
     pub id: String,
+    /// Whether this foreground needs an exclusive raw-mode/alt-screen terminal.
+    /// Cooked foregrounds (plain line streams) leave the tty in cooked mode so
+    /// the terminal driver keeps turning Ctrl-C into SIGINT.
+    pub raw_mode: bool,
     pub factory: ForegroundFactory,
 }
 
