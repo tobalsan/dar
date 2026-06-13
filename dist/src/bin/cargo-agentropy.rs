@@ -72,7 +72,7 @@ fn scaffold(args: NewArgs) -> Result<()> {
 
     println!("created {}", dir.display());
     println!("enable it with one plugin-list line:");
-    println!("  {}::{type_name},", crate_ident(&args.name));
+    println!("  {}::extension(),", crate_ident(&args.name));
     println!("and add this dependency to the dist/root Cargo.toml:");
     println!(
         "  {} = {{ path = \"{}\" }}",
@@ -112,12 +112,16 @@ fn extension_type_name(name: &str) -> String {
 }
 
 fn cargo_toml(name: &str) -> String {
+    let ident = crate_ident(name);
     format!(
         r#"[package]
 name = "{name}"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.83"
+
+[package.metadata.agentropy]
+factory = "{ident}::extension"
 
 [dependencies]
 anyhow = "1"
@@ -145,6 +149,10 @@ use host_api::{{Extension, RegisterCtx, StartCtx}};
 pub const TICK_TOPIC: &str = "{name}.tick";
 
 pub struct {type_name};
+
+pub fn extension() -> Box<dyn Extension> {{
+    Box::new({type_name})
+}}
 
 impl Extension for {type_name} {{
     fn id(&self) -> &'static str {{
@@ -203,6 +211,10 @@ impl {type_name}Service for Service {{
 
 pub struct {type_name};
 
+pub fn extension() -> Box<dyn Extension> {{
+    Box::new({type_name})
+}}
+
 impl Extension for {type_name} {{
     fn id(&self) -> &'static str {{
         "{name}"
@@ -228,6 +240,10 @@ use anyhow::Result;
 use host_api::{{ExclusiveTerminal, Extension, Foreground, RegisterCtx, StartCtx}};
 
 pub struct {type_name};
+
+pub fn extension() -> Box<dyn Extension> {{
+    Box::new({type_name})
+}}
 
 impl Extension for {type_name} {{
     fn id(&self) -> &'static str {{
@@ -261,4 +277,31 @@ impl Foreground for {type_name}Foreground {{
 }}
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cargo_toml_includes_agentropy_factory_marker_and_workspace() {
+        let manifest = cargo_toml("my-ext");
+
+        assert!(manifest.contains("[package.metadata.agentropy]\nfactory = \"my_ext::extension\""));
+        assert!(manifest.contains("\n[workspace]\n"));
+    }
+
+    #[test]
+    fn scaffolded_extension_kinds_include_factory() {
+        for kind in [
+            ExtensionKind::Background,
+            ExtensionKind::Service,
+            ExtensionKind::Foreground,
+        ] {
+            let source = lib_rs("my-ext", "MyExtExtension", kind);
+
+            assert!(source.contains("pub fn extension() -> Box<dyn Extension>"));
+            assert!(source.contains("Box::new(MyExtExtension)"));
+        }
+    }
 }
