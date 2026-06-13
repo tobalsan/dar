@@ -489,15 +489,44 @@ fn first_option(value: &Value) -> Option<Value> {
 // Event sink / store
 // ---------------------------------------------------------------------------
 
-/// Stream one stdout line to the event sink + store and bump `last_event_at`.
+/// Stream one stdout line to events + store.
+///
+/// Mirrors `runner-codex`'s discipline:
+/// - **Deltas** (`text_delta` / `thinking_delta` / `toolcall_delta` /
+///   `signature_delta`) only update `last_event_at`. They are the liveness
+///   signal during a long quiet turn but add no information to the log or
+///   the dashboard Events tab — emitting them produces one card per token.
+/// - **Lines that classify to an empty `row_type`** (turn boundary, queue /
+///   compaction / retry noise, unrecognized pi events) push to the event
+///   sink and log so the live `frontend-log` / TUI feed stays useful, but
+///   skip the store insert so the dashboard's persistent Events tab doesn't
+///   accumulate blank cards.
+/// - **All other lines**: full path — sink, liveness, log, and store.
 fn emit_line(ctx: &TurnLoopCtx, clean: &str) {
     let ts = Utc::now();
+
+    // Liveness only — deltas are streaming tokens whose final assembled text
+    // is delivered by `message_end` / `toolcall_end` / `tool_execution_end`.
+    if is_pi_delta(clean) {
+        if let Ok(mut t) = ctx.last_event_at.lock() {
+            *t = ts;
+        }
+        return;
+    }
+
     let pl = classify_protocol_line("stdout", clean);
     ctx.events.push(format!("child[{}]: {clean}", ctx.issue_id));
     if let Ok(mut t) = ctx.last_event_at.lock() {
         *t = ts;
     }
     log_ev(&ctx.issue_id, "stdout", clean);
+
+    // Skip the store for empty `row_type` (turn boundary, queue / compaction
+    // / retry noise, unrecognized pi events) — they'd render as blank cards.
+    if pl.row_type.is_empty() {
+        return;
+    }
+
     let payload = serde_json::json!({
         "type": "protocol_event",
         "stream": "stdout",
@@ -508,6 +537,27 @@ fn emit_line(ctx: &TurnLoopCtx, clean: &str) {
     .to_string();
     ctx.store
         .insert_event(Some(&ctx.run_id), &ctx.issue_id, EVENT_KIND, &payload, ts);
+}
+
+/// Return `true` when `line` is a pi JSONL event whose `assistantMessageEvent`
+/// is one of the streaming-delta kinds. Each delta carries a single token's
+/// worth of text; the final assembled text arrives in `message_end` /
+/// `toolcall_end` / `tool_execution_end`, so the deltas carry no information
+/// worth logging or storing.
+fn is_pi_delta(line: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    if v.get("type").and_then(Value::as_str) != Some("message_update") {
+        return false;
+    }
+    let Some(inner) = v.get("assistantMessageEvent").and_then(Value::as_object) else {
+        return false;
+    };
+    matches!(
+        inner.get("type").and_then(Value::as_str),
+        Some("text_delta" | "thinking_delta" | "toolcall_delta" | "signature_delta")
+    )
 }
 
 fn persist_event(
@@ -816,5 +866,207 @@ done"#;
             assert!(std::time::Instant::now() < deadline, "child {pid} still alive");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    // --- emit_line discipline (ALG-236) ----------------------------------
+
+    use runner_core::strip_ansi;
+
+    /// Event sink that records every pushed line. The sink itself is
+    /// `!Clone` (we hand it to the runner as a trait object); the inner
+    /// `Vec` lives in an `Arc<Mutex<...>>` so the `Recorder` returned by
+    /// `emit_ctx` can inspect what was pushed.
+    struct RecordingSink {
+        inner: Arc<RecordingInner>,
+    }
+
+    struct RecordingInner {
+        lines: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[derive(Clone)]
+    struct Recorder {
+        lines: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingSink {
+        fn build() -> (Arc<dyn cap_runner::RunnerEventSink>, Recorder) {
+            let lines = Arc::new(Mutex::new(Vec::new()));
+            let inner = Arc::new(RecordingInner { lines: Arc::clone(&lines) });
+            let sink = RecordingSink { inner };
+            (Arc::new(sink), Recorder { lines })
+        }
+    }
+
+    impl cap_runner::RunnerEventSink for RecordingSink {
+        fn push(&self, line: String) {
+            self.inner.lines.lock().unwrap().push(line);
+        }
+    }
+
+    impl Recorder {
+        fn count(&self) -> usize {
+            self.lines.lock().unwrap().len()
+        }
+        fn lines(&self) -> Vec<String> {
+            self.lines.lock().unwrap().clone()
+        }
+    }
+
+    /// Event store that records every payload so tests can assert on
+    /// the structured `protocol_event` content (not just the call count).
+    struct RecordingStore {
+        inner: Arc<RecordingStoreInner>,
+    }
+
+    struct RecordingStoreInner {
+        payloads: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[derive(Clone)]
+    struct StoreRecorder {
+        payloads: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingStore {
+        fn build() -> (Arc<dyn cap_runner::RunnerEventStore>, StoreRecorder) {
+            let payloads = Arc::new(Mutex::new(Vec::new()));
+            let inner = Arc::new(RecordingStoreInner { payloads: Arc::clone(&payloads) });
+            let store = RecordingStore { inner };
+            (Arc::new(store), StoreRecorder { payloads })
+        }
+    }
+
+    impl cap_runner::RunnerEventStore for RecordingStore {
+        fn insert_event(
+            &self,
+            _run_id: Option<&str>,
+            _issue_identifier: &str,
+            _kind: &'static str,
+            payload: &str,
+            _ts: DateTime<Utc>,
+        ) {
+            self.inner.payloads.lock().unwrap().push(payload.to_string());
+        }
+    }
+
+    impl StoreRecorder {
+        fn count(&self) -> usize {
+            self.payloads.lock().unwrap().len()
+        }
+        fn payload(&self, i: usize) -> String {
+            self.payloads.lock().unwrap()[i].clone()
+        }
+    }
+
+    fn emit_ctx() -> (TurnLoopCtx, Recorder, StoreRecorder) {
+        let (events, recorder) = RecordingSink::build();
+        let (store, store_recorder) = RecordingStore::build();
+        let last_event_at = Arc::new(Mutex::new(Utc::now()));
+        let ctx = TurnLoopCtx {
+            pid: 4242,
+            issue_id: "ALG-1".to_string(),
+            run_id: "run-1".to_string(),
+            prompt: "ignored".to_string(),
+            events,
+            store,
+            last_event_at,
+        };
+        (ctx, recorder, store_recorder)
+    }
+
+    #[test]
+    fn emit_text_delta_is_liveness_only_no_sink_no_store() {
+        let (ctx, sink, store) = emit_ctx();
+        let line = r#"{"type":"message_update","message":{},"assistantMessageEvent":{"type":"text_delta","delta":"p"}}"#;
+        emit_line(&ctx, line);
+        assert_eq!(sink.count(), 0, "delta must not push to event sink");
+        assert_eq!(store.count(), 0, "delta must not store");
+    }
+
+    #[test]
+    fn emit_thinking_delta_is_liveness_only() {
+        let (ctx, sink, store) = emit_ctx();
+        let line = r#"{"type":"message_update","message":{},"assistantMessageEvent":{"type":"thinking_delta","delta":"hmm"}}"#;
+        emit_line(&ctx, line);
+        assert_eq!(sink.count(), 0);
+        assert_eq!(store.count(), 0);
+    }
+
+    #[test]
+    fn emit_toolcall_end_pushes_sink_and_stores_tool_call() {
+        let (ctx, sink, store) = emit_ctx();
+        let line = r#"{"type":"message_update","message":{},"assistantMessageEvent":{"type":"toolcall_end","contentIndex":1,"toolCall":{"id":"c1","name":"bash","arguments":{"command":"ls"}}}}"#;
+        emit_line(&ctx, line);
+        assert_eq!(sink.count(), 1, "raw line goes to live log");
+        assert_eq!(store.count(), 1, "structured tool_call is stored");
+        let payload = store.payload(0);
+        assert!(payload.contains("\"log_row\":\"tool_call\""), "payload={payload}");
+        assert!(payload.contains("\"text\":\"bash\""), "payload={payload}");
+    }
+
+    #[test]
+    fn emit_tool_execution_end_stores_tool_output() {
+        let (ctx, sink, store) = emit_ctx();
+        let line = r#"{"type":"tool_execution_end","toolCallId":"c1","toolName":"bash","result":{"content":[{"type":"text","text":"total 4"}]},"isError":false}"#;
+        emit_line(&ctx, line);
+        assert_eq!(sink.count(), 1);
+        assert_eq!(store.count(), 1);
+        let payload = store.payload(0);
+        assert!(payload.contains("\"log_row\":\"tool_output\""), "payload={payload}");
+        assert!(payload.contains("total 4"), "payload={payload}");
+    }
+
+    #[test]
+    fn emit_message_end_assistant_stores_assistant_card_with_full_text() {
+        let (ctx, sink, store) = emit_ctx();
+        let line = r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]}}"#;
+        emit_line(&ctx, line);
+        assert_eq!(sink.count(), 1);
+        assert_eq!(store.count(), 1);
+        let payload = store.payload(0);
+        assert!(payload.contains("\"log_row\":\"assistant\""), "payload={payload}");
+        assert!(payload.contains("Done."), "payload={payload}");
+    }
+
+    #[test]
+    fn emit_lifecycle_event_pushes_sink_but_skips_store() {
+        let (ctx, sink, store) = emit_ctx();
+        for line in [
+            r#"{"type":"agent_end"}"#,
+            r#"{"type":"queue_update","queued":2}"#,
+            r#"{"type":"compaction_start"}"#,
+            r#"{"type":"model_change","provider":"openai"}"#,
+        ] {
+            emit_line(&ctx, line);
+        }
+        assert_eq!(sink.count(), 4, "lifecycle lines still go to live log");
+        assert_eq!(store.count(), 0, "lifecycle lines must not produce cards");
+    }
+
+    #[test]
+    fn emit_plain_text_passes_through_with_default_classification() {
+        let (ctx, sink, store) = emit_ctx();
+        emit_line(&ctx, "tool_call: bash");
+        assert_eq!(sink.count(), 1);
+        assert_eq!(store.count(), 1);
+        let payload = store.payload(0);
+        assert!(payload.contains("\"log_row\":\"tool_call\""), "payload={payload}");
+    }
+
+    #[test]
+    fn emit_ansi_is_stripped_before_logging() {
+        // `pump_one_turn` calls `emit_line` with the line already ANSI-stripped;
+        // assert that contract: whatever the caller hands in is what gets
+        // pushed to the event sink verbatim.
+        let (ctx, sink, _store) = emit_ctx();
+        emit_line(&ctx, "tool_call: bash");
+        let pushed = sink.lines()[0].clone();
+        assert_eq!(pushed, "child[ALG-1]: tool_call: bash");
+
+        // strip_ansi is what `pump_one_turn` applies first; verify the helper
+        // itself so the contract above stays honest.
+        let raw = "\u{1b}[31mtool_call: bash\u{1b}[0m";
+        assert_eq!(strip_ansi(raw), "tool_call: bash");
     }
 }

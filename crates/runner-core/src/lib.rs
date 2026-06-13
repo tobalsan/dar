@@ -361,12 +361,216 @@ pub fn classify_protocol_line(stream: &str, text: &str) -> ProtocolLine {
         if is_jsonrpc {
             return classify_jsonrpc_line(&value);
         }
+        // Pi JSONL path: top-level "type" with one of the known pi event kinds.
+        // Recognized here so deltas collapse to liveness-only and thinking /
+        // tool-call / tool-output get proper row_type + text. Unknown pi event
+        // types fall through to the default JSON classifier.
+        if let Some(pi) = classify_pi_line(&value) {
+            return pi;
+        }
         let row_type = map_event_type(&value);
         let display = extract_display_text(&value).unwrap_or_else(|| text.to_string());
         ProtocolLine { row_type, text: display, detail: String::new() }
     } else {
         ProtocolLine { row_type: normalize_log_row(stream, text), text: text.to_string(), detail: String::new() }
     }
+}
+
+/// Whether `v` looks like a pi JSONL protocol event. Heuristic: a JSON object
+/// with a top-level `type` string that is one of the well-known pi event
+/// families. Returns `false` for generic JSON like `{"type":"assistant",...}`
+/// (the default classifier handles those).
+fn is_pi_event(v: &serde_json::Value) -> bool {
+    let Some(t) = v.get("type").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    matches!(
+        t,
+        "message_update"
+            | "message_start"
+            | "message_end"
+            | "turn_end"
+            | "agent_start"
+            | "agent_end"
+            | "tool_execution_start"
+            | "tool_execution_update"
+            | "tool_execution_end"
+            | "queue_update"
+            | "compaction_start"
+            | "compaction_end"
+            | "auto_retry_start"
+            | "auto_retry_end"
+            | "model_change"
+            | "thinking_level_change"
+            | "session"
+            | "custom"
+    )
+}
+
+/// Classify a pi JSONL event. Returns:
+/// - `Some(pl)` with `row_type: ""` for events the dashboard should hide
+///   (deltas, lifecycle, queue/compaction/retry noise) — still log/push
+///   upstream as a liveness signal if the caller wants.
+/// - `Some(pl)` with a real `row_type` for events the dashboard should
+///   render as a card (assistant, thinking, tool_call, tool_output, error).
+/// - `None` when the event is not a recognized pi shape, so the caller
+///   falls through to the default JSON classifier.
+fn classify_pi_line(v: &serde_json::Value) -> Option<ProtocolLine> {
+    if !is_pi_event(v) {
+        return None;
+    }
+    let t = v.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+    let pl = match t {
+        // Turn boundary / lifecycle: hidden. `runner-pi`'s turn loop also
+        // watches these for `agent_end` to end the current turn.
+        "agent_start" | "agent_end" | "turn_end" => hidden(),
+        // Queue / compaction / retry: noise.
+        "queue_update"
+        | "compaction_start"
+        | "compaction_end"
+        | "auto_retry_start"
+        | "auto_retry_end"
+        | "model_change"
+        | "thinking_level_change"
+        | "session"
+        | "custom" => hidden(),
+        // message_start: emit only the user-side content; assistant start
+        // produces no text yet (deltas and the matching message_end carry
+        // the body).
+        "message_start" => classify_message_start(v),
+        // message_end: assistant gets a card with the assembled text; user
+        // prompts are also surfaced.
+        "message_end" => classify_message_end(v),
+        // message_update: a single nested `assistantMessageEvent` whose
+        // `type` selects the row.
+        "message_update" => classify_message_update(v),
+        // tool_execution_*: the final `end` carries the result; the
+        // intermediate `start` and `update` are liveness / partial-result
+        // churn we don't want to render.
+        "tool_execution_start" | "tool_execution_update" => hidden(),
+        "tool_execution_end" => classify_tool_execution_end(v),
+        _ => return None,
+    };
+    Some(pl)
+}
+
+fn hidden() -> ProtocolLine {
+    ProtocolLine { row_type: "", text: String::new(), detail: String::new() }
+}
+
+fn classify_message_start(v: &serde_json::Value) -> ProtocolLine {
+    let role = role_of(v);
+    match role.as_deref() {
+        Some("user") => message_text(v).map_or_else(hidden, |text| ProtocolLine {
+            row_type: "user",
+            text,
+            detail: String::new(),
+        }),
+        _ => hidden(),
+    }
+}
+
+fn classify_message_end(v: &serde_json::Value) -> ProtocolLine {
+    let role = role_of(v);
+    let text = match message_text(v) {
+        Some(t) if !t.is_empty() => t,
+        _ => return hidden(),
+    };
+    match role.as_deref() {
+        Some("assistant") => ProtocolLine { row_type: "assistant", text, detail: String::new() },
+        Some("user") => ProtocolLine { row_type: "user", text, detail: String::new() },
+        _ => hidden(),
+    }
+}
+
+fn classify_message_update(v: &serde_json::Value) -> ProtocolLine {
+    let Some(inner) = v.get("assistantMessageEvent").and_then(serde_json::Value::as_object) else {
+        return hidden();
+    };
+    let inner_type = inner.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+    match inner_type {
+        // Streaming tokens: not interesting as a card, but the caller still
+        // bumps `last_event_at` and pushes a line to the live log.
+        "text_delta" | "thinking_delta" | "toolcall_delta" | "signature_delta" => hidden(),
+        "thinking" | "thinking_end" => {
+            let text = inner
+                .get("thinking")
+                .or_else(|| inner.get("text"))
+                .or_else(|| inner.get("delta"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if text.is_empty() {
+                hidden()
+            } else {
+                ProtocolLine { row_type: "thinking", text: strip_ansi(&text), detail: String::new() }
+            }
+        }
+        "toolcall_start" | "toolcall_end" => {
+            let call = inner.get("toolCall").and_then(serde_json::Value::as_object);
+            let name = call
+                .and_then(|c| c.get("name").and_then(serde_json::Value::as_str))
+                .or_else(|| inner.get("name").and_then(serde_json::Value::as_str))
+                .unwrap_or("tool")
+                .to_string();
+            let detail = call
+                .and_then(|c| c.get("arguments"))
+                .map(|a| if a.is_string() { a.as_str().unwrap().to_string() } else { a.to_string() })
+                .unwrap_or_default();
+            ProtocolLine { row_type: "tool_call", text: name, detail: strip_ansi(&detail) }
+        }
+        "error" => {
+            let msg = inner
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| inner.get("reason").and_then(serde_json::Value::as_str))
+                .unwrap_or("assistant error")
+                .to_string();
+            ProtocolLine { row_type: "error", text: msg, detail: String::new() }
+        }
+        _ => hidden(),
+    }
+}
+
+fn classify_tool_execution_end(v: &serde_json::Value) -> ProtocolLine {
+    let result = v.get("result").and_then(serde_json::Value::as_object);
+    let mut text = result
+        .and_then(|r| r.get("content"))
+        .and_then(|c| join_text_entries(Some(c)))
+        .unwrap_or_default();
+    if text.is_empty() {
+        if let Some(t) = v.get("partialResult").and_then(serde_json::Value::as_str) {
+            text = t.to_string();
+        } else if let Some(t) = v.get("resultText").and_then(serde_json::Value::as_str) {
+            text = t.to_string();
+        }
+    }
+    if text.is_empty() {
+        return hidden();
+    }
+    let is_error = v
+        .get("isError")
+        .and_then(serde_json::Value::as_bool)
+        .or_else(|| result.and_then(|r| r.get("isError")).and_then(serde_json::Value::as_bool))
+        .unwrap_or(false);
+    if is_error {
+        return ProtocolLine { row_type: "error", text: strip_ansi(&text), detail: String::new() };
+    }
+    ProtocolLine { row_type: "tool_output", text: strip_ansi(&text), detail: String::new() }
+}
+
+fn role_of(v: &serde_json::Value) -> Option<String> {
+    v.get("message")
+        .and_then(|m| m.get("role"))
+        .and_then(serde_json::Value::as_str)
+        .map(|s| s.to_string())
+}
+
+/// Extract the assembled text from a pi `message` envelope
+/// (`{type: "message_end", message: {role, content: [{type:"text", text:...}, ...]}}`).
+/// Joins all `text`-typed content entries; ignores tool-call / image / etc.
+fn message_text(v: &serde_json::Value) -> Option<String> {
+    join_text_entries(v.get("message").and_then(|m| m.get("content")))
 }
 
 /// Join text entries from a JSON array. Each entry may be a plain string or an
@@ -963,5 +1167,136 @@ mod tests {
         assert_eq!(pl.row_type, "tool_call");
         assert_eq!(pl.text, "spawnAgent");
         assert_eq!(pl.detail, "do the thing");
+    }
+
+    // -----------------------------------------------------------------
+    // Pi JSONL protocol events (ALG-236)
+    // -----------------------------------------------------------------
+
+    fn pi_pl(text: &str) -> ProtocolLine {
+        classify_protocol_line("stdout", text)
+    }
+
+    #[test]
+    fn pi_text_delta_is_hidden() {
+        let line = r#"{"type":"message_update","message":{},"assistantMessageEvent":{"type":"text_delta","delta":"pong"}}"#;
+        assert_eq!(pi_pl(line).row_type, "");
+    }
+
+    #[test]
+    fn pi_thinking_delta_is_hidden_but_full_thinking_is_thinking_row() {
+        let delta = r#"{"type":"message_update","message":{},"assistantMessageEvent":{"type":"thinking_delta","delta":"hmm"}}"#;
+        assert_eq!(pi_pl(delta).row_type, "");
+
+        let full = r#"{"type":"message_update","message":{},"assistantMessageEvent":{"type":"thinking","thinking":"let me check the file"}}"#;
+        let pl = pi_pl(full);
+        assert_eq!(pl.row_type, "thinking");
+        assert_eq!(pl.text, "let me check the file");
+    }
+
+    #[test]
+    fn pi_toolcall_end_maps_to_tool_call_with_args() {
+        let line = r#"{"type":"message_update","message":{},"assistantMessageEvent":{"type":"toolcall_end","contentIndex":1,"toolCall":{"id":"call_123","name":"bash","arguments":{"command":"ls"}}}}"#;
+        let pl = pi_pl(line);
+        assert_eq!(pl.row_type, "tool_call");
+        assert_eq!(pl.text, "bash");
+        assert!(pl.detail.contains("ls"), "detail={}", pl.detail);
+    }
+
+    #[test]
+    fn pi_toolcall_delta_is_hidden() {
+        let line = r#"{"type":"message_update","message":{},"assistantMessageEvent":{"type":"toolcall_delta","delta":{"arguments":"{\"command\":\"ls\"}"}}}"#;
+        assert_eq!(pi_pl(line).row_type, "");
+    }
+
+    #[test]
+    fn pi_tool_execution_end_maps_to_tool_output() {
+        let line = r#"{"type":"tool_execution_end","toolCallId":"call_123","toolName":"bash","result":{"content":[{"type":"text","text":"total 48"}]},"isError":false}"#;
+        let pl = pi_pl(line);
+        assert_eq!(pl.row_type, "tool_output");
+        assert_eq!(pl.text, "total 48");
+    }
+
+    #[test]
+    fn pi_tool_execution_end_with_error_flag_is_error_row() {
+        let line = r#"{"type":"tool_execution_end","toolCallId":"c1","result":{"content":[{"type":"text","text":"boom"}]},"isError":true}"#;
+        let pl = pi_pl(line);
+        assert_eq!(pl.row_type, "error");
+        assert_eq!(pl.text, "boom");
+    }
+
+    #[test]
+    fn pi_tool_execution_start_and_update_are_hidden() {
+        let start = r#"{"type":"tool_execution_start","toolCallId":"c1","toolName":"bash","args":{"command":"ls"}}"#;
+        let update = r#"{"type":"tool_execution_update","toolCallId":"c1","partialResult":"total 4"}"#;
+        assert_eq!(pi_pl(start).row_type, "");
+        assert_eq!(pi_pl(update).row_type, "");
+    }
+
+    #[test]
+    fn pi_message_end_assistant_yields_assistant_row_with_full_text() {
+        let line = r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Done with task."}]}}"#;
+        let pl = pi_pl(line);
+        assert_eq!(pl.row_type, "assistant");
+        assert_eq!(pl.text, "Done with task.");
+    }
+
+    #[test]
+    fn pi_message_end_user_yields_user_row() {
+        let line = r#"{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"please go"}]}}"#;
+        let pl = pi_pl(line);
+        assert_eq!(pl.row_type, "user");
+        assert_eq!(pl.text, "please go");
+    }
+
+    #[test]
+    fn pi_message_start_assistant_is_hidden_until_end() {
+        // Body is delivered in message_end; message_start is just the marker.
+        let line = r#"{"type":"message_start","message":{"role":"assistant","content":[]}}"#;
+        assert_eq!(pi_pl(line).row_type, "");
+    }
+
+    #[test]
+    fn pi_message_start_user_emits_user_row() {
+        // Prompt text is in the same message envelope, so we surface it.
+        let line = r#"{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        let pl = pi_pl(line);
+        assert_eq!(pl.row_type, "user");
+        assert_eq!(pl.text, "hi");
+    }
+
+    #[test]
+    fn pi_lifecycle_events_are_hidden() {
+        for line in [
+            r#"{"type":"agent_start"}"#,
+            r#"{"type":"agent_end"}"#,
+            r#"{"type":"turn_end"}"#,
+            r#"{"type":"queue_update","queued":2}"#,
+            r#"{"type":"compaction_start"}"#,
+            r#"{"type":"compaction_end"}"#,
+            r#"{"type":"auto_retry_start","attempt":1}"#,
+            r#"{"type":"model_change","provider":"openai","modelId":"gpt-5"}"#,
+            r#"{"type":"thinking_level_change","thinkingLevel":"low"}"#,
+            r#"{"type":"session","version":3,"id":"abc"}"#,
+            r#"{"type":"custom","customType":"caveman-level","data":{"level":"full"}}"#,
+        ] {
+            assert_eq!(pi_pl(line).row_type, "", "expected hidden for {line}");
+        }
+    }
+
+    #[test]
+    fn pi_message_update_error_yields_error_row() {
+        let line = r#"{"type":"message_update","message":{},"assistantMessageEvent":{"type":"error","reason":"aborted"}}"#;
+        let pl = pi_pl(line);
+        assert_eq!(pl.row_type, "error");
+        assert_eq!(pl.text, "aborted");
+    }
+
+    #[test]
+    fn pi_unknown_message_update_inner_type_is_hidden() {
+        // Some future pi event kind we don't know about: don't pretend it's
+        // an assistant card; let the dashboard filter it out.
+        let line = r#"{"type":"message_update","message":{},"assistantMessageEvent":{"type":"future_kind","foo":1}}"#;
+        assert_eq!(pi_pl(line).row_type, "");
     }
 }
