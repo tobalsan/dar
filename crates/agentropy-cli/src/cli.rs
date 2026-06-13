@@ -19,6 +19,10 @@ pub enum Command {
     Run(RunArgs),
     /// Validate agent.yaml, WORKFLOW.md, and the tracker; exit code only.
     Doctor(DoctorArgs),
+    /// Bootstrap the per-agent composition crate.
+    InitBuild(BuildArgs),
+    /// Regenerate and build the per-agent binary.
+    Build(BuildArgs),
     /// Scaffold the default WORKFLOW.md prompt in the agent folder.
     InitWorkflow(InitWorkflowArgs),
     /// Export the configured Linear project and issues under the data dir.
@@ -35,6 +39,13 @@ pub struct RunArgs {
 #[derive(Debug, Args)]
 pub struct DoctorArgs {
     /// Agent folder to validate (defaults to the current directory).
+    #[arg(long)]
+    pub dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct BuildArgs {
+    /// Agent folder to build (defaults to the current directory).
     #[arg(long)]
     pub dir: Option<PathBuf>,
 }
@@ -72,6 +83,12 @@ impl RunArgs {
 }
 
 impl DoctorArgs {
+    pub fn resolve_root(&self) -> Result<PathBuf> {
+        resolve_root(self.dir.as_deref())
+    }
+}
+
+impl BuildArgs {
     pub fn resolve_root(&self) -> Result<PathBuf> {
         resolve_root(self.dir.as_deref())
     }

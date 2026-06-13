@@ -1,0 +1,32 @@
+# generated - do not hand-edit
+[package]
+name = "agentropy-agent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+
+[[bin]]
+name = "agentropy"
+path = "src/main.rs"
+
+[workspace]
+
+[dependencies]
+host-api = { path = "../../crates/host-api" }
+agentropy-cli = { path = "../../crates/agentropy-cli" }
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal"] }
+frontend-log = { path = "../../extensions/frontend-log" }
+tracker-files = { path = "../../extensions/tracker-files" }
+tracker-linear = { path = "../../extensions/tracker-linear" }
+orchestrator = { path = "../../extensions/orchestrator" }
+dashboard = { path = "../../extensions/dashboard" }
+runner-pi = { path = "../../extensions/runner-pi" }
+runner-claude = { path = "../../extensions/runner-claude" }
+runner-codex = { path = "../../extensions/runner-codex" }
+runner-opencode = { path = "../../extensions/runner-opencode" }
+runner-cli = { path = "../../extensions/runner-cli" }
+runner-fake = { path = "../../extensions/runner-fake" }
+chat-opencode = { path = "../../extensions/chat-opencode" }
+chat-pi = { path = "../../extensions/chat-pi" }
+chat-codex = { path = "../../extensions/chat-codex" }
+tui = { path = "../../extensions/tui" }

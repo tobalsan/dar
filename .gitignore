@@ -9,6 +9,8 @@ example-agent/workspaces/*
 !example-agent/workspaces/.gitkeep
 example-agent/logs/*
 !example-agent/logs/.gitkeep
+example-agent/.agentropy/target/
+example-agent/bin/
 data/
 
 # Local Claude Code config dropped into agent folders

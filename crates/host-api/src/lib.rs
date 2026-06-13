@@ -78,6 +78,20 @@ pub trait Extension: Send + Sync {
     }
 }
 
+impl Extension for Box<dyn Extension> {
+    fn id(&self) -> &'static str {
+        self.as_ref().id()
+    }
+
+    fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> BoxFuture<'a, Result<()>> {
+        self.as_ref().register(ctx)
+    }
+
+    fn start<'a>(&'a self, ctx: StartCtx) -> BoxFuture<'a, Result<()>> {
+        self.as_ref().start(ctx)
+    }
+}
+
 pub trait Foreground: Send {
     fn run<'a>(
         &'a mut self,
@@ -95,7 +109,8 @@ pub struct LogEvent {
     pub message: String,
 }
 
-pub type SharedPanicHook = Arc<Mutex<Option<Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>>>>;
+pub type SharedPanicHook =
+    Arc<Mutex<Option<Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>>>>;
 
 pub struct ExclusiveTerminal {
     interactive: bool,

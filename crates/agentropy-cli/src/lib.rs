@@ -1,6 +1,7 @@
 //! Reusable agentropy CLI boot wiring.
 
 mod cli;
+pub mod composer;
 mod doctor;
 
 use std::sync::Arc;
@@ -86,6 +87,8 @@ async fn run_non_run_command(command: Command) -> Result<()> {
             let code = doctor::run(&root, &dotenv_report, services)?;
             std::process::exit(code);
         }
+        Command::InitBuild(args) => composer::init_build(&args.resolve_root()?),
+        Command::Build(args) => composer::build(&args.resolve_root()?),
         Command::InitWorkflow(args) => {
             let root = args.resolve_root()?;
             dotenv::load_agent_env(&root)?;
@@ -173,6 +176,29 @@ mod tests {
                 );
             }
             _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn build_commands_parse_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        for command in ["init-build", "build"] {
+            let cli = Cli::try_parse_from([
+                "agentropy".into(),
+                command.into(),
+                "--dir".into(),
+                temp.path().as_os_str().to_os_string(),
+            ])
+            .unwrap();
+            match cli.command {
+                Command::InitBuild(args) | Command::Build(args) => {
+                    assert_eq!(
+                        args.resolve_root().unwrap(),
+                        temp.path().canonicalize().unwrap()
+                    );
+                }
+                _ => panic!("expected build command"),
+            }
         }
     }
 }
