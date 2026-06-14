@@ -63,35 +63,34 @@ my-agent/
 ├── workspaces/         # created at runtime, one dir per issue
 ├── data/
 │   └── store.db        # SQLite: runs, events, claims, heartbeats
-└── logs/
-    └── agent.log
+├── logs/
+│   └── agent.log
+├── bin/agentropy       # agent's own binary (build B only)
+└── .agentropy/         # committed composition crate (build B only)
 ```
 
 Move the folder, move the agent. Everything it needs lives inside.
 
 ## Build
 
-From-source / repo dev build (all stock extensions, single monolith):
+There are two independent build models. Pick based on your goal:
+
+- **A — From-source build (repo dev, monolith):** you are hacking on the
+  runtime itself or want a single checkout with all stock extensions. One
+  `cargo build` produces one binary.
+- **B — Agent-specific build (self-contained):** each agent folder carries its
+  own composition crate (`.agentropy/`) and binary (`bin/agentropy`), links
+  only what it uses, supports local extension crates, and can self-update.
+  This is the "move folder, move agent" model.
+
+### A · From-source build (repo dev, monolith)
 
 ```bash
 cargo build --release          # → ./target/release/agentropy
 ```
 
-## Extensions
-
-The codebase is a cargo workspace: a domain-free host (`crates/agentropy-host`)
-plus small contract crates (`crates/host-api`, `crates/cap-tracker`,
-`crates/cap-runner`, `crates/cap-chat`, `crates/orchestrator-api`), with features living as one
-crate each under `extensions/`. The binary is assembled from an explicit plugin
-list in the composition root (`dist/`). Extensions import `host-api`
-(and optionally one cap/api crate) and read zero host internals.
-
-For writing your own extension, see the [authoring guide](docs/extensions.md);
-start from `extensions/example` (the living reference, kept green in CI) or
-scaffold one with `cargo agentropy new my-extension --kind background`
-(or `service` / `foreground`).
-
-### Adding an extension
+One binary, all stock extensions baked in. To add or remove an extension,
+edit the `dist/` composition root:
 
 1. Add the crate as a dependency in `dist/Cargo.toml`:
 
@@ -122,6 +121,38 @@ scaffold one with `cargo agentropy new my-extension --kind background`
 
 Removing an extension is the reverse: delete its `plugins![]` line and
 `dist/Cargo.toml` dependency, rebuild.
+
+### B · Agent-specific build (self-contained)
+
+```bash
+agentropy init-build --dir ./my-agent   # one-time: writes .agentropy/ crate
+agentropy build --dir ./my-agent        # → ./my-agent/bin/agentropy
+```
+
+The agent links only the extensions it uses, supports local extension crates
+under `extensions/` inside the agent folder, and can self-update. See
+[Self-contained agents (build B)](#self-contained-agents-build-b--per-agent-binary--self-update)
+for the full workflow (folder layout, self-update loop, portability, local
+extensions, and toolchain prerequisites).
+
+## Extensions
+
+The codebase is a cargo workspace: a domain-free host (`crates/agentropy-host`)
+plus small contract crates (`crates/host-api`, `crates/cap-tracker`,
+`crates/cap-runner`, `crates/cap-chat`, `crates/orchestrator-api`), with
+features living as one crate each under `extensions/`. The binary is assembled
+from an explicit plugin list in the composition root (`dist/`). Extensions
+import `host-api` (and optionally one cap/api crate) and read zero host
+internals.
+
+Editing `dist/` is the **build A** path (see above). In **build B**, each agent
+gets its own composition crate (`.agentropy/`) and can add agent-local
+extensions under its own `extensions/` folder — scaffold one with
+`cargo agentropy new my-extension --kind background` (or `service` /
+`foreground`). See [Self-contained agents (build B)](#self-contained-agents-build-b--per-agent-binary--self-update).
+
+For writing your own extension, see the [authoring guide](docs/extensions.md);
+start from `extensions/example` (the living reference, kept green in CI).
 
 ### Enabling & configuring extensions
 
@@ -549,3 +580,65 @@ Fires on stall, safety park, and startup errors. Backends:
 
 Burst-dedup: notifications are batched per `window_secs`; duplicate events
 within the window are collapsed. Max `max_items` unique items per batch.
+
+## Self-contained agents (build B — per-agent binary + self-update)
+
+This is **build B**. Each agent folder carries its own composition crate and
+binary — no shared repo checkout required. Move the folder, move the agent.
+
+### Setup (one-time per agent)
+
+```bash
+# Requires: Rust toolchain + cargo on the host (or vendor deps for offline use)
+
+agentropy init-build --dir ./my-agent          # writes .agentropy/ — commit it
+agentropy init-build --dir ./my-agent --vendor # also vendor deps for offline/air-gap
+
+agentropy build --dir ./my-agent               # → ./my-agent/bin/agentropy
+agentropy build --dir ./my-agent --vendor --offline   # air-gapped build
+```
+
+`.agentropy/` is the composition crate for this agent. Commit it alongside
+`agent.yaml` and `WORKFLOW.md`; it pins which extensions the agent links.
+
+### Local extension crates
+
+Drop an extension crate under the agent's `extensions/` folder and reference it
+from `.agentropy/Cargo.toml`. Scaffold one:
+
+```bash
+cargo agentropy new my-extension --kind background   # or service | foreground
+```
+
+The agent's `.agentropy/` composition root lists only what this agent needs —
+unrelated stock extensions are not linked.
+
+### Self-update loop
+
+An agent can rebuild its own binary from inside the folder and hot-swap itself:
+
+```bash
+agentropy self rebuild --dir ./my-agent
+agentropy self rebuild --dir ./my-agent --vendor --offline   # air-gapped
+```
+
+Sequence: recompose `.agentropy/` → `agentropy build` → `agentropy doctor` gate
+→ atomic binary swap → `execv` into the new binary. The running process is
+replaced in place; no external orchestration needed.
+
+To bump dependencies deliberately (then commit the updated lock):
+
+```bash
+agentropy lock-refresh --dir ./my-agent
+```
+
+### Portability
+
+The built binary is statically linked (musl on Linux, universal on macOS).
+Copy `bin/agentropy` to any compatible host — no Rust toolchain needed at
+runtime. The toolchain is only required when rebuilding (i.e., for
+`agentropy build` / `agentropy self rebuild`).
+
+For truly air-gapped hosts, run `init-build --vendor` once on a connected
+machine, commit the `vendor/` tree inside `.agentropy/`, then build offline
+with `--vendor --offline`.
