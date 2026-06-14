@@ -439,8 +439,9 @@ mod tests {
             .render()
             .expect("content renders");
         assert!(html.contains("class=\"pager\""), "pager rendered");
-        assert!(html.contains("/content?page=1"), "first-page link present");
-        assert!(html.contains("/content?page=3"), "last-page link present");
+        assert!(html.contains("hx-get=\"/content\""), "pager uses /content endpoint");
+        assert!(html.contains("window.__dashPage=1"), "first-page control present");
+        assert!(html.contains("window.__dashPage=3"), "last-page control present");
         assert!(html.contains("aria-current=\"page\""), "current page marked");
     }
 
