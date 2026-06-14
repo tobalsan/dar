@@ -638,10 +638,8 @@ Prerequisites: `cargo`/`rustc` on PATH, plus the `cargo-agentropy` helper
 
    The new crate's `Cargo.toml` carries the discovery marker
    `[package.metadata.agentropy] factory = "standup_poster::extension"` and a
-   `pub fn extension() -> Box<dyn Extension>`. (The scaffold points `host-api`
-   at the repo-relative `../../crates/host-api`; for a folder outside the
-   repo, repoint it to the same pinned `git`/`rev` the composer uses for stock
-   crates — visible in `.agentropy/Cargo.toml` after the next step.)
+   `pub fn extension() -> Box<dyn Extension>`. The scaffold pins `host-api`
+   to the same `git`/`rev` source the composer uses for stock crates.
 
 3. Bootstrap, build, run:
 
@@ -666,8 +664,8 @@ regenerates both the `[dependencies]` and the `plugins![…]` list in
 
 ### Local extension crates
 
-Drop an extension crate under the agent's `extensions/` folder and reference it
-from `.agentropy/Cargo.toml`. Scaffold one:
+Drop an extension crate under the agent's `extensions/` folder. The composer
+auto-discovers crates with agentropy package metadata. Scaffold one:
 
 ```bash
 cargo agentropy new my-extension --kind background   # or service | foreground
