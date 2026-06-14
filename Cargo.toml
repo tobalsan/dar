@@ -3,6 +3,7 @@ members = [
     "dist",
     "crates/agentropy-cli",
     "crates/agentropy-host",
+    "crates/agentropy-presence",
     "crates/cap-chat",
     "crates/cap-tracker",
     "crates/cap-runner",

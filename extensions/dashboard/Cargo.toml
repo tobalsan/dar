@@ -8,6 +8,7 @@ rust-version = "1.83"
 anyhow = "1"
 askama = "0.13"
 axum = { version = "0.8", features = ["ws"] }
+agentropy-presence = { path = "../../crates/agentropy-presence" }
 cap-tracker = { path = "../../crates/cap-tracker" }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"

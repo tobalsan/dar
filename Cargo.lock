@@ -32,7 +32,9 @@ name = "agentropy-cli"
 version = "0.2.1"
 dependencies = [
  "agentropy-host",
+ "agentropy-presence",
  "anyhow",
+ "axum 0.8.9",
  "cap-runner",
  "clap",
  "fs2",
@@ -57,6 +59,19 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "agentropy-presence"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
@@ -655,6 +670,7 @@ dependencies = [
 name = "dashboard"
 version = "0.2.0"
 dependencies = [
+ "agentropy-presence",
  "anyhow",
  "askama",
  "axum 0.8.9",

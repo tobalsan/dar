@@ -35,6 +35,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub hitl: HitlConfig,
     pub workspace: WorkspaceConfig,
+    #[serde(default)]
     pub dashboard: DashboardConfig,
     /// Host-level foreground slot selection: the id of the extension that owns
     /// the terminal. Absent → "logs" (the frontend-log extension).
@@ -210,10 +211,36 @@ pub struct WorkspaceConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DashboardConfig {
+    /// Bind address. Defaults to `0.0.0.0` so a single `agentropy dash`
+    /// aggregator (and, over a tailnet, a remote browser) can reach the
+    /// agent's own dashboard.
+    #[serde(default = "default_dashboard_bind")]
     pub bind: IpAddr,
+    /// Bind port. Defaults to `0` (OS-assigned ephemeral) so running more than
+    /// one agent on a host never collides on a fixed port; the aggregator
+    /// discovers the real port from the presence registry.
+    #[serde(default = "default_dashboard_port")]
     pub port: u16,
     #[serde(default)]
     pub webhook_secret: Option<String>,
+}
+
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            bind: default_dashboard_bind(),
+            port: default_dashboard_port(),
+            webhook_secret: None,
+        }
+    }
+}
+
+fn default_dashboard_bind() -> IpAddr {
+    IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+}
+
+fn default_dashboard_port() -> u16 {
+    0
 }
 
 /// Reads `<root>/agent.yaml` and deserializes it.

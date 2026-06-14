@@ -82,8 +82,99 @@ impl host_api::Extension for DashboardExtension {
             if let Ok(runs) = ctx.host.services.get_named::<dyn RunQuery>("orchestrator") {
                 let _ = self.runs.set(runs);
             }
+            // Presence: announce this dashboard into the registry so a single
+            // `agentropy dash` aggregator can discover and link to it. The host
+            // surfaces the *actual* bound addr, which is what makes the
+            // OS-assigned (`:0`) ephemeral port usable. Failure to register is
+            // non-fatal: the agent's own dashboard still works standalone.
+            if let Some(addr) = ctx.host.http_addr() {
+                match register_presence(&ctx, addr) {
+                    Ok((registry, entry)) => {
+                        let cleanup = PresenceGuard { registry, entry };
+                        let mut shutdown = ctx.shutdown.clone();
+                        tokio::spawn(async move {
+                            shutdown.cancelled().await;
+                            cleanup.unlink();
+                        });
+                    }
+                    Err(e) => tracing::warn!("dashboard presence registration failed: {e:#}"),
+                }
+            } else {
+                tracing::warn!("dashboard: no bound HTTP addr; skipping presence registration");
+            }
             Ok(())
         })
+    }
+}
+
+/// Reachable address advertised in the presence file. The host binds on
+/// `0.0.0.0` for direction A, but a literal `0.0.0.0` host is not dialable; the
+/// aggregator rewrites the host portion to the browser's request host anyway,
+/// so we keep the real port and a placeholder host that survives that rewrite.
+/// Uses `SocketAddr`'s own `Display` so IPv6 hosts are bracketed (`[::]:port`)
+/// and the stored addr stays a well-formed `host:port`.
+fn advertised_addr(bound: std::net::SocketAddr) -> String {
+    bound.to_string()
+}
+
+#[derive(serde::Deserialize)]
+struct AgentIdOnly {
+    id: String,
+}
+
+/// Read just the `id` field from `<root>/agent.yaml`.
+fn read_agent_id(root: &std::path::Path) -> anyhow::Result<String> {
+    use anyhow::Context as _;
+    let path = root.join("agent.yaml");
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let parsed: AgentIdOnly = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parsing id from {}", path.display()))?;
+    Ok(parsed.id)
+}
+
+/// Registry directory from `extensions.dashboard.registry_dir`, else default.
+fn registry_dir(ctx: &host_api::StartCtx) -> std::path::PathBuf {
+    ctx.config
+        .get("dashboard")
+        .and_then(|v| v.get("registry_dir"))
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(agentropy_presence::default_registry_dir)
+}
+
+fn register_presence(
+    ctx: &host_api::StartCtx,
+    addr: std::net::SocketAddr,
+) -> anyhow::Result<(agentropy_presence::Registry, agentropy_presence::PresenceEntry)> {
+    let root = ctx.paths.root();
+    let id = read_agent_id(root)?;
+    let folder = root.to_string_lossy().to_string();
+    let entry = agentropy_presence::PresenceEntry {
+        id,
+        folder,
+        addr: advertised_addr(addr),
+        pid: std::process::id(),
+        started_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    };
+    let registry = agentropy_presence::Registry::new(registry_dir(ctx));
+    registry.write(&entry)?;
+    Ok((registry, entry))
+}
+
+struct PresenceGuard {
+    registry: agentropy_presence::Registry,
+    entry: agentropy_presence::PresenceEntry,
+}
+
+impl PresenceGuard {
+    fn unlink(&self) {
+        if let Err(e) = self.registry.remove(&self.entry.id, &self.entry.folder) {
+            tracing::warn!("dashboard presence unlink failed: {e:#}");
+        }
     }
 }
 

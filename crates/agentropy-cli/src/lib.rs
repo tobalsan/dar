@@ -2,6 +2,7 @@
 
 mod cli;
 pub mod composer;
+pub mod dash;
 mod doctor;
 pub mod self_check;
 pub mod self_update;
@@ -45,6 +46,14 @@ async fn run_inner(plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
             let root = args.resolve_root()?;
             self_check::guard_boot(&root)?;
             run_host(root, plugins).await
+        }
+        Command::Dash(args) => {
+            dash::serve(dash::DashOptions::resolve(
+                args.bind,
+                args.port,
+                args.registry_dir,
+            ))
+            .await
         }
         other => run_non_run_command(other, plugins).await,
     }
@@ -93,6 +102,7 @@ fn dashboard_addr_for_root(root: &std::path::Path) -> Result<(std::net::IpAddr, 
 async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
     match command {
         Command::Run(_) => unreachable!("run is handled by run_host()"),
+        Command::Dash(_) => unreachable!("dash is handled in run_inner()"),
         Command::Doctor(args) => {
             let root = args.resolve_root()?;
             let dotenv_report = dotenv::load_agent_env(&root)?;

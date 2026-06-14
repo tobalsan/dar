@@ -23,9 +23,12 @@ orchestrator:
 workspace:
   root: ./workspaces
 
-dashboard:
-  bind: 127.0.0.1
-  port: 7878
+# Each agent's dashboard binds an OS-assigned free port on 0.0.0.0 by default,
+# so multiple agents never collide. Run `agentropy dash` for one unified view
+# over every live agent. Override here to pin a fixed bind/port if needed.
+# dashboard:
+#   bind: 127.0.0.1
+#   port: 7878
 
 # Terminal UI instead of the plain log stream (Chat / Logs / Dash tabs):
 foreground: tui
