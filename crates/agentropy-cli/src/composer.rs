@@ -99,30 +99,12 @@ struct AgentSelection {
     runner: SelectedUse,
     #[serde(default = "default_foreground")]
     foreground: String,
-    #[serde(default)]
-    extensions: ExtensionSelection,
 }
 
 #[derive(Debug, Deserialize)]
 struct SelectedUse {
     #[serde(rename = "use", alias = "sdk")]
     use_: String,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct ExtensionSelection {
-    tui: Option<TuiSelection>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TuiSelection {
-    #[serde(default)]
-    chat: TuiChatSelection,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct TuiChatSelection {
-    backend: Option<String>,
 }
 
 pub fn init_build(agent: &Path) -> Result<()> {
@@ -164,14 +146,20 @@ fn write_composition_crate(agent: &Path) -> Result<(PathBuf, bool)> {
     Ok((crate_dir, changed))
 }
 
+const ALL_RUNNERS: &[&str] = &[
+    "runner-pi",
+    "runner-codex",
+    "runner-opencode",
+    "runner-cli",
+    "runner-fake",
+];
+
 fn selected_stock_extensions(agent: &Path) -> Result<Vec<&'static StockExtension>> {
     let selection = agent_selection(agent)?;
-    let mut packages = vec![
-        "orchestrator",
-        "tracker-linear",
-        tracker_package(&selection.tracker.use_)?,
-        runner_package(&selection.runner.use_)?,
-    ];
+    // Validate runner.use early so a typo fails at build time.
+    let _ = runner_package(&selection.runner.use_)?;
+    let mut packages = vec!["orchestrator", "tracker-linear", tracker_package(&selection.tracker.use_)?];
+    packages.extend_from_slice(ALL_RUNNERS);
     packages.extend(foreground_packages(&selection)?);
     packages.sort_unstable();
     packages.dedup();
@@ -213,44 +201,17 @@ fn runner_package(use_: &str) -> Result<&'static str> {
     }
 }
 
+const ALL_CHATS: &[&str] = &["chat-pi", "chat-codex", "chat-opencode"];
+
 fn foreground_packages(selection: &AgentSelection) -> Result<Vec<&'static str>> {
     match selection.foreground.as_str() {
         "logs" => Ok(vec!["frontend-log"]),
         "tui" => {
-            let mut packages = vec!["frontend-log", "chat-pi", "tui"];
-            if let Some(chat_package) = tui_chat_package(selection)? {
-                packages.push(chat_package);
-            }
+            let mut packages = vec!["frontend-log", "tui"];
+            packages.extend_from_slice(ALL_CHATS);
             Ok(packages)
         }
         other => bail!("unknown foreground {other:?}"),
-    }
-}
-
-fn tui_chat_package(selection: &AgentSelection) -> Result<Option<&'static str>> {
-    if let Some(backend) = selection
-        .extensions
-        .tui
-        .as_ref()
-        .and_then(|tui| tui.chat.backend.as_deref())
-    {
-        return Ok(stock_chat_package(backend));
-    }
-    match selection.runner.use_.as_str() {
-        "pi" => Ok(Some("chat-pi")),
-        "codex" => Ok(Some("chat-codex")),
-        "opencode" => Ok(Some("chat-opencode")),
-        "cli" | "fake" => Ok(None),
-        other => bail!("unknown tui chat backend {other:?}"),
-    }
-}
-
-fn stock_chat_package(backend: &str) -> Option<&'static str> {
-    match backend {
-        "pi" => Some("chat-pi"),
-        "codex" => Some("chat-codex"),
-        "opencode" => Some("chat-opencode"),
-        _ => None,
     }
 }
 
@@ -826,8 +787,25 @@ extensions:
 
         let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
         assert!(manifest.contains("chat-pi = { git = "));
-        assert!(!manifest.contains("chat-codex = { git = "));
-        assert!(!manifest.contains("chat-opencode = { git = "));
+        assert!(manifest.contains("chat-codex = { git = "));
+        assert!(manifest.contains("chat-opencode = { git = "));
+    }
+
+    #[test]
+    fn init_build_always_includes_all_runners() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(agent, "files", "fake", "logs", "");
+
+        init_build(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
+        for pkg in ["runner-pi", "runner-codex", "runner-opencode", "runner-cli", "runner-fake"] {
+            assert!(
+                manifest.contains(&format!("{pkg} = {{ git = ")),
+                "{pkg} should always be linked regardless of runner.use"
+            );
+        }
     }
 
     #[test]
