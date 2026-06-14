@@ -76,7 +76,8 @@ pub async fn serve(opts: DashOptions) -> Result<()> {
     let local = listener.local_addr().ok();
     if let Some(addr) = local {
         println!(
-            "agentropy dash listening on http://{}:{}/ (registry {})",
+            "agentropy dash listening on {} (browse http://{}:{}/) (registry {})",
+            addr,
             display_host(addr.ip()),
             addr.port(),
             opts.registry_dir.display()
