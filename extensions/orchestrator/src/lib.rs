@@ -37,6 +37,7 @@ use orchestrator_api::{
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::watch;
 
+use crate::agent_config_reload::AgentConfigReloader;
 use crate::config::AgentConfig;
 use crate::domain::Issue;
 use crate::hitl::{HitlNotification, HitlNotify};
@@ -56,6 +57,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
 
+pub mod agent_config_reload;
 pub mod config;
 pub mod domain;
 pub mod dotenv;
@@ -78,6 +80,30 @@ const CONTINUATION_DELAY: Duration = Duration::from_secs(1);
 /// Static nudge fed to a turn-capable runner when the issue is still active at a
 /// turn boundary: continue the same live session for another turn.
 const TURN_CONTINUE_PROMPT: &str = "Continue working on this issue. Re-read the issue file; if the work is complete, update the issue state accordingly, otherwise keep going.";
+
+struct ApplyOutcome {
+    tracker_applied: bool,
+    runner_applied: bool,
+}
+
+fn warn_restart_required(field: &str) {
+    logging::ev(
+        "-",
+        "agent_config_reload",
+        &format!("agent.yaml field `{field}` changed; restart required"),
+    );
+}
+
+fn revert_runner_fields(new_eff: &mut EffectiveLoopConfig, current: &EffectiveLoopConfig) {
+    new_eff.runner_kind.clone_from(&current.runner_kind);
+    new_eff.runner_command.clone_from(&current.runner_command);
+    new_eff.model.clone_from(&current.model);
+    new_eff.provider.clone_from(&current.provider);
+    new_eff.thinking.clone_from(&current.thinking);
+    new_eff.max_run_timeout_ms = current.max_run_timeout_ms;
+    new_eff.stall_timeout_ms = current.stall_timeout_ms;
+    new_eff.max_turns = current.max_turns;
+}
 
 #[derive(Default)]
 pub struct OrchestratorExtension {
@@ -425,9 +451,10 @@ struct Retry {
 }
 
 pub struct Orchestrator {
-    /// Agent definition (id, name, tracker path, etc.). Never modified; used as
-    /// the fallback when WORKFLOW.md frontmatter omits a field.
+    /// Agent definition used as the fallback when WORKFLOW.md frontmatter omits
+    /// a field. Live-safe fields are refreshed from agent.yaml on mtime change.
     agent_cfg: AgentConfig,
+    agent_config_reloader: AgentConfigReloader,
     paths: AgentPaths,
     tracker: Arc<dyn crate::tracker::Tracker>,
     runner: Arc<dyn cap_runner::Runner>,
@@ -489,6 +516,7 @@ impl Orchestrator {
     ) -> Self {
         Self {
             agent_cfg,
+            agent_config_reloader: AgentConfigReloader::new(&paths.root),
             paths,
             tracker,
             runner,
@@ -598,7 +626,8 @@ impl Orchestrator {
         // Step 3: observe child completions.
         self.collect_finished().await;
 
-        // Step 4: load WORKFLOW.md.
+        // Step 4: load agent.yaml and WORKFLOW.md.
+        self.maybe_reload_agent_config();
         self.maybe_reload_workflow();
 
         // Poll candidates once per tick (after maybe_reload so config changes
@@ -649,150 +678,11 @@ impl Orchestrator {
         match self.prompt.maybe_reload() {
             Ok(false) => {}
             Ok(true) => {
-                let mut new_eff = EffectiveLoopConfig::merge(
+                let new_eff = EffectiveLoopConfig::merge(
                     &self.agent_cfg,
                     &self.prompt.snapshot().frontmatter,
                 );
-
-                // Rebuild the tracker when state lists change so poll_candidates
-                // uses the new active/terminal filters immediately. If the
-                // rebuild fails, revert the state fields in new_eff so the
-                // tracker filter and effective_cfg remain in sync.
-                let tracker_changed = new_eff.active_states != self.effective_cfg.active_states
-                    || new_eff.terminal_states != self.effective_cfg.terminal_states
-                    || new_eff.needs_human != self.effective_cfg.needs_human
-                    || new_eff.tracker_kind != self.effective_cfg.tracker_kind
-                    || new_eff.tracker_project_slug != self.effective_cfg.tracker_project_slug
-                    || new_eff.tracker_endpoint != self.effective_cfg.tracker_endpoint
-                    || new_eff.tracker_team != self.effective_cfg.tracker_team
-                    || new_eff.tracker_assignee != self.effective_cfg.tracker_assignee
-                    || new_eff.tracker_labels != self.effective_cfg.tracker_labels;
-
-                if tracker_changed {
-                    let mut tracker_cfg = self.agent_cfg.tracker.clone();
-                    tracker_cfg.use_ = new_eff.tracker_kind.clone();
-                    tracker_cfg.active_states = new_eff.active_states.clone();
-                    tracker_cfg.terminal_states = new_eff.terminal_states.clone();
-                    tracker_cfg.project_slug = new_eff.tracker_project_slug.clone();
-                    tracker_cfg.endpoint = Some(new_eff.tracker_endpoint.clone());
-                    tracker_cfg.needs_human = new_eff.needs_human.clone();
-                    tracker_cfg.team = new_eff.tracker_team.clone();
-                    tracker_cfg.assignee = new_eff.tracker_assignee.clone();
-                    tracker_cfg.label = (!new_eff.tracker_labels.is_empty())
-                        .then(|| crate::config::StringOrVec::List(new_eff.tracker_labels.clone()));
-                    match tracker::build_configured(
-                        &self.runner_services,
-                        &tracker_cfg,
-                        self.paths.root.clone(),
-                    ) {
-                        Ok(t) => {
-                            self.tracker = t;
-                            logging::ev(
-                                "-",
-                                "workflow_reload",
-                                &format!(
-                                    "tracker rebuilt: kind={} active={:?} terminal={:?}",
-                                    new_eff.tracker_kind,
-                                    new_eff.active_states,
-                                    new_eff.terminal_states
-                                ),
-                            );
-                        }
-                        Err(e) => {
-                            // Revert all tracker-related fields so the running
-                            // tracker instance and effective_cfg stay in sync.
-                            new_eff.active_states = self.effective_cfg.active_states.clone();
-                            new_eff.terminal_states = self.effective_cfg.terminal_states.clone();
-                            new_eff.needs_human = self.effective_cfg.needs_human.clone();
-                            new_eff.tracker_kind = self.effective_cfg.tracker_kind.clone();
-                            new_eff.tracker_project_slug =
-                                self.effective_cfg.tracker_project_slug.clone();
-                            new_eff.tracker_endpoint = self.effective_cfg.tracker_endpoint.clone();
-                            new_eff.tracker_team = self.effective_cfg.tracker_team.clone();
-                            new_eff.tracker_assignee = self.effective_cfg.tracker_assignee.clone();
-                            new_eff.tracker_labels = self.effective_cfg.tracker_labels.clone();
-                            logging::ev(
-                                "-",
-                                "workflow_reload",
-                                &format!(
-                                    "tracker rebuild failed (tracker config unchanged): {e:#}"
-                                ),
-                            );
-                        }
-                    }
-                }
-
-                let runner_changed = new_eff.runner_kind != self.effective_cfg.runner_kind;
-                if runner_changed {
-                    let runner_id = runner_service_id(&new_eff.runner_kind);
-                    match self
-                        .runner_services
-                        .get_named::<dyn cap_runner::Runner>(runner_id)
-                    {
-                        Ok(runner) => {
-                            self.runner = runner;
-                            logging::ev(
-                                "-",
-                                "workflow_reload",
-                                &format!("runner resolved: kind={runner_id}"),
-                            );
-                        }
-                        Err(e) => {
-                            new_eff.runner_kind = self.effective_cfg.runner_kind.clone();
-                            new_eff.runner_command = self.effective_cfg.runner_command.clone();
-                            logging::ev(
-                                "-",
-                                "workflow_reload",
-                                &format!("runner resolve failed (runner config unchanged): {e:#}"),
-                            );
-                        }
-                    }
-                }
-
-                // Validate the reloaded thinking/effort level against the
-                // (possibly new) runner as a pair. On failure, revert the whole
-                // runner + thinking change as a unit so a bad live edit never
-                // reaches a dispatched child: reverting only the level can still
-                // leave an invalid combo (e.g. switching to codex while the
-                // inherited level is `none`).
-                if let Err(e) = thinking::validate_thinking_for_runner(
-                    runner_service_id(&new_eff.runner_kind),
-                    new_eff.thinking.as_deref(),
-                ) {
-                    if new_eff.runner_kind != self.effective_cfg.runner_kind {
-                        // Re-resolve the previous runner so the live instance
-                        // matches the reverted runner_kind.
-                        let prev_id = runner_service_id(&self.effective_cfg.runner_kind);
-                        if let Ok(runner) = self
-                            .runner_services
-                            .get_named::<dyn cap_runner::Runner>(prev_id)
-                        {
-                            self.runner = runner;
-                        }
-                        new_eff.runner_kind = self.effective_cfg.runner_kind.clone();
-                        new_eff.runner_command = self.effective_cfg.runner_command.clone();
-                    }
-                    new_eff.thinking = self.effective_cfg.thinking.clone();
-                    logging::ev(
-                        "-",
-                        "workflow_reload",
-                        &format!(
-                            "runner/thinking unchanged (invalid combo on reload): {e:#}"
-                        ),
-                    );
-                }
-
-                self.effective_cfg = new_eff;
-                logging::ev(
-                    "-",
-                    "workflow_reload",
-                    &format!(
-                        "effective config updated: poll={}ms concurrent={} retries={}",
-                        self.effective_cfg.poll_interval_ms,
-                        self.effective_cfg.max_concurrent,
-                        self.effective_cfg.max_retries,
-                    ),
-                );
+                self.apply_effective_config(new_eff, "workflow_reload");
             }
             Err(e) => {
                 logging::ev(
@@ -802,6 +692,216 @@ impl Orchestrator {
                 );
             }
         }
+    }
+
+    fn maybe_reload_agent_config(&mut self) {
+        let Some(mut new_cfg) = (match self.agent_config_reloader.maybe_reload() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                logging::ev(
+                    "-",
+                    "agent_config_reload",
+                    &format!("agent.yaml reload error: {e:#}"),
+                );
+                None
+            }
+        }) else {
+            return;
+        };
+
+        self.warn_and_freeze_boot_only_fields(&mut new_cfg);
+        let old_cfg = self.agent_cfg.clone();
+        self.agent_cfg = new_cfg;
+        let new_eff =
+            EffectiveLoopConfig::merge(&self.agent_cfg, &self.prompt.snapshot().frontmatter);
+        let outcome = self.apply_effective_config(new_eff, "agent_config_reload");
+
+        if !outcome.tracker_applied {
+            self.agent_cfg.tracker = old_cfg.tracker;
+        }
+        if !outcome.runner_applied {
+            self.agent_cfg.runner = old_cfg.runner;
+        }
+    }
+
+    fn warn_and_freeze_boot_only_fields(&self, new_cfg: &mut AgentConfig) {
+        if new_cfg.id != self.agent_cfg.id {
+            warn_restart_required("id");
+            new_cfg.id.clone_from(&self.agent_cfg.id);
+        }
+        if new_cfg.name != self.agent_cfg.name {
+            warn_restart_required("name");
+            new_cfg.name.clone_from(&self.agent_cfg.name);
+        }
+        if new_cfg.foreground != self.agent_cfg.foreground {
+            warn_restart_required("foreground");
+            new_cfg.foreground.clone_from(&self.agent_cfg.foreground);
+        }
+        if new_cfg.extensions != self.agent_cfg.extensions {
+            warn_restart_required("extensions.*");
+            new_cfg.extensions.clone_from(&self.agent_cfg.extensions);
+        }
+        if new_cfg.hitl.notifier != self.agent_cfg.hitl.notifier {
+            warn_restart_required("hitl.notifier");
+            new_cfg
+                .hitl
+                .notifier
+                .clone_from(&self.agent_cfg.hitl.notifier);
+        }
+        if new_cfg.workspace.root != self.agent_cfg.workspace.root {
+            warn_restart_required("workspace.root");
+            new_cfg
+                .workspace
+                .root
+                .clone_from(&self.agent_cfg.workspace.root);
+        }
+        if new_cfg.dashboard.bind != self.agent_cfg.dashboard.bind {
+            warn_restart_required("dashboard.bind");
+            new_cfg.dashboard.bind = self.agent_cfg.dashboard.bind;
+        }
+        if new_cfg.dashboard.port != self.agent_cfg.dashboard.port {
+            warn_restart_required("dashboard.port");
+            new_cfg.dashboard.port = self.agent_cfg.dashboard.port;
+        }
+        if new_cfg.dashboard.webhook_secret != self.agent_cfg.dashboard.webhook_secret {
+            warn_restart_required("dashboard.webhook_secret");
+            new_cfg
+                .dashboard
+                .webhook_secret
+                .clone_from(&self.agent_cfg.dashboard.webhook_secret);
+        }
+    }
+
+    fn apply_effective_config(
+        &mut self,
+        mut new_eff: EffectiveLoopConfig,
+        event: &str,
+    ) -> ApplyOutcome {
+        let mut outcome = ApplyOutcome {
+            tracker_applied: true,
+            runner_applied: true,
+        };
+
+        // Rebuild the tracker when state lists change so poll_candidates uses
+        // the new filters immediately. On rebuild failure, revert all tracker
+        // fields so the tracker instance and effective_cfg stay in sync.
+        let tracker_changed = new_eff.active_states != self.effective_cfg.active_states
+            || new_eff.terminal_states != self.effective_cfg.terminal_states
+            || new_eff.needs_human != self.effective_cfg.needs_human
+            || new_eff.tracker_kind != self.effective_cfg.tracker_kind
+            || new_eff.tracker_project_slug != self.effective_cfg.tracker_project_slug
+            || new_eff.tracker_endpoint != self.effective_cfg.tracker_endpoint
+            || new_eff.tracker_team != self.effective_cfg.tracker_team
+            || new_eff.tracker_assignee != self.effective_cfg.tracker_assignee
+            || new_eff.tracker_labels != self.effective_cfg.tracker_labels;
+
+        if tracker_changed {
+            let mut tracker_cfg = self.agent_cfg.tracker.clone();
+            tracker_cfg.use_ = new_eff.tracker_kind.clone();
+            tracker_cfg.active_states = new_eff.active_states.clone();
+            tracker_cfg.terminal_states = new_eff.terminal_states.clone();
+            tracker_cfg.project_slug = new_eff.tracker_project_slug.clone();
+            tracker_cfg.endpoint = Some(new_eff.tracker_endpoint.clone());
+            tracker_cfg.needs_human = new_eff.needs_human.clone();
+            tracker_cfg.team = new_eff.tracker_team.clone();
+            tracker_cfg.assignee = new_eff.tracker_assignee.clone();
+            tracker_cfg.label = (!new_eff.tracker_labels.is_empty())
+                .then(|| crate::config::StringOrVec::List(new_eff.tracker_labels.clone()));
+            match tracker::build_configured(
+                &self.runner_services,
+                &tracker_cfg,
+                self.paths.root.clone(),
+            ) {
+                Ok(t) => {
+                    self.tracker = t;
+                    logging::ev(
+                        "-",
+                        event,
+                        &format!(
+                            "tracker rebuilt: kind={} active={:?} terminal={:?}",
+                            new_eff.tracker_kind, new_eff.active_states, new_eff.terminal_states
+                        ),
+                    );
+                }
+                Err(e) => {
+                    outcome.tracker_applied = false;
+                    new_eff.active_states = self.effective_cfg.active_states.clone();
+                    new_eff.terminal_states = self.effective_cfg.terminal_states.clone();
+                    new_eff.needs_human = self.effective_cfg.needs_human.clone();
+                    new_eff.tracker_kind = self.effective_cfg.tracker_kind.clone();
+                    new_eff.tracker_project_slug = self.effective_cfg.tracker_project_slug.clone();
+                    new_eff.tracker_endpoint = self.effective_cfg.tracker_endpoint.clone();
+                    new_eff.tracker_team = self.effective_cfg.tracker_team.clone();
+                    new_eff.tracker_assignee = self.effective_cfg.tracker_assignee.clone();
+                    new_eff.tracker_labels = self.effective_cfg.tracker_labels.clone();
+                    logging::ev(
+                        "-",
+                        event,
+                        &format!("tracker rebuild failed (tracker config unchanged): {e:#}"),
+                    );
+                }
+            }
+        }
+
+        let runner_changed = new_eff.runner_kind != self.effective_cfg.runner_kind;
+        if runner_changed {
+            let runner_id = runner_service_id(&new_eff.runner_kind);
+            match self
+                .runner_services
+                .get_named::<dyn cap_runner::Runner>(runner_id)
+            {
+                Ok(runner) => {
+                    self.runner = runner;
+                    logging::ev("-", event, &format!("runner resolved: kind={runner_id}"));
+                }
+                Err(e) => {
+                    outcome.runner_applied = false;
+                    logging::ev(
+                        "-",
+                        event,
+                        &format!("runner resolve failed (runner config unchanged): {e:#}"),
+                    );
+                }
+            }
+        }
+
+        if let Err(e) = thinking::validate_thinking_for_runner(
+            runner_service_id(&new_eff.runner_kind),
+            new_eff.thinking.as_deref(),
+        ) {
+            outcome.runner_applied = false;
+            if new_eff.runner_kind != self.effective_cfg.runner_kind {
+                let prev_id = runner_service_id(&self.effective_cfg.runner_kind);
+                if let Ok(runner) = self
+                    .runner_services
+                    .get_named::<dyn cap_runner::Runner>(prev_id)
+                {
+                    self.runner = runner;
+                }
+            }
+            logging::ev(
+                "-",
+                event,
+                &format!("runner/thinking unchanged (invalid combo on reload): {e:#}"),
+            );
+        }
+
+        if !outcome.runner_applied {
+            revert_runner_fields(&mut new_eff, &self.effective_cfg);
+        }
+
+        self.effective_cfg = new_eff;
+        logging::ev(
+            "-",
+            event,
+            &format!(
+                "effective config updated: poll={}ms concurrent={} retries={}",
+                self.effective_cfg.poll_interval_ms,
+                self.effective_cfg.max_concurrent,
+                self.effective_cfg.max_retries,
+            ),
+        );
+        outcome
     }
 
     /// Step 2b. Drive turn boundaries for turn-capable, still-running slots.
@@ -2542,7 +2642,10 @@ mod tests {
     fn banner_uses_fixed_port_when_configured() {
         let bind = IpAddr::V4(Ipv4Addr::LOCALHOST);
         let msg = super::dashboard_banner(bind, 7878, None);
-        assert_eq!(msg, "agentropy running; dashboard on http://127.0.0.1:7878/");
+        assert_eq!(
+            msg,
+            "agentropy running; dashboard on http://127.0.0.1:7878/"
+        );
     }
 
     #[test]
@@ -2808,7 +2911,7 @@ mod tests {
                 command: "fake".to_string(),
                 model: None,
                 provider: None,
-            thinking: None,
+                thinking: None,
                 max_run_timeout_ms: 1000,
                 stall_timeout_ms: 300_000,
                 max_turns: 20,
@@ -2832,6 +2935,334 @@ mod tests {
             foreground: "logs".to_string(),
             extensions: Default::default(),
         }
+    }
+
+    fn write_agent_yaml(root: &Path, cfg: &AgentConfig) {
+        let label = match &cfg.tracker.label {
+            Some(crate::config::StringOrVec::Scalar(value)) => {
+                format!("  label: {value}\n")
+            }
+            Some(crate::config::StringOrVec::List(values)) => {
+                format!(
+                    "  label:\n{}",
+                    values
+                        .iter()
+                        .map(|value| format!("    - {value}\n"))
+                        .collect::<String>()
+                )
+            }
+            None => String::new(),
+        };
+        let tracker_config = cfg
+            .tracker
+            .config
+            .as_ref()
+            .map(|inner| format!("  config:\n    path: {}\n", inner.path.display()))
+            .unwrap_or_default();
+        let dashboard_secret = cfg
+            .dashboard
+            .webhook_secret
+            .as_ref()
+            .map(|secret| format!("  webhook_secret: {secret}\n"))
+            .unwrap_or_default();
+        let runner_model = cfg
+            .runner
+            .model
+            .as_ref()
+            .map(|model| format!("  model: {model}\n"))
+            .unwrap_or_default();
+        let runner_provider = cfg
+            .runner
+            .provider
+            .as_ref()
+            .map(|provider| format!("  provider: {provider}\n"))
+            .unwrap_or_default();
+        let runner_thinking = cfg
+            .runner
+            .thinking
+            .as_ref()
+            .map(|thinking| format!("  thinking: {thinking}\n"))
+            .unwrap_or_default();
+        let yaml = format!(
+            "\
+id: {}
+name: {}
+foreground: {}
+tracker:
+  use: {}
+{}  active_states:
+{}
+  terminal_states:
+{}
+{}runner:
+  use: {}
+  command: {}
+{}{}{}
+  max_run_timeout_ms: {}
+  stall_timeout_ms: {}
+  max_turns: {}
+orchestrator:
+  poll_interval_ms: {}
+  max_concurrent: {}
+  max_active_runs: {}
+  max_retries: {}
+  retry_backoff_ms: {}
+workspace:
+  root: {}
+dashboard:
+  bind: {}
+  port: {}
+{}",
+            cfg.id,
+            cfg.name,
+            cfg.foreground,
+            cfg.tracker.use_,
+            tracker_config,
+            cfg.tracker
+                .active_states
+                .iter()
+                .map(|state| format!("    - {state}\n"))
+                .collect::<String>(),
+            cfg.tracker
+                .terminal_states
+                .iter()
+                .map(|state| format!("    - {state}\n"))
+                .collect::<String>(),
+            label,
+            cfg.runner.use_,
+            cfg.runner.command,
+            runner_model,
+            runner_provider,
+            runner_thinking,
+            cfg.runner.max_run_timeout_ms,
+            cfg.runner.stall_timeout_ms,
+            cfg.runner.max_turns,
+            cfg.orchestrator.poll_interval_ms,
+            cfg.orchestrator.max_concurrent,
+            cfg.orchestrator.max_active_runs,
+            cfg.orchestrator.max_retries,
+            cfg.orchestrator.retry_backoff_ms,
+            cfg.workspace.root.display(),
+            cfg.dashboard.bind,
+            cfg.dashboard.port,
+            dashboard_secret,
+        );
+        std::fs::write(root.join("agent.yaml"), yaml).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tick_reloads_agent_yaml_live_orchestrator_fields() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+        let mut agent_cfg = test_agent_config();
+        write_agent_yaml(temp.path(), &agent_cfg);
+
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let (state, control_rx) = test_state(Arc::clone(&store));
+        let tracker = Arc::new(StaticTracker {
+            issue: issue("ISSUE-1", None, None),
+            parks: None,
+        });
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg.clone(),
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state,
+            control_rx,
+        );
+
+        agent_cfg.orchestrator.poll_interval_ms = 777;
+        agent_cfg.orchestrator.max_concurrent = 4;
+        write_agent_yaml(temp.path(), &agent_cfg);
+        orchestrator.agent_config_reloader.mark_stale_for_test();
+
+        orchestrator.tick().await;
+
+        assert_eq!(orchestrator.effective_cfg.poll_interval_ms, 777);
+        assert_eq!(orchestrator.effective_cfg.max_concurrent, 4);
+        assert_eq!(orchestrator.next_poll_delay(), Duration::from_millis(777));
+    }
+
+    #[tokio::test]
+    async fn malformed_agent_yaml_keeps_last_good_config() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+        let agent_cfg = test_agent_config();
+        write_agent_yaml(temp.path(), &agent_cfg);
+
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let (state, control_rx) = test_state(Arc::clone(&store));
+        let tracker = Arc::new(StaticTracker {
+            issue: issue("ISSUE-1", None, None),
+            parks: None,
+        });
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state,
+            control_rx,
+        );
+
+        std::fs::write(temp.path().join("agent.yaml"), "runner: [").unwrap();
+        orchestrator.agent_config_reloader.mark_stale_for_test();
+
+        orchestrator.tick().await;
+
+        assert_eq!(orchestrator.effective_cfg.poll_interval_ms, 100);
+        assert_eq!(orchestrator.next_poll_delay(), Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn unknown_runner_in_agent_yaml_reverts_runner_but_keeps_other_live_fields() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+        let mut agent_cfg = test_agent_config();
+        agent_cfg.runner.model = Some("old-model".to_string());
+        agent_cfg.runner.provider = Some("old-provider".to_string());
+        agent_cfg.runner.max_run_timeout_ms = 111;
+        agent_cfg.runner.stall_timeout_ms = 222;
+        agent_cfg.runner.max_turns = 3;
+        write_agent_yaml(temp.path(), &agent_cfg);
+
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let (state, control_rx) = test_state(Arc::clone(&store));
+        let tracker = Arc::new(StaticTracker {
+            issue: issue("ISSUE-1", None, None),
+            parks: None,
+        });
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg.clone(),
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state,
+            control_rx,
+        );
+
+        agent_cfg.runner.use_ = "missing-runner".to_string();
+        agent_cfg.runner.model = Some("new-model".to_string());
+        agent_cfg.runner.provider = Some("new-provider".to_string());
+        agent_cfg.runner.max_run_timeout_ms = 555;
+        agent_cfg.runner.stall_timeout_ms = 666;
+        agent_cfg.runner.max_turns = 7;
+        agent_cfg.orchestrator.poll_interval_ms = 444;
+        write_agent_yaml(temp.path(), &agent_cfg);
+        orchestrator.agent_config_reloader.mark_stale_for_test();
+
+        orchestrator.tick().await;
+
+        assert_eq!(orchestrator.effective_cfg.runner_kind, "fake");
+        assert_eq!(
+            orchestrator.effective_cfg.model.as_deref(),
+            Some("old-model")
+        );
+        assert_eq!(
+            orchestrator.effective_cfg.provider.as_deref(),
+            Some("old-provider")
+        );
+        assert_eq!(orchestrator.effective_cfg.max_run_timeout_ms, 111);
+        assert_eq!(orchestrator.effective_cfg.stall_timeout_ms, 222);
+        assert_eq!(orchestrator.effective_cfg.max_turns, 3);
+        assert_eq!(orchestrator.agent_cfg.runner.use_, "fake");
+        assert_eq!(orchestrator.effective_cfg.poll_interval_ms, 444);
+    }
+
+    #[tokio::test]
+    async fn boot_only_agent_yaml_fields_are_frozen() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+        let mut agent_cfg = test_agent_config();
+        write_agent_yaml(temp.path(), &agent_cfg);
+
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let (state, control_rx) = test_state(Arc::clone(&store));
+        let tracker = Arc::new(StaticTracker {
+            issue: issue("ISSUE-1", None, None),
+            parks: None,
+        });
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg.clone(),
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state,
+            control_rx,
+        );
+
+        agent_cfg.id = "new-id".to_string();
+        agent_cfg.name = "New Name".to_string();
+        agent_cfg.foreground = "orchestrator".to_string();
+        agent_cfg.workspace.root = "other-workspaces".into();
+        agent_cfg.dashboard.port = 9999;
+        agent_cfg.dashboard.webhook_secret = Some("rotated".to_string());
+        write_agent_yaml(temp.path(), &agent_cfg);
+        orchestrator.agent_config_reloader.mark_stale_for_test();
+
+        orchestrator.tick().await;
+
+        assert_eq!(orchestrator.agent_cfg.id, "test-agent");
+        assert_eq!(orchestrator.agent_cfg.name, "Test Agent");
+        assert_eq!(orchestrator.agent_cfg.foreground, "logs");
+        assert_eq!(
+            orchestrator.effective_cfg.workspace_root,
+            Path::new("workspaces")
+        );
+        assert_eq!(orchestrator.effective_cfg.dashboard_port, 7878);
+        assert_eq!(orchestrator.effective_cfg.webhook_secret, None);
+    }
+
+    #[tokio::test]
+    async fn workflow_frontmatter_still_overrides_reloaded_agent_yaml() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("WORKFLOW.md"),
+            "---\npolling:\n  interval_ms: 222\n---\nDo {{ issue.title }}",
+        )
+        .unwrap();
+        let mut agent_cfg = test_agent_config();
+        write_agent_yaml(temp.path(), &agent_cfg);
+
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let (state, control_rx) = test_state(Arc::clone(&store));
+        let tracker = Arc::new(StaticTracker {
+            issue: issue("ISSUE-1", None, None),
+            parks: None,
+        });
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &prompt.snapshot().frontmatter);
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg.clone(),
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state,
+            control_rx,
+        );
+
+        agent_cfg.orchestrator.poll_interval_ms = 999;
+        write_agent_yaml(temp.path(), &agent_cfg);
+        orchestrator.agent_config_reloader.mark_stale_for_test();
+
+        orchestrator.tick().await;
+
+        assert_eq!(orchestrator.agent_cfg.orchestrator.poll_interval_ms, 999);
+        assert_eq!(orchestrator.effective_cfg.poll_interval_ms, 222);
     }
 
     #[tokio::test]
@@ -3658,7 +4089,7 @@ mod tests {
                 command,
                 model: None,
                 provider: None,
-            thinking: None,
+                thinking: None,
                 max_run_timeout_ms: 30_000,
                 stall_timeout_ms: 300_000,
                 max_turns: 20,
@@ -4133,9 +4564,13 @@ mod tests {
         let tracker = Arc::new(MutableTracker::new(active_issue.clone()));
         let agent_cfg = test_agent_config();
         let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
-        let (mut orch, state, mut harness, store, _run_id) =
-            turn_loop_fixture(&temp, Arc::clone(&tracker) as Arc<dyn Tracker>, &active_issue, effective_cfg)
-                .await;
+        let (mut orch, state, mut harness, store, _run_id) = turn_loop_fixture(
+            &temp,
+            Arc::clone(&tracker) as Arc<dyn Tracker>,
+            &active_issue,
+            effective_cfg,
+        )
+        .await;
 
         // Issue moved to terminal before the boundary is processed.
         tracker.set_state("done");
@@ -4191,7 +4626,10 @@ mod tests {
         harness.ended_tx.send(crate::runner::TurnEnded).unwrap();
         tokio::task::yield_now().await;
         orch.poll_turns();
-        assert!(matches!(harness.recv_decision().await, TurnDecision::Finish));
+        assert!(matches!(
+            harness.recv_decision().await,
+            TurnDecision::Finish
+        ));
         // Supervisor resolves Normal; issue is still active -> existing
         // continuation-retry path engages (the backstop).
         for _ in 0..100 {
@@ -4203,7 +4641,11 @@ mod tests {
         orch.collect_finished().await;
 
         assert!(orch.slots.is_empty());
-        assert_eq!(orch.retries.len(), 1, "still-active normal exit -> continuation retry");
+        assert_eq!(
+            orch.retries.len(),
+            1,
+            "still-active normal exit -> continuation retry"
+        );
         assert!(orch.retries[0].continuation);
     }
 
