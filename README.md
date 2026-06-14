@@ -601,6 +601,69 @@ agentropy build --dir ./my-agent --vendor --offline   # air-gapped build
 `.agentropy/` is the composition crate for this agent. Commit it alongside
 `agent.yaml` and `WORKFLOW.md`; it pins which extensions the agent links.
 
+### Worked example: a `worker` agent
+
+A self-contained agent at `~/agents/worker` using the Linear tracker, the
+Codex runner, a chat-enabled TUI, and one agent-local extension.
+
+Prerequisites: `cargo`/`rustc` on PATH, plus the `cargo-agentropy` helper
+(built from a repo checkout with `cargo build --release`, then put
+`cargo-agentropy` on PATH).
+
+1. Write `~/agents/worker/agent.yaml` — the `use:` / `foreground:` keys
+   decide which stock extensions get linked:
+
+   ```yaml
+   id: worker
+   name: "Worker"
+
+   tracker:
+     use: linear            # links tracker-linear
+     project_slug: abc123   # Linear project slugId
+   runner:
+     use: codex             # links runner-codex
+   foreground: tui          # links tui + frontend-log + chat-pi, and chat-codex
+                            # (TUI chat backend follows runner.use)
+   ```
+
+   The Linear tracker needs `LINEAR_API_KEY` in `~/agents/worker/.env`.
+
+2. Scaffold the prompt and one local extension (run from inside the folder):
+
+   ```bash
+   cd ~/agents/worker
+   agentropy init-workflow --dir .                       # writes WORKFLOW.md
+   cargo agentropy new standup-poster --kind background  # → extensions/standup-poster/
+   ```
+
+   The new crate's `Cargo.toml` carries the discovery marker
+   `[package.metadata.agentropy] factory = "standup_poster::extension"` and a
+   `pub fn extension() -> Box<dyn Extension>`. (The scaffold points `host-api`
+   at the repo-relative `../../crates/host-api`; for a folder outside the
+   repo, repoint it to the same pinned `git`/`rev` the composer uses for stock
+   crates — visible in `.agentropy/Cargo.toml` after the next step.)
+
+3. Bootstrap, build, run:
+
+   ```bash
+   agentropy init-build --dir .   # generates .agentropy/ (commit it)
+   agentropy build --dir .        # → ~/agents/worker/bin/agentropy
+   ./bin/agentropy run
+   ```
+
+**Where each extension comes from in the final binary:**
+
+| Extension | Source | How it's linked |
+|---|---|---|
+| `orchestrator`, `tracker-linear`, `runner-codex`, `chat-codex`, `chat-pi`, `tui`, `frontend-log` | the agentropy repo | pinned `git = "…", rev = "…"` dep in `.agentropy/Cargo.toml`, feature-gated — only the subset `agent.yaml` selects is compiled in |
+| `standup-poster` | the agent's own `extensions/standup-poster/` | relative `path = "../extensions/standup-poster"`, auto-discovered via its `[package.metadata.agentropy] factory` marker |
+
+`orchestrator` and `tracker-linear` are always linked; the rest of the stock
+subset follows `tracker.use` / `runner.use` / `foreground`. The composer
+regenerates both the `[dependencies]` and the `plugins![…]` list in
+`.agentropy/` on every `init-build` / `build` — stock entries
+`#[cfg(feature = …)]`-gated, local entries always present, never hand-edited.
+
 ### Local extension crates
 
 Drop an extension crate under the agent's `extensions/` folder and reference it
@@ -634,10 +697,14 @@ agentropy lock-refresh --dir ./my-agent
 
 ### Portability
 
-The built binary is statically linked (musl on Linux, universal on macOS).
-Copy `bin/agentropy` to any compatible host — no Rust toolchain needed at
-runtime. The toolchain is only required when rebuilding (i.e., for
-`agentropy build` / `agentropy self rebuild`).
+`agentropy build` runs `cargo build --release` against the host's native
+target — the result is a dynamically-linked binary for that platform/arch.
+`bin/agentropy` can be copied to another host only if that host is
+ABI-compatible (same OS, arch, and libc). It is not a portable static binary.
+
+A Rust toolchain is not needed merely to *run* `bin/agentropy`, but is
+required to rebuild or self-update (`agentropy build` /
+`agentropy self rebuild`).
 
 For truly air-gapped hosts, run `init-build --vendor` once on a connected
 machine, commit the `vendor/` tree inside `.agentropy/`, then build offline
