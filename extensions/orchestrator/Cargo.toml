@@ -30,7 +30,6 @@ tempfile = "3"
 tracker-files = { path = "../tracker-files" }
 tracker-linear = { path = "../tracker-linear" }
 runner-pi = { path = "../runner-pi" }
-runner-claude = { path = "../runner-claude" }
 runner-codex = { path = "../runner-codex" }
 runner-cli = { path = "../runner-cli" }
 runner-fake = { path = "../runner-fake" }

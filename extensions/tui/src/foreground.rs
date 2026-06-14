@@ -663,7 +663,7 @@ done"#;
 
         let mut preamble_pending = true;
         submit_turn(
-            "claude", // resolved id without a registered backend
+            "fake", // resolved id without a registered backend
             &config,
             &ctx,
             &chat_tx,

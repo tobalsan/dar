@@ -305,7 +305,7 @@ impl AgentConfig {
 mod tests {
     use super::*;
 
-    const BASE: &str = "id: a\nname: A\ntracker:\n  use: files\n  config:\n    path: ./issues\n  active_states: [todo]\n  terminal_states: [done]\nrunner:\n  use: claude-code\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
+    const BASE: &str = "id: a\nname: A\ntracker:\n  use: files\n  config:\n    path: ./issues\n  active_states: [todo]\n  terminal_states: [done]\nrunner:\n  use: fake\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
 
     #[test]
     fn extension_configs_extracts_per_extension_section() {
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn tracker_dimensions_parse_with_scalar_label() {
-        let raw = "id: a\nname: A\ntracker:\n  use: linear\n  active_states: [todo]\n  terminal_states: [done]\n  team: ALG\n  assignee: \"@thinh\"\n  label: bug\nrunner:\n  use: claude-code\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
+        let raw = "id: a\nname: A\ntracker:\n  use: linear\n  active_states: [todo]\n  terminal_states: [done]\n  team: ALG\n  assignee: \"@thinh\"\n  label: bug\nrunner:\n  use: fake\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
         let cfg: AgentConfig = serde_yaml::from_str(raw).unwrap();
         assert_eq!(cfg.tracker.team.as_deref(), Some("ALG"));
         assert_eq!(cfg.tracker.assignee.as_deref(), Some("@thinh"));
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn tracker_label_parses_as_list() {
-        let raw = "id: a\nname: A\ntracker:\n  use: linear\n  active_states: [todo]\n  terminal_states: [done]\n  label: [bug, urgent]\nrunner:\n  use: claude-code\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
+        let raw = "id: a\nname: A\ntracker:\n  use: linear\n  active_states: [todo]\n  terminal_states: [done]\n  label: [bug, urgent]\nrunner:\n  use: fake\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
         let cfg: AgentConfig = serde_yaml::from_str(raw).unwrap();
         assert_eq!(cfg.tracker.labels(), vec!["bug", "urgent"]);
     }

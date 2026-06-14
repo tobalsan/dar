@@ -24,7 +24,6 @@ dashboard = { path = "../extensions/dashboard" }
 tracker-files = { path = "../extensions/tracker-files" }
 tracker-linear = { path = "../extensions/tracker-linear" }
 runner-pi = { path = "../extensions/runner-pi" }
-runner-claude = { path = "../extensions/runner-claude" }
 runner-codex = { path = "../extensions/runner-codex" }
 runner-cli = { path = "../extensions/runner-cli" }
 runner-fake = { path = "../extensions/runner-fake" }

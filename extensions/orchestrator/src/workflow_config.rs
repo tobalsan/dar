@@ -561,8 +561,8 @@ mod tests {
                 label: None,
             },
             runner: RunnerConfig {
-                use_: "claude-code".into(),
-                command: "claude".into(),
+                use_: "fake".into(),
+                command: "fake".into(),
                 model: None,
                 provider: None,
             thinking: None,
@@ -648,9 +648,9 @@ workspace:
   reuse: false
   cleanup_on_terminal: true
 agent:
-  sdk: claude-code
-  command: claude
-  model: claude-opus-4-6
+  sdk: fake
+  command: fake
+  model: fake-model
   max_run_timeout_ms: 900000
 hooks:
   after_create: ./after-create.sh
@@ -683,10 +683,10 @@ body"#;
             fm.workspace.as_ref().unwrap().cleanup_on_terminal,
             Some(true)
         );
-        assert_eq!(fm.agent.as_ref().unwrap().sdk, Some("claude-code".into()));
+        assert_eq!(fm.agent.as_ref().unwrap().sdk, Some("fake".into()));
         assert_eq!(
             fm.agent.as_ref().unwrap().model,
-            Some("claude-opus-4-6".into())
+            Some("fake-model".into())
         );
         assert_eq!(
             fm.hooks.as_ref().unwrap().after_create,
@@ -730,8 +730,8 @@ body"#;
         assert_eq!(eff.needs_human, Some("Needs Human".into()));
         assert_eq!(eff.poll_interval_ms, 10_000);
         assert_eq!(eff.poll_jitter_ms, 0);
-        assert_eq!(eff.runner_kind, "claude-code");
-        assert_eq!(eff.runner_command, "claude");
+        assert_eq!(eff.runner_kind, "fake");
+        assert_eq!(eff.runner_command, "fake");
         assert_eq!(eff.model, None);
         assert!(eff.allow_stale);
         assert!(eff.workspace_reuse);
@@ -831,7 +831,7 @@ body"#;
     fn unknown_runner_without_command_falls_back_to_base_command() {
         // WORKFLOW.md names an unknown runner but omits `command:`.
         // The base agent.yaml command should be used, not "pi".
-        let base = base_config(); // base.runner.command = "claude"
+        let base = base_config(); // base.runner.command = "fake"
         let raw = "---\nagent:\n  sdk: gemini-code\n---";
         let snap = parse_workflow_md(raw).unwrap();
         let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
@@ -853,7 +853,7 @@ body"#;
     #[test]
     fn merge_runner_kind_beats_sdk_and_turn_timeout_alias_wins() {
         let base = base_config();
-        let raw = "---\nagent:\n  sdk: claude\n  kind: codex\n  turn_timeout_ms: 2500\n  max_run_timeout_ms: 9000\n---";
+        let raw = "---\nagent:\n  sdk: fake\n  kind: codex\n  turn_timeout_ms: 2500\n  max_run_timeout_ms: 9000\n---";
         let snap = parse_workflow_md(raw).unwrap();
         let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
         assert_eq!(eff.runner_kind, "codex");
@@ -955,10 +955,10 @@ body"#;
     #[test]
     fn agent_yaml_model_falls_back_when_workflow_absent() {
         let mut base = base_config();
-        base.runner.model = Some("claude-opus-4-6".into());
+        base.runner.model = Some("fake-model".into());
         let wf = WorkflowFrontmatter::default();
         let eff = EffectiveLoopConfig::merge(&base, &wf);
-        assert_eq!(eff.model, Some("claude-opus-4-6".into()));
+        assert_eq!(eff.model, Some("fake-model".into()));
     }
 
     #[test]

@@ -406,7 +406,7 @@ mod tests {
         snapshot.agent.id = "demo".to_string();
         snapshot.agent.folder = "/tmp/demo".to_string();
         snapshot.agent.tracker = "files".to_string();
-        snapshot.agent.runner = "claude".to_string();
+        snapshot.agent.runner = "fake".to_string();
         for i in 0..12 {
             snapshot.active_runs.push(ActiveRun {
                 run_id: format!("run-{i}"),

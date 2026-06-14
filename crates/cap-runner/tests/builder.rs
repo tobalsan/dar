@@ -34,8 +34,8 @@ fn build_params<'a>(
     last_event_at: &Arc<Mutex<DateTime<Utc>>>,
 ) -> cap_runner::SpawnParamsBuilder<'a> {
     SpawnParams::builder(
-        "claude",
-        "claude",
+        "fake",
+        "fake",
         Path::new("/agent/workspaces/ISSUE-1"),
         Path::new("/agent/workspaces"),
         Path::new("/agent"),
@@ -62,8 +62,8 @@ fn spawn_params_builder_round_trips_all_fields() {
         .expose_linear_graphql_tool(true)
         .build();
 
-    assert_eq!(params.command, "claude");
-    assert_eq!(params.runner_kind, "claude");
+    assert_eq!(params.command, "fake");
+    assert_eq!(params.runner_kind, "fake");
     assert_eq!(params.model.as_deref(), Some("model-a"));
     assert_eq!(params.provider.as_deref(), Some("anthropic"));
     assert_eq!(params.thinking.as_deref(), Some("high"));

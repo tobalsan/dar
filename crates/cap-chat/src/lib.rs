@@ -1,5 +1,5 @@
 //! Chat capability contract: interactive operator chat sessions backed by an
-//! agent CLI (pi, claude, ...). Backends register `dyn ChatBackend` in the
+//! agent CLI (pi, codex, ...). Backends register `dyn ChatBackend` in the
 //! typed service registry under their runner id (e.g. `"pi"`); the foreground
 //! resolves one and drives turns through `ChatSession`.
 

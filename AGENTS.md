@@ -15,7 +15,7 @@ cargo test --release backoff_grows_then_caps   # a single test by name
 ./target/release/agentropy run   --dir ./example-agent    # long-running loop + dashboard on :7878
 ```
 
-`run` needs the `claude` CLI installed and authenticated on the host (not bundled). It dispatches real Claude children — running against `example-agent` spends API. `example-agent/` is the test fixture; reset between runs by setting `issues/*.md` `state:` back to `todo`, emptying `workspaces/` (keep `.gitkeep`), and deleting `data/store.db` (persisted run history) plus `logs/agent.log`.
+The runner backend named by `agent.yaml` `runner.use` must be installed and authenticated on the host (not bundled); `example-agent` ships the `fake` runner so it has no host dependency. `example-agent/` is the test fixture; reset between runs by setting `issues/*.md` `state:` back to `todo`, emptying `workspaces/` (keep `.gitkeep`), and deleting `data/store.db` (persisted run history) plus `logs/agent.log`.
 
 ## Architecture
 
@@ -23,7 +23,7 @@ cargo test --release backoff_grows_then_caps   # a single test by name
 
 Domain-free host (`crates/agentropy-host`) + contract crates (`crates/host-api`, `cap-tracker`, `cap-runner`, `cap-chat`, `orchestrator-api`, `runner-core`); every feature is one crate under `extensions/`. The composition root is `dist/`: the `plugins![]` list in `dist/src/main.rs` is the only place naming the shipped extension mix — adding/removing an extension = one list line + a `dist/Cargo.toml` dependency, then rebuild. Extensions import `host-api` (plus at most one cap/api crate) and read zero host internals. Integration surfaces:
 
-- **Typed service registry** — named services, e.g. runners register `dyn Runner` under `"pi"`/`"claude"`/`"claude-code"`/`"codex"`/`"cli"`/`"fake"`, trackers register `dyn TrackerFactory` under `"files"`/`"linear"`, chat backends register `dyn ChatBackend` under `"pi"` (id + Rust type form the key, so it coexists with the runner's `"pi"`). Linked ≠ enabled: `agent.yaml` `tracker.use` / `runner.use` picks which registered service actually runs.
+- **Typed service registry** — named services, e.g. runners register `dyn Runner` under `"pi"`/`"codex"`/`"cli"`/`"fake"`, trackers register `dyn TrackerFactory` under `"files"`/`"linear"`, chat backends register `dyn ChatBackend` under `"pi"` (id + Rust type form the key, so it coexists with the runner's `"pi"`). Linked ≠ enabled: `agent.yaml` `tracker.use` / `runner.use` picks which registered service actually runs.
 - **Typed event bus** — broadcast + retained topics. Orchestration payloads live in `crates/orchestrator-api`: `RunSnapshot` (retained), `ControlMsg`, `RunRequested`, `DispatchRequested`. Semantics documented in `crates/host-api/src/lib.rs`.
 - **Foreground slot** — at most one extension owns the terminal; selected per agent via top-level `foreground:` key in `agent.yaml` (default `"logs"`); unknown id → clean boot error, exit 1. Per-extension config: top-level `extensions:` map in `agent.yaml`, keyed by extension id, delivered via `ConfigStore`.
 
@@ -51,10 +51,6 @@ Kill `agentropy` and rerun → it starts cold and trusts whatever the issue file
 ### Single-writer discipline (`extensions/orchestrator/src/state.rs`)
 
 The **orchestrator is the sole mutator** of run state (including the `paused` flag). The dashboard extension only publishes `ControlMsg` (Stop/Pause/Resume) on the bus `CONTROL_TOPIC` (the orchestrator bridges it to its internal `control_tx`) and renders from the retained `RunSnapshot`. Stop/Pause/Resume mutate run state only, never issue state.
-
-### Runner permission flags (`extensions/runner-claude/src/lib.rs`)
-
-Spawns `claude -p --permission-mode bypassPermissions --add-dir <agent-folder>` with the per-issue workspace as cwd, prompt piped to stdin. These flags are deliberate (resolves a PRD open question): headless runs have no human to answer permission prompts, and `WORKFLOW.md` requires the child to edit its issue file at `../../issues/ISSUE-N.md` — outside the workspace cwd, blocked by Claude's default OS sandbox. **Do NOT use `--dangerously-skip-permissions`** — it hangs headless on a first-use acceptance gate (no TTY).
 
 ### Templating: two engines, both strict
 

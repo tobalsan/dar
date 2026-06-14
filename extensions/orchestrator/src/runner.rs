@@ -1,8 +1,8 @@
 //! Runner contract re-exports plus the glue impls that bind this crate's
 //! event ring and SQLite store to the runner event traits.
 //!
-//! The five runner backends now live in their own extension crates
-//! (`extensions/runner-{pi,claude,codex,cli,fake}`), each registering itself
+//! The runner backends now live in their own extension crates
+//! (`extensions/runner-{pi,codex,cli,fake}`), each registering itself
 //! as a typed `dyn cap_runner::Runner` service. Shared spawn/supervision logic
 //! lives in `runner-core`.
 

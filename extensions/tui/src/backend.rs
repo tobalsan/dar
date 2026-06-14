@@ -129,8 +129,8 @@ mod tests {
         );
         // Even an unregistered override is taken as-is; the open reports it.
         assert_eq!(
-            resolve(Some("claude"), &services, &bus),
-            backend("claude")
+            resolve(Some("fake"), &services, &bus),
+            backend("fake")
         );
     }
 
@@ -169,13 +169,13 @@ mod tests {
     #[test]
     fn incompatible_runner_falls_back_to_pi_with_a_notice() {
         let services = registry(&["pi"]);
-        let bus = bus_with_snapshot(7, "claude-code");
+        let bus = bus_with_snapshot(7, "fake");
         match resolve(None, &services, &bus) {
             Resolution::Backend { id, notice: Some(notice) } => {
                 assert_eq!(id, "pi");
                 assert_eq!(
                     notice,
-                    "runner \"claude-code\" has no interactive chat backend; \
+                    "runner \"fake\" has no interactive chat backend; \
                      chatting via pi"
                 );
             }
@@ -192,7 +192,7 @@ mod tests {
             Resolution::Disabled
         );
         // Followable runner named, but neither it nor pi is registered.
-        let bus = bus_with_snapshot(4, "claude-code");
+        let bus = bus_with_snapshot(4, "fake");
         assert_eq!(resolve(None, &services, &bus), Resolution::Disabled);
     }
 }

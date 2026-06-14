@@ -53,10 +53,6 @@ const STOCK_EXTENSIONS: &[StockExtension] = &[
         factory: "runner_pi::RunnerPiExtension",
     },
     StockExtension {
-        package: "runner-claude",
-        factory: "runner_claude::RunnerClaudeExtension",
-    },
-    StockExtension {
         package: "runner-codex",
         factory: "runner_codex::RunnerCodexExtension",
     },
@@ -209,7 +205,6 @@ fn tracker_package(use_: &str) -> Result<&'static str> {
 fn runner_package(use_: &str) -> Result<&'static str> {
     match use_ {
         "pi" => Ok("runner-pi"),
-        "claude" | "claude-code" => Ok("runner-claude"),
         "codex" => Ok("runner-codex"),
         "opencode" => Ok("runner-opencode"),
         "cli" => Ok("runner-cli"),
@@ -245,7 +240,7 @@ fn tui_chat_package(selection: &AgentSelection) -> Result<Option<&'static str>> 
         "pi" => Ok(Some("chat-pi")),
         "codex" => Ok(Some("chat-codex")),
         "opencode" => Ok(Some("chat-opencode")),
-        "claude" | "claude-code" | "cli" | "fake" => Ok(None),
+        "cli" | "fake" => Ok(None),
         other => bail!("unknown tui chat backend {other:?}"),
     }
 }
@@ -722,7 +717,7 @@ mod tests {
     fn init_build_feature_gates_stock_extensions_from_agent_yaml() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
-        write_agent_yaml(agent, "files", "claude-code", "logs", "");
+        write_agent_yaml(agent, "files", "fake", "logs", "");
 
         init_build(agent).unwrap();
 
@@ -732,7 +727,7 @@ mod tests {
         assert!(manifest.contains("optional = true"));
         assert!(manifest.contains("[features]\ndefault = ["));
         assert!(manifest.contains("stock-tracker-files = [\"dep:tracker-files\"]"));
-        assert!(manifest.contains("stock-runner-claude = [\"dep:runner-claude\"]"));
+        assert!(manifest.contains("stock-runner-fake = [\"dep:runner-fake\"]"));
         assert!(manifest.contains("stock-orchestrator = [\"dep:orchestrator\"]"));
         assert!(manifest.contains("stock-frontend-log = [\"dep:frontend-log\"]"));
         assert!(manifest.contains("tracker-linear = { git = "));
@@ -746,7 +741,7 @@ mod tests {
     fn init_build_includes_tui_provider_closure() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
-        write_agent_yaml(agent, "files", "claude-code", "tui", "");
+        write_agent_yaml(agent, "files", "fake", "tui", "");
 
         init_build(agent).unwrap();
 
@@ -788,7 +783,7 @@ mod tests {
         write_agent_yaml(
             agent,
             "files",
-            "claude-code",
+            "fake",
             "tui",
             r#"
 extensions:
@@ -804,7 +799,7 @@ extensions:
         let source = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
         assert!(manifest.contains("chat-opencode = { git = "));
         assert!(manifest.contains("chat-pi = { git = "));
-        assert!(manifest.contains("runner-claude = { git = "));
+        assert!(manifest.contains("runner-fake = { git = "));
         assert!(manifest.contains("stock-chat-opencode = [\"dep:chat-opencode\"]"));
         assert!(source.contains("chat_opencode::ChatOpenCodeExtension"));
         assert!(source.contains("chat_pi::ChatPiExtension"));
@@ -817,7 +812,7 @@ extensions:
         write_agent_yaml(
             agent,
             "files",
-            "claude-code",
+            "fake",
             "tui",
             r#"
 extensions:

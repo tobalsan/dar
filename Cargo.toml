@@ -17,7 +17,6 @@ members = [
     "extensions/example",
     "extensions/frontend-log",
     "extensions/orchestrator",
-    "extensions/runner-claude",
     "extensions/runner-cli",
     "extensions/runner-codex",
     "extensions/runner-fake",

@@ -12,7 +12,6 @@
 //! | ------------------ | ---------------------------------- | --------------------------------------------- |
 //! | `pi`               | `--thinking <level>`               | none (→ pi's `off`), minimal, low, medium, high, xhigh |
 //! | `codex`            | `-c model_reasoning_effort=<level>`| minimal, low, medium, high, xhigh             |
-//! | `claude`/`claude-code` | `--effort <level>`             | low, medium, high, xhigh                      |
 //! | `opencode`         | reasoningEffort (deferred, ALG-226)| —                                             |
 //! | `cli` / `fake`     | ignored                            | —                                             |
 //!
@@ -28,16 +27,12 @@ const PI_LEVELS: [&str; 6] = ["none", "minimal", "low", "medium", "high", "xhigh
 /// Levels codex accepts via `-c model_reasoning_effort=<level>`.
 const CODEX_LEVELS: [&str; 5] = ["minimal", "low", "medium", "high", "xhigh"];
 
-/// Levels claude accepts via `--effort <level>`.
-const CLAUDE_LEVELS: [&str; 4] = ["low", "medium", "high", "xhigh"];
-
 /// Allowed levels for a resolved runner kind, or `None` when the runner ignores
 /// the setting entirely (`cli`, `fake`, and any unknown runner).
 fn allowed_levels(runner_kind: &str) -> Option<&'static [&'static str]> {
     match runner_kind {
         "pi" | "" => Some(&PI_LEVELS),
         "codex" => Some(&CODEX_LEVELS),
-        "claude" | "claude-code" => Some(&CLAUDE_LEVELS),
         // `opencode` mapping deferred until ALG-226 lands; treat as ignore for now.
         _ => None,
     }
@@ -99,7 +94,7 @@ mod tests {
 
     #[test]
     fn absent_level_is_ok_for_every_runner() {
-        for runner in ["pi", "codex", "claude", "claude-code", "cli", "fake", "opencode"] {
+        for runner in ["pi", "codex", "cli", "fake", "opencode"] {
             assert!(validate_thinking_for_runner(runner, None).is_ok());
             assert!(validate_thinking_for_runner(runner, Some("  ")).is_ok());
         }
@@ -127,19 +122,6 @@ mod tests {
     fn codex_accepts_supported_levels() {
         for level in ["minimal", "low", "medium", "high", "xhigh"] {
             assert!(validate_thinking_for_runner("codex", Some(level)).is_ok());
-        }
-    }
-
-    #[test]
-    fn claude_rejects_minimal_and_none() {
-        for bad in ["none", "minimal"] {
-            let err = validate_thinking_for_runner("claude", Some(bad)).unwrap_err();
-            assert!(err.to_string().contains("low, medium, high, xhigh"));
-        }
-        for runner in ["claude", "claude-code"] {
-            for level in ["low", "medium", "high", "xhigh"] {
-                assert!(validate_thinking_for_runner(runner, Some(level)).is_ok());
-            }
         }
     }
 

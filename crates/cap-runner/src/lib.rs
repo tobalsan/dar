@@ -73,7 +73,7 @@ pub struct LogRow {
 #[non_exhaustive]
 pub struct SpawnParams<'a> {
     pub command: &'a str,
-    /// Runner kind (e.g. "pi", "claude"). Selects which backend is used.
+    /// Runner kind (e.g. "pi", "codex"). Selects which backend is used.
     pub runner_kind: &'a str,
     /// Model override; passed to runners that support a model flag.
     pub model: Option<String>,
@@ -81,7 +81,7 @@ pub struct SpawnParams<'a> {
     pub provider: Option<String>,
     /// Canonical reasoning level on the scale `none | minimal | low | medium |
     /// high | xhigh`. Forwarded per-runner: pi `--thinking` (none→off), codex
-    /// `-c model_reasoning_effort=<level>`, claude `--effort <level>`. Already
+    /// `-c model_reasoning_effort=<level>`. Already
     /// validated against the runner's supported subset before dispatch.
     pub thinking: Option<String>,
     pub workspace: &'a Path,
