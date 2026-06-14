@@ -174,7 +174,14 @@ impl Registry {
                 let _ = std::fs::remove_file(&path);
             }
         }
-        out.sort_by(|a, b| a.id.cmp(&b.id).then(a.folder.cmp(&b.folder)));
+        // Order of appearance: oldest started_at first; id/folder break ties
+        // (started_at is second-granular, so same-second starts stay stable).
+        out.sort_by(|a, b| {
+            a.started_at
+                .cmp(&b.started_at)
+                .then(a.id.cmp(&b.id))
+                .then(a.folder.cmp(&b.folder))
+        });
         out
     }
 }
