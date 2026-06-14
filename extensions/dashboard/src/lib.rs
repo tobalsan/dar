@@ -109,14 +109,20 @@ async fn index(State(api): State<BusApiState>) -> Response {
     }
 }
 
-async fn content(State(api): State<BusApiState>) -> Response {
+#[derive(Deserialize)]
+struct ContentQuery {
+    page: Option<usize>,
+}
+
+async fn content(State(api): State<BusApiState>, Query(q): Query<ContentQuery>) -> Response {
     let Some(bus) = api.bus.get() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "dashboard bus unavailable").into_response();
     };
     let snapshot = bus
         .read_retained::<RunSnapshot>(RUN_SNAPSHOT_TOPIC)
         .unwrap_or_else(|_| RunSnapshot::empty());
-    match view::ContentTemplate::from_snapshot(snapshot).render() {
+    let page = q.page.unwrap_or(1).max(1);
+    match view::ContentTemplate::from_snapshot_page(snapshot, page).render() {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
             tracing::error!("dashboard render failed: {e}");

@@ -50,6 +50,11 @@
     .live { background: rgba(122,162,247,.15); color: var(--info); }
     .run-row.clickable { cursor: pointer; }
     .run-row.clickable:hover { border-color: var(--accent); }
+    .pager { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .75rem; justify-content: center; }
+    .page-btn { min-width: 2rem; padding: .3rem .5rem; font-size: .8rem; }
+    .page-btn.current { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+    .page-btn:disabled { opacity: .4; cursor: default; }
+    .page-btn:disabled:hover { border-color: var(--border); }
     #run-detail:empty { display: none; }
     .drawer {
       position: fixed; top: 0; right: 0; bottom: 0; width: min(34rem, 100%);
