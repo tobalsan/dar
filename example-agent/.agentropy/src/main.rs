@@ -2,20 +2,19 @@
 #[tokio::main(worker_threads = 2)]
 async fn main() {
     agentropy_cli::run(host_api::plugins![
-        frontend_log::FrontendLogExtension,
-        tracker_files::TrackerFilesExtension,
-        tracker_linear::TrackerLinearExtension,
-        orchestrator::OrchestratorExtension::default(),
-        dashboard::DashboardExtension::default(),
-        runner_pi::RunnerPiExtension,
-        runner_claude::RunnerClaudeExtension,
-        runner_codex::RunnerCodexExtension,
-        runner_opencode::RunnerOpenCodeExtension,
-        runner_cli::RunnerCliExtension,
-        runner_fake::RunnerFakeExtension,
-        chat_opencode::ChatOpenCodeExtension,
+        #[cfg(feature = "stock-chat-pi")]
         chat_pi::ChatPiExtension,
-        chat_codex::ChatCodexExtension,
+        #[cfg(feature = "stock-frontend-log")]
+        frontend_log::FrontendLogExtension,
+        #[cfg(feature = "stock-orchestrator")]
+        orchestrator::OrchestratorExtension::default(),
+        #[cfg(feature = "stock-runner-claude")]
+        runner_claude::RunnerClaudeExtension,
+        #[cfg(feature = "stock-tracker-files")]
+        tracker_files::TrackerFilesExtension,
+        #[cfg(feature = "stock-tracker-linear")]
+        tracker_linear::TrackerLinearExtension,
+        #[cfg(feature = "stock-tui")]
         tui::TuiExtension,
     ])
     .await

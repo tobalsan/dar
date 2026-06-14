@@ -25,6 +25,9 @@ pub enum Command {
     Build(BuildArgs),
     /// Refresh the per-agent Cargo.lock.
     LockRefresh(DirArgs),
+    /// Manage this agent binary.
+    #[command(name = "self")]
+    Self_(SelfArgs),
     /// Scaffold the default WORKFLOW.md prompt in the agent folder.
     InitWorkflow(InitWorkflowArgs),
     /// Export the configured Linear project and issues under the data dir.
@@ -63,6 +66,18 @@ pub struct DirArgs {
     /// Agent folder (defaults to the current directory).
     #[arg(long)]
     pub dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct SelfArgs {
+    #[command(subcommand)]
+    pub command: SelfCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SelfCommand {
+    /// Rebuild, doctor, swap, and restart this agent binary.
+    Rebuild(BuildArgs),
 }
 
 #[derive(Debug, Args)]

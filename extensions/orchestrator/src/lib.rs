@@ -39,7 +39,7 @@ use tokio::sync::watch;
 
 use crate::config::AgentConfig;
 use crate::domain::Issue;
-use crate::hitl::{HitlNotification, HitlNotify, NoopHitlNotifier};
+use crate::hitl::{HitlNotification, HitlNotify};
 use crate::paths::{issue_workspace, issue_workspace_path, resolve_workspace_root, AgentPaths};
 use crate::prompt::PromptRenderer;
 use crate::runner::{ExitKind, KillReason, RunnerHandle, SpawnParams, TurnDecision};
@@ -428,7 +428,7 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new(
         agent_cfg: AgentConfig,
         paths: AgentPaths,
@@ -448,7 +448,7 @@ impl Orchestrator {
             effective_cfg,
             state,
             control_rx,
-            Arc::new(NoopHitlNotifier),
+            Arc::new(crate::hitl::NoopHitlNotifier),
         )
     }
 
@@ -2467,12 +2467,14 @@ fn run_before_remove(
     }
 }
 
+#[cfg(test)]
 fn default_runner() -> Arc<dyn cap_runner::Runner> {
     default_runner_services()
         .get_named::<dyn cap_runner::Runner>("pi")
         .expect("pi runner is registered")
 }
 
+#[cfg(test)]
 fn default_runner_services() -> host_api::ServiceRegistry {
     let mut services = host_api::ServiceRegistry::default();
     let runners: [(&str, Arc<dyn cap_runner::Runner>); 6] = [

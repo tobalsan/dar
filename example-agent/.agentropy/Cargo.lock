@@ -7,19 +7,11 @@ name = "agentropy-agent"
 version = "0.1.0"
 dependencies = [
  "agentropy-cli",
- "chat-codex",
- "chat-opencode",
  "chat-pi",
- "dashboard",
  "frontend-log",
  "host-api",
  "orchestrator",
  "runner-claude",
- "runner-cli",
- "runner-codex",
- "runner-fake",
- "runner-opencode",
- "runner-pi",
  "tokio",
  "tracker-files",
  "tracker-linear",
@@ -29,7 +21,7 @@ dependencies = [
 [[package]]
 name = "agentropy-cli"
 version = "0.2.1"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "agentropy-host",
  "anyhow",
@@ -53,7 +45,7 @@ dependencies = [
 [[package]]
 name = "agentropy-host"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "axum",
@@ -155,48 +147,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
-name = "askama"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d4744ed2eef2645831b441d8f5459689ade2ab27c854488fbab1fbe94fce1a7"
-dependencies = [
- "askama_derive",
- "itoa",
- "percent-encoding",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "askama_derive"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d661e0f57be36a5c14c48f78d09011e67e0cb618f269cca9f2fd8d15b68c46ac"
-dependencies = [
- "askama_parser",
- "basic-toml",
- "memchr",
- "proc-macro2",
- "quote",
- "rustc-hash",
- "serde",
- "serde_derive",
- "syn",
-]
-
-[[package]]
-name = "askama_parser"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf315ce6524c857bb129ff794935cf6d42c82a6cff60526fe2a63593de4d0d4f"
-dependencies = [
- "memchr",
- "serde",
- "serde_derive",
- "winnow",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -215,7 +165,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
- "base64",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -234,10 +183,8 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
- "sha1",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -270,28 +217,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
-name = "basic-toml"
-version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba62675e8242a4c4e806d12f11d136e626e6c8361d6b829310732241652a178a"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
-
-[[package]]
-name = "block-buffer"
-version = "0.10.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
-dependencies = [
- "generic-array",
-]
 
 [[package]]
 name = "bumpalo"
@@ -308,7 +237,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 [[package]]
 name = "cap-chat"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "tokio",
@@ -317,7 +246,7 @@ dependencies = [
 [[package]]
 name = "cap-runner"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "chrono",
@@ -329,7 +258,7 @@ dependencies = [
 [[package]]
 name = "cap-tracker"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "chrono",
@@ -376,36 +305,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
-name = "chat-codex"
-version = "0.2.1"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
-dependencies = [
- "anyhow",
- "cap-chat",
- "host-api",
- "runner-core",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "chat-opencode"
-version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
-dependencies = [
- "anyhow",
- "cap-chat",
- "host-api",
- "opencode-client",
- "runner-core",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "chat-pi"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "cap-chat",
@@ -496,15 +398,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
-name = "cpufeatures"
-version = "0.2.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "crossbeam-channel"
 version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -545,16 +438,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crypto-common"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
-dependencies = [
- "generic-array",
- "typenum",
-]
-
-[[package]]
 name = "darling"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -589,61 +472,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "dashboard"
-version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
-dependencies = [
- "anyhow",
- "askama",
- "axum",
- "cap-tracker",
- "chrono",
- "hex",
- "hmac",
- "host-api",
- "mime_guess",
- "minijinja",
- "orchestrator-api",
- "pulldown-cmark",
- "reqwest",
- "rusqlite",
- "rust-embed",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "subtle",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "data-encoding"
-version = "2.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
-
-[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
-dependencies = [
- "powerfmt",
-]
-
-[[package]]
-name = "digest"
-version = "0.10.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
-dependencies = [
- "block-buffer",
- "crypto-common",
- "subtle",
-]
 
 [[package]]
 name = "displaydoc"
@@ -714,7 +546,7 @@ dependencies = [
 [[package]]
 name = "frontend-log"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "host-api",
@@ -780,25 +612,6 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
-]
-
-[[package]]
-name = "generic-array"
-version = "0.14.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
-dependencies = [
- "typenum",
- "version_check",
-]
-
-[[package]]
-name = "getopts"
-version = "0.2.24"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df"
-dependencies = [
- "unicode-width 0.2.0",
 ]
 
 [[package]]
@@ -870,24 +683,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "hex"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
-
-[[package]]
-name = "hmac"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
-dependencies = [
- "digest",
-]
-
-[[package]]
 name = "host-api"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "axum",
@@ -1302,16 +1100,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
-name = "mime_guess"
-version = "2.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
-dependencies = [
- "mime",
- "unicase",
-]
-
-[[package]]
 name = "minijinja"
 version = "2.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1384,7 +1172,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "opencode-client"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1399,7 +1187,7 @@ dependencies = [
 [[package]]
 name = "orchestrator"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -1430,7 +1218,7 @@ dependencies = [
 [[package]]
 name = "orchestrator-api"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "chrono",
  "serde",
@@ -1516,25 +1304,6 @@ checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
 ]
-
-[[package]]
-name = "pulldown-cmark"
-version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
-dependencies = [
- "bitflags",
- "getopts",
- "memchr",
- "pulldown-cmark-escape",
- "unicase",
-]
-
-[[package]]
-name = "pulldown-cmark-escape"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 
 [[package]]
 name = "quinn"
@@ -1741,7 +1510,7 @@ dependencies = [
 [[package]]
 name = "runner-claude"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -1752,7 +1521,7 @@ dependencies = [
 [[package]]
 name = "runner-cli"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -1763,7 +1532,7 @@ dependencies = [
 [[package]]
 name = "runner-codex"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -1777,7 +1546,7 @@ dependencies = [
 [[package]]
 name = "runner-core"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -1792,7 +1561,7 @@ dependencies = [
 [[package]]
 name = "runner-fake"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -1803,7 +1572,7 @@ dependencies = [
 [[package]]
 name = "runner-opencode"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -1818,7 +1587,7 @@ dependencies = [
 [[package]]
 name = "runner-pi"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "cap-runner",
@@ -1841,43 +1610,6 @@ dependencies = [
  "hashlink",
  "libsqlite3-sys",
  "smallvec",
-]
-
-[[package]]
-name = "rust-embed"
-version = "8.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04113cb9355a377d83f06ef1f0a45b8ab8cd7d8b1288160717d66df5c7988d27"
-dependencies = [
- "axum",
- "mime_guess",
- "rust-embed-impl",
- "rust-embed-utils",
- "tokio",
- "walkdir",
-]
-
-[[package]]
-name = "rust-embed-impl"
-version = "8.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da0902e4c7c8e997159ab384e6d0fc91c221375f6894346ae107f47dd0f3ccaa"
-dependencies = [
- "proc-macro2",
- "quote",
- "rust-embed-utils",
- "syn",
- "walkdir",
-]
-
-[[package]]
-name = "rust-embed-utils"
-version = "8.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bcdef0be6fe7f6fa333b1073c949729274b05f123a0ad7efcb8efd878e5c3b1"
-dependencies = [
- "sha2",
- "walkdir",
 ]
 
 [[package]]
@@ -1945,15 +1677,6 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
-
-[[package]]
-name = "same-file"
-version = "1.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
-dependencies = [
- "winapi-util",
-]
 
 [[package]]
 name = "scopeguard"
@@ -2047,28 +1770,6 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
-]
-
-[[package]]
-name = "sha1"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "digest",
-]
-
-[[package]]
-name = "sha2"
-version = "0.10.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "digest",
 ]
 
 [[package]]
@@ -2253,12 +1954,11 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.47"
+version = "0.3.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
+checksum = "711a53c2d47bbd818258c498c8dbfe186a2526c631495cfe7e078567f86b8469"
 dependencies = [
  "deranged",
- "itoa",
  "num-conv",
  "powerfmt",
  "serde_core",
@@ -2268,15 +1968,15 @@ dependencies = [
 
 [[package]]
 name = "time-core"
-version = "0.1.8"
+version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7694e1cfe791f8d31026952abf09c69ca6f6fa4e1a1229e18988f06a04a12dca"
+checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
 
 [[package]]
 name = "time-macros"
-version = "0.2.27"
+version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e70e4c5a0e0a8a4823ad65dfe1a6930e4f4d756dcd9dd7939022b5e8c501215"
+checksum = "71c652a3727a9cbb9a02f707f530b618ce00d0ccd762009c8c23bd191df3c17d"
 dependencies = [
  "num-conv",
  "time-core",
@@ -2342,18 +2042,6 @@ checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
  "rustls",
  "tokio",
-]
-
-[[package]]
-name = "tokio-tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
- "tungstenite",
 ]
 
 [[package]]
@@ -2534,7 +2222,7 @@ dependencies = [
 [[package]]
 name = "tracker-files"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "cap-tracker",
@@ -2548,7 +2236,7 @@ dependencies = [
 [[package]]
 name = "tracker-linear"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "cap-tracker",
@@ -2571,7 +2259,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "tui"
 version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=0e707c874f7cdaa2d74331936250906100c72b22#0e707c874f7cdaa2d74331936250906100c72b22"
+source = "git+https://github.com/tobalsan/dar.git?rev=6a38c1b1306f3ad794a947d6989d2ee71751c544#6a38c1b1306f3ad794a947d6989d2ee71751c544"
 dependencies = [
  "anyhow",
  "cap-chat",
@@ -2584,34 +2272,6 @@ dependencies = [
  "serde_json",
  "tokio",
 ]
-
-[[package]]
-name = "tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand",
- "sha1",
- "thiserror",
-]
-
-[[package]]
-name = "typenum"
-version = "1.20.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
-
-[[package]]
-name = "unicase"
-version = "2.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
 
 [[package]]
 name = "unicode-ident"
@@ -2701,16 +2361,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "walkdir"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
-dependencies = [
- "same-file",
- "winapi-util",
-]
 
 [[package]]
 name = "want"
@@ -2848,15 +2498,6 @@ name = "winapi-i686-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
-
-[[package]]
-name = "winapi-util"
-version = "0.1.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
-dependencies = [
- "windows-sys 0.61.2",
-]
 
 [[package]]
 name = "winapi-x86_64-pc-windows-gnu"

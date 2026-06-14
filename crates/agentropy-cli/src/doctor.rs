@@ -12,6 +12,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use anyhow::Context;
 use host_api::ServiceRegistry;
 use orchestrator::config;
 use orchestrator::dotenv::LoadReport;
@@ -34,6 +35,14 @@ pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyho
         ));
     } else {
         pass(&format!(".env not found at {}", dotenv.path.display()));
+    }
+
+    match check_toolchain(&paths.root) {
+        Ok(msg) => pass(&msg),
+        Err(e) => {
+            fail(&format!("Rust toolchain unavailable: {e:#}"));
+            ok = false;
+        }
     }
 
     // 1. Config.
@@ -180,6 +189,81 @@ fn check_opencode(command: &str) -> anyhow::Result<String> {
     })
 }
 
+fn check_toolchain(root: &Path) -> anyhow::Result<String> {
+    let pinned = pinned_toolchain(root)?;
+    let cargo_version = command_version("cargo")?;
+    let rustc_version = command_version("rustc")?;
+    if !tool_version_satisfies_channel(&cargo_version, &pinned) {
+        anyhow::bail!(
+            "cargo is `{cargo_version}`, but `.agentropy/rust-toolchain.toml` requires Rust `{pinned}` or newer; install/switch Rust via rustup"
+        );
+    }
+    if !tool_version_satisfies_channel(&rustc_version, &pinned) {
+        anyhow::bail!(
+            "rustc is `{rustc_version}`, but `.agentropy/rust-toolchain.toml` requires Rust `{pinned}` or newer; install/switch Rust via rustup"
+        );
+    }
+    Ok(format!(
+        "Rust toolchain available (cargo {cargo_version}, rustc {rustc_version})"
+    ))
+}
+
+fn pinned_toolchain(root: &Path) -> anyhow::Result<String> {
+    let path = root.join(".agentropy/rust-toolchain.toml");
+    let content =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let value = content
+        .parse::<toml::Value>()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    value
+        .get("toolchain")
+        .and_then(|t| t.get("channel"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_string)
+        .context("missing [toolchain].channel")
+}
+
+fn command_version(command: &str) -> anyhow::Result<String> {
+    let output = Command::new(command)
+        .arg("--version")
+        .output()
+        .map_err(|e| anyhow::anyhow!("{command} not found - install Rust via rustup: {e}"))?;
+    if !output.status.success() {
+        anyhow::bail!("`{command} --version` exited with {}", output.status);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn tool_version_satisfies_channel(version_output: &str, channel: &str) -> bool {
+    match (
+        first_version_tuple(version_output),
+        first_version_tuple(channel),
+    ) {
+        (Some(actual), Some(required)) => actual >= required,
+        _ => version_output.contains(channel),
+    }
+}
+
+fn first_version_tuple(text: &str) -> Option<(u64, u64, u64)> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+        .find_map(parse_version_tuple)
+}
+
+fn parse_version_tuple(token: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = token.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts
+        .next()
+        .and_then(|part| part.split('-').next())
+        .filter(|part| !part.is_empty())
+        .map(str::parse)
+        .transpose()
+        .ok()?
+        .unwrap_or(0);
+    Some((major, minor, patch))
+}
+
 fn pass(msg: &str) {
     eprintln!("  ok   {msg}");
 }
@@ -207,5 +291,37 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let msg = check_opencode(script.to_str().unwrap()).unwrap();
         assert!(msg.contains("9.9.9"), "{msg}");
+    }
+
+    #[test]
+    fn toolchain_version_accepts_equal_or_newer_numeric_channel() {
+        assert!(tool_version_satisfies_channel("rustc 1.83.0", "1.83"));
+        assert!(tool_version_satisfies_channel("cargo 1.96.0", "1.83"));
+        assert!(tool_version_satisfies_channel("rustc 1.83.1", "1.83.0"));
+    }
+
+    #[test]
+    fn toolchain_version_rejects_older_numeric_channel() {
+        assert!(!tool_version_satisfies_channel("rustc 1.82.9", "1.83"));
+        assert!(!tool_version_satisfies_channel("cargo 1.83.0", "1.83.1"));
+    }
+
+    #[test]
+    fn toolchain_version_falls_back_to_exact_channel_match() {
+        assert!(tool_version_satisfies_channel("rustc stable", "stable"));
+        assert!(!tool_version_satisfies_channel("rustc beta", "stable"));
+    }
+
+    #[test]
+    fn toolchain_check_reports_too_old_version() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".agentropy")).unwrap();
+        std::fs::write(
+            dir.path().join(".agentropy/rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"999.0\"\n",
+        )
+        .unwrap();
+        let err = check_toolchain(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("requires Rust `999.0` or newer"));
     }
 }

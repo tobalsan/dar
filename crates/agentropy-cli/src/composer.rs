@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 
 const GENERATED_TOML_HEADER: &str = "# generated - do not hand-edit\n";
 const GENERATED_RUST_HEADER: &str = "// # generated - do not hand-edit\n";
@@ -12,6 +13,12 @@ const GENERATED_RUST_HEADER: &str = "// # generated - do not hand-edit\n";
 struct StockExtension {
     package: &'static str,
     factory: &'static str,
+}
+
+impl StockExtension {
+    fn feature(&self) -> String {
+        format!("stock-{}", self.package)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -90,12 +97,44 @@ struct LocalExtension {
     path: PathBuf,
 }
 
+#[derive(Debug, Deserialize)]
+struct AgentSelection {
+    tracker: SelectedUse,
+    runner: SelectedUse,
+    #[serde(default = "default_foreground")]
+    foreground: String,
+    #[serde(default)]
+    extensions: ExtensionSelection,
+}
+
+#[derive(Debug, Deserialize)]
+struct SelectedUse {
+    #[serde(rename = "use", alias = "sdk")]
+    use_: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ExtensionSelection {
+    tui: Option<TuiSelection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TuiSelection {
+    #[serde(default)]
+    chat: TuiChatSelection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TuiChatSelection {
+    backend: Option<String>,
+}
+
 pub fn init_build(agent: &Path) -> Result<()> {
     init_build_with_options(agent, BuildOptions::default())
 }
 
 pub fn init_build_with_options(agent: &Path, options: BuildOptions) -> Result<()> {
-    let crate_dir = write_composition_crate(agent)?;
+    let (crate_dir, _) = write_composition_crate(agent)?;
     refresh_lockfile(&crate_dir, options.offline && !options.vendor)?;
     if options.vendor {
         vendor_dependencies(&crate_dir)?;
@@ -103,7 +142,11 @@ pub fn init_build_with_options(agent: &Path, options: BuildOptions) -> Result<()
     Ok(())
 }
 
-fn write_composition_crate(agent: &Path) -> Result<PathBuf> {
+pub fn compose(agent: &Path) -> Result<bool> {
+    write_composition_crate(agent).map(|(_, changed)| changed)
+}
+
+fn write_composition_crate(agent: &Path) -> Result<(PathBuf, bool)> {
     let agent = agent
         .canonicalize()
         .with_context(|| format!("resolving agent folder {}", agent.display()))?;
@@ -111,17 +154,113 @@ fn write_composition_crate(agent: &Path) -> Result<PathBuf> {
     fs::create_dir_all(crate_dir.join("src"))
         .with_context(|| format!("creating {}", crate_dir.join("src").display()))?;
 
+    let stock = selected_stock_extensions(&agent)?;
     let locals = discover_extensions(&agent)?;
-    write_if_changed(
+    let mut changed = write_if_changed(
         &crate_dir.join("Cargo.toml"),
-        &cargo_toml(&crate_dir, &locals)?,
+        &cargo_toml(&crate_dir, &stock, &locals)?,
     )?;
-    write_if_changed(&crate_dir.join("src/main.rs"), &main_rs(&locals))?;
-    write_if_changed(
+    changed |= write_if_changed(&crate_dir.join("src/main.rs"), &main_rs(&stock, &locals))?;
+    changed |= write_if_changed(
         &crate_dir.join("rust-toolchain.toml"),
         "[toolchain]\nchannel = \"1.83\"\n",
     )?;
-    Ok(crate_dir)
+    Ok((crate_dir, changed))
+}
+
+fn selected_stock_extensions(agent: &Path) -> Result<Vec<&'static StockExtension>> {
+    let selection = agent_selection(agent)?;
+    let mut packages = vec![
+        "orchestrator",
+        "tracker-linear",
+        tracker_package(&selection.tracker.use_)?,
+        runner_package(&selection.runner.use_)?,
+    ];
+    packages.extend(foreground_packages(&selection)?);
+    packages.sort_unstable();
+    packages.dedup();
+
+    let mut selected = Vec::new();
+    for package in packages {
+        let stock = STOCK_EXTENSIONS
+            .iter()
+            .find(|stock| stock.package == package)
+            .with_context(|| format!("unknown stock extension package {package}"))?;
+        selected.push(stock);
+    }
+    selected.sort_by(|a, b| a.package.cmp(b.package));
+    Ok(selected)
+}
+
+fn agent_selection(agent: &Path) -> Result<AgentSelection> {
+    let path = agent.join("agent.yaml");
+    let raw = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    serde_yaml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+}
+
+fn tracker_package(use_: &str) -> Result<&'static str> {
+    match use_ {
+        "files" => Ok("tracker-files"),
+        "linear" => Ok("tracker-linear"),
+        other => bail!("unknown tracker.use {other:?}"),
+    }
+}
+
+fn runner_package(use_: &str) -> Result<&'static str> {
+    match use_ {
+        "pi" => Ok("runner-pi"),
+        "claude" | "claude-code" => Ok("runner-claude"),
+        "codex" => Ok("runner-codex"),
+        "opencode" => Ok("runner-opencode"),
+        "cli" => Ok("runner-cli"),
+        "fake" => Ok("runner-fake"),
+        other => bail!("unknown runner.use {other:?}"),
+    }
+}
+
+fn foreground_packages(selection: &AgentSelection) -> Result<Vec<&'static str>> {
+    match selection.foreground.as_str() {
+        "logs" => Ok(vec!["frontend-log"]),
+        "tui" => {
+            let mut packages = vec!["frontend-log", "chat-pi", "tui"];
+            if let Some(chat_package) = tui_chat_package(selection)? {
+                packages.push(chat_package);
+            }
+            Ok(packages)
+        }
+        other => bail!("unknown foreground {other:?}"),
+    }
+}
+
+fn tui_chat_package(selection: &AgentSelection) -> Result<Option<&'static str>> {
+    if let Some(backend) = selection
+        .extensions
+        .tui
+        .as_ref()
+        .and_then(|tui| tui.chat.backend.as_deref())
+    {
+        return Ok(stock_chat_package(backend));
+    }
+    match selection.runner.use_.as_str() {
+        "pi" => Ok(Some("chat-pi")),
+        "codex" => Ok(Some("chat-codex")),
+        "opencode" => Ok(Some("chat-opencode")),
+        "claude" | "claude-code" | "cli" | "fake" => Ok(None),
+        other => bail!("unknown tui chat backend {other:?}"),
+    }
+}
+
+fn stock_chat_package(backend: &str) -> Option<&'static str> {
+    match backend {
+        "pi" => Some("chat-pi"),
+        "codex" => Some("chat-codex"),
+        "opencode" => Some("chat-opencode"),
+        _ => None,
+    }
+}
+
+fn default_foreground() -> String {
+    "logs".to_string()
 }
 
 pub fn build(agent: &Path) -> Result<()> {
@@ -129,7 +268,7 @@ pub fn build(agent: &Path) -> Result<()> {
 }
 
 pub fn build_with_options(agent: &Path, options: BuildOptions) -> Result<()> {
-    let crate_dir = write_composition_crate(agent)?;
+    let (crate_dir, _) = write_composition_crate(agent)?;
     if !crate_dir.join("Cargo.lock").exists() {
         refresh_lockfile(&crate_dir, false)?;
     }
@@ -155,9 +294,46 @@ pub fn build_with_options(agent: &Path, options: BuildOptions) -> Result<()> {
     Ok(())
 }
 
+pub fn build_to(agent: &Path, dest: &Path) -> Result<()> {
+    let agent = agent
+        .canonicalize()
+        .with_context(|| format!("resolving agent folder {}", agent.display()))?;
+    let crate_dir = agent.join(".agentropy");
+    run_cargo_with_stderr(&crate_dir, ["build", "--release", "--locked"])?;
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let binary = crate_dir
+        .join("target")
+        .join("release")
+        .join(binary_name("agentropy"));
+    fs::copy(&binary, dest).with_context(|| {
+        format!(
+            "copying built agentropy binary from {} to {}",
+            binary.display(),
+            dest.display()
+        )
+    })?;
+    Ok(())
+}
+
 pub fn lock_refresh(agent: &Path) -> Result<()> {
-    let crate_dir = write_composition_crate(agent)?;
+    let (crate_dir, _) = write_composition_crate(agent)?;
     run_cargo(&crate_dir, &["update"])
+}
+
+fn run_cargo_with_stderr<const N: usize>(crate_dir: &Path, args: [&str; N]) -> Result<()> {
+    let output = Command::new("cargo")
+        .args(args)
+        .current_dir(crate_dir)
+        .output()
+        .with_context(|| format!("running cargo in {}", crate_dir.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprint!("{stderr}");
+        bail!("cargo exited with {}", output.status);
+    }
+    Ok(())
 }
 
 fn discover_extensions(agent: &Path) -> Result<Vec<LocalExtension>> {
@@ -204,7 +380,11 @@ fn discover_extensions(agent: &Path) -> Result<Vec<LocalExtension>> {
     Ok(extensions)
 }
 
-fn cargo_toml(_crate_dir: &Path, locals: &[LocalExtension]) -> Result<String> {
+fn cargo_toml(
+    _crate_dir: &Path,
+    stock: &[&StockExtension],
+    locals: &[LocalExtension],
+) -> Result<String> {
     let source = stock_source()?;
     let mut out = String::from(GENERATED_TOML_HEADER);
     out.push_str(
@@ -223,11 +403,11 @@ path = "src/main.rs"
 [dependencies]
 "#,
     );
-    stock_dependency(&mut out, "host-api", &source);
-    stock_dependency(&mut out, "agentropy-cli", &source);
+    stock_dependency(&mut out, "host-api", &source, false);
+    stock_dependency(&mut out, "agentropy-cli", &source, false);
     out.push_str("tokio = { version = \"1.43\", features = [\"rt-multi-thread\", \"macros\", \"signal\"] }\n");
-    for stock in STOCK_EXTENSIONS {
-        stock_dependency(&mut out, stock.package, &source);
+    for stock in stock {
+        stock_dependency(&mut out, stock.package, &source, true);
     }
     for local in locals {
         out.push_str(&format!(
@@ -236,17 +416,32 @@ path = "src/main.rs"
             toml_path(&local.path)
         ));
     }
+    out.push_str("\n[features]\n");
+    let default_features = stock
+        .iter()
+        .map(|stock| format!("\"{}\"", stock.feature()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!("default = [{default_features}]\n"));
+    for stock in stock {
+        out.push_str(&format!(
+            "{} = [\"dep:{}\"]\n",
+            stock.feature(),
+            stock.package
+        ));
+    }
     Ok(out)
 }
 
-fn stock_dependency(out: &mut String, package: &str, source: &StockSource) {
+fn stock_dependency(out: &mut String, package: &str, source: &StockSource, optional: bool) {
+    let optional = if optional { ", optional = true" } else { "" };
     out.push_str(&format!(
-        "{package} = {{ git = \"{}\", rev = \"{}\" }}\n",
+        "{package} = {{ git = \"{}\", rev = \"{}\"{optional} }}\n",
         source.git, source.rev
     ));
 }
 
-fn main_rs(locals: &[LocalExtension]) -> String {
+fn main_rs(stock: &[&StockExtension], locals: &[LocalExtension]) -> String {
     let mut out = String::from(GENERATED_RUST_HEADER);
     out.push_str(
         r#"#[tokio::main(worker_threads = 2)]
@@ -254,7 +449,11 @@ async fn main() {
     agentropy_cli::run(host_api::plugins![
 "#,
     );
-    for stock in STOCK_EXTENSIONS {
+    for stock in stock {
+        out.push_str(&format!(
+            "        #[cfg(feature = \"{}\")]\n",
+            stock.feature()
+        ));
         out.push_str(&format!("        {},\n", stock.factory));
     }
     for local in locals {
@@ -395,6 +594,7 @@ mod tests {
     fn compose_discovers_extensions_and_generates_stable_crate_files() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
+        write_test_agent_yaml(agent);
         write_test_extension(agent);
 
         init_build(agent).unwrap();
@@ -429,23 +629,11 @@ mod tests {
     fn build_compiles_generated_crate_and_copies_agent_binary() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
-        write_test_extension(agent);
-
-        init_build(agent).unwrap();
-        build(agent).unwrap();
-
-        assert!(agent.join("bin").join(binary_name("agentropy")).is_file());
-    }
-
-    #[test]
-    fn build_creates_missing_lockfile() {
-        let temp = tempfile::tempdir().unwrap();
-        let agent = temp.path();
+        write_test_agent_yaml(agent);
         write_test_extension(agent);
 
         build(agent).unwrap();
 
-        assert!(agent.join(".agentropy/Cargo.lock").is_file());
         assert!(agent.join("bin").join(binary_name("agentropy")).is_file());
     }
 
@@ -453,6 +641,7 @@ mod tests {
     fn init_build_refreshes_lockfile_when_manifest_changes() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
+        write_test_agent_yaml(agent);
 
         init_build(agent).unwrap();
         let original_lock = std::fs::read_to_string(agent.join(".agentropy/Cargo.lock")).unwrap();
@@ -471,6 +660,7 @@ mod tests {
     fn build_does_not_refresh_stale_lockfile() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
+        write_test_agent_yaml(agent);
 
         init_build(agent).unwrap();
         write_test_extension(agent);
@@ -489,6 +679,7 @@ mod tests {
     fn vendor_writes_cargo_config_and_supports_offline_builds() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
+        write_test_agent_yaml(agent);
 
         init_build_with_options(
             agent,
@@ -514,6 +705,7 @@ mod tests {
     fn lock_refresh_regenerates_and_updates_existing_composition_lockfile() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
+        write_test_agent_yaml(agent);
 
         init_build(agent).unwrap();
         write_test_extension(agent);
@@ -524,6 +716,123 @@ mod tests {
         let lock = std::fs::read_to_string(agent.join(".agentropy/Cargo.lock")).unwrap();
         assert!(manifest.contains("my-ext = { path = \"../extensions/my-ext\" }"));
         assert!(lock.contains("name = \"my-ext\""));
+    }
+
+    #[test]
+    fn init_build_feature_gates_stock_extensions_from_agent_yaml() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(agent, "files", "claude-code", "logs", "");
+
+        init_build(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
+        let source = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
+        assert!(manifest.contains("tracker-files = { git = "));
+        assert!(manifest.contains("optional = true"));
+        assert!(manifest.contains("[features]\ndefault = ["));
+        assert!(manifest.contains("stock-tracker-files = [\"dep:tracker-files\"]"));
+        assert!(manifest.contains("stock-runner-claude = [\"dep:runner-claude\"]"));
+        assert!(manifest.contains("stock-orchestrator = [\"dep:orchestrator\"]"));
+        assert!(manifest.contains("stock-frontend-log = [\"dep:frontend-log\"]"));
+        assert!(manifest.contains("tracker-linear = { git = "));
+        assert!(manifest.contains("stock-tracker-linear = [\"dep:tracker-linear\"]"));
+        assert!(source.contains("tracker_linear::TrackerLinearExtension"));
+        assert!(source.contains("#[cfg(feature = \"stock-tracker-files\")]"));
+        assert!(source.contains("tracker_files::TrackerFilesExtension"));
+    }
+
+    #[test]
+    fn init_build_includes_tui_provider_closure() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(agent, "files", "claude-code", "tui", "");
+
+        init_build(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
+        let source = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
+        for package in ["frontend-log", "chat-pi", "tui"] {
+            assert!(
+                manifest.contains(&format!("{package} = {{ git = ")),
+                "{package} should be linked for foreground: tui"
+            );
+        }
+        assert!(source.contains("frontend_log::FrontendLogExtension"));
+        assert!(source.contains("chat_pi::ChatPiExtension"));
+        assert!(source.contains("tui::TuiExtension"));
+    }
+
+    #[test]
+    fn init_build_includes_tui_chat_backend_for_followed_runner() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(agent, "files", "codex", "tui", "");
+
+        init_build(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
+        let source = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
+        assert!(manifest.contains("chat-codex = { git = "));
+        assert!(manifest.contains("chat-pi = { git = "));
+        assert!(manifest.contains("runner-codex = { git = "));
+        assert!(manifest.contains("stock-chat-codex = [\"dep:chat-codex\"]"));
+        assert!(source.contains("chat_codex::ChatCodexExtension"));
+        assert!(source.contains("chat_pi::ChatPiExtension"));
+    }
+
+    #[test]
+    fn init_build_includes_explicit_tui_chat_backend() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(
+            agent,
+            "files",
+            "claude-code",
+            "tui",
+            r#"
+extensions:
+  tui:
+    chat:
+      backend: opencode
+"#,
+        );
+
+        init_build(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
+        let source = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
+        assert!(manifest.contains("chat-opencode = { git = "));
+        assert!(manifest.contains("chat-pi = { git = "));
+        assert!(manifest.contains("runner-claude = { git = "));
+        assert!(manifest.contains("stock-chat-opencode = [\"dep:chat-opencode\"]"));
+        assert!(source.contains("chat_opencode::ChatOpenCodeExtension"));
+        assert!(source.contains("chat_pi::ChatPiExtension"));
+    }
+
+    #[test]
+    fn init_build_allows_explicit_custom_tui_chat_backend() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(
+            agent,
+            "files",
+            "claude-code",
+            "tui",
+            r#"
+extensions:
+  tui:
+    chat:
+      backend: my-chat
+"#,
+        );
+
+        init_build(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
+        assert!(manifest.contains("chat-pi = { git = "));
+        assert!(!manifest.contains("chat-codex = { git = "));
+        assert!(!manifest.contains("chat-opencode = { git = "));
     }
 
     #[test]
@@ -586,6 +895,47 @@ impl Extension for MyExt {
     }
 }
 "#,
+        )
+        .unwrap();
+    }
+
+    fn write_test_agent_yaml(agent: &Path) {
+        write_agent_yaml(agent, "files", "fake", "logs", "");
+    }
+
+    fn write_agent_yaml(agent: &Path, tracker: &str, runner: &str, foreground: &str, extra: &str) {
+        std::fs::write(
+            agent.join("agent.yaml"),
+            format!(
+                r#"id: test-agent
+name: Test Agent
+
+tracker:
+  use: {tracker}
+  config:
+    path: ./issues
+  active_states: [todo]
+  terminal_states: [done]
+
+runner:
+  use: {runner}
+
+orchestrator:
+  poll_interval_ms: 10000
+  max_concurrent: 1
+  max_retries: 3
+  retry_backoff_ms: 30000
+
+workspace:
+  root: ./workspaces
+
+dashboard:
+  bind: 127.0.0.1
+  port: 7878
+
+foreground: {foreground}
+{extra}"#
+            ),
         )
         .unwrap();
     }
