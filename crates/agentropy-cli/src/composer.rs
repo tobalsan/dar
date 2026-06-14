@@ -158,7 +158,7 @@ fn selected_stock_extensions(agent: &Path) -> Result<Vec<&'static StockExtension
     let selection = agent_selection(agent)?;
     // Validate runner.use early so a typo fails at build time.
     let _ = runner_package(&selection.runner.use_)?;
-    let mut packages = vec!["orchestrator", "tracker-linear", tracker_package(&selection.tracker.use_)?];
+    let mut packages = vec!["orchestrator", "dashboard", "tracker-linear", tracker_package(&selection.tracker.use_)?];
     packages.extend_from_slice(ALL_RUNNERS);
     packages.extend(foreground_packages(&selection)?);
     packages.sort_unstable();
@@ -806,6 +806,26 @@ extensions:
                 "{pkg} should always be linked regardless of runner.use"
             );
         }
+    }
+
+    #[test]
+    fn init_build_always_includes_dashboard() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(agent, "files", "fake", "logs", "");
+
+        init_build(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
+        assert!(
+            manifest.contains("dashboard = { git = "),
+            "dashboard is baseline and must always be linked (presence registry)"
+        );
+        let main = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
+        assert!(
+            main.contains("dashboard::DashboardExtension::default()"),
+            "dashboard extension must be in the generated plugins! list"
+        );
     }
 
     #[test]
