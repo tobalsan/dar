@@ -12,6 +12,8 @@ async fn main() {
         runner_claude::RunnerClaudeExtension,
         #[cfg(feature = "stock-tracker-files")]
         tracker_files::TrackerFilesExtension,
+        #[cfg(feature = "stock-tracker-linear")]
+        tracker_linear::TrackerLinearExtension,
         #[cfg(feature = "stock-tui")]
         tui::TuiExtension,
     ])

@@ -193,14 +193,14 @@ fn check_toolchain(root: &Path) -> anyhow::Result<String> {
     let pinned = pinned_toolchain(root)?;
     let cargo_version = command_version("cargo")?;
     let rustc_version = command_version("rustc")?;
-    if !cargo_version.contains(&pinned) {
+    if !tool_version_satisfies_channel(&cargo_version, &pinned) {
         anyhow::bail!(
-            "cargo is `{cargo_version}`, but `.agentropy/rust-toolchain.toml` pins `{pinned}`; install/switch Rust via rustup"
+            "cargo is `{cargo_version}`, but `.agentropy/rust-toolchain.toml` requires Rust `{pinned}` or newer; install/switch Rust via rustup"
         );
     }
-    if !rustc_version.contains(&pinned) {
+    if !tool_version_satisfies_channel(&rustc_version, &pinned) {
         anyhow::bail!(
-            "rustc is `{rustc_version}`, but `.agentropy/rust-toolchain.toml` pins `{pinned}`; install/switch Rust via rustup"
+            "rustc is `{rustc_version}`, but `.agentropy/rust-toolchain.toml` requires Rust `{pinned}` or newer; install/switch Rust via rustup"
         );
     }
     Ok(format!(
@@ -234,6 +234,36 @@ fn command_version(command: &str) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn tool_version_satisfies_channel(version_output: &str, channel: &str) -> bool {
+    match (
+        first_version_tuple(version_output),
+        first_version_tuple(channel),
+    ) {
+        (Some(actual), Some(required)) => actual >= required,
+        _ => version_output.contains(channel),
+    }
+}
+
+fn first_version_tuple(text: &str) -> Option<(u64, u64, u64)> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+        .find_map(parse_version_tuple)
+}
+
+fn parse_version_tuple(token: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = token.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts
+        .next()
+        .and_then(|part| part.split('-').next())
+        .filter(|part| !part.is_empty())
+        .map(str::parse)
+        .transpose()
+        .ok()?
+        .unwrap_or(0);
+    Some((major, minor, patch))
+}
+
 fn pass(msg: &str) {
     eprintln!("  ok   {msg}");
 }
@@ -264,15 +294,34 @@ mod tests {
     }
 
     #[test]
-    fn toolchain_check_reports_pinned_version_mismatch() {
+    fn toolchain_version_accepts_equal_or_newer_numeric_channel() {
+        assert!(tool_version_satisfies_channel("rustc 1.83.0", "1.83"));
+        assert!(tool_version_satisfies_channel("cargo 1.96.0", "1.83"));
+        assert!(tool_version_satisfies_channel("rustc 1.83.1", "1.83.0"));
+    }
+
+    #[test]
+    fn toolchain_version_rejects_older_numeric_channel() {
+        assert!(!tool_version_satisfies_channel("rustc 1.82.9", "1.83"));
+        assert!(!tool_version_satisfies_channel("cargo 1.83.0", "1.83.1"));
+    }
+
+    #[test]
+    fn toolchain_version_falls_back_to_exact_channel_match() {
+        assert!(tool_version_satisfies_channel("rustc stable", "stable"));
+        assert!(!tool_version_satisfies_channel("rustc beta", "stable"));
+    }
+
+    #[test]
+    fn toolchain_check_reports_too_old_version() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".agentropy")).unwrap();
         std::fs::write(
             dir.path().join(".agentropy/rust-toolchain.toml"),
-            "[toolchain]\nchannel = \"__missing_version__\"\n",
+            "[toolchain]\nchannel = \"999.0\"\n",
         )
         .unwrap();
         let err = check_toolchain(dir.path()).unwrap_err();
-        assert!(err.to_string().contains("pins `__missing_version__`"));
+        assert!(err.to_string().contains("requires Rust `999.0` or newer"));
     }
 }

@@ -88,13 +88,25 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
             let code = doctor::run(&root, &dotenv_report, services)?;
             std::process::exit(code);
         }
-        Command::InitBuild(args) => composer::init_build(&args.resolve_root()?),
-        Command::Build(args) => composer::build(&args.resolve_root()?),
+        Command::InitBuild(args) => composer::init_build_with_options(
+            &args.resolve_root()?,
+            composer::BuildOptions {
+                vendor: args.vendor,
+                offline: args.offline,
+            },
+        ),
+        Command::Build(args) => composer::build_with_options(
+            &args.resolve_root()?,
+            composer::BuildOptions {
+                vendor: args.vendor,
+                offline: args.offline,
+            },
+        ),
+        Command::LockRefresh(args) => composer::lock_refresh(&args.resolve_root()?),
         Command::Self_(args) => match args.command {
-            cli::SelfCommand::Rebuild(_) => self_update::rebuild(
-                &args.command.resolve_root()?,
-                self_update::RestartMode::Execv,
-            ),
+            cli::SelfCommand::Rebuild(args) => {
+                self_update::rebuild(&args.resolve_root()?, self_update::RestartMode::Execv)
+            }
         },
         Command::InitWorkflow(args) => {
             let root = args.resolve_root()?;
@@ -183,6 +195,8 @@ mod tests {
                 command.into(),
                 "--dir".into(),
                 temp.path().as_os_str().to_os_string(),
+                "--vendor".into(),
+                "--offline".into(),
             ])
             .unwrap();
             match cli.command {
@@ -191,9 +205,32 @@ mod tests {
                         args.resolve_root().unwrap(),
                         temp.path().canonicalize().unwrap()
                     );
+                    assert!(args.vendor);
+                    assert!(args.offline);
                 }
                 _ => panic!("expected build command"),
             }
+        }
+    }
+
+    #[test]
+    fn lock_refresh_command_parses_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let cli = Cli::try_parse_from([
+            "agentropy".into(),
+            "lock-refresh".into(),
+            "--dir".into(),
+            temp.path().as_os_str().to_os_string(),
+        ])
+        .unwrap();
+        match cli.command {
+            Command::LockRefresh(args) => {
+                assert_eq!(
+                    args.resolve_root().unwrap(),
+                    temp.path().canonicalize().unwrap()
+                );
+            }
+            _ => panic!("expected lock-refresh command"),
         }
     }
 
@@ -209,12 +246,14 @@ mod tests {
         ])
         .unwrap();
         match cli.command {
-            Command::Self_(args) => {
-                assert_eq!(
-                    args.command.resolve_root().unwrap(),
-                    temp.path().canonicalize().unwrap()
-                );
-            }
+            Command::Self_(args) => match args.command {
+                cli::SelfCommand::Rebuild(args) => {
+                    assert_eq!(
+                        args.resolve_root().unwrap(),
+                        temp.path().canonicalize().unwrap()
+                    );
+                }
+            },
             _ => panic!("expected self rebuild command"),
         }
     }

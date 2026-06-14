@@ -12,21 +12,23 @@ path = "src/main.rs"
 [workspace]
 
 [dependencies]
-host-api = { path = "../../crates/host-api" }
-agentropy-cli = { path = "../../crates/agentropy-cli" }
+host-api = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740" }
+agentropy-cli = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740" }
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal"] }
-chat-pi = { path = "../../extensions/chat-pi", optional = true }
-frontend-log = { path = "../../extensions/frontend-log", optional = true }
-orchestrator = { path = "../../extensions/orchestrator", optional = true }
-runner-claude = { path = "../../extensions/runner-claude", optional = true }
-tracker-files = { path = "../../extensions/tracker-files", optional = true }
-tui = { path = "../../extensions/tui", optional = true }
+chat-pi = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }
+frontend-log = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }
+orchestrator = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }
+runner-claude = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }
+tracker-files = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }
+tracker-linear = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }
+tui = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }
 
 [features]
-default = ["stock-chat-pi", "stock-frontend-log", "stock-orchestrator", "stock-runner-claude", "stock-tracker-files", "stock-tui"]
+default = ["stock-chat-pi", "stock-frontend-log", "stock-orchestrator", "stock-runner-claude", "stock-tracker-files", "stock-tracker-linear", "stock-tui"]
 stock-chat-pi = ["dep:chat-pi"]
 stock-frontend-log = ["dep:frontend-log"]
 stock-orchestrator = ["dep:orchestrator"]
 stock-runner-claude = ["dep:runner-claude"]
 stock-tracker-files = ["dep:tracker-files"]
+stock-tracker-linear = ["dep:tracker-linear"]
 stock-tui = ["dep:tui"]

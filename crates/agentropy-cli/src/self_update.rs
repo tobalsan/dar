@@ -20,9 +20,7 @@ pub fn rebuild(_agent: &Path, _restart: RestartMode) -> Result<()> {
         .canonicalize()
         .with_context(|| format!("resolving agent folder {}", _agent.display()))?;
     with_lock(&agent, || {
-        if !composer::compose(&agent)? {
-            return Ok(());
-        }
+        composer::compose(&agent)?;
         let new_binary = agent.join("bin/agentropy.new");
         if new_binary.exists() {
             fs::remove_file(&new_binary)

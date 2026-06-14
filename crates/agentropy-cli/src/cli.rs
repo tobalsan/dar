@@ -23,6 +23,8 @@ pub enum Command {
     InitBuild(BuildArgs),
     /// Regenerate and build the per-agent binary.
     Build(BuildArgs),
+    /// Refresh the per-agent Cargo.lock.
+    LockRefresh(DirArgs),
     /// Manage this agent binary.
     #[command(name = "self")]
     Self_(SelfArgs),
@@ -49,6 +51,19 @@ pub struct DoctorArgs {
 #[derive(Debug, Args)]
 pub struct BuildArgs {
     /// Agent folder to build (defaults to the current directory).
+    #[arg(long)]
+    pub dir: Option<PathBuf>,
+    /// Vendor dependencies into .agentropy/vendor for offline builds.
+    #[arg(long)]
+    pub vendor: bool,
+    /// Run cargo without network access.
+    #[arg(long)]
+    pub offline: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DirArgs {
+    /// Agent folder (defaults to the current directory).
     #[arg(long)]
     pub dir: Option<PathBuf>,
 }
@@ -109,11 +124,9 @@ impl BuildArgs {
     }
 }
 
-impl SelfCommand {
+impl DirArgs {
     pub fn resolve_root(&self) -> Result<PathBuf> {
-        match self {
-            SelfCommand::Rebuild(args) => args.resolve_root(),
-        }
+        resolve_root(self.dir.as_deref())
     }
 }
 
