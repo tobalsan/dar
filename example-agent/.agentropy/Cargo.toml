@@ -12,16 +12,16 @@ path = "src/main.rs"
 [workspace]
 
 [dependencies]
-host-api = { git = "https://github.com/tobalsan/dar.git", rev = "6a38c1b1306f3ad794a947d6989d2ee71751c544" }
-agentropy-cli = { git = "https://github.com/tobalsan/dar.git", rev = "6a38c1b1306f3ad794a947d6989d2ee71751c544" }
+host-api = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740" }
+agentropy-cli = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740" }
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal"] }
-chat-pi = { git = "https://github.com/tobalsan/dar.git", rev = "6a38c1b1306f3ad794a947d6989d2ee71751c544", optional = true }
-frontend-log = { git = "https://github.com/tobalsan/dar.git", rev = "6a38c1b1306f3ad794a947d6989d2ee71751c544", optional = true }
-orchestrator = { git = "https://github.com/tobalsan/dar.git", rev = "6a38c1b1306f3ad794a947d6989d2ee71751c544", optional = true }
-runner-claude = { git = "https://github.com/tobalsan/dar.git", rev = "6a38c1b1306f3ad794a947d6989d2ee71751c544", optional = true }
-tracker-files = { git = "https://github.com/tobalsan/dar.git", rev = "6a38c1b1306f3ad794a947d6989d2ee71751c544", optional = true }
-tracker-linear = { git = "https://github.com/tobalsan/dar.git", rev = "6a38c1b1306f3ad794a947d6989d2ee71751c544", optional = true }
-tui = { git = "https://github.com/tobalsan/dar.git", rev = "6a38c1b1306f3ad794a947d6989d2ee71751c544", optional = true }
+chat-pi = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }
+frontend-log = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }
+orchestrator = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }
+runner-claude = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }
+tracker-files = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }
+tracker-linear = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }
+tui = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }
 
 [features]
 default = ["stock-chat-pi", "stock-frontend-log", "stock-orchestrator", "stock-runner-claude", "stock-tracker-files", "stock-tracker-linear", "stock-tui"]
