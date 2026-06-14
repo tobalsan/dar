@@ -125,9 +125,9 @@ pub fn lines(snapshot: &RunSnapshot, now: DateTime<Utc>) -> Vec<String> {
     section(
         &mut out,
         tail_label("history", snapshot.history.len()),
-        // Most recent entries first, so a vertically clipped pane still
-        // shows the runs that just finished.
-        snapshot.history.iter().rev().take(TAIL).map(|entry| {
+        // Snapshot is already newest-first; take the head so a vertically
+        // clipped pane still shows the runs that just finished.
+        snapshot.history.iter().take(TAIL).map(|entry| {
             format!(
                 "  {}  {:?}  {}  {}",
                 entry.identifier,
