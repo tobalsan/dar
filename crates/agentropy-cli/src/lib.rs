@@ -3,6 +3,7 @@
 mod cli;
 pub mod composer;
 mod doctor;
+pub mod self_check;
 pub mod self_update;
 
 use std::sync::Arc;
@@ -31,9 +32,20 @@ pub async fn run(plugins: Vec<Arc<dyn Extension>>) {
 }
 
 async fn run_inner(plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
+    // `--self-check` is a boot-validation flag, handled before clap so it can be
+    // passed alongside `--dir` without a dedicated subcommand. It parses the
+    // config and instantiates every extension, then exits 0/non-zero.
+    if let Some(root) = self_check::extract_flag(std::env::args_os())? {
+        let code = self_check::run(&root, plugins).await?;
+        std::process::exit(code);
+    }
     let cli = Cli::parse();
     match cli.command {
-        Command::Run(args) => run_host(args.resolve_root()?, plugins).await,
+        Command::Run(args) => {
+            let root = args.resolve_root()?;
+            self_check::guard_boot(&root)?;
+            run_host(root, plugins).await
+        }
         other => run_non_run_command(other, plugins).await,
     }
 }
