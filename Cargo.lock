@@ -16,7 +16,6 @@ dependencies = [
  "frontend-log",
  "host-api",
  "orchestrator",
- "runner-claude",
  "runner-cli",
  "runner-codex",
  "runner-fake",
@@ -1539,7 +1538,6 @@ dependencies = [
  "nix",
  "orchestrator-api",
  "reqwest",
- "runner-claude",
  "runner-cli",
  "runner-codex",
  "runner-core",
@@ -1882,17 +1880,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "runner-claude"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "cap-runner",
- "chrono",
- "host-api",
- "runner-core",
 ]
 
 [[package]]

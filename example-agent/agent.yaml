@@ -9,8 +9,7 @@ tracker:
   terminal_states: [done, cancelled]
 
 runner:
-  use: claude-code
-  command: claude
+  use: fake
   max_run_timeout_ms: 3600000
   stall_timeout_ms: 300000
   max_turns: 20

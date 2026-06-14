@@ -245,7 +245,7 @@ mod tests {
         snapshot.version = 7;
         snapshot.agent.id = "demo".to_string();
         snapshot.agent.tracker = "files".to_string();
-        snapshot.agent.runner = "claude".to_string();
+        snapshot.agent.runner = "fake".to_string();
         snapshot.paused = true;
         snapshot.last_tick_at = Some(now - Duration::seconds(3));
         snapshot.rate_limit_min_remaining = Some(42);
@@ -363,7 +363,7 @@ mod tests {
         let rows = lines(&populated_snapshot(now), now);
         assert_eq!(
             rows[0],
-            "agent demo | tracker files | runner claude | PAUSED \
+            "agent demo | tracker files | runner fake | PAUSED \
              | last tick 3s ago | rate limit 42min remaining"
         );
     }
@@ -378,7 +378,7 @@ mod tests {
         let rows = lines(&snapshot, now);
         assert_eq!(
             rows[0],
-            "agent demo | tracker files | runner claude | last tick never"
+            "agent demo | tracker files | runner fake | last tick never"
         );
     }
 

@@ -346,7 +346,7 @@ fn persist_runner_event(
 }
 
 /// Classify a protocol output line into a UI log row type and display text.
-/// Tries JSON parsing first (for pi/claude/codex protocol events); falls back
+/// Tries JSON parsing first (for pi/codex protocol events); falls back
 /// to text heuristics for plain text output.
 pub fn classify_protocol_line(stream: &str, text: &str) -> ProtocolLine {
     if stream == "stderr" {

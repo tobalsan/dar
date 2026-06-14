@@ -41,7 +41,6 @@ jobs:
           - example
           - frontend-log
           - orchestrator
-          - runner-claude
           - runner-cli
           - runner-codex
           - runner-fake

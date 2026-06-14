@@ -5,7 +5,7 @@ an agent folder. It polls an issue tracker, dispatches AI coding-agent children
 into per-issue workspaces, watches them finish, and loops — with a live
 dashboard to observe and control the world.
 
-Supports Claude Code, Pi, Codex, and arbitrary CLI runners. Trackers: local
+Supports Pi, Codex, and arbitrary CLI runners. Trackers: local
 Markdown files or Linear.
 
 ## How it works
@@ -75,9 +75,6 @@ Move the folder, move the agent. Everything it needs lives inside.
 cargo build --release          # → ./target/release/agentropy
 ```
 
-For the `claude` runner: the **Claude Code CLI** (`claude`) must be installed
-and authenticated on the host. Agentropy does not bundle, install, or auth it.
-
 ## Extensions
 
 The codebase is a cargo workspace: a domain-free host (`crates/agentropy-host`)
@@ -110,7 +107,6 @@ scaffold one with `cargo agentropy new my-extension --kind background`
        orchestrator::OrchestratorExtension,
        dashboard::DashboardExtension::default(),
        runner_pi::RunnerPiExtension,
-       runner_claude::RunnerClaudeExtension,
        runner_codex::RunnerCodexExtension,
        runner_cli::RunnerCliExtension,
        runner_fake::RunnerFakeExtension,
@@ -136,7 +132,7 @@ tracker:
   use: files            # files | linear
 
 runner:
-  use: claude-code      # pi | claude | claude-code | codex | cli | fake
+  use: pi               # pi | codex | cli | fake
 ```
 
 Background extensions in `plugins![]` (orchestrator, dashboard, frontend-log)
@@ -212,9 +208,9 @@ tracker:
 # at least one must resolve or the daemon refuses to boot.
 
 runner:
-  use: claude-code            # pi | claude | claude-code | codex | cli | fake
-  command: claude             # executable; defaults to runner kind's canonical command
-  # model: claude-opus-4-6   # passed to runners that accept --model
+  use: pi                     # pi | codex | cli | fake
+  command: pi                 # executable; defaults to runner kind's canonical command
+  # model: gpt-5             # passed to runners that accept --model
   # provider: anthropic       # passed to runners that accept a provider flag
   # thinking: high            # reasoning level (alias: effort); see "Thinking / reasoning level"
   max_run_timeout_ms: 3600000 # 1 h hard cap per attempt (alias: turn_timeout_ms)
@@ -282,10 +278,10 @@ workspace:
   cleanup_on_terminal: false      # remove workspace on success (default false)
 
 agent:
-  runner: claude                  # or pi, codex, cli
-  command: claude
-  model: claude-opus-4-6
-  # provider: anthropic           # passed to runners that accept a provider flag
+  runner: pi                      # or codex, cli
+  command: pi
+  model: gpt-5
+  # provider: openai              # passed to runners that accept a provider flag
   # thinking: high                # reasoning level (alias: effort); overrides runner.thinking
   max_run_timeout_ms: 1800000
   stall_timeout_ms: 300000
@@ -325,14 +321,13 @@ The child must eventually leave the issue in a non-active state (or set it to
 | `use` value | Binary | Protocol |
 |---|---|---|
 | `pi` (default) | `pi` | JSON-RPC turn request over stdin |
-| `claude` / `claude-code` | `claude` | `claude -p --permission-mode bypassPermissions --add-dir <agent-folder>`, prompt on stdin |
 | `codex` | `codex` | `codex app-server` + JSON-RPC turn request |
 | `cli` | `sh` (configurable) | No stdin; reads from `AGENT_*` env vars |
 | `fake` | `sh` | Echoes `$AGENT_PROMPT`; test shim only |
 
 All runners spawn in their own process group so SIGTERM reaches the whole
-subprocess tree. `pi` and `claude` persist per-issue session dirs under
-`pi-sessions/ISSUE-N/` and `claude-sessions/ISSUE-N/` respectively.
+subprocess tree. `pi` persists per-issue session dirs under
+`pi-sessions/ISSUE-N/`.
 
 ## Thinking / reasoning level
 
@@ -354,7 +349,6 @@ runner default applies.
 |---|---|---|
 | `pi` | `--thinking <level>` | `none` (mapped to pi's `off`), `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `codex` | `-c model_reasoning_effort=<level>` | `minimal`, `low`, `medium`, `high`, `xhigh` |
-| `claude` / `claude-code` | `--effort <level>` | `low`, `medium`, `high`, `xhigh` |
 | `cli` / `fake` | ignored | — |
 
 > **Breaking change:** the previous WORKFLOW.md `agent.thinking` semantics — a
@@ -388,7 +382,7 @@ the subset applicable to their lifecycle point.
 | `AGENT_MODEL` | Model name (only when configured) |
 | `AGENT_WORKER_MODEL` | Same as `AGENT_MODEL` (alias, only when configured) |
 | `AGENT_LINEAR_GRAPHQL_TOOL` | `1` when the Linear GraphQL tool is enabled |
-| `AGENT_SESSION_DIR` | Per-issue session directory (Pi and Claude runners only) |
+| `AGENT_SESSION_DIR` | Per-issue session directory (Pi runner only) |
 
 `workspace.root` in `agent.yaml`/WORKFLOW.md supports `$AGENT_HOME` (expands
 to the agent folder) and `~` (expands to `$HOME`) in addition to relative paths

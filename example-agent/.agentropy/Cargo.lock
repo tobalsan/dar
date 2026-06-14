@@ -11,7 +11,7 @@ dependencies = [
  "frontend-log",
  "host-api",
  "orchestrator",
- "runner-claude",
+ "runner-fake",
  "tokio",
  "tracker-files",
  "tracker-linear",
@@ -1479,17 +1479,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "runner-claude"
-version = "0.2.0"
-source = "git+https://github.com/tobalsan/dar.git?rev=09b8e3758a61327bc060d9656727b338a5903740#09b8e3758a61327bc060d9656727b338a5903740"
-dependencies = [
- "anyhow",
- "cap-runner",
- "host-api",
- "runner-core",
-]
-
-[[package]]
 name = "runner-core"
 version = "0.2.0"
 source = "git+https://github.com/tobalsan/dar.git?rev=09b8e3758a61327bc060d9656727b338a5903740#09b8e3758a61327bc060d9656727b338a5903740"
@@ -1502,6 +1491,17 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "runner-fake"
+version = "0.2.0"
+source = "git+https://github.com/tobalsan/dar.git?rev=09b8e3758a61327bc060d9656727b338a5903740#09b8e3758a61327bc060d9656727b338a5903740"
+dependencies = [
+ "anyhow",
+ "cap-runner",
+ "host-api",
+ "runner-core",
 ]
 
 [[package]]

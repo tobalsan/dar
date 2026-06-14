@@ -8,8 +8,8 @@ async fn main() {
         frontend_log::FrontendLogExtension,
         #[cfg(feature = "stock-orchestrator")]
         orchestrator::OrchestratorExtension::default(),
-        #[cfg(feature = "stock-runner-claude")]
-        runner_claude::RunnerClaudeExtension,
+        #[cfg(feature = "stock-runner-fake")]
+        runner_fake::RunnerFakeExtension,
         #[cfg(feature = "stock-tracker-files")]
         tracker_files::TrackerFilesExtension,
         #[cfg(feature = "stock-tracker-linear")]

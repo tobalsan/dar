@@ -486,9 +486,9 @@ mod tests {
         snapshot.version = 1;
         snapshot.agent.id = "demo".to_string();
         snapshot.agent.tracker = "files".to_string();
-        snapshot.agent.runner = "claude".to_string();
+        snapshot.agent.runner = "fake".to_string();
         let screen = rendered_wide(&dash_app(snapshot));
-        assert!(screen.contains("agent demo | tracker files | runner claude | last tick never"));
+        assert!(screen.contains("agent demo | tracker files | runner fake | last tick never"));
         assert!(!screen.contains("PAUSED"));
         assert!(screen.contains("active runs (0):"));
         assert!(screen.contains("queue (0):"));
@@ -506,7 +506,7 @@ mod tests {
         snapshot.version = 5;
         snapshot.agent.id = "demo".to_string();
         snapshot.agent.tracker = "files".to_string();
-        snapshot.agent.runner = "claude".to_string();
+        snapshot.agent.runner = "fake".to_string();
         snapshot.paused = true;
         snapshot.last_tick_at = Some(now);
         snapshot.rate_limit_min_remaining = Some(17);

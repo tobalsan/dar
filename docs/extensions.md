@@ -92,8 +92,8 @@ ctx.services.service::<dyn Runner>("fake", Arc::new(FakeRunner))?;
 let runner = ctx.host.services.get::<dyn Runner>("fake")?;
 ```
 
-Real ids in the shipped mix: runners `dyn Runner` under `pi` / `claude` /
-`claude-code` / `codex` / `cli` / `fake`; trackers `dyn TrackerFactory` under
+Real ids in the shipped mix: runners `dyn Runner` under `pi` / `codex` /
+`cli` / `fake`; trackers `dyn TrackerFactory` under
 `files` / `linear`; chat backends `dyn ChatBackend` under `pi`. Id and type
 form the key, so `dyn ChatBackend @ "pi"` coexists with `dyn Runner @ "pi"`.
 (`register` is an alias for `service`.)
