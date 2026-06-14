@@ -16,6 +16,16 @@ impl DashboardTemplate {
     }
 }
 
+/// Number of history rows shown per page in the Recent runs list.
+pub const PAGE_SIZE: usize = 10;
+
+/// One pagination control rendered below the Recent runs list.
+pub struct PageLink {
+    pub page: usize,
+    pub label: String,
+    pub current: bool,
+}
+
 #[derive(Template)]
 #[template(path = "content.html")]
 pub struct ContentTemplate {
@@ -27,10 +37,19 @@ pub struct ContentTemplate {
     pub recent_count: usize,
     pub last_tick: String,
     pub last_tick_at: String,
+    pub page: usize,
+    pub total_pages: usize,
+    pub pages: Vec<PageLink>,
+    pub has_prev: bool,
+    pub has_next: bool,
 }
 
 impl ContentTemplate {
     pub fn from_snapshot(s: RunSnapshot) -> Self {
+        Self::from_snapshot_page(s, 1)
+    }
+
+    pub fn from_snapshot_page(s: RunSnapshot, requested_page: usize) -> Self {
         let tick_at = s.last_tick_at;
         let last_tick = tick_at
             .map(|ts| fmt_age((Utc::now() - ts).num_seconds().max(0)))
@@ -38,22 +57,43 @@ impl ContentTemplate {
         let last_tick_at = tick_at.map(|ts| ts.to_rfc3339()).unwrap_or_default();
         let active_ids: std::collections::HashSet<&str> =
             s.active_runs.iter().map(|r| r.run_id.as_str()).collect();
-        let history = s
+        let all_history = s
             .runs
             .into_iter()
             .filter(|run| run.outcome.as_deref() != Some("park_barrier"))
             .filter(|run| !active_ids.contains(run.run_id.as_str()))
             .map(history_row)
             .collect::<Vec<_>>();
+        let recent_count = all_history.len();
+        let total_pages = recent_count.div_ceil(PAGE_SIZE).max(1);
+        let page = requested_page.clamp(1, total_pages);
+        let start = (page - 1) * PAGE_SIZE;
+        let history = all_history
+            .into_iter()
+            .skip(start)
+            .take(PAGE_SIZE)
+            .collect::<Vec<_>>();
+        let pages = (1..=total_pages)
+            .map(|p| PageLink {
+                page: p,
+                label: p.to_string(),
+                current: p == page,
+            })
+            .collect::<Vec<_>>();
         Self {
             agent: s.agent,
             active_count: s.active_runs.len(),
-            recent_count: history.len(),
+            recent_count,
             active_runs: s.active_runs,
             history,
             rate_limit_min_remaining: s.rate_limit_min_remaining,
             last_tick,
             last_tick_at,
+            page,
+            total_pages,
+            pages,
+            has_prev: page > 1,
+            has_next: page < total_pages,
         }
     }
 }
@@ -331,6 +371,85 @@ mod tests {
             exit_code: Some(0),
             process_alive: false,
         }
+    }
+
+    fn snapshot_with_runs(n: usize) -> RunSnapshot {
+        let mut s = RunSnapshot::empty();
+        s.runs = (0..n)
+            .map(|i| {
+                let mut r = sample_run();
+                r.run_id = format!("ALG-{i}-run");
+                r.issue_identifier = format!("ALG-{i}");
+                r
+            })
+            .collect();
+        s
+    }
+
+    #[test]
+    fn pagination_slices_to_page_size() {
+        let t = ContentTemplate::from_snapshot_page(snapshot_with_runs(23), 1);
+        assert_eq!(t.recent_count, 23, "full count reported");
+        assert_eq!(t.history.len(), PAGE_SIZE, "first page capped at page size");
+        assert_eq!(t.total_pages, 3, "23 runs -> 3 pages");
+        assert_eq!(t.page, 1);
+        assert!(!t.has_prev);
+        assert!(t.has_next);
+        assert_eq!(t.history[0].identifier, "ALG-0", "newest-first preserved");
+    }
+
+    #[test]
+    fn pagination_last_page_has_remainder() {
+        let t = ContentTemplate::from_snapshot_page(snapshot_with_runs(23), 3);
+        assert_eq!(t.history.len(), 3, "last page holds the remainder");
+        assert_eq!(t.page, 3);
+        assert!(t.has_prev);
+        assert!(!t.has_next);
+        assert_eq!(t.history[0].identifier, "ALG-20", "page 3 starts at index 20");
+    }
+
+    #[test]
+    fn pagination_clamps_out_of_range_page() {
+        let over = ContentTemplate::from_snapshot_page(snapshot_with_runs(15), 99);
+        assert_eq!(over.page, 2, "clamped to last page");
+        let under = ContentTemplate::from_snapshot_page(snapshot_with_runs(15), 0);
+        assert_eq!(under.page, 1, "clamped to first page");
+    }
+
+    #[test]
+    fn pagination_single_page_when_few_runs() {
+        let t = ContentTemplate::from_snapshot_page(snapshot_with_runs(4), 1);
+        assert_eq!(t.total_pages, 1);
+        assert_eq!(t.history.len(), 4);
+        assert!(!t.has_prev);
+        assert!(!t.has_next);
+    }
+
+    #[test]
+    fn pagination_empty_history_is_single_page() {
+        let t = ContentTemplate::from_snapshot_page(snapshot_with_runs(0), 1);
+        assert_eq!(t.total_pages, 1);
+        assert_eq!(t.recent_count, 0);
+        assert!(t.history.is_empty());
+    }
+
+    #[test]
+    fn pagination_controls_render_below_list() {
+        let html = ContentTemplate::from_snapshot_page(snapshot_with_runs(23), 2)
+            .render()
+            .expect("content renders");
+        assert!(html.contains("class=\"pager\""), "pager rendered");
+        assert!(html.contains("/content?page=1"), "first-page link present");
+        assert!(html.contains("/content?page=3"), "last-page link present");
+        assert!(html.contains("aria-current=\"page\""), "current page marked");
+    }
+
+    #[test]
+    fn pagination_controls_hidden_for_single_page() {
+        let html = ContentTemplate::from_snapshot_page(snapshot_with_runs(7), 1)
+            .render()
+            .expect("content renders");
+        assert!(!html.contains("class=\"pager\""), "no pager for a single page");
     }
 
     #[test]
