@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// A YAML scalar or list, normalised to `Vec<String>`. Used by tracker `label`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum StringOrVec {
     Scalar(String),
@@ -24,7 +24,7 @@ impl StringOrVec {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct AgentConfig {
     pub id: String,
     #[allow(dead_code)]
@@ -51,7 +51,7 @@ fn default_foreground() -> String {
     "logs".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct TrackerConfig {
     #[serde(rename = "use")]
     pub use_: String,
@@ -83,16 +83,19 @@ pub struct TrackerConfig {
 impl TrackerConfig {
     /// Configured label names, empty when unset.
     pub fn labels(&self) -> Vec<String> {
-        self.label.as_ref().map(StringOrVec::to_vec).unwrap_or_default()
+        self.label
+            .as_ref()
+            .map(StringOrVec::to_vec)
+            .unwrap_or_default()
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct TrackerInner {
     pub path: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RunnerConfig {
     /// Runner kind. Accepts `use` (canonical), `sdk` (alias). Empty / absent → "pi".
     #[serde(rename = "use", alias = "sdk", default)]
@@ -136,7 +139,7 @@ fn default_stall_timeout_ms() -> u64 {
     5 * 60 * 1000
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct OrchestratorConfig {
     pub poll_interval_ms: u64,
     #[serde(default = "default_max_concurrent")]
@@ -148,13 +151,13 @@ pub struct OrchestratorConfig {
     pub retry_backoff_ms: u64,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct HitlConfig {
     #[serde(default)]
     pub notifier: HitlNotifierConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct HitlNotifierConfig {
     #[serde(rename = "use", default = "default_hitl_notifier_use")]
     pub use_: String,
@@ -204,12 +207,12 @@ fn default_retry_backoff_ms() -> u64 {
     30 * 1000
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct WorkspaceConfig {
     pub root: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct DashboardConfig {
     /// Bind address. Defaults to `0.0.0.0` so a single `agentropy dash`
     /// aggregator (and, over a tailnet, a remote browser) can reach the
@@ -336,7 +339,9 @@ mod tests {
 
     #[test]
     fn extension_configs_extracts_per_extension_section() {
-        let raw = format!("{BASE}extensions:\n  dashboard:\n    port: 9000\n  example:\n    greeting: hi\n");
+        let raw = format!(
+            "{BASE}extensions:\n  dashboard:\n    port: 9000\n  example:\n    greeting: hi\n"
+        );
         let cfg: AgentConfig = serde_yaml::from_str(&raw).unwrap();
         let configs = cfg.extension_configs().unwrap();
         assert_eq!(configs["dashboard"], serde_json::json!({ "port": 9000 }));
