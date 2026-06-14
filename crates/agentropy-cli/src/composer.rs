@@ -1,5 +1,6 @@
 //! Per-agent composition crate generation.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -21,10 +22,13 @@ impl StockExtension {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct BuildOptions {
     pub vendor: bool,
     pub offline: bool,
+    pub target: Option<String>,
+    pub static_: bool,
+    pub universal: bool,
 }
 
 const STOCK_EXTENSIONS: &[StockExtension] = &[
@@ -158,7 +162,12 @@ fn selected_stock_extensions(agent: &Path) -> Result<Vec<&'static StockExtension
     let selection = agent_selection(agent)?;
     // Validate runner.use early so a typo fails at build time.
     let _ = runner_package(&selection.runner.use_)?;
-    let mut packages = vec!["orchestrator", "dashboard", "tracker-linear", tracker_package(&selection.tracker.use_)?];
+    let mut packages = vec![
+        "orchestrator",
+        "dashboard",
+        "tracker-linear",
+        tracker_package(&selection.tracker.use_)?,
+    ];
     packages.extend_from_slice(ALL_RUNNERS);
     packages.extend(foreground_packages(&selection)?);
     packages.sort_unstable();
@@ -225,6 +234,7 @@ pub fn build(agent: &Path) -> Result<()> {
 
 pub fn build_with_options(agent: &Path, options: BuildOptions) -> Result<()> {
     let (crate_dir, _) = write_composition_crate(agent)?;
+    validate_build_options(&options)?;
     if !crate_dir.join("Cargo.lock").exists() {
         refresh_lockfile(&crate_dir, false)?;
     }
@@ -234,35 +244,76 @@ pub fn build_with_options(agent: &Path, options: BuildOptions) -> Result<()> {
     let agent = agent
         .canonicalize()
         .with_context(|| format!("resolving agent folder {}", agent.display()))?;
-    let mut args = vec!["build", "--release", "--locked"];
+    if options.universal {
+        return build_universal(&crate_dir, &agent, options.offline);
+    }
+    let target = build_target(&options)?;
+    if options.static_ {
+        crate::doctor::check_static_build_prereqs(
+            target.as_deref().context("static build target missing")?,
+        )?;
+    }
+    let mut args = vec![
+        "build".to_string(),
+        "--release".to_string(),
+        "--locked".to_string(),
+    ];
     if options.offline {
-        args.push("--offline");
+        args.push("--offline".to_string());
+    }
+    if let Some(target) = target.as_deref() {
+        args.push("--target".to_string());
+        args.push(target.to_string());
     }
     run_cargo(&crate_dir, &args)?;
     fs::create_dir_all(agent.join("bin"))
         .with_context(|| format!("creating {}", agent.join("bin").display()))?;
-    let binary = crate_dir
-        .join("target")
-        .join("release")
-        .join(binary_name("agentropy"));
+    let binary = built_binary_path(&crate_dir, target.as_deref());
     fs::copy(&binary, agent.join("bin").join(binary_name("agentropy")))
         .with_context(|| format!("copying {}", binary.display()))?;
     Ok(())
 }
 
 pub fn build_to(agent: &Path, dest: &Path) -> Result<()> {
+    build_to_with_options(agent, dest, BuildOptions::default())
+}
+
+pub fn build_to_with_options(agent: &Path, dest: &Path, options: BuildOptions) -> Result<()> {
+    validate_build_options(&options)?;
     let agent = agent
         .canonicalize()
         .with_context(|| format!("resolving agent folder {}", agent.display()))?;
     let crate_dir = agent.join(".agentropy");
-    run_cargo_with_stderr(&crate_dir, ["build", "--release", "--locked"])?;
+    if options.vendor {
+        vendor_dependencies(&crate_dir)?;
+    }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    let binary = crate_dir
-        .join("target")
-        .join("release")
-        .join(binary_name("agentropy"));
+    if options.universal {
+        build_universal_to(&crate_dir, dest, options.offline)?;
+        return Ok(());
+    }
+    let target = build_target(&options)?;
+    if options.static_ {
+        crate::doctor::check_static_build_prereqs(
+            target.as_deref().context("static build target missing")?,
+        )?;
+    }
+    let mut args = vec![
+        "build".to_string(),
+        "--release".to_string(),
+        "--locked".to_string(),
+    ];
+    if options.offline {
+        args.push("--offline".to_string());
+    }
+    if let Some(target) = target.as_deref() {
+        args.push("--target".to_string());
+        args.push(target.to_string());
+    }
+    run_cargo_with_stderr(&crate_dir, args)?;
+    let binary = built_binary_path(&crate_dir, target.as_deref());
     fs::copy(&binary, dest).with_context(|| {
         format!(
             "copying built agentropy binary from {} to {}",
@@ -273,12 +324,82 @@ pub fn build_to(agent: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+fn validate_build_options(options: &BuildOptions) -> Result<()> {
+    if options.universal && (options.static_ || options.target.is_some()) {
+        bail!("--universal cannot be combined with --static or --target");
+    }
+    Ok(())
+}
+
+fn build_target(options: &BuildOptions) -> Result<Option<String>> {
+    if let Some(target) = &options.target {
+        return Ok(Some(target.to_string()));
+    }
+    if options.static_ {
+        return Ok(Some(default_static_target()?));
+    }
+    Ok(None)
+}
+
+fn default_static_target() -> Result<String> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Ok("x86_64-unknown-linux-musl".to_string()),
+        ("linux", "aarch64") => Ok("aarch64-unknown-linux-musl".to_string()),
+        _ => bail!("--static is supported only on Linux x86_64/aarch64; use --target <musl-triple> on supported Linux hosts"),
+    }
+}
+
+fn build_universal(crate_dir: &Path, agent: &Path, offline: bool) -> Result<()> {
+    fs::create_dir_all(agent.join("bin"))
+        .with_context(|| format!("creating {}", agent.join("bin").display()))?;
+    build_universal_to(
+        crate_dir,
+        &agent.join("bin").join(binary_name("agentropy")),
+        offline,
+    )
+}
+
+fn build_universal_to(crate_dir: &Path, dest: &Path, offline: bool) -> Result<()> {
+    if std::env::consts::OS != "macos" {
+        bail!("--universal is supported only on macOS");
+    }
+    for target in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+        let mut args = vec![
+            "build".to_string(),
+            "--release".to_string(),
+            "--locked".to_string(),
+            "--target".to_string(),
+            target.to_string(),
+        ];
+        if offline {
+            args.push("--offline".to_string());
+        }
+        run_cargo_with_stderr(crate_dir, args)?;
+    }
+    let status = Command::new("lipo")
+        .arg("-create")
+        .arg("-output")
+        .arg(dest)
+        .arg(built_binary_path(crate_dir, Some("aarch64-apple-darwin")))
+        .arg(built_binary_path(crate_dir, Some("x86_64-apple-darwin")))
+        .status()
+        .context("running lipo")?;
+    if !status.success() {
+        bail!("lipo exited with {status}");
+    }
+    Ok(())
+}
+
 pub fn lock_refresh(agent: &Path) -> Result<()> {
     let (crate_dir, _) = write_composition_crate(agent)?;
     run_cargo(&crate_dir, &["update"])
 }
 
-fn run_cargo_with_stderr<const N: usize>(crate_dir: &Path, args: [&str; N]) -> Result<()> {
+fn run_cargo_with_stderr<I, S>(crate_dir: &Path, args: I) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let output = Command::new("cargo")
         .args(args)
         .current_dir(crate_dir)
@@ -446,7 +567,11 @@ fn vendor_dependencies(crate_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_cargo(crate_dir: &Path, args: &[&str]) -> Result<()> {
+fn run_cargo<I, S>(crate_dir: &Path, args: I) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let status = Command::new("cargo")
         .args(args)
         .current_dir(crate_dir)
@@ -542,6 +667,17 @@ fn binary_name(name: &str) -> String {
     }
 }
 
+fn built_binary_path(crate_dir: &Path, target: Option<&str>) -> PathBuf {
+    let target_dir = crate_dir.join("target");
+    match target {
+        Some(target) => target_dir
+            .join(target)
+            .join("release")
+            .join(binary_name("agentropy")),
+        None => target_dir.join("release").join(binary_name("agentropy")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,6 +768,36 @@ mod tests {
     }
 
     #[test]
+    fn target_build_reads_binary_from_target_specific_release_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let crate_dir = temp.path().join(".agentropy");
+        let target = "x86_64-unknown-linux-musl";
+
+        assert_eq!(
+            built_binary_path(&crate_dir, Some(target)),
+            crate_dir
+                .join("target")
+                .join(target)
+                .join("release")
+                .join(binary_name("agentropy"))
+        );
+    }
+
+    #[test]
+    fn host_build_reads_binary_from_default_release_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let crate_dir = temp.path().join(".agentropy");
+
+        assert_eq!(
+            built_binary_path(&crate_dir, None),
+            crate_dir
+                .join("target")
+                .join("release")
+                .join(binary_name("agentropy"))
+        );
+    }
+
+    #[test]
     fn vendor_writes_cargo_config_and_supports_offline_builds() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
@@ -642,6 +808,7 @@ mod tests {
             BuildOptions {
                 vendor: true,
                 offline: false,
+                ..BuildOptions::default()
             },
         )
         .unwrap();
@@ -800,7 +967,13 @@ extensions:
         init_build(agent).unwrap();
 
         let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
-        for pkg in ["runner-pi", "runner-codex", "runner-opencode", "runner-cli", "runner-fake"] {
+        for pkg in [
+            "runner-pi",
+            "runner-codex",
+            "runner-opencode",
+            "runner-cli",
+            "runner-fake",
+        ] {
             assert!(
                 manifest.contains(&format!("{pkg} = {{ git = ")),
                 "{pkg} should always be linked regardless of runner.use"

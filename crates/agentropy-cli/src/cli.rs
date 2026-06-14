@@ -22,7 +22,7 @@ pub enum Command {
     /// Validate agent.yaml, WORKFLOW.md, and the tracker; exit code only.
     Doctor(DoctorArgs),
     /// Bootstrap the per-agent composition crate.
-    InitBuild(BuildArgs),
+    InitBuild(InitBuildArgs),
     /// Regenerate and build the per-agent binary.
     Build(BuildArgs),
     /// Refresh the per-agent Cargo.lock.
@@ -61,10 +61,38 @@ pub struct DoctorArgs {
     /// Agent folder to validate (defaults to the current directory).
     #[arg(long)]
     pub dir: Option<PathBuf>,
+    /// Also preflight static Linux build prerequisites.
+    #[arg(long = "static")]
+    pub static_: bool,
+    /// Static build target triple to preflight.
+    #[arg(long)]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct BuildArgs {
+    /// Agent folder to build (defaults to the current directory).
+    #[arg(long)]
+    pub dir: Option<PathBuf>,
+    /// Vendor dependencies into .agentropy/vendor for offline builds.
+    #[arg(long)]
+    pub vendor: bool,
+    /// Run cargo without network access.
+    #[arg(long)]
+    pub offline: bool,
+    /// Build for an explicit Rust target triple.
+    #[arg(long)]
+    pub target: Option<String>,
+    /// Build a static Linux musl binary for this host architecture.
+    #[arg(long = "static")]
+    pub static_: bool,
+    /// On macOS, build arm64 + x86_64 and join them with lipo.
+    #[arg(long)]
+    pub universal: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct InitBuildArgs {
     /// Agent folder to build (defaults to the current directory).
     #[arg(long)]
     pub dir: Option<PathBuf>,
@@ -134,6 +162,12 @@ impl DoctorArgs {
 }
 
 impl BuildArgs {
+    pub fn resolve_root(&self) -> Result<PathBuf> {
+        resolve_root(self.dir.as_deref())
+    }
+}
+
+impl InitBuildArgs {
     pub fn resolve_root(&self) -> Result<PathBuf> {
         resolve_root(self.dir.as_deref())
     }

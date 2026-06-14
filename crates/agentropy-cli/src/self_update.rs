@@ -16,9 +16,18 @@ pub enum RestartMode {
 }
 
 pub fn rebuild(_agent: &Path, _restart: RestartMode) -> Result<()> {
+    rebuild_with_options(_agent, composer::BuildOptions::default(), _restart)
+}
+
+pub fn rebuild_with_options(
+    _agent: &Path,
+    options: composer::BuildOptions,
+    _restart: RestartMode,
+) -> Result<()> {
     let agent = _agent
         .canonicalize()
         .with_context(|| format!("resolving agent folder {}", _agent.display()))?;
+    ensure_self_rebuild_output_runnable(&options)?;
     with_lock(&agent, || {
         composer::compose(&agent)?;
         let new_binary = agent.join("bin/agentropy.new");
@@ -26,7 +35,7 @@ pub fn rebuild(_agent: &Path, _restart: RestartMode) -> Result<()> {
             fs::remove_file(&new_binary)
                 .with_context(|| format!("removing stale {}", new_binary.display()))?;
         }
-        composer::build_to(&agent, &new_binary)?;
+        composer::build_to_with_options(&agent, &new_binary, options)?;
         doctor_gate(&agent, &ProcessDoctor)?;
         atomic_swap(&agent)?;
         match _restart {
@@ -34,6 +43,39 @@ pub fn rebuild(_agent: &Path, _restart: RestartMode) -> Result<()> {
             RestartMode::Skip => Ok(()),
         }
     })
+}
+
+fn ensure_self_rebuild_output_runnable(options: &composer::BuildOptions) -> Result<()> {
+    if options.universal {
+        return Ok(());
+    }
+    let Some(target) = options.target.as_deref() else {
+        return Ok(());
+    };
+    if target_is_host_runnable(target) {
+        return Ok(());
+    }
+    bail!("self rebuild target `{target}` is not runnable on this host; use a host target or `build --target` for cross-built artifacts")
+}
+
+fn target_is_host_runnable(target: &str) -> bool {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => {
+            matches!(
+                target,
+                "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl"
+            )
+        }
+        ("linux", "aarch64") => {
+            matches!(
+                target,
+                "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl"
+            )
+        }
+        ("macos", "x86_64") => target == "x86_64-apple-darwin",
+        ("macos", "aarch64") => target == "aarch64-apple-darwin",
+        _ => false,
+    }
 }
 
 trait DoctorRunner {
@@ -252,6 +294,42 @@ mod tests {
             .unwrap()
             .1;
         assert!(second_start >= first_end);
+    }
+
+    #[test]
+    fn self_rebuild_rejects_non_runnable_target() {
+        let target = if cfg!(target_arch = "aarch64") {
+            "x86_64-unknown-linux-musl"
+        } else {
+            "aarch64-unknown-linux-musl"
+        };
+        let err = ensure_self_rebuild_output_runnable(&composer::BuildOptions {
+            target: Some(target.to_string()),
+            ..composer::BuildOptions::default()
+        })
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("is not runnable on this host"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn self_rebuild_allows_host_target() {
+        let target = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "x86_64") => "x86_64-unknown-linux-musl",
+            ("linux", "aarch64") => "aarch64-unknown-linux-musl",
+            ("macos", "x86_64") => "x86_64-apple-darwin",
+            ("macos", "aarch64") => "aarch64-apple-darwin",
+            _ => return,
+        };
+
+        ensure_self_rebuild_output_runnable(&composer::BuildOptions {
+            target: Some(target.to_string()),
+            ..composer::BuildOptions::default()
+        })
+        .unwrap();
     }
 
     struct FakeDoctor {
