@@ -53,26 +53,26 @@
     {% if total_pages > 1 %}
     <nav class="pager" aria-label="Run history pages">
       <button class="page-btn" {% if !has_prev %}disabled{% endif %}
-        hx-get="/content?page=1" hx-target="#content" hx-swap="innerHTML"
-        onclick="document.getElementById('content').setAttribute('hx-get','/content?page=1')"
+        hx-get="/content" hx-target="#content" hx-swap="innerHTML"
+        onclick="window.__dashPage=1"
         aria-label="First page">&laquo;</button>
       <button class="page-btn" {% if !has_prev %}disabled{% endif %}
-        hx-get="/content?page={{ page - 1 }}" hx-target="#content" hx-swap="innerHTML"
-        onclick="document.getElementById('content').setAttribute('hx-get','/content?page={{ page - 1 }}')"
+        hx-get="/content" hx-target="#content" hx-swap="innerHTML"
+        onclick="window.__dashPage={{ page - 1 }}"
         aria-label="Previous page">&lsaquo;</button>
       {% for p in pages %}
       <button class="page-btn{% if p.current %} current{% endif %}"
         {% if p.current %}aria-current="page"{% endif %}
-        hx-get="/content?page={{ p.page }}" hx-target="#content" hx-swap="innerHTML"
-        onclick="document.getElementById('content').setAttribute('hx-get','/content?page={{ p.page }}')">{{ p.label }}</button>
+        hx-get="/content" hx-target="#content" hx-swap="innerHTML"
+        onclick="window.__dashPage={{ p.page }}">{{ p.label }}</button>
       {% endfor %}
       <button class="page-btn" {% if !has_next %}disabled{% endif %}
-        hx-get="/content?page={{ page + 1 }}" hx-target="#content" hx-swap="innerHTML"
-        onclick="document.getElementById('content').setAttribute('hx-get','/content?page={{ page + 1 }}')"
+        hx-get="/content" hx-target="#content" hx-swap="innerHTML"
+        onclick="window.__dashPage={{ page + 1 }}"
         aria-label="Next page">&rsaquo;</button>
       <button class="page-btn" {% if !has_next %}disabled{% endif %}
-        hx-get="/content?page={{ total_pages }}" hx-target="#content" hx-swap="innerHTML"
-        onclick="document.getElementById('content').setAttribute('hx-get','/content?page={{ total_pages }}')"
+        hx-get="/content" hx-target="#content" hx-swap="innerHTML"
+        onclick="window.__dashPage={{ total_pages }}"
         aria-label="Last page">&raquo;</button>
     </nav>
     {% endif %}

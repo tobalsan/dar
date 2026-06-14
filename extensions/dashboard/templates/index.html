@@ -97,6 +97,12 @@
   </div>
   <div id="run-detail"></div>
   <script>
+    window.__dashPage = window.__dashPage || 1;
+    document.body.addEventListener('htmx:configRequest', function (ev) {
+      if ((ev.detail.path || '').indexOf('/content') === 0) {
+        ev.detail.parameters['page'] = window.__dashPage;
+      }
+    });
     function closeDrawer() {
       document.getElementById('run-detail').innerHTML = '';
     }
