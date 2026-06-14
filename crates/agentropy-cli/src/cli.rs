@@ -17,6 +17,8 @@ pub struct Cli {
 pub enum Command {
     /// Run the orchestrator loop and dashboard (long-running).
     Run(RunArgs),
+    /// Serve a unified dashboard over every live agent on this host (long-running).
+    Dash(DashArgs),
     /// Validate agent.yaml, WORKFLOW.md, and the tracker; exit code only.
     Doctor(DoctorArgs),
     /// Bootstrap the per-agent composition crate.
@@ -39,6 +41,19 @@ pub struct RunArgs {
     /// Agent folder to run in (defaults to the current directory).
     #[arg(long)]
     pub dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct DashArgs {
+    /// Address to bind the aggregator on (default 0.0.0.0).
+    #[arg(long)]
+    pub bind: Option<std::net::IpAddr>,
+    /// Port to bind the aggregator on (default 7878).
+    #[arg(long)]
+    pub port: Option<u16>,
+    /// Registry directory to read agent presence from (default ~/.agentropy/dashboards).
+    #[arg(long)]
+    pub registry_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

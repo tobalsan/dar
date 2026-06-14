@@ -49,7 +49,7 @@ use std::io::Write;
 use std::panic::PanicHookInfo;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use axum::Router;
@@ -648,6 +648,7 @@ impl RegisterCtx {
             bus: Arc::new(self.bus),
             router: Arc::new(self.http.into_router()),
             services: self.services,
+            http_addr: Arc::new(OnceLock::new()),
         })
     }
 }
@@ -665,4 +666,21 @@ pub struct StartServices {
     pub bus: Arc<EventBus>,
     pub router: Arc<Router>,
     pub services: ServiceRegistry,
+    /// Socket address the host HTTP server actually bound, set once by the host
+    /// after a successful synchronous bind and before any extension `start`
+    /// runs. `None` when HTTP is disabled. With an OS-assigned port (`:0`) this
+    /// is how an extension learns the real ephemeral port it ended up on.
+    http_addr: Arc<OnceLock<std::net::SocketAddr>>,
+}
+
+impl StartServices {
+    /// The address the host HTTP server bound, if HTTP is enabled and bound.
+    pub fn http_addr(&self) -> Option<std::net::SocketAddr> {
+        self.http_addr.get().copied()
+    }
+
+    /// Record the bound address. Called once by the host; ignored if already set.
+    pub fn set_http_addr(&self, addr: std::net::SocketAddr) {
+        let _ = self.http_addr.set(addr);
+    }
 }

@@ -87,6 +87,30 @@ pub struct OrchestratorExtension {
     store_cell: Arc<std::sync::OnceLock<Arc<Store>>>,
 }
 
+/// Startup banner for the dashboard URL.
+///
+/// With an explicit fixed port we announce the URL directly. With the default
+/// OS-assigned port (`0`) the configured value is meaningless, so we report the
+/// *actual* bound port from the host when known, and otherwise point the
+/// operator at the unified `agentropy dash` aggregator.
+fn dashboard_banner(
+    bind: std::net::IpAddr,
+    port: u16,
+    bound: Option<std::net::SocketAddr>,
+) -> String {
+    if port != 0 {
+        return format!("agentropy running; dashboard on http://{bind}:{port}/");
+    }
+    match bound {
+        Some(addr) => format!(
+            "agentropy running; dashboard on http://{}:{}/ (run `agentropy dash` for the fleet view)",
+            if bind.is_unspecified() { std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) } else { bind },
+            addr.port()
+        ),
+        None => "agentropy running; run `agentropy dash` for the dashboard".to_string(),
+    }
+}
+
 impl Extension for OrchestratorExtension {
     fn id(&self) -> &'static str {
         "orchestrator"
@@ -240,9 +264,7 @@ impl Extension for OrchestratorExtension {
                 hitl,
             )
             .with_snapshot_bus(ctx.host.bus.clone())
-            .with_startup_banner(format!(
-                "agentropy running; dashboard on http://{bind}:{port}/"
-            ));
+            .with_startup_banner(dashboard_banner(bind, port, ctx.host.http_addr()));
             tokio::spawn(async move {
                 let _guard = log_guard;
                 if let Err(e) = orchestrator.run(shutdown_rx).await {
@@ -2516,7 +2538,31 @@ mod tests {
     use crate::workflow_config::{EffectiveLoopConfig, WorkflowFrontmatter};
     use anyhow::Result;
     use chrono::TimeZone;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn banner_uses_fixed_port_when_configured() {
+        let bind = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let msg = super::dashboard_banner(bind, 7878, None);
+        assert_eq!(msg, "agentropy running; dashboard on http://127.0.0.1:7878/");
+    }
+
+    #[test]
+    fn banner_reports_actual_port_for_ephemeral() {
+        let bind = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let bound = Some(SocketAddr::from(([0, 0, 0, 0], 53124)));
+        let msg = super::dashboard_banner(bind, 0, bound);
+        assert!(msg.contains("http://127.0.0.1:53124/"));
+        assert!(msg.contains("agentropy dash"));
+    }
+
+    #[test]
+    fn banner_falls_back_when_port_unknown() {
+        let bind = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let msg = super::dashboard_banner(bind, 0, None);
+        assert!(msg.contains("agentropy dash"));
+        assert!(!msg.contains(":0/"));
+    }
     use tempfile::tempdir;
     use tempfile::TempDir;
     use tokio::sync::mpsc;

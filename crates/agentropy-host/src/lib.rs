@@ -177,6 +177,12 @@ async fn boot_inner(
             .await
             .with_context(|| format!("binding host HTTP on {bind}:{port}"))
             .inspect_err(|e| report("-", e))?;
+        // Surface the *actual* bound address so extensions can learn the
+        // OS-assigned port when booting on `:0` (ephemeral). Set before any
+        // extension `start` runs.
+        if let Ok(addr) = listener.local_addr() {
+            host.set_http_addr(addr);
+        }
         Some(tokio::spawn(async move {
             axum::serve(listener, http_router.as_ref().clone().into_make_service())
                 .with_graceful_shutdown(async move {
