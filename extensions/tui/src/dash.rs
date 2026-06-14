@@ -422,8 +422,9 @@ mod tests {
         let mut snapshot = RunSnapshot::empty();
         snapshot.version = 2;
         for i in 0..15 {
+            // HistoryRing is newest-first (push_front), so ISSUE-14 leads.
             snapshot.history.push(HistoryEntry {
-                identifier: format!("ISSUE-{i}"),
+                identifier: format!("ISSUE-{}", 14 - i),
                 status: RunStatus::Succeeded,
                 pid: 0,
                 ended_at: now,
