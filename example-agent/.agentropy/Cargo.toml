@@ -15,18 +15,18 @@ path = "src/main.rs"
 host-api = { path = "../../crates/host-api" }
 agentropy-cli = { path = "../../crates/agentropy-cli" }
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal"] }
-frontend-log = { path = "../../extensions/frontend-log" }
-tracker-files = { path = "../../extensions/tracker-files" }
-tracker-linear = { path = "../../extensions/tracker-linear" }
-orchestrator = { path = "../../extensions/orchestrator" }
-dashboard = { path = "../../extensions/dashboard" }
-runner-pi = { path = "../../extensions/runner-pi" }
-runner-claude = { path = "../../extensions/runner-claude" }
-runner-codex = { path = "../../extensions/runner-codex" }
-runner-opencode = { path = "../../extensions/runner-opencode" }
-runner-cli = { path = "../../extensions/runner-cli" }
-runner-fake = { path = "../../extensions/runner-fake" }
-chat-opencode = { path = "../../extensions/chat-opencode" }
-chat-pi = { path = "../../extensions/chat-pi" }
-chat-codex = { path = "../../extensions/chat-codex" }
-tui = { path = "../../extensions/tui" }
+chat-pi = { path = "../../extensions/chat-pi", optional = true }
+frontend-log = { path = "../../extensions/frontend-log", optional = true }
+orchestrator = { path = "../../extensions/orchestrator", optional = true }
+runner-claude = { path = "../../extensions/runner-claude", optional = true }
+tracker-files = { path = "../../extensions/tracker-files", optional = true }
+tui = { path = "../../extensions/tui", optional = true }
+
+[features]
+default = ["stock-chat-pi", "stock-frontend-log", "stock-orchestrator", "stock-runner-claude", "stock-tracker-files", "stock-tui"]
+stock-chat-pi = ["dep:chat-pi"]
+stock-frontend-log = ["dep:frontend-log"]
+stock-orchestrator = ["dep:orchestrator"]
+stock-runner-claude = ["dep:runner-claude"]
+stock-tracker-files = ["dep:tracker-files"]
+stock-tui = ["dep:tui"]
