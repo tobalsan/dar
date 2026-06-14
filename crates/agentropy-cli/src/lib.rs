@@ -3,6 +3,7 @@
 mod cli;
 pub mod composer;
 mod doctor;
+pub mod self_update;
 
 use std::sync::Arc;
 
@@ -89,6 +90,12 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
         }
         Command::InitBuild(args) => composer::init_build(&args.resolve_root()?),
         Command::Build(args) => composer::build(&args.resolve_root()?),
+        Command::Self_(args) => match args.command {
+            cli::SelfCommand::Rebuild(_) => self_update::rebuild(
+                &args.command.resolve_root()?,
+                self_update::RestartMode::Execv,
+            ),
+        },
         Command::InitWorkflow(args) => {
             let root = args.resolve_root()?;
             dotenv::load_agent_env(&root)?;
@@ -187,6 +194,28 @@ mod tests {
                 }
                 _ => panic!("expected build command"),
             }
+        }
+    }
+
+    #[test]
+    fn self_rebuild_command_parses_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let cli = Cli::try_parse_from([
+            "agentropy".into(),
+            "self".into(),
+            "rebuild".into(),
+            "--dir".into(),
+            temp.path().as_os_str().to_os_string(),
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Self_(args) => {
+                assert_eq!(
+                    args.command.resolve_root().unwrap(),
+                    temp.path().canonicalize().unwrap()
+                );
+            }
+            _ => panic!("expected self rebuild command"),
         }
     }
 }

@@ -23,6 +23,9 @@ pub enum Command {
     InitBuild(BuildArgs),
     /// Regenerate and build the per-agent binary.
     Build(BuildArgs),
+    /// Manage this agent binary.
+    #[command(name = "self")]
+    Self_(SelfArgs),
     /// Scaffold the default WORKFLOW.md prompt in the agent folder.
     InitWorkflow(InitWorkflowArgs),
     /// Export the configured Linear project and issues under the data dir.
@@ -48,6 +51,18 @@ pub struct BuildArgs {
     /// Agent folder to build (defaults to the current directory).
     #[arg(long)]
     pub dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct SelfArgs {
+    #[command(subcommand)]
+    pub command: SelfCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SelfCommand {
+    /// Rebuild, doctor, swap, and restart this agent binary.
+    Rebuild(BuildArgs),
 }
 
 #[derive(Debug, Args)]
@@ -91,6 +106,14 @@ impl DoctorArgs {
 impl BuildArgs {
     pub fn resolve_root(&self) -> Result<PathBuf> {
         resolve_root(self.dir.as_deref())
+    }
+}
+
+impl SelfCommand {
+    pub fn resolve_root(&self) -> Result<PathBuf> {
+        match self {
+            SelfCommand::Rebuild(args) => args.resolve_root(),
+        }
     }
 }
 
