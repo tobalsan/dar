@@ -71,6 +71,8 @@ Move the folder, move the agent. Everything it needs lives inside.
 
 ## Build
 
+From-source / repo dev build (all stock extensions, single monolith):
+
 ```bash
 cargo build --release          # → ./target/release/agentropy
 ```
@@ -159,6 +161,21 @@ See [Configuration](#configuration-agentyaml) for the full `agent.yaml` referenc
 ## CLI
 
 ```bash
+# Bootstrap the per-agent composition crate (.agentropy/) — one-time setup.
+agentropy init-build --dir ./my-agent
+agentropy init-build --dir ./my-agent --vendor   # vendor deps for offline use
+
+# Build the agent's own binary → <folder>/bin/agentropy.
+agentropy build --dir ./my-agent
+agentropy build --dir ./my-agent --vendor --offline   # air-gapped build
+
+# Refresh the per-agent Cargo.lock (deliberate dep bump; commit result).
+agentropy lock-refresh --dir ./my-agent
+
+# Self-update: recompose, build, doctor-gate, atomic swap, execv.
+agentropy self rebuild --dir ./my-agent
+agentropy self rebuild --dir ./my-agent --vendor --offline
+
 # Scaffold the default WORKFLOW.md prompt in an agent folder.
 agentropy init-workflow --dir ./my-agent
 agentropy init-workflow --dir ./my-agent --force                      # overwrite existing
