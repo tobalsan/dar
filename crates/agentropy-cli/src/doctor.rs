@@ -208,6 +208,80 @@ fn check_toolchain(root: &Path) -> anyhow::Result<String> {
     ))
 }
 
+pub fn check_static_build_prereqs(target: &str) -> anyhow::Result<String> {
+    let targets = installed_rust_targets()?;
+    check_static_build_prereqs_with(target, Some(&targets), &present_musl_linkers())
+}
+
+fn check_static_build_prereqs_with(
+    target: &str,
+    installed_targets: Option<&str>,
+    present_linkers: &[&str],
+) -> anyhow::Result<String> {
+    if !target.ends_with("-unknown-linux-musl") {
+        anyhow::bail!("static builds require a Linux musl target, got `{target}`");
+    }
+    let installed_targets = installed_targets.context("checking installed Rust targets")?;
+    if !installed_targets.lines().any(|line| line.trim() == target) {
+        anyhow::bail!("rust target `{target}` is not installed; run `rustup target add {target}`");
+    }
+    if !target_musl_linker_present(target, present_linkers) {
+        anyhow::bail!(
+            "musl linker for `{target}` not found; install musl-tools/musl-gcc or build with cross/container"
+        );
+    }
+    Ok(format!("static build prerequisites available for {target}"))
+}
+
+fn installed_rust_targets() -> anyhow::Result<String> {
+    let output = Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("rustup not found - install Rust via rustup: {e}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "`rustup target list --installed` exited with {}",
+            output.status
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn present_musl_linkers() -> Vec<&'static str> {
+    [
+        "musl-gcc",
+        "x86_64-linux-musl-gcc",
+        "aarch64-linux-musl-gcc",
+    ]
+    .into_iter()
+    .filter(|command| command_exists(command))
+    .collect()
+}
+
+fn target_musl_linker_present(target: &str, present_linkers: &[&str]) -> bool {
+    let target_linker = match target {
+        "x86_64-unknown-linux-musl" => "x86_64-linux-musl-gcc",
+        "aarch64-unknown-linux-musl" => "aarch64-linux-musl-gcc",
+        _ => return false,
+    };
+    present_linkers.contains(&target_linker)
+        || (target_arch_matches(target) && present_linkers.contains(&"musl-gcc"))
+}
+
+fn target_arch_matches(target: &str) -> bool {
+    target
+        .strip_suffix("-unknown-linux-musl")
+        .is_some_and(|arch| arch == std::env::consts::ARCH)
+}
+
+fn command_exists(command: &str) -> bool {
+    Command::new(command)
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn pinned_toolchain(root: &Path) -> anyhow::Result<String> {
     let path = root.join(".agentropy/rust-toolchain.toml");
     let content =
@@ -323,5 +397,53 @@ mod tests {
         .unwrap();
         let err = check_toolchain(dir.path()).unwrap_err();
         assert!(err.to_string().contains("requires Rust `999.0` or newer"));
+    }
+
+    #[test]
+    fn static_preflight_requires_installed_rust_target() {
+        let err = check_static_build_prereqs_with(
+            "x86_64-unknown-linux-musl",
+            Some("x86_64-apple-darwin\n"),
+            &["x86_64-linux-musl-gcc"],
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("rust target `x86_64-unknown-linux-musl` is not installed"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn static_preflight_requires_musl_linker() {
+        let err = check_static_build_prereqs_with(
+            "x86_64-unknown-linux-musl",
+            Some("x86_64-unknown-linux-musl\n"),
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("musl linker for `x86_64-unknown-linux-musl` not found"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn static_preflight_requires_linker_for_requested_target() {
+        let err = check_static_build_prereqs_with(
+            "aarch64-unknown-linux-musl",
+            Some("aarch64-unknown-linux-musl\n"),
+            &["x86_64-linux-musl-gcc"],
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("musl linker for `aarch64-unknown-linux-musl` not found"),
+            "{err:#}"
+        );
     }
 }
