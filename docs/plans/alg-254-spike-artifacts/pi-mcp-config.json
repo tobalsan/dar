@@ -1,0 +1,1 @@
+{ "mcpServers": { "toy": { "command": "python3", "args": ["/tmp/alg254-toy/toy_mcp.py"] } } }
