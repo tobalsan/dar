@@ -777,6 +777,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "host-api",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

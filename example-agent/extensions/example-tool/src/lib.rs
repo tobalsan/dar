@@ -7,11 +7,19 @@
 //!
 //! It is wired only into the `example-agent` composition (a local discovered
 //! extension), never the shipped `dist` tool set.
+//!
+//! The tool deliberately reads its own `extensions.example-tool` config during
+//! `register()` (a `suffix` appended to the uppercased text). That makes it a
+//! genuine guard for config parity: a registry built with an empty config store
+//! (as a naive bridge would) produces a *different* result than one fed the real
+//! `agent.yaml` config, so the codex e2e fails loudly if the host MCP bridge
+//! ever stops threading extension config into the `register()` pass.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use host_api::{Extension, RegisterCtx};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tool_registry::{
     ToolExecutor, ToolOutcome, ToolRegistryHandle, ToolSpec, TOOL_REGISTRY_SERVICE,
@@ -23,6 +31,15 @@ pub fn extension() -> Box<dyn Extension> {
 
 pub struct ExampleToolExtension;
 
+/// Per-extension config read from `extensions.example-tool` in `agent.yaml`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ExampleToolConfig {
+    /// Appended verbatim to the uppercased text. Lets the e2e prove that the
+    /// host MCP bridge fed real config into the tool's `register()` pass.
+    #[serde(default)]
+    pub suffix: String,
+}
+
 impl Extension for ExampleToolExtension {
     fn id(&self) -> &'static str {
         "example-tool"
@@ -30,18 +47,33 @@ impl Extension for ExampleToolExtension {
 
     fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            let config = match ctx.config.get(self.id()) {
+                Some(value) => serde_json::from_value::<ExampleToolConfig>(value.clone())
+                    .context("parsing extensions.example-tool config")?,
+                None => ExampleToolConfig::default(),
+            };
             let registry = ctx
                 .services
                 .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
                 .context("example-tool requires the tool-registry-host extension")?;
-            register_into(registry.as_ref())
+            register_into_with_config(registry.as_ref(), config)
         })
     }
 }
 
-/// Register the toy `echo_upper` tool into a registry. Shared by the extension
-/// `register()` pass and the standalone example bridge binary/tests.
+/// Register the toy `echo_upper` tool with default (empty) config. Shared by
+/// tests that don't exercise the config path.
 pub fn register_into(registry: &dyn ToolRegistryHandle) -> Result<()> {
+    register_into_with_config(registry, ExampleToolConfig::default())
+}
+
+/// Register the toy `echo_upper` tool, baking the resolved config into the
+/// executor. Shared by the extension `register()` pass and the standalone
+/// example bridge binary/tests.
+pub fn register_into_with_config(
+    registry: &dyn ToolRegistryHandle,
+    config: ExampleToolConfig,
+) -> Result<()> {
     registry.register_tool(
         ToolSpec::new(
             "echo_upper",
@@ -59,11 +91,15 @@ pub fn register_into(registry: &dyn ToolRegistryHandle) -> Result<()> {
                 "additionalProperties": false,
             }),
         ),
-        Arc::new(EchoUpper),
+        Arc::new(EchoUpper {
+            suffix: config.suffix,
+        }),
     )
 }
 
-struct EchoUpper;
+struct EchoUpper {
+    suffix: String,
+}
 
 #[async_trait::async_trait]
 impl ToolExecutor for EchoUpper {
@@ -74,7 +110,7 @@ impl ToolExecutor for EchoUpper {
                 "echo_upper requires a 'text' string argument",
             ));
         };
-        Ok(ToolOutcome::ok(text.to_uppercase()))
+        Ok(ToolOutcome::ok(format!("{}{}", text.to_uppercase(), self.suffix)))
     }
 }
 
@@ -84,7 +120,7 @@ mod tests {
 
     #[tokio::test]
     async fn echo_upper_uppercases() {
-        let out = EchoUpper
+        let out = EchoUpper { suffix: String::new() }
             .execute(json!({ "text": "hello from spike" }))
             .await
             .unwrap();
@@ -93,7 +129,23 @@ mod tests {
 
     #[tokio::test]
     async fn echo_upper_missing_arg_is_structured_error() {
-        let out = EchoUpper.execute(json!({})).await.unwrap();
+        let out = EchoUpper { suffix: String::new() }
+            .execute(json!({}))
+            .await
+            .unwrap();
         assert!(out.is_error);
+    }
+
+    #[tokio::test]
+    async fn echo_upper_appends_configured_suffix() {
+        // The config read during register() must reach the executor — this is
+        // the contract the host MCP bridge's config parity guarantees.
+        let out = EchoUpper {
+            suffix: " [cfg]".to_string(),
+        }
+        .execute(json!({ "text": "hi" }))
+        .await
+        .unwrap();
+        assert_eq!(out, ToolOutcome::ok("HI [cfg]"));
     }
 }

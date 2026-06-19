@@ -5,6 +5,12 @@
 //! the `example-tool` extension does, and serves the MCP stdio protocol — i.e.
 //! the same registry + bridge surface the host owns, exercised without the full
 //! per-agent composition. Not shipped in `dist`.
+//!
+//! Accepts an optional `--suffix <s>` that stands in for the
+//! `extensions.example-tool.suffix` config the host bridge resolves from
+//! `agent.yaml`. The e2e passes a known suffix and asserts it appears in the
+//! tool result, so a regression that drops extension config on the bridge path
+//! fails the test instead of silently passing.
 
 use std::sync::Arc;
 
@@ -15,8 +21,12 @@ use tool_registry::{ToolRegistry, ToolRegistryHandle};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let suffix = parse_suffix(std::env::args().skip(1));
     let registry = ToolRegistry::new();
-    example_tool::register_into(&registry)?;
+    example_tool::register_into_with_config(
+        &registry,
+        example_tool::ExampleToolConfig { suffix },
+    )?;
     let registry: Arc<dyn ToolRegistryHandle> = Arc::new(registry);
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -73,4 +83,19 @@ async fn main() -> Result<()> {
         stdout.flush().await?;
     }
     Ok(())
+}
+
+/// Parse `--suffix <value>` (or `--suffix=<value>`) from the argument list,
+/// standing in for the resolved `extensions.example-tool.suffix` config.
+fn parse_suffix(args: impl Iterator<Item = String>) -> String {
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        if arg == "--suffix" {
+            return args.next().unwrap_or_default();
+        }
+        if let Some(value) = arg.strip_prefix("--suffix=") {
+            return value.to_string();
+        }
+    }
+    String::new()
 }

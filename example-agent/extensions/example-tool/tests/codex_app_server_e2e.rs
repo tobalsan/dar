@@ -40,11 +40,19 @@ fn codex_app_server_calls_echo_upper_through_host_bridge() {
     let bridge = env!("CARGO_BIN_EXE_example-mcp-bridge");
     let workspace = tempfile::tempdir().unwrap();
 
+    // A non-empty suffix passed to the bridge stands in for resolved
+    // `extensions.example-tool.suffix` config. The agent echoes the tool's exact
+    // output, so the suffix only appears if the bridge threaded config into the
+    // tool's register() pass — guarding the bridge config-parity contract.
+    const SUFFIX: &str = " [via-config]";
+    let expected = format!("HELLO FROM SPIKE{SUFFIX}");
+
     let mut child = Command::new("codex")
         .arg("app-server")
         .args(["-c", "approval_policy=\"never\""])
         .args(["-c", "sandbox_permissions=[\"disk-full-read-access\"]"])
         .args(["-c", &format!("mcp_servers.agentropy.command={bridge:?}")])
+        .args(["-c", &format!("mcp_servers.agentropy.args={:?}", ["--suffix", SUFFIX])])
         .current_dir(workspace.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -103,19 +111,19 @@ fn codex_app_server_calls_echo_upper_through_host_bridge() {
         }
     }));
 
-    // The tool result returns inside the same thread; look for HELLO FROM SPIKE
-    // anywhere in the streamed items/turn output.
+    // The tool result returns inside the same thread; look for the configured
+    // result (uppercased text + suffix) anywhere in the streamed turn output.
     let found = read_until(&mut reader, Duration::from_secs(180), |msg| {
-        msg.to_string()
-            .contains("HELLO FROM SPIKE")
-            .then_some(true)
+        msg.to_string().contains(&expected).then_some(true)
     })
     .unwrap_or(false);
 
+    // Reap the child so the test does not leave a zombie codex app-server.
     let _ = child.kill();
+    let _ = child.wait();
     assert!(
         found,
-        "expected the echo_upper tool result HELLO FROM SPIKE to return in-session"
+        "expected the configured echo_upper result {expected:?} to return in-session"
     );
 }
 

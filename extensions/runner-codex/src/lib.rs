@@ -22,7 +22,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
-const EVENT_KIND: &'static str = "runner.codex";
+const EVENT_KIND: &str = "runner.codex";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// SIGTERM-to-SIGKILL grace passed to `term_then_kill` on shutdown/kill.
 const KILL_GRACE: Duration = Duration::from_secs(5);
@@ -1203,7 +1203,7 @@ mod tests {
         e.chain().any(|cause| {
             cause
                 .downcast_ref::<std::io::Error>()
-                .map_or(false, |io| io.raw_os_error() == Some(26))
+                .is_some_and(|io| io.raw_os_error() == Some(26))
         })
     }
 
