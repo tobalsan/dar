@@ -1,0 +1,10 @@
+[package]
+name = "tool-registry-host"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+
+[dependencies]
+anyhow = "1"
+host-api = { path = "../../crates/host-api" }
+tool-registry = { path = "../../crates/tool-registry" }

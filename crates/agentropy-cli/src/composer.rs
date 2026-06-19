@@ -33,6 +33,10 @@ pub struct BuildOptions {
 
 const STOCK_EXTENSIONS: &[StockExtension] = &[
     StockExtension {
+        package: "tool-registry-host",
+        factory: "tool_registry_host::ToolRegistryHostExtension",
+    },
+    StockExtension {
         package: "frontend-log",
         factory: "frontend_log::FrontendLogExtension",
     },
@@ -163,6 +167,7 @@ fn selected_stock_extensions(agent: &Path) -> Result<Vec<&'static StockExtension
     // Validate runner.use early so a typo fails at build time.
     let _ = runner_package(&selection.runner.use_)?;
     let mut packages = vec![
+        "tool-registry-host",
         "orchestrator",
         "dashboard",
         "tracker-linear",

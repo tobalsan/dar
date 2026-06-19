@@ -1436,6 +1436,32 @@ impl Orchestrator {
         }
     }
 
+    /// Build the host MCP bridge descriptor for spawned runners, or `None` when
+    /// no extension registered any tool. When present, the agent backend is
+    /// pointed at `<this binary> __mcp-bridge --dir <agent root>`, a separate
+    /// host-owned process that re-loads the agent's config/secrets and executes
+    /// registered tools in-host; the agent only sees tool schemas and results.
+    fn host_tool_bridge(&self) -> Option<cap_runner::HostToolBridge> {
+        let registry = self
+            .runner_services
+            .get_named::<dyn tool_registry::ToolRegistryHandle>(
+                tool_registry::TOOL_REGISTRY_SERVICE,
+            )
+            .ok()?;
+        if registry.is_empty() {
+            return None;
+        }
+        let command = std::env::current_exe().ok()?.to_string_lossy().into_owned();
+        Some(cap_runner::HostToolBridge {
+            command,
+            args: vec![
+                "__mcp-bridge".to_string(),
+                "--dir".to_string(),
+                self.paths.root.display().to_string(),
+            ],
+        })
+    }
+
     /// Render the prompt and spawn a child for one issue, creating a run slot.
     /// On render failure (strict-undefined) the child is NOT spawned; the
     /// attempt is treated as abnormal and scheduled for backoff retry.
@@ -1643,6 +1669,7 @@ impl Orchestrator {
         .provider(self.effective_cfg.provider.clone())
         .thinking(self.effective_cfg.thinking.clone())
         .expose_linear_graphql_tool(self.effective_cfg.linear.worker_tool.unwrap_or(false))
+        .host_tool_bridge(self.host_tool_bridge())
         .build();
 
         match self.runner.spawn(params).await {

@@ -22,6 +22,7 @@ dependencies = [
  "runner-opencode",
  "runner-pi",
  "tokio",
+ "tool-registry-host",
  "tracker-files",
  "tracker-linear",
  "tui",
@@ -34,6 +35,7 @@ dependencies = [
  "agentropy-host",
  "agentropy-presence",
  "anyhow",
+ "async-trait",
  "axum 0.8.9",
  "cap-runner",
  "clap",
@@ -46,6 +48,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tool-registry",
 ]
 
 [[package]]
@@ -765,6 +768,19 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "example-tool"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "host-api",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tool-registry",
 ]
 
 [[package]]
@@ -1565,6 +1581,7 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "tokio",
+ "tool-registry",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -2591,6 +2608,26 @@ name = "toml_write"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+
+[[package]]
+name = "tool-registry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "tool-registry-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "host-api",
+ "tool-registry",
+]
 
 [[package]]
 name = "tower"

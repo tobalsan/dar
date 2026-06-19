@@ -1,5 +1,6 @@
 //! Reusable agentropy CLI boot wiring.
 
+pub mod bridge;
 mod cli;
 pub mod composer;
 pub mod dash;
@@ -55,6 +56,10 @@ async fn run_inner(plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
             ))
             .await
         }
+        Command::McpBridge(args) => {
+            let root = args.resolve_root()?;
+            bridge::serve(&root, plugins).await
+        }
         other => run_non_run_command(other, plugins).await,
     }
 }
@@ -103,6 +108,7 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
     match command {
         Command::Run(_) => unreachable!("run is handled by run_host()"),
         Command::Dash(_) => unreachable!("dash is handled in run_inner()"),
+        Command::McpBridge(_) => unreachable!("mcp bridge is handled in run_inner()"),
         Command::Doctor(args) => {
             let root = args.resolve_root()?;
             if args.static_ {
@@ -177,7 +183,7 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
     }
 }
 
-async fn plugin_services(
+pub(crate) async fn plugin_services(
     root: &std::path::Path,
     plugins: Vec<Arc<dyn Extension>>,
 ) -> Result<ServiceRegistry> {

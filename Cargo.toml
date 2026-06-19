@@ -8,6 +8,7 @@ members = [
     "crates/cap-tracker",
     "crates/cap-runner",
     "crates/host-api",
+    "crates/tool-registry",
     "crates/orchestrator-api",
     "crates/opencode-client",
     "crates/runner-core",
@@ -23,9 +24,11 @@ members = [
     "extensions/runner-fake",
     "extensions/runner-opencode",
     "extensions/runner-pi",
+    "extensions/tool-registry-host",
     "extensions/tracker-files",
     "extensions/tracker-linear",
     "extensions/tui",
+    "example-agent/extensions/example-tool",
 ]
 resolver = "2"
 

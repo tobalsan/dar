@@ -34,6 +34,9 @@ pub enum Command {
     InitWorkflow(InitWorkflowArgs),
     /// Export the configured Linear project and issues under the data dir.
     Export(ExportArgs),
+    /// Host-owned MCP bridge over stdio (spawned by runners; not for direct use).
+    #[command(name = "__mcp-bridge", hide = true)]
+    McpBridge(DirArgs),
 }
 
 #[derive(Debug, Args)]
