@@ -79,12 +79,14 @@ fn codex_app_server_calls_echo_upper_through_host_bridge() {
         }
     }));
 
+    // codex app-server returns the id nested as `result.thread.id` (the same
+    // shape the production runner extracts in extract_thread_id).
     let thread_id = read_until(&mut reader, Duration::from_secs(60), |msg| {
         (msg.get("id") == Some(&json!(2)))
-            .then(|| msg["result"]["threadId"].as_str().map(str::to_string))
+            .then(|| msg["result"]["thread"]["id"].as_str().map(str::to_string))
             .flatten()
     })
-    .expect("thread/start returned a threadId");
+    .expect("thread/start returned a thread id");
 
     send(json!({
         "jsonrpc": "2.0", "id": 3, "method": "turn/start",
