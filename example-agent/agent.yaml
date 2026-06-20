@@ -33,6 +33,14 @@ workspace:
 # Terminal UI instead of the plain log stream (Chat / Logs / Dash tabs):
 foreground: tui
 
+extensions:
+  # Toy tool-registry fixture (gated to this example agent). The host MCP bridge
+  # resolves this config and threads it into the tool's register() pass, so the
+  # `echo_upper` result is suffixed with the value below — proving config/secret
+  # parity between the host and the bridge.
+  example-tool:
+    suffix: " [via-config]"
+
 # extensions:
 #   tui:
 #     chat:

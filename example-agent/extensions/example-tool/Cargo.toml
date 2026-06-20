@@ -1,0 +1,31 @@
+[package]
+name = "example-tool"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+
+# Discovered as a local extension for `example-agent` only. This is a TEST
+# FIXTURE (the tool-registry analogue of the `fake` runner): it registers a toy
+# `echo_upper` tool to prove the minimal registration surface and power the
+# end-to-end / manual verification. It is deliberately NOT in the shipped `dist`
+# tool set.
+[package.metadata.agentropy]
+factory = "example_tool::extension"
+
+# Standalone host MCP bridge over the toy registry; used by the codex app-server
+# end-to-end integration test. Not shipped in `dist`.
+[[bin]]
+name = "example-mcp-bridge"
+path = "src/bin/example-mcp-bridge.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+host-api = { path = "../../../crates/host-api" }
+tool-registry = { path = "../../../crates/tool-registry" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "macros", "io-std", "io-util"] }
+
+[dev-dependencies]
+tempfile = "3"

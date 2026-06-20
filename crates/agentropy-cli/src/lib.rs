@@ -1,5 +1,6 @@
 //! Reusable agentropy CLI boot wiring.
 
+pub mod bridge;
 mod cli;
 pub mod composer;
 pub mod dash;
@@ -55,6 +56,10 @@ async fn run_inner(plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
             ))
             .await
         }
+        Command::McpBridge(args) => {
+            let root = args.resolve_root()?;
+            bridge::serve(&root, plugins).await
+        }
         other => run_non_run_command(other, plugins).await,
     }
 }
@@ -103,6 +108,7 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
     match command {
         Command::Run(_) => unreachable!("run is handled by run_host()"),
         Command::Dash(_) => unreachable!("dash is handled in run_inner()"),
+        Command::McpBridge(_) => unreachable!("mcp bridge is handled in run_inner()"),
         Command::Doctor(args) => {
             let root = args.resolve_root()?;
             if args.static_ {
@@ -177,10 +183,22 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
     }
 }
 
-async fn plugin_services(
+/// Run every extension's `register()` pass against a fresh service registry and
+/// return the populated services. Used by the non-`run` paths that need a live
+/// service graph without the long-running host (doctor, self-check, the MCP
+/// bridge, init-workflow, export).
+///
+/// The `register()` pass is fed the *same* per-extension config that `run_host`
+/// builds from `agent.yaml` (`extensions.<id>` sections), so a tool that reads
+/// its config during registration is configured identically here and inside the
+/// host MCP bridge — not handed an empty store. Config parity at this seam is
+/// what makes config/duplicate errors surface at doctor/boot and keeps the
+/// bridge's executors correctly configured.
+pub(crate) async fn plugin_services(
     root: &std::path::Path,
     plugins: Vec<Arc<dyn Extension>>,
 ) -> Result<ServiceRegistry> {
+    let config = ConfigStore::from_values(config::load(root)?.extension_configs()?);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut ctx = RegisterCtx {
         bus: EventBus::new(),
@@ -188,7 +206,7 @@ async fn plugin_services(
         foreground: ForegroundRegistry::default(),
         services: ServiceRegistry::default(),
         paths: HostPaths::new(root)?,
-        config: ConfigStore::default(),
+        config,
         shutdown: ShutdownToken::new(shutdown_rx),
     };
     for plugin in plugins {
@@ -200,6 +218,86 @@ async fn plugin_services(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tool_registry::{
+        ToolExecutor, ToolOutcome, ToolRegistry, ToolRegistryHandle, ToolSpec,
+        TOOL_REGISTRY_SERVICE,
+    };
+
+    /// Extension that reads its `extensions.cfg-tool` config during register()
+    /// and registers a tool whose output echoes the configured value. Proves
+    /// that `plugin_services` feeds real `agent.yaml` config into register().
+    struct ConfigReadingExt;
+
+    struct ConfiguredTool {
+        marker: String,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for ConfiguredTool {
+        async fn execute(&self, _args: serde_json::Value) -> Result<ToolOutcome> {
+            Ok(ToolOutcome::ok(self.marker.clone()))
+        }
+    }
+
+    impl Extension for ConfigReadingExt {
+        fn id(&self) -> &'static str {
+            "cfg-tool"
+        }
+        fn register<'a>(
+            &'a self,
+            ctx: &'a mut RegisterCtx,
+        ) -> host_api::BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                let registry: Arc<ToolRegistry> = Arc::new(ToolRegistry::new());
+                let handle: Arc<dyn ToolRegistryHandle> = registry.clone();
+                // Publish + register so the test can read it back.
+                ctx.services
+                    .service::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE, handle)?;
+                let marker = ctx
+                    .config
+                    .get(self.id())
+                    .and_then(|v| v.get("marker"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("NO-CONFIG")
+                    .to_string();
+                registry.register_tool(
+                    ToolSpec::new("probe", "probe", serde_json::json!({"type": "object"})),
+                    Arc::new(ConfiguredTool { marker }),
+                )?;
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_services_threads_agent_config_into_register() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("agent.yaml"),
+            concat!(
+                "id: t\n",
+                "name: t\n",
+                "tracker:\n  use: files\n  config:\n    path: ./issues\n",
+                "  active_states: [todo]\n  terminal_states: [done]\n",
+                "runner:\n  use: fake\n",
+                "orchestrator:\n  poll_interval_ms: 1000\n  max_concurrent: 1\n  max_retries: 1\n",
+                "workspace:\n  root: ./workspaces\n",
+                "extensions:\n  cfg-tool:\n    marker: FROM-CONFIG\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "{{ issue.description }}").unwrap();
+
+        let services = plugin_services(temp.path(), vec![Arc::new(ConfigReadingExt)])
+            .await
+            .unwrap();
+        let registry = services
+            .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
+            .unwrap();
+        let out = registry.dispatch("probe", serde_json::json!({})).await;
+        // Empty-config (the old bug) would yield "NO-CONFIG".
+        assert_eq!(out, ToolOutcome::ok("FROM-CONFIG"));
+    }
 
     #[test]
     fn clap_display_errors_remain_successful_exits() {

@@ -22,7 +22,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
-const EVENT_KIND: &'static str = "runner.codex";
+const EVENT_KIND: &str = "runner.codex";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// SIGTERM-to-SIGKILL grace passed to `term_then_kill` on shutdown/kill.
 const KILL_GRACE: Duration = Duration::from_secs(5);
@@ -77,7 +77,43 @@ fn codex_args(p: &SpawnParams<'_>) -> Vec<OsString> {
         args.push(OsString::from("-c"));
         args.push(OsString::from(format!("model_reasoning_effort={effort:?}")));
     }
+    // Wire the host MCP bridge as a codex MCP server on the same app-server
+    // invocation, so the agent can call host-registered extension tools and the
+    // result returns inside the same thread/turn.
+    if let Some(bridge) = &p.host_tool_bridge {
+        args.extend(mcp_bridge_args(bridge));
+    }
     args
+}
+
+/// Build the `-c mcp_servers.agentropy.*` flags advertising the host MCP bridge
+/// to `codex app-server`. The agent reaches the bridge by spawning
+/// `command args...` over stdio; tool results return in-session.
+fn mcp_bridge_args(bridge: &cap_runner::HostToolBridge) -> Vec<OsString> {
+    // codex parses `-c key=value` values as TOML; render command/args as TOML
+    // string + array literals.
+    let command_toml = toml_string(&bridge.command);
+    let args_toml = format!(
+        "[{}]",
+        bridge
+            .args
+            .iter()
+            .map(|a| toml_string(a))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    vec![
+        OsString::from("-c"),
+        OsString::from(format!("mcp_servers.agentropy.command={command_toml}")),
+        OsString::from("-c"),
+        OsString::from(format!("mcp_servers.agentropy.args={args_toml}")),
+    ]
+}
+
+/// Render a string as a TOML basic string literal (quoted, escaped).
+fn toml_string(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 // ---------------------------------------------------------------------------
@@ -910,6 +946,69 @@ mod tests {
     }
 
     #[test]
+    fn codex_args_wire_mcp_bridge_when_present() {
+        let workspace_root = Path::new("/tmp/agent/workspaces");
+        let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
+        let mut p = params(Some("codex-1".to_string()), workspace, workspace_root);
+        p.host_tool_bridge = Some(cap_runner::HostToolBridge {
+            command: "/opt/agentropy".to_string(),
+            args: vec![
+                "__mcp-bridge".to_string(),
+                "--dir".to_string(),
+                "/tmp/agent".to_string(),
+            ],
+        });
+        let args = arg_strings(codex_args(&p));
+
+        // Rides the same app-server invocation, NOT codex exec.
+        assert_eq!(args[0], "app-server");
+        let command_flag = args
+            .windows(2)
+            .find(|w| w[0] == "-c" && w[1].starts_with("mcp_servers.agentropy.command="))
+            .map(|w| w[1].clone())
+            .expect("mcp_servers.agentropy.command flag missing");
+        assert_eq!(
+            command_flag,
+            "mcp_servers.agentropy.command=\"/opt/agentropy\""
+        );
+        let args_flag = args
+            .windows(2)
+            .find(|w| w[0] == "-c" && w[1].starts_with("mcp_servers.agentropy.args="))
+            .map(|w| w[1].clone())
+            .expect("mcp_servers.agentropy.args flag missing");
+        assert_eq!(
+            args_flag,
+            "mcp_servers.agentropy.args=[\"__mcp-bridge\", \"--dir\", \"/tmp/agent\"]"
+        );
+    }
+
+    #[test]
+    fn codex_args_omit_mcp_bridge_when_absent() {
+        let workspace_root = Path::new("/tmp/agent/workspaces");
+        let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
+        let p = params(Some("codex-1".to_string()), workspace, workspace_root);
+        let args = arg_strings(codex_args(&p));
+        assert!(
+            !args.iter().any(|a| a.contains("mcp_servers")),
+            "no mcp_servers flag should be present without a bridge: {args:?}"
+        );
+    }
+
+    #[test]
+    fn mcp_bridge_args_escape_toml_strings() {
+        let bridge = cap_runner::HostToolBridge {
+            command: "/path/with \"quote\"".to_string(),
+            args: vec!["a\\b".to_string()],
+        };
+        let rendered = arg_strings(mcp_bridge_args(&bridge));
+        assert_eq!(
+            rendered[1],
+            "mcp_servers.agentropy.command=\"/path/with \\\"quote\\\"\""
+        );
+        assert_eq!(rendered[3], "mcp_servers.agentropy.args=[\"a\\\\b\"]");
+    }
+
+    #[test]
     fn codex_effort_is_passed_as_config_flag() {
         let workspace_root = Path::new("/tmp/agent/workspaces");
         let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
@@ -1104,7 +1203,7 @@ mod tests {
         e.chain().any(|cause| {
             cause
                 .downcast_ref::<std::io::Error>()
-                .map_or(false, |io| io.raw_os_error() == Some(26))
+                .is_some_and(|io| io.raw_os_error() == Some(26))
         })
     }
 

@@ -1,6 +1,7 @@
 #[tokio::main(worker_threads = 2)]
 async fn main() {
     agentropy_cli::run(host_api::plugins![
+        tool_registry_host::ToolRegistryHostExtension,
         frontend_log::FrontendLogExtension,
         tracker_files::TrackerFilesExtension,
         tracker_linear::TrackerLinearExtension,
@@ -45,6 +46,7 @@ mod tests {
         assert_eq!(
             plugins,
             [
+                "tool_registry_host::ToolRegistryHostExtension",
                 "frontend_log::FrontendLogExtension",
                 "tracker_files::TrackerFilesExtension",
                 "tracker_linear::TrackerLinearExtension",

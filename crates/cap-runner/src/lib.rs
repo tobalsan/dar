@@ -94,6 +94,11 @@ pub struct SpawnParams<'a> {
     pub max_run_timeout_ms: u64,
     /// Expose the optional Linear GraphQL worker tool to compatible protocol runners.
     pub expose_linear_graphql_tool: bool,
+    /// When set, the runner advertises the host MCP bridge to its backend so the
+    /// agent can call host-registered extension tools. Carries the command +
+    /// args the backend should spawn to reach the bridge (the host binary's
+    /// `__mcp-bridge --dir <agent>` invocation).
+    pub host_tool_bridge: Option<HostToolBridge>,
     pub events: Arc<dyn RunnerEventSink>,
     pub store: Arc<dyn RunnerEventStore>,
     pub last_event_at: Arc<Mutex<DateTime<Utc>>>,
@@ -116,6 +121,15 @@ pub struct SpawnParamsBuilder<'a> {
     provider: Option<String>,
     thinking: Option<String>,
     expose_linear_graphql_tool: bool,
+    host_tool_bridge: Option<HostToolBridge>,
+}
+
+/// How a runner reaches the host MCP bridge: the command to spawn and its args.
+/// The backend launches this as its MCP server over stdio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostToolBridge {
+    pub command: String,
+    pub args: Vec<String>,
 }
 
 impl<'a> SpawnParams<'a> {
@@ -151,6 +165,7 @@ impl<'a> SpawnParams<'a> {
             provider: None,
             thinking: None,
             expose_linear_graphql_tool: false,
+            host_tool_bridge: None,
         }
     }
 }
@@ -176,6 +191,11 @@ impl<'a> SpawnParamsBuilder<'a> {
         self
     }
 
+    pub fn host_tool_bridge(mut self, value: Option<HostToolBridge>) -> Self {
+        self.host_tool_bridge = value;
+        self
+    }
+
     pub fn build(self) -> SpawnParams<'a> {
         SpawnParams {
             command: self.command,
@@ -191,6 +211,7 @@ impl<'a> SpawnParamsBuilder<'a> {
             run_id: self.run_id,
             max_run_timeout_ms: self.max_run_timeout_ms,
             expose_linear_graphql_tool: self.expose_linear_graphql_tool,
+            host_tool_bridge: self.host_tool_bridge,
             events: self.events,
             store: self.store,
             last_event_at: self.last_event_at,
