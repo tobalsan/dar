@@ -30,7 +30,7 @@ use runner_core::{
     classify_protocol_line, common_env, effective_command, log_ev, scrub_loaded_env,
     setup_process_group, strip_ansi, term_then_kill,
 };
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -114,107 +114,6 @@ fn pi_args(
     args
 }
 
-/// Name of the host MCP bridge as advertised to pi's MCP adapter. Stable so the
-/// per-session metadata cache and `MCP_DIRECT_TOOLS` filter refer to it.
-const BRIDGE_SERVER_NAME: &str = "agentropy";
-
-/// Extra `pi` CLI args plus process env produced when wiring the host MCP
-/// bridge: `(args, env)`.
-type BridgeInvocation = (Vec<OsString>, Vec<(OsString, OsString)>);
-
-/// Per-session pi config sub-tree used to make the host bridge's tools reliable
-/// at turn start:
-/// - `toolPrefix: "none"` keeps the host tool names unprefixed (so the agent
-///   calls `echo_upper`, not `agentropy_echo_upper`).
-/// - `directTools: true` promotes the bridge's tools to first-class pi tools
-///   (rather than only being reachable through the proxy `mcp` gateway tool).
-/// - `disableProxyTool: false` keeps the always-present proxy `mcp` tool as the
-///   cold-start floor: it is registered synchronously at extension load and
-///   lazy-connects on call, so the toy tool is reachable on the very first turn
-///   even before the async server bootstrap finishes (see the init-race note in
-///   `mcp_config_args`).
-fn bridge_settings() -> Value {
-    json!({
-        "toolPrefix": "none",
-        "directTools": true,
-        "disableProxyTool": false,
-    })
-}
-
-/// The pi `--mcp-config` document advertising the host bridge as a stdio MCP
-/// server. Matches pi-mcp-adapter's schema: `{ "mcpServers": { <name>: { command,
-/// args } }, "settings": { ... } }`.
-fn bridge_mcp_config(bridge: &cap_runner::HostToolBridge) -> Value {
-    json!({
-        "mcpServers": {
-            BRIDGE_SERVER_NAME: {
-                "command": bridge.command,
-                "args": bridge.args,
-                // Eager so pi connects (and warms the per-session metadata cache)
-                // during session_start instead of waiting for the first call.
-                "lifecycle": "eager",
-            }
-        },
-        "settings": bridge_settings(),
-    })
-}
-
-/// Materialize the per-session MCP config for the host bridge, returning the
-/// extra `pi` CLI args (`--mcp-config <file>`) and process env to apply.
-///
-/// ## Init-race characterization (ALG-254 / ALG-257)
-///
-/// pi's MCP adapter starts configured servers **asynchronously** on
-/// `session_start`: it stores an `initPromise` and resolves it in the
-/// background, so the JSONL `tools/list` the model sees at turn start is
-/// whatever the adapter registered *synchronously at extension load*. That is
-/// the window ALG-254 observed where the tool was "not surfaced".
-///
-/// Two surfaces close that window, and we enable both:
-///
-/// 1. **Proxy `mcp` tool (cold-start floor).** Always registered synchronously
-///    at load; it lazy-connects to the bridge on first call (awaiting the
-///    `initPromise`), so the host tool is reachable on the very first turn even
-///    on a cold cache. Kept on via `disableProxyTool: false`.
-/// 2. **Direct first-class tools (warm path).** The adapter surfaces the
-///    bridge's tools as plain pi tools only when its metadata cache has a valid
-///    entry for the server. We mark the bridge server `lifecycle: "eager"` so
-///    the adapter connects to it during `session_start` regardless of whether
-///    `mcp-cache.json` already exists — warming/refreshing the cache entry for
-///    our server every run rather than depending on a stale shared cache. The
-///    cache entry is invalidated automatically on any `command`/`args` change
-///    (pi's `configHash`), so a reconfigured bridge never surfaces stale tools.
-///    `MCP_DIRECT_TOOLS` scopes direct-tool promotion to our server.
-///
-/// We deliberately do **not** repoint `PI_CODING_AGENT_DIR`: the `--mcp-config`
-/// flag itself is registered by the pi-mcp-adapter extension, which is
-/// discovered from the agent dir's installed packages. Isolating that dir would
-/// drop the adapter and make `--mcp-config` an unknown flag.
-///
-/// Net effect: the toy tool is reliably surfaced at turn start (proxy floor),
-/// and promoted to a first-class tool once the eager connect completes —
-/// without the cold-cache race ALG-254 hit. No shim fallback is needed for this
-/// surface.
-fn mcp_config_args(
-    session_dir: &Path,
-    bridge: &cap_runner::HostToolBridge,
-) -> Result<BridgeInvocation> {
-    let config_path = session_dir.join("mcp-config.json");
-    let config = bridge_mcp_config(bridge);
-    std::fs::write(&config_path, format!("{config:#}\n"))
-        .with_context(|| format!("writing pi mcp config {}", config_path.display()))?;
-
-    let args = vec![
-        OsString::from("--mcp-config"),
-        config_path.into_os_string(),
-    ];
-    let env = vec![(
-        OsString::from("MCP_DIRECT_TOOLS"),
-        OsString::from(BRIDGE_SERVER_NAME),
-    )];
-    Ok((args, env))
-}
-
 /// One `{"type":"prompt"}` JSONL line carrying the next turn's prompt.
 fn prompt_command(id: &str, message: &str) -> String {
     serde_json::json!({ "id": id, "type": "prompt", "message": message }).to_string() + "\n"
@@ -246,7 +145,7 @@ async fn spawn_pi(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     // `mcp_config_args`).
     let mut bridge_env: Vec<(OsString, OsString)> = Vec::new();
     if let Some(bridge) = &p.host_tool_bridge {
-        let (bridge_args, env) = mcp_config_args(&session_dir, bridge)?;
+        let (bridge_args, env) = runner_core::pi_mcp_config_args(&session_dir, bridge)?;
         args.extend(bridge_args);
         bridge_env = env;
     }
@@ -805,29 +704,16 @@ mod tests {
     }
 
     #[test]
-    fn bridge_mcp_config_matches_pi_adapter_schema() {
-        let cfg = bridge_mcp_config(&bridge());
-        let server = &cfg["mcpServers"]["agentropy"];
-        assert_eq!(server["command"], "/opt/agentropy");
-        assert_eq!(
-            server["args"],
-            json!(["__mcp-bridge", "--dir", "/tmp/agent"])
-        );
-        // Eager lifecycle so pi connects + warms the cache at session_start.
-        assert_eq!(server["lifecycle"], "eager");
-        // Direct tools on (first-class), proxy floor retained, names unprefixed.
-        assert_eq!(cfg["settings"]["directTools"], true);
-        assert_eq!(cfg["settings"]["disableProxyTool"], false);
-        assert_eq!(cfg["settings"]["toolPrefix"], "none");
-    }
-
-    #[test]
     fn mcp_config_args_writes_config_and_returns_flag_and_env() {
+        // The pi runner reuses the shared `pi_mcp_config_args` writer; assert it
+        // produces the per-session `--mcp-config` flag + `MCP_DIRECT_TOOLS` env
+        // the spawn path applies. (Config-document shape is covered in
+        // runner-core's bridge tests.)
         let dir = tempfile::tempdir().unwrap();
         let session_dir = dir.path().join("pi-sessions/ISSUE-1");
         std::fs::create_dir_all(&session_dir).unwrap();
 
-        let (args, env) = mcp_config_args(&session_dir, &bridge()).unwrap();
+        let (args, env) = runner_core::pi_mcp_config_args(&session_dir, &bridge()).unwrap();
 
         // `--mcp-config <session_dir>/mcp-config.json`
         assert_eq!(args[0], OsString::from("--mcp-config"));

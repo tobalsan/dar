@@ -184,10 +184,6 @@ fn opencode_env(
     env
 }
 
-/// opencode MCP server key advertising the host bridge. Tools surface to the
-/// agent namespaced `agentropy_<tool>`.
-const BRIDGE_SERVER_NAME: &str = "agentropy";
-
 fn opencode_config(model: Option<&str>, bridge: Option<&HostToolBridge>) -> serde_json::Value {
     let mut config = serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
@@ -216,32 +212,9 @@ fn opencode_config(model: Option<&str>, bridge: Option<&HostToolBridge>) -> serd
         config["model"] = serde_json::Value::String(model.to_string());
     }
     if let Some(bridge) = bridge {
-        config["mcp"] = mcp_block(bridge);
+        config["mcp"] = runner_core::opencode_mcp_block(bridge);
     }
     config
-}
-
-/// Build the `mcp.agentropy` block pointing at the host MCP bridge. opencode
-/// spawns a `type: "local"` server as `command[0] command[1..]` over stdio; the
-/// host-registered tools surface namespaced `agentropy_<tool>` and their results
-/// return over SSE in the same session. The permission map (`"*":"allow"`)
-/// already allows these host tools.
-fn mcp_block(bridge: &HostToolBridge) -> serde_json::Value {
-    let mut command = Vec::with_capacity(1 + bridge.args.len());
-    command.push(serde_json::Value::String(bridge.command.clone()));
-    command.extend(
-        bridge
-            .args
-            .iter()
-            .map(|a| serde_json::Value::String(a.clone())),
-    );
-    serde_json::json!({
-        BRIDGE_SERVER_NAME: {
-            "type": "local",
-            "command": command,
-            "enabled": true,
-        }
-    })
 }
 
 fn write_opencode_config(

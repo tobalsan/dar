@@ -61,12 +61,13 @@ impl OpenCodeChatSession {
         std::fs::create_dir_all(dir.join("config"))
             .with_context(|| format!("creating opencode chat dir {}", dir.display()))?;
         seed_opencode_auth(&dir)?;
-        write_opencode_config(&dir, model.as_deref())?;
+        let bridge = params.host_tool_bridge.as_ref();
+        write_opencode_config(&dir, model.as_deref(), bridge)?;
 
         let mut server = OpenCodeServer::spawn(
             effective_command(&params.command, "opencode"),
             opencode_args(0),
-            opencode_env(&dir, model.as_deref()),
+            opencode_env(&dir, model.as_deref(), bridge),
             &params.agent_root,
         )
         .await?;
@@ -215,7 +216,11 @@ fn opencode_args(port: u16) -> Vec<OsString> {
     ]
 }
 
-fn opencode_env(session_dir: &Path, model: Option<&str>) -> Vec<(OsString, OsString)> {
+fn opencode_env(
+    session_dir: &Path,
+    model: Option<&str>,
+    bridge: Option<&cap_chat::HostToolBridge>,
+) -> Vec<(OsString, OsString)> {
     let config_dir = session_dir.join("config");
     vec![
         (
@@ -232,7 +237,7 @@ fn opencode_env(session_dir: &Path, model: Option<&str>) -> Vec<(OsString, OsStr
         ),
         (
             OsString::from("OPENCODE_CONFIG_CONTENT"),
-            OsString::from(opencode_config(model).to_string()),
+            OsString::from(opencode_config(model, bridge).to_string()),
         ),
         (
             OsString::from("XDG_DATA_HOME"),
@@ -249,7 +254,10 @@ fn opencode_env(session_dir: &Path, model: Option<&str>) -> Vec<(OsString, OsStr
     ]
 }
 
-fn opencode_config(model: Option<&str>) -> serde_json::Value {
+fn opencode_config(
+    model: Option<&str>,
+    bridge: Option<&cap_chat::HostToolBridge>,
+) -> serde_json::Value {
     let mut config = serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
         "permission": {
@@ -276,13 +284,27 @@ fn opencode_config(model: Option<&str>) -> serde_json::Value {
     if let Some(model) = model {
         config["model"] = serde_json::Value::String(model.to_string());
     }
+    // Wire the host MCP bridge so the chat opencode agent calls the same
+    // registry tools an issue worker does; tools surface namespaced
+    // `agentropy_<tool>` and results return over SSE in the same session.
+    // Reuses the runner's `mcp.agentropy` block writer.
+    if let Some(bridge) = bridge {
+        config["mcp"] = runner_core::opencode_mcp_block(bridge);
+    }
     config
 }
 
-fn write_opencode_config(session_dir: &Path, model: Option<&str>) -> Result<()> {
+fn write_opencode_config(
+    session_dir: &Path,
+    model: Option<&str>,
+    bridge: Option<&cap_chat::HostToolBridge>,
+) -> Result<()> {
     let path = session_dir.join("config").join("opencode.json");
-    std::fs::write(&path, serde_json::to_vec_pretty(&opencode_config(model))?)
-        .with_context(|| format!("writing opencode config {}", path.display()))
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&opencode_config(model, bridge))?,
+    )
+    .with_context(|| format!("writing opencode config {}", path.display()))
 }
 
 fn map_event(event: &OpenCodeEvent) -> Option<ChatEvent> {

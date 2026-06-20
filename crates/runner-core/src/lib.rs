@@ -16,6 +16,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::oneshot;
 
+pub mod bridge;
+pub use bridge::{
+    codex_mcp_bridge_args, opencode_mcp_block, pi_mcp_config_args, BridgeInvocation,
+    BRIDGE_SERVER_NAME,
+};
+
 /// Configure a child command to run in its own process group, so signalling the
 /// negative pid reaches the whole subtree.
 pub fn setup_process_group(cmd: &mut Command) -> &mut Command {

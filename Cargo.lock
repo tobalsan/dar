@@ -391,6 +391,7 @@ name = "cap-chat"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "cap-runner",
  "tokio",
 ]
 
@@ -776,6 +777,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "cap-chat",
+ "cap-runner",
+ "chat-pi",
  "host-api",
  "opencode-client",
  "serde",
@@ -1953,6 +1957,7 @@ dependencies = [
  "host-api",
  "nix",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -2806,6 +2811,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tool-registry",
 ]
 
 [[package]]

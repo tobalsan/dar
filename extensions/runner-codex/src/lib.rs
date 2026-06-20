@@ -81,39 +81,9 @@ fn codex_args(p: &SpawnParams<'_>) -> Vec<OsString> {
     // invocation, so the agent can call host-registered extension tools and the
     // result returns inside the same thread/turn.
     if let Some(bridge) = &p.host_tool_bridge {
-        args.extend(mcp_bridge_args(bridge));
+        args.extend(runner_core::codex_mcp_bridge_args(bridge));
     }
     args
-}
-
-/// Build the `-c mcp_servers.agentropy.*` flags advertising the host MCP bridge
-/// to `codex app-server`. The agent reaches the bridge by spawning
-/// `command args...` over stdio; tool results return in-session.
-fn mcp_bridge_args(bridge: &cap_runner::HostToolBridge) -> Vec<OsString> {
-    // codex parses `-c key=value` values as TOML; render command/args as TOML
-    // string + array literals.
-    let command_toml = toml_string(&bridge.command);
-    let args_toml = format!(
-        "[{}]",
-        bridge
-            .args
-            .iter()
-            .map(|a| toml_string(a))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    vec![
-        OsString::from("-c"),
-        OsString::from(format!("mcp_servers.agentropy.command={command_toml}")),
-        OsString::from("-c"),
-        OsString::from(format!("mcp_servers.agentropy.args={args_toml}")),
-    ]
-}
-
-/// Render a string as a TOML basic string literal (quoted, escaped).
-fn toml_string(value: &str) -> String {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
 }
 
 // ---------------------------------------------------------------------------
@@ -992,20 +962,6 @@ mod tests {
             !args.iter().any(|a| a.contains("mcp_servers")),
             "no mcp_servers flag should be present without a bridge: {args:?}"
         );
-    }
-
-    #[test]
-    fn mcp_bridge_args_escape_toml_strings() {
-        let bridge = cap_runner::HostToolBridge {
-            command: "/path/with \"quote\"".to_string(),
-            args: vec!["a\\b".to_string()],
-        };
-        let rendered = arg_strings(mcp_bridge_args(&bridge));
-        assert_eq!(
-            rendered[1],
-            "mcp_servers.agentropy.command=\"/path/with \\\"quote\\\"\""
-        );
-        assert_eq!(rendered[3], "mcp_servers.agentropy.args=[\"a\\\\b\"]");
     }
 
     #[test]

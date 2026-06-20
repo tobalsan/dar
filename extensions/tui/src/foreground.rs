@@ -327,8 +327,35 @@ async fn open_session(
     )
     .model(model)
     .provider(provider)
+    .host_tool_bridge(host_tool_bridge(ctx))
     .build();
     backend.open(params, tx).await
+}
+
+/// Build the host MCP bridge descriptor for the chat backend, or `None` when no
+/// extension registered any tool. Mirrors the orchestrator's worker-spawn path
+/// so interactive chat advertises the same registry tools as issue workers: the
+/// backend is pointed at `<this binary> __mcp-bridge --dir <agent root>`, a
+/// host-owned process that re-loads the agent's config/secrets and executes
+/// registered tools in-host; the chat agent only sees tool schemas and results.
+fn host_tool_bridge(ctx: &StartCtx) -> Option<cap_chat::HostToolBridge> {
+    let registry = ctx
+        .host
+        .services
+        .get_named::<dyn tool_registry::ToolRegistryHandle>(tool_registry::TOOL_REGISTRY_SERVICE)
+        .ok()?;
+    if registry.is_empty() {
+        return None;
+    }
+    let command = std::env::current_exe().ok()?.to_string_lossy().into_owned();
+    Some(cap_chat::HostToolBridge {
+        command,
+        args: vec![
+            "__mcp-bridge".to_string(),
+            "--dir".to_string(),
+            ctx.paths.root().display().to_string(),
+        ],
+    })
 }
 
 #[cfg(test)]
