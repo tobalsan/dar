@@ -777,6 +777,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "host-api",
+ "opencode-client",
  "serde",
  "serde_json",
  "tempfile",

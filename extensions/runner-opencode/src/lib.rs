@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use cap_runner::{
-    ExitKind, KillReason, RunnerEventSink, RunnerEventStore, RunnerHandle, SpawnParams,
-    TurnDecision, TurnEnded,
+    ExitKind, HostToolBridge, KillReason, RunnerEventSink, RunnerEventStore, RunnerHandle,
+    SpawnParams, TurnDecision, TurnEnded,
 };
 use chrono::{DateTime, Utc};
 use host_api::{Extension, RegisterCtx};
@@ -71,11 +71,11 @@ async fn spawn_opencode(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     std::fs::create_dir_all(session_dir.join("config"))
         .with_context(|| format!("creating opencode config dir {}", session_dir.display()))?;
     seed_opencode_auth(&session_dir)?;
-    write_opencode_config(&session_dir, model.as_deref())?;
+    write_opencode_config(&session_dir, model.as_deref(), p.host_tool_bridge.as_ref())?;
 
     let command = effective_command(p.command, "opencode");
     let args = opencode_args(0);
-    let env = opencode_env(&p, &session_dir, model.as_deref());
+    let env = opencode_env(&p, &session_dir, model.as_deref(), p.host_tool_bridge.as_ref());
     let server = OpenCodeServer::spawn(command.clone(), args.clone(), env, p.workspace).await?;
     let pid = server.pid().context("opencode serve has no pid")?;
 
@@ -153,6 +153,7 @@ fn opencode_env(
     p: &SpawnParams<'_>,
     session_dir: &Path,
     model: Option<&str>,
+    bridge: Option<&HostToolBridge>,
 ) -> Vec<(OsString, OsString)> {
     let config_dir = session_dir.join("config");
     let mut env = env_with_session_dir(common_env(p), session_dir);
@@ -166,7 +167,7 @@ fn opencode_env(
     ));
     env.push((
         OsString::from("OPENCODE_CONFIG_CONTENT"),
-        OsString::from(opencode_config(model).to_string()),
+        OsString::from(opencode_config(model, bridge).to_string()),
     ));
     env.push((
         OsString::from("XDG_DATA_HOME"),
@@ -183,7 +184,11 @@ fn opencode_env(
     env
 }
 
-fn opencode_config(model: Option<&str>) -> serde_json::Value {
+/// opencode MCP server key advertising the host bridge. Tools surface to the
+/// agent namespaced `agentropy_<tool>`.
+const BRIDGE_SERVER_NAME: &str = "agentropy";
+
+fn opencode_config(model: Option<&str>, bridge: Option<&HostToolBridge>) -> serde_json::Value {
     let mut config = serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
         "permission": {
@@ -210,13 +215,46 @@ fn opencode_config(model: Option<&str>) -> serde_json::Value {
     if let Some(model) = model {
         config["model"] = serde_json::Value::String(model.to_string());
     }
+    if let Some(bridge) = bridge {
+        config["mcp"] = mcp_block(bridge);
+    }
     config
 }
 
-fn write_opencode_config(session_dir: &Path, model: Option<&str>) -> Result<()> {
+/// Build the `mcp.agentropy` block pointing at the host MCP bridge. opencode
+/// spawns a `type: "local"` server as `command[0] command[1..]` over stdio; the
+/// host-registered tools surface namespaced `agentropy_<tool>` and their results
+/// return over SSE in the same session. The permission map (`"*":"allow"`)
+/// already allows these host tools.
+fn mcp_block(bridge: &HostToolBridge) -> serde_json::Value {
+    let mut command = Vec::with_capacity(1 + bridge.args.len());
+    command.push(serde_json::Value::String(bridge.command.clone()));
+    command.extend(
+        bridge
+            .args
+            .iter()
+            .map(|a| serde_json::Value::String(a.clone())),
+    );
+    serde_json::json!({
+        BRIDGE_SERVER_NAME: {
+            "type": "local",
+            "command": command,
+            "enabled": true,
+        }
+    })
+}
+
+fn write_opencode_config(
+    session_dir: &Path,
+    model: Option<&str>,
+    bridge: Option<&HostToolBridge>,
+) -> Result<()> {
     let path = session_dir.join("config").join("opencode.json");
-    std::fs::write(&path, serde_json::to_vec_pretty(&opencode_config(model))?)
-        .with_context(|| format!("writing opencode config {}", path.display()))
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&opencode_config(model, bridge))?,
+    )
+    .with_context(|| format!("writing opencode config {}", path.display()))
 }
 
 /// opencode reads credentials from `$XDG_DATA_HOME/opencode`, defaulting to
@@ -808,7 +846,7 @@ mod tests {
         );
         let session_dir = session_dir(&p);
         let model = effective_model(p.model.as_deref(), p.provider.as_deref());
-        let env = opencode_env(&p, &session_dir, model.as_deref());
+        let env = opencode_env(&p, &session_dir, model.as_deref(), None);
         assert!(env.contains(&(
             OsString::from("OPENCODE_CONFIG"),
             OsString::from("/tmp/agent/opencode-sessions/ISSUE-1/config/opencode.json")
@@ -846,7 +884,7 @@ mod tests {
 
     #[test]
     fn opencode_config_allows_permissions_and_uses_model_when_set() {
-        let config = opencode_config(Some("anthropic/claude-sonnet"));
+        let config = opencode_config(Some("anthropic/claude-sonnet"), None);
         assert_eq!(config["permission"]["*"], "allow");
         assert_eq!(config["permission"]["bash"], "allow");
         assert_eq!(config["permission"]["external_directory"], "allow");
@@ -854,7 +892,76 @@ mod tests {
         assert_eq!(config["permission"]["question"], "allow");
         assert_eq!(config["permission"]["webfetch"], "allow");
         assert_eq!(config["model"], "anthropic/claude-sonnet");
-        assert!(opencode_config(None).get("model").is_none());
+        assert!(opencode_config(None, None).get("model").is_none());
+    }
+
+    #[test]
+    fn opencode_config_has_no_mcp_block_without_bridge() {
+        let config = opencode_config(Some("anthropic/claude-sonnet"), None);
+        assert!(config.get("mcp").is_none());
+    }
+
+    #[test]
+    fn opencode_config_writes_agentropy_mcp_block_when_bridge_present() {
+        let bridge = HostToolBridge {
+            command: "/opt/agentropy".to_string(),
+            args: vec![
+                "__mcp-bridge".to_string(),
+                "--dir".to_string(),
+                "/tmp/agent".to_string(),
+            ],
+        };
+        let config = opencode_config(Some("anthropic/claude-sonnet"), Some(&bridge));
+        let server = &config["mcp"]["agentropy"];
+        assert_eq!(server["type"], "local");
+        assert_eq!(server["enabled"], true);
+        assert_eq!(
+            server["command"],
+            serde_json::json!(["/opt/agentropy", "__mcp-bridge", "--dir", "/tmp/agent"])
+        );
+        // Host tools surface namespaced `agentropy_<tool>`; the permission map
+        // already allows them via the wildcard.
+        assert_eq!(config["permission"]["*"], "allow");
+    }
+
+    #[test]
+    fn opencode_env_embeds_mcp_block_in_config_content_when_bridge_present() {
+        let workspace_root = Path::new("/tmp/agent/workspaces");
+        let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
+        let p = params(Some("anthropic/claude-sonnet".into()), workspace, workspace_root);
+        let session_dir = session_dir(&p);
+        let model = effective_model(p.model.as_deref(), p.provider.as_deref());
+        let bridge = HostToolBridge {
+            command: "/opt/agentropy".to_string(),
+            args: vec!["__mcp-bridge".to_string(), "--dir".to_string(), "/tmp/agent".to_string()],
+        };
+        let env = opencode_env(&p, &session_dir, model.as_deref(), Some(&bridge));
+        let content = env
+            .iter()
+            .find(|(key, _)| key == "OPENCODE_CONFIG_CONTENT")
+            .map(|(_, value)| value.to_string_lossy().to_string())
+            .expect("OPENCODE_CONFIG_CONTENT missing");
+        let config: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(config["mcp"]["agentropy"]["type"], "local");
+        assert_eq!(config["mcp"]["agentropy"]["enabled"], true);
+    }
+
+    #[test]
+    fn write_opencode_config_persists_mcp_block_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        let bridge = HostToolBridge {
+            command: "/opt/agentropy".to_string(),
+            args: vec!["__mcp-bridge".to_string(), "--dir".to_string(), "/tmp/agent".to_string()],
+        };
+        write_opencode_config(dir.path(), Some("anthropic/claude-sonnet"), Some(&bridge)).unwrap();
+        let written = std::fs::read_to_string(dir.path().join("config/opencode.json")).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            config["mcp"]["agentropy"]["command"],
+            serde_json::json!(["/opt/agentropy", "__mcp-bridge", "--dir", "/tmp/agent"])
+        );
+        assert_eq!(config["permission"]["*"], "allow");
     }
 
     #[test]
