@@ -29,3 +29,4 @@ tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "macros", "io-s
 
 [dev-dependencies]
 tempfile = "3"
+opencode-client = { path = "../../../crates/opencode-client" }

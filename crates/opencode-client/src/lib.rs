@@ -56,7 +56,7 @@ impl OpenCodeServer {
         let args = args
             .into_iter()
             .map(|arg| {
-                if arg == OsString::from("0") {
+                if arg == "0" {
                     port_arg.clone()
                 } else {
                     arg
