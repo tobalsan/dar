@@ -25,11 +25,15 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
+
+pub mod observe;
+pub use observe::{Redactor, ToolCallObservation};
 
 /// Service id under which the shared [`ToolRegistry`] is published in the host
 /// service registry. Extensions resolve it with
@@ -47,6 +51,36 @@ pub struct ToolSpec {
     pub description: String,
     /// JSON Schema for the arguments object (the MCP `inputSchema`).
     pub input_schema: Value,
+    /// Optional read/write metadata describing whether the tool reads and/or
+    /// mutates host state. Advisory only in v1 (surfaced in logs / future UI;
+    /// the registry does **not** enforce permissions on it). Both default to
+    /// `false` so existing specs keep their meaning across (de)serialization.
+    #[serde(default)]
+    pub access: ToolAccess,
+}
+
+/// Advisory read/write metadata for a tool. `read` means the tool inspects host
+/// state; `write` means it may mutate it. Used purely to explain a tool in logs
+/// and a future permission UI — v1 does not enforce anything on these flags.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolAccess {
+    #[serde(default)]
+    pub read: bool,
+    #[serde(default)]
+    pub write: bool,
+}
+
+impl ToolAccess {
+    /// Compact human-readable label for logs, e.g. `read,write`, `write`,
+    /// `read`, or `none` when neither flag is set.
+    pub fn label(&self) -> &'static str {
+        match (self.read, self.write) {
+            (true, true) => "read,write",
+            (true, false) => "read",
+            (false, true) => "write",
+            (false, false) => "none",
+        }
+    }
 }
 
 impl ToolSpec {
@@ -59,15 +93,41 @@ impl ToolSpec {
             name: name.into(),
             description: description.into(),
             input_schema,
+            access: ToolAccess::default(),
         }
     }
 
-    /// Render this spec as an MCP `tools/list` entry.
+    /// Set the read/write access metadata, returning the spec (builder style).
+    pub fn with_access(mut self, read: bool, write: bool) -> Self {
+        self.access = ToolAccess { read, write };
+        self
+    }
+
+    /// Mark this tool as reading host state.
+    pub fn reads(mut self) -> Self {
+        self.access.read = true;
+        self
+    }
+
+    /// Mark this tool as mutating host state.
+    pub fn writes(mut self) -> Self {
+        self.access.write = true;
+        self
+    }
+
+    /// Render this spec as an MCP `tools/list` entry. Read/write metadata rides
+    /// along in the standard MCP `annotations` object (`readOnlyHint` /
+    /// non-`readOnly`), so a client/UI that understands annotations can explain
+    /// the tool without a bespoke field.
     pub fn to_mcp_tool(&self) -> Value {
         json!({
             "name": self.name,
             "description": self.description,
             "inputSchema": self.input_schema,
+            "annotations": {
+                "readOnlyHint": self.access.read && !self.access.write,
+                "destructiveHint": self.access.write,
+            },
         })
     }
 }
@@ -133,6 +193,15 @@ pub trait ToolRegistryHandle: Send + Sync {
     /// Dispatch a call by name + JSON args, returning a structured outcome.
     /// Errors and panics are normalized to `is_error: true`.
     async fn dispatch(&self, name: &str, args: Value) -> ToolOutcome;
+
+    /// Dispatch a call and also return a [`ToolCallObservation`] (redacted +
+    /// truncated, carrying name/status/duration/read-write) for logging.
+    async fn dispatch_observed(
+        &self,
+        name: &str,
+        args: Value,
+        redactor: &Redactor,
+    ) -> (ToolOutcome, ToolCallObservation);
 }
 
 struct RegisteredTool {
@@ -183,6 +252,38 @@ impl ToolRegistry {
             Err(err) => ToolOutcome::error(format!("tool {name:?} failed: {err:#}")),
         }
     }
+
+    /// Dispatch a tool and, alongside the structured outcome, produce a
+    /// [`ToolCallObservation`] for logging: tool name, read/write metadata,
+    /// success/failure, wall-clock duration, and redacted + truncated args and
+    /// result summary. `redactor` masks host secrets (and arbitrary token-shaped
+    /// strings) before anything is recorded, so secrets never reach a log.
+    ///
+    /// The outcome returned is byte-for-byte the same one [`dispatch`] returns;
+    /// observation is a side-channel and never alters what the agent sees.
+    pub async fn dispatch_observed(
+        &self,
+        name: &str,
+        args: Value,
+        redactor: &Redactor,
+    ) -> (ToolOutcome, ToolCallObservation) {
+        let access = {
+            let tools = self.tools.lock().await;
+            tools.get(name).map(|t| t.spec.access)
+        };
+        let started = Instant::now();
+        let outcome = ToolRegistry::dispatch(self, name, args.clone()).await;
+        let elapsed = started.elapsed();
+        let observation = ToolCallObservation::build(
+            name,
+            access.unwrap_or_default(),
+            &outcome,
+            elapsed,
+            &args,
+            redactor,
+        );
+        (outcome, observation)
+    }
 }
 
 #[async_trait::async_trait]
@@ -229,6 +330,15 @@ impl ToolRegistryHandle for ToolRegistry {
 
     async fn dispatch(&self, name: &str, args: Value) -> ToolOutcome {
         ToolRegistry::dispatch(self, name, args).await
+    }
+
+    async fn dispatch_observed(
+        &self,
+        name: &str,
+        args: Value,
+        redactor: &Redactor,
+    ) -> (ToolOutcome, ToolCallObservation) {
+        ToolRegistry::dispatch_observed(self, name, args, redactor).await
     }
 }
 

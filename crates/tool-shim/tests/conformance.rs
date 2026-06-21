@@ -271,6 +271,7 @@ impl NativeBridgeSurface {
         let mut output: Vec<u8> = Vec::new();
         agentropy_cli::bridge::serve_stdio(
             Arc::clone(&self.registry),
+            tool_registry::Redactor::default(),
             input.as_bytes(),
             &mut output,
         )
