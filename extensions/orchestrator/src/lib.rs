@@ -1668,7 +1668,6 @@ impl Orchestrator {
         .model(self.effective_cfg.model.clone())
         .provider(self.effective_cfg.provider.clone())
         .thinking(self.effective_cfg.thinking.clone())
-        .expose_linear_graphql_tool(self.effective_cfg.linear.worker_tool.unwrap_or(false))
         .host_tool_bridge(self.host_tool_bridge())
         .build();
 

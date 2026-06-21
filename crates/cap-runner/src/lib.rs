@@ -14,7 +14,6 @@ pub const AGENT_PROMPT: &str = "AGENT_PROMPT";
 pub const AGENT_WORKER_PROMPT: &str = "AGENT_WORKER_PROMPT";
 pub const AGENT_MODEL: &str = "AGENT_MODEL";
 pub const AGENT_WORKER_MODEL: &str = "AGENT_WORKER_MODEL";
-pub const AGENT_LINEAR_GRAPHQL_TOOL: &str = "AGENT_LINEAR_GRAPHQL_TOOL";
 pub const AGENT_SESSION_DIR: &str = "AGENT_SESSION_DIR";
 
 /// How an attempt finished, from the orchestrator's point of view.
@@ -92,8 +91,6 @@ pub struct SpawnParams<'a> {
     /// SQLite run_id for this dispatch attempt. Used to tag event rows.
     pub run_id: String,
     pub max_run_timeout_ms: u64,
-    /// Expose the optional Linear GraphQL worker tool to compatible protocol runners.
-    pub expose_linear_graphql_tool: bool,
     /// When set, the runner advertises the host MCP bridge to its backend so the
     /// agent can call host-registered extension tools. Carries the command +
     /// args the backend should spawn to reach the bridge (the host binary's
@@ -120,7 +117,6 @@ pub struct SpawnParamsBuilder<'a> {
     model: Option<String>,
     provider: Option<String>,
     thinking: Option<String>,
-    expose_linear_graphql_tool: bool,
     host_tool_bridge: Option<HostToolBridge>,
 }
 
@@ -164,7 +160,6 @@ impl<'a> SpawnParams<'a> {
             model: None,
             provider: None,
             thinking: None,
-            expose_linear_graphql_tool: false,
             host_tool_bridge: None,
         }
     }
@@ -183,11 +178,6 @@ impl<'a> SpawnParamsBuilder<'a> {
 
     pub fn thinking(mut self, value: Option<String>) -> Self {
         self.thinking = value;
-        self
-    }
-
-    pub fn expose_linear_graphql_tool(mut self, value: bool) -> Self {
-        self.expose_linear_graphql_tool = value;
         self
     }
 
@@ -210,7 +200,6 @@ impl<'a> SpawnParamsBuilder<'a> {
             issue_id: self.issue_id,
             run_id: self.run_id,
             max_run_timeout_ms: self.max_run_timeout_ms,
-            expose_linear_graphql_tool: self.expose_linear_graphql_tool,
             host_tool_bridge: self.host_tool_bridge,
             events: self.events,
             store: self.store,

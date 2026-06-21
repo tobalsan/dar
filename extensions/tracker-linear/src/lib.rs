@@ -23,8 +23,11 @@ use chrono::Utc;
 use host_api::{Extension, HostCommand, RegisterCtx};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tool_registry::{ToolRegistryHandle, TOOL_REGISTRY_SERVICE};
 
-const DEFAULT_ENDPOINT: &str = "https://api.linear.app/graphql";
+mod linear_graphql;
+
+pub(crate) const DEFAULT_ENDPOINT: &str = "https://api.linear.app/graphql";
 /// Initial sentinel: no real observation yet.
 const UNSET_MIN: i64 = i64::MAX;
 /// Page size for GraphQL pagination.
@@ -58,9 +61,39 @@ impl Extension for TrackerLinearExtension {
                 .service::<dyn HostCommand>("init-workflow", Arc::new(InitWorkflowCommand))?;
             ctx.services
                 .service::<dyn HostCommand>("export", Arc::new(ExportCommand))?;
+
+            // Register the `linear_graphql` host tool against the shared
+            // registry, if one is published. The registry is owned by the
+            // tool-registry-host extension and is always present in the stock
+            // composition; we resolve it leniently so a stripped composition
+            // without the registry still boots the tracker.
+            if let Ok(registry) = ctx
+                .services
+                .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
+            {
+                let endpoint = linear_graphql_endpoint(ctx.config.get(self.id()));
+                linear_graphql::register_into(registry.as_ref(), endpoint)?;
+            }
             Ok(())
         })
     }
+}
+
+/// Per-extension config for `extensions.tracker-linear` relevant to the tool.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct TrackerLinearToolConfig {
+    #[serde(default)]
+    endpoint: Option<String>,
+}
+
+/// Resolve the GraphQL endpoint for the `linear_graphql` tool from the
+/// extension config, falling back to the default Linear endpoint.
+fn linear_graphql_endpoint(config: Option<&Value>) -> String {
+    config
+        .and_then(|v| serde_json::from_value::<TrackerLinearToolConfig>(v.clone()).ok())
+        .and_then(|c| c.endpoint)
+        .filter(|e| !e.is_empty())
+        .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string())
 }
 
 struct InitWorkflowCommand;

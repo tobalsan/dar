@@ -59,7 +59,6 @@ fn spawn_params_builder_round_trips_all_fields() {
         .model(Some("model-a".into()))
         .provider(Some("anthropic".into()))
         .thinking(Some("high".into()))
-        .expose_linear_graphql_tool(true)
         .build();
 
     assert_eq!(params.command, "fake");
@@ -74,7 +73,6 @@ fn spawn_params_builder_round_trips_all_fields() {
     assert_eq!(params.issue_id, "ISSUE-1");
     assert_eq!(params.run_id, "run-1");
     assert_eq!(params.max_run_timeout_ms, 60_000);
-    assert!(params.expose_linear_graphql_tool);
     assert!(Arc::ptr_eq(&params.events, &events));
     assert!(Arc::ptr_eq(&params.store, &store));
     assert!(Arc::ptr_eq(&params.last_event_at, &last_event_at));
@@ -91,7 +89,6 @@ fn spawn_params_builder_defaults_optional_fields() {
     assert_eq!(params.model, None);
     assert_eq!(params.provider, None);
     assert_eq!(params.thinking, None);
-    assert!(!params.expose_linear_graphql_tool);
 }
 
 #[test]
@@ -134,9 +131,5 @@ fn agent_env_constants_match_contract() {
     assert_eq!(cap_runner::AGENT_WORKER_PROMPT, "AGENT_WORKER_PROMPT");
     assert_eq!(cap_runner::AGENT_MODEL, "AGENT_MODEL");
     assert_eq!(cap_runner::AGENT_WORKER_MODEL, "AGENT_WORKER_MODEL");
-    assert_eq!(
-        cap_runner::AGENT_LINEAR_GRAPHQL_TOOL,
-        "AGENT_LINEAR_GRAPHQL_TOOL"
-    );
     assert_eq!(cap_runner::AGENT_SESSION_DIR, "AGENT_SESSION_DIR");
 }
