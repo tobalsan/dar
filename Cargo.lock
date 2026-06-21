@@ -2637,6 +2637,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tool-shim"
+version = "0.1.0"
+dependencies = [
+ "agentropy-cli",
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tool-registry",
+]
+
+[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
