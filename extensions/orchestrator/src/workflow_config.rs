@@ -182,7 +182,10 @@ pub struct WfServerConfig {
 pub struct WfLinearConfig {
     pub project: Option<String>,
     pub team: Option<String>,
-    /// Enable the linear_graphql worker tool when the child runs.
+    /// Deprecated/no-op: the `linear_graphql` tool is now an
+    /// extension-registered host tool, always available to wired agents through
+    /// the host MCP bridge (it no longer needs a per-workflow opt-in). Parsed
+    /// for backward-compatibility with existing frontmatter.
     #[serde(alias = "exposeGraphqlTool")]
     pub worker_tool: Option<bool>,
     /// HMAC-SHA256 secret used to verify Linear webhook requests.

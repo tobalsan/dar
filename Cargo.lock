@@ -2789,6 +2789,7 @@ name = "tracker-linear"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "cap-tracker",
  "chrono",
  "host-api",
@@ -2798,6 +2799,7 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "tokio",
+ "tool-registry",
  "tracing",
 ]
 

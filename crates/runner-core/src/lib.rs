@@ -130,7 +130,6 @@ pub fn effective_command(command: &str, default: &str) -> OsString {
 ///   - `AGENT_WORKER_PROMPT`    — same as `AGENT_PROMPT` (alias)
 ///   - `AGENT_MODEL`            — model name (only when configured)
 ///   - `AGENT_WORKER_MODEL`     — same as `AGENT_MODEL` (alias, only when configured)
-///   - `AGENT_LINEAR_GRAPHQL_TOOL` — set to `1` when the Linear GraphQL tool is enabled
 ///   - `AGENT_SESSION_DIR`      — path to the per-issue session directory (session runners only)
 pub fn common_env(p: &SpawnParams<'_>) -> Vec<(OsString, OsString)> {
     let mut env = vec![
@@ -165,12 +164,6 @@ pub fn common_env(p: &SpawnParams<'_>) -> Vec<(OsString, OsString)> {
         env.push((OsString::from("AGENT_MODEL"), OsString::from(model)));
         env.push((OsString::from("AGENT_WORKER_MODEL"), OsString::from(model)));
     }
-    if p.expose_linear_graphql_tool {
-        env.push((
-            OsString::from("AGENT_LINEAR_GRAPHQL_TOOL"),
-            OsString::from("1"),
-        ));
-    }
     env
 }
 
@@ -184,32 +177,6 @@ pub fn env_with_session_dir(
         session_dir.as_os_str().to_os_string(),
     ));
     env
-}
-
-/// Optional worker tool definitions shared by protocol runners (pi, codex).
-pub fn worker_tools(p: &SpawnParams<'_>) -> Vec<serde_json::Value> {
-    if p.expose_linear_graphql_tool {
-        vec![serde_json::json!({
-            "name": "linear_graphql",
-            "description": "Execute a Linear GraphQL operation against the configured Linear API endpoint.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "GraphQL query or mutation document."
-                    },
-                    "variables": {
-                        "type": "object",
-                        "description": "GraphQL variables object."
-                    }
-                },
-                "required": ["query"]
-            }
-        })]
-    } else {
-        Vec::new()
-    }
 }
 
 // ---------------------------------------------------------------------------
