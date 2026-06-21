@@ -772,6 +772,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-jobs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "host-api",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tool-registry",
+]
+
+[[package]]
 name = "example-tool"
 version = "0.1.0"
 dependencies = [

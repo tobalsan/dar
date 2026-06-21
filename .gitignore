@@ -11,6 +11,9 @@ example-agent/logs/*
 !example-agent/logs/.gitkeep
 example-agent/.agentropy/target/
 example-agent/bin/
+# Runtime-created backing file for the example-jobs demo tools
+example-agent/jobs.json
+example-agent/jobs.json.tmp
 data/
 
 # Local Claude Code config dropped into agent folders

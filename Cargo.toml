@@ -30,6 +30,7 @@ members = [
     "extensions/tracker-linear",
     "extensions/tui",
     "example-agent/extensions/example-tool",
+    "example-agent/extensions/example-jobs",
 ]
 resolver = "2"
 
