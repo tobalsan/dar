@@ -30,3 +30,7 @@ tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "macros", "io-s
 [dev-dependencies]
 tempfile = "3"
 opencode-client = { path = "../../../crates/opencode-client" }
+cap-chat = { path = "../../../crates/cap-chat" }
+cap-runner = { path = "../../../crates/cap-runner" }
+chat-pi = { path = "../../../extensions/chat-pi" }
+tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }

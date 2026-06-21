@@ -6,4 +6,5 @@ rust-version = "1.83"
 
 [dependencies]
 anyhow = "1"
+cap-runner = { path = "../cap-runner" }
 tokio = { version = "1.43", features = ["sync"] }

@@ -7,6 +7,7 @@ rust-version = "1.83"
 [dependencies]
 anyhow = "1"
 cap-chat = { path = "../../crates/cap-chat" }
+tool-registry = { path = "../../crates/tool-registry" }
 chrono = { version = "0.4", features = ["serde"] }
 # crossterm pinned to the workspace lock (agentropy-host has 0.28.x) and
 # ratatui 0.29's own crossterm backend matches 0.28 — one copy in tree.

@@ -6,6 +6,8 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
+pub use cap_runner::HostToolBridge;
+
 /// Backend id used when no configured/followed backend is available.
 pub const CHAT_FALLBACK_BACKEND: &str = "pi";
 
@@ -53,6 +55,12 @@ pub struct ChatSessionParams {
     pub session_dir: PathBuf,
     pub model: Option<String>,
     pub provider: Option<String>,
+    /// When set, the chat backend advertises the host MCP bridge to its agent
+    /// CLI so the operator's chat session sees the same host-registered
+    /// registry tools an issue worker does. Carries the command + args the
+    /// backend spawns to reach the bridge (the host binary's
+    /// `__mcp-bridge --dir <agent>` invocation).
+    pub host_tool_bridge: Option<HostToolBridge>,
 }
 
 impl ChatSessionParams {
@@ -67,6 +75,7 @@ impl ChatSessionParams {
             session_dir: session_dir.to_path_buf(),
             model: None,
             provider: None,
+            host_tool_bridge: None,
         }
     }
 }
@@ -77,6 +86,7 @@ pub struct ChatSessionParamsBuilder {
     session_dir: PathBuf,
     model: Option<String>,
     provider: Option<String>,
+    host_tool_bridge: Option<HostToolBridge>,
 }
 
 impl ChatSessionParamsBuilder {
@@ -90,6 +100,11 @@ impl ChatSessionParamsBuilder {
         self
     }
 
+    pub fn host_tool_bridge(mut self, value: Option<HostToolBridge>) -> Self {
+        self.host_tool_bridge = value;
+        self
+    }
+
     pub fn build(self) -> ChatSessionParams {
         ChatSessionParams {
             command: self.command,
@@ -97,6 +112,7 @@ impl ChatSessionParamsBuilder {
             session_dir: self.session_dir,
             model: self.model,
             provider: self.provider,
+            host_tool_bridge: self.host_tool_bridge,
         }
     }
 }
