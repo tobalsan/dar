@@ -41,6 +41,13 @@ extensions:
   example-tool:
     suffix: " [via-config]"
 
+  # Example of validated, JSON-backed mutation through the host tool registry
+  # (a demonstration of ALG-253, NOT the ALG-218 scheduler). The host executes
+  # jobs_create / jobs_edit / jobs_list against this generic jobs file instead
+  # of the agent editing it ad hoc.
+  example-jobs:
+    path: ./jobs.json
+
 # extensions:
 #   tui:
 #     chat:

@@ -1,0 +1,26 @@
+[package]
+name = "example-jobs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+
+# Discovered as a local extension for `example-agent` only. This is an EXAMPLE
+# (a demonstration of ALG-253's host tool registry + MCP bridge, NOT the ALG-218
+# cron scheduler): it registers validated, JSON-backed mutation tools
+# (`jobs_create` / `jobs_edit` / `jobs_list`) that the host executes against a
+# generic jobs JSON file, instead of the agent editing the file ad hoc. It is
+# deliberately NOT in the shipped `dist` tool set.
+[package.metadata.agentropy]
+factory = "example_jobs::extension"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+host-api = { path = "../../../crates/host-api" }
+tool-registry = { path = "../../../crates/tool-registry" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "macros"] }
