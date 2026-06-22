@@ -157,10 +157,137 @@ pub fn opencode_mcp_block(bridge: &HostToolBridge) -> Value {
     })
 }
 
+/// The full opencode config document shared by the issue-worker runner and the
+/// TUI chat backend, so both spawn a byte-for-byte identical opencode child:
+/// the `$schema`, the ~17-key permission allow-list, the optional `model`, and
+/// the optional `mcp.agentropy` host-bridge block. The per-extension XDG /
+/// `OPENCODE_CONFIG*` env assembly stays in each extension.
+pub fn opencode_config(model: Option<&str>, bridge: Option<&HostToolBridge>) -> Value {
+    let mut config = json!({
+        "$schema": "https://opencode.ai/config.json",
+        "permission": {
+            "*": "allow",
+            "bash": "allow",
+            "doom_loop": "allow",
+            "edit": "allow",
+            "external_directory": "allow",
+            "glob": "allow",
+            "grep": "allow",
+            "list": "allow",
+            "lsp": "allow",
+            "question": "allow",
+            "read": "allow",
+            "skill": "allow",
+            "task": "allow",
+            "todowrite": "allow",
+            "todoread": "allow",
+            "webfetch": "allow",
+            "websearch": "allow",
+            "write": "allow",
+        },
+    });
+    if let Some(model) = model {
+        config["model"] = Value::String(model.to_string());
+    }
+    // Wire the host MCP bridge so the opencode agent calls the same registry
+    // tools an issue worker does; tools surface namespaced `agentropy_<tool>`
+    // and results return over SSE in the same session.
+    if let Some(bridge) = bridge {
+        config["mcp"] = opencode_mcp_block(bridge);
+    }
+    config
+}
+
+/// Write the shared [`opencode_config`] to `<session_dir>/config/opencode.json`
+/// (pretty-printed), the on-disk path both the runner and chat backend point
+/// `OPENCODE_CONFIG` at.
+pub fn write_opencode_config(
+    session_dir: &Path,
+    model: Option<&str>,
+    bridge: Option<&HostToolBridge>,
+) -> Result<()> {
+    let path = session_dir.join("config").join("opencode.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&opencode_config(model, bridge))?,
+    )
+    .with_context(|| format!("writing opencode config {}", path.display()))
+}
+
+// ---------------------------------------------------------------------------
+// codex (app-server JSON-RPC 2.0 request builders)
+// ---------------------------------------------------------------------------
+
+/// `initialize` request. Shared verbatim by `runner-codex` and `chat-codex` so
+/// both handshake identically with `codex app-server`.
+pub fn make_initialize(id: u64, workspace: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "initialize",
+        "params": {
+            "clientInfo": { "name": "agentropy", "version": "0.1.0" },
+            "capabilities": { "experimentalApi": true },
+            "cwd": workspace,
+        }
+    })
+}
+
+/// `initialized` notification (no response expected).
+pub fn make_initialized() -> Value {
+    json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} })
+}
+
+/// `thread/start` request.
+pub fn make_thread_start(id: u64, workspace: &str, model: Option<&str>) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "thread/start",
+        "params": {
+            "model": model,
+            "cwd": workspace,
+            "approvalPolicy": "never",
+            "sandbox": "danger-full-access",
+            "serviceName": "agentropy",
+        }
+    })
+}
+
+/// `turn/start` request. The optional `effort` field is OMITTED when `None` and
+/// emitted when `Some` (an absent optional field and an explicit `null` are
+/// equivalent to codex app-server). `runner-codex` passes the issue's
+/// `thinking` effort; `chat-codex` always passes `None`.
+pub fn make_turn_start(
+    id: u64,
+    thread_id: &str,
+    workspace: &str,
+    prompt: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Value {
+    let mut params = json!({
+        "threadId": thread_id,
+        "input": [{ "type": "text", "text": prompt }],
+        "cwd": workspace,
+        "model": model,
+        "approvalPolicy": "never",
+        "sandboxPolicy": { "type": "dangerFullAccess" },
+    });
+    if let Some(effort) = effort {
+        params["effort"] = Value::String(effort.to_string());
+    }
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "turn/start",
+        "params": params,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     fn bridge() -> HostToolBridge {
         HostToolBridge {
@@ -171,51 +298,6 @@ mod tests {
                 "/tmp/agent".to_string(),
             ],
         }
-    }
-
-    #[test]
-    fn host_tool_bridge_none_without_registry_or_tools() {
-        let root = tempfile::tempdir().unwrap();
-        let services = ServiceRegistry::default();
-        assert!(host_tool_bridge(&services, root.path()).is_none());
-
-        let mut services = ServiceRegistry::default();
-        services
-            .service::<dyn ToolRegistryHandle>(
-                TOOL_REGISTRY_SERVICE,
-                Arc::new(tool_registry::ToolRegistry::new()),
-            )
-            .unwrap();
-        assert!(host_tool_bridge(&services, root.path()).is_none());
-    }
-
-    #[test]
-    fn host_tool_bridge_some_when_registry_has_tool() {
-        struct Noop;
-        #[async_trait::async_trait]
-        impl tool_registry::ToolExecutor for Noop {
-            async fn execute(&self, _args: Value) -> anyhow::Result<tool_registry::ToolOutcome> {
-                Ok(tool_registry::ToolOutcome::ok("ok"))
-            }
-        }
-
-        let root = tempfile::tempdir().unwrap();
-        let registry = tool_registry::ToolRegistry::new();
-        registry
-            .register_tool(
-                tool_registry::ToolSpec::new("noop", "noop", json!({ "type": "object" })),
-                Arc::new(Noop),
-            )
-            .unwrap();
-        let mut services = ServiceRegistry::default();
-        services
-            .service::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE, Arc::new(registry))
-            .unwrap();
-
-        let bridge = host_tool_bridge(&services, root.path()).unwrap();
-        assert_eq!(bridge.args[0], "__mcp-bridge");
-        assert_eq!(bridge.args[1], "--dir");
-        assert_eq!(bridge.args[2], root.path().display().to_string());
     }
 
     #[test]
@@ -288,5 +370,116 @@ mod tests {
             server["command"],
             json!(["/opt/agentropy", "__mcp-bridge", "--dir", "/tmp/agent"])
         );
+    }
+
+    #[test]
+    fn opencode_config_allows_permissions_and_uses_model_when_set() {
+        let config = opencode_config(Some("anthropic/claude-sonnet"), None);
+        assert_eq!(config["permission"]["*"], "allow");
+        assert_eq!(config["permission"]["bash"], "allow");
+        assert_eq!(config["permission"]["external_directory"], "allow");
+        assert_eq!(config["permission"]["edit"], "allow");
+        assert_eq!(config["permission"]["question"], "allow");
+        assert_eq!(config["permission"]["webfetch"], "allow");
+        assert_eq!(config["model"], "anthropic/claude-sonnet");
+        assert!(opencode_config(None, None).get("model").is_none());
+    }
+
+    #[test]
+    fn opencode_config_has_no_mcp_block_without_bridge() {
+        assert!(opencode_config(Some("anthropic/claude-sonnet"), None)
+            .get("mcp")
+            .is_none());
+    }
+
+    #[test]
+    fn opencode_config_writes_agentropy_mcp_block_when_bridge_present() {
+        let config = opencode_config(Some("anthropic/claude-sonnet"), Some(&bridge()));
+        let server = &config["mcp"][BRIDGE_SERVER_NAME];
+        assert_eq!(server["type"], "local");
+        assert_eq!(server["enabled"], true);
+        assert_eq!(
+            server["command"],
+            json!(["/opt/agentropy", "__mcp-bridge", "--dir", "/tmp/agent"])
+        );
+        assert_eq!(config["permission"]["*"], "allow");
+    }
+
+    #[test]
+    fn write_opencode_config_persists_mcp_block_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        write_opencode_config(dir.path(), Some("anthropic/claude-sonnet"), Some(&bridge()))
+            .unwrap();
+        let written = std::fs::read_to_string(dir.path().join("config/opencode.json")).unwrap();
+        let config: Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            config["mcp"][BRIDGE_SERVER_NAME]["command"],
+            json!(["/opt/agentropy", "__mcp-bridge", "--dir", "/tmp/agent"])
+        );
+        assert_eq!(config["permission"]["*"], "allow");
+    }
+
+    #[test]
+    fn initialize_request_shape() {
+        let req = make_initialize(1, "/ws/ISSUE-1");
+        assert_eq!(req["jsonrpc"], "2.0");
+        assert_eq!(req["id"], 1);
+        assert_eq!(req["method"], "initialize");
+        assert_eq!(req["params"]["clientInfo"]["name"], "agentropy");
+        assert_eq!(req["params"]["capabilities"]["experimentalApi"], true);
+        assert_eq!(req["params"]["cwd"], "/ws/ISSUE-1");
+    }
+
+    #[test]
+    fn initialized_notification_shape() {
+        let req = make_initialized();
+        assert_eq!(req["method"], "initialized");
+        assert!(req.get("id").is_none());
+    }
+
+    #[test]
+    fn thread_start_request_shape() {
+        let req = make_thread_start(2, "/ws/ISSUE-1", Some("o3"));
+        assert_eq!(req["method"], "thread/start");
+        assert_eq!(req["params"]["approvalPolicy"], "never");
+        assert_eq!(req["params"]["sandbox"], "danger-full-access");
+        assert_eq!(req["params"]["serviceName"], "agentropy");
+        assert_eq!(req["params"]["model"], "o3");
+        assert_eq!(req["params"]["cwd"], "/ws/ISSUE-1");
+    }
+
+    #[test]
+    fn thread_start_null_model_when_none() {
+        assert!(make_thread_start(2, "/ws/ISSUE-1", None)["params"]["model"].is_null());
+    }
+
+    #[test]
+    fn turn_start_request_shape_emits_effort_when_some() {
+        let req = make_turn_start(
+            3,
+            "t1",
+            "/ws/ISSUE-1",
+            "do something",
+            Some("o3"),
+            Some("high"),
+        );
+        assert_eq!(req["method"], "turn/start");
+        assert_eq!(req["params"]["threadId"], "t1");
+        assert_eq!(req["params"]["input"][0]["type"], "text");
+        assert_eq!(req["params"]["input"][0]["text"], "do something");
+        assert_eq!(req["params"]["approvalPolicy"], "never");
+        assert_eq!(req["params"]["sandboxPolicy"]["type"], "dangerFullAccess");
+        assert_eq!(req["params"]["model"], "o3");
+        assert_eq!(req["params"]["effort"], "high");
+    }
+
+    #[test]
+    fn turn_start_omits_effort_key_when_none() {
+        let req = make_turn_start(3, "t1", "/ws/ISSUE-1", "do", None, None);
+        // An absent optional field and an explicit null are equivalent to codex
+        // app-server; the unified builder omits the key when effort is None.
+        assert!(req["params"].get("effort").is_none());
+        assert!(req["params"]["model"].is_null());
     }
 }

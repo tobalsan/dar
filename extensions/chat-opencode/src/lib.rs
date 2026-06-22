@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use cap_chat::{ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams};
 use host_api::{Extension, RegisterCtx};
 use opencode_client::{OpenCodeEvent, OpenCodeServer};
-use runner_core::effective_command;
+use runner_core::{effective_command, opencode_config, write_opencode_config};
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
@@ -252,59 +252,6 @@ fn opencode_env(
             session_dir.join("cache").as_os_str().to_os_string(),
         ),
     ]
-}
-
-fn opencode_config(
-    model: Option<&str>,
-    bridge: Option<&cap_chat::HostToolBridge>,
-) -> serde_json::Value {
-    let mut config = serde_json::json!({
-        "$schema": "https://opencode.ai/config.json",
-        "permission": {
-            "*": "allow",
-            "bash": "allow",
-            "doom_loop": "allow",
-            "edit": "allow",
-            "external_directory": "allow",
-            "glob": "allow",
-            "grep": "allow",
-            "list": "allow",
-            "lsp": "allow",
-            "question": "allow",
-            "read": "allow",
-            "skill": "allow",
-            "task": "allow",
-            "todowrite": "allow",
-            "todoread": "allow",
-            "webfetch": "allow",
-            "websearch": "allow",
-            "write": "allow",
-        },
-    });
-    if let Some(model) = model {
-        config["model"] = serde_json::Value::String(model.to_string());
-    }
-    // Wire the host MCP bridge so the chat opencode agent calls the same
-    // registry tools an issue worker does; tools surface namespaced
-    // `agentropy_<tool>` and results return over SSE in the same session.
-    // Reuses the runner's `mcp.agentropy` block writer.
-    if let Some(bridge) = bridge {
-        config["mcp"] = runner_core::opencode_mcp_block(bridge);
-    }
-    config
-}
-
-fn write_opencode_config(
-    session_dir: &Path,
-    model: Option<&str>,
-    bridge: Option<&cap_chat::HostToolBridge>,
-) -> Result<()> {
-    let path = session_dir.join("config").join("opencode.json");
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&opencode_config(model, bridge))?,
-    )
-    .with_context(|| format!("writing opencode config {}", path.display()))
 }
 
 fn map_event(event: &OpenCodeEvent) -> Option<ChatEvent> {

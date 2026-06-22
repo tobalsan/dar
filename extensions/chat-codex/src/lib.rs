@@ -12,7 +12,8 @@ use anyhow::{Context, Result};
 use cap_chat::{ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams};
 use host_api::{Extension, RegisterCtx};
 use runner_core::{
-    effective_command, scrub_loaded_env, setup_process_group, strip_ansi, term_then_kill,
+    effective_command, make_initialize, make_initialized, make_thread_start, make_turn_start,
+    scrub_loaded_env, setup_process_group, strip_ansi, term_then_kill,
 };
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -306,60 +307,6 @@ fn codex_args(params: &ChatSessionParams) -> Vec<OsString> {
     args
 }
 
-fn make_initialize(id: u64, workspace: &str) -> Value {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "initialize",
-        "params": {
-            "clientInfo": { "name": "agentropy", "version": "0.1.0" },
-            "capabilities": { "experimentalApi": true },
-            "cwd": workspace,
-        }
-    })
-}
-
-fn make_initialized() -> Value {
-    serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} })
-}
-
-fn make_thread_start(id: u64, workspace: &str, model: Option<&str>) -> Value {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "thread/start",
-        "params": {
-            "model": model,
-            "cwd": workspace,
-            "approvalPolicy": "never",
-            "sandbox": "danger-full-access",
-            "serviceName": "agentropy",
-        }
-    })
-}
-
-fn make_turn_start(
-    id: u64,
-    thread_id: &str,
-    workspace: &str,
-    prompt: &str,
-    model: Option<&str>,
-) -> Value {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "turn/start",
-        "params": {
-            "threadId": thread_id,
-            "input": [{ "type": "text", "text": prompt }],
-            "cwd": workspace,
-            "model": model,
-            "approvalPolicy": "never",
-            "sandboxPolicy": { "type": "dangerFullAccess" },
-        }
-    })
-}
-
 fn make_turn_interrupt(id: u64, thread_id: &str, turn_id: &str) -> Value {
     serde_json::json!({
         "jsonrpc": "2.0",
@@ -394,7 +341,7 @@ async fn write_turn(
 ) -> Result<()> {
     write_value_to(
         stdin,
-        make_turn_start(request_id, thread_id, workspace, prompt, model),
+        make_turn_start(request_id, thread_id, workspace, prompt, model, None),
     )
     .await
 }

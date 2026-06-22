@@ -11,8 +11,9 @@ use anyhow::{Context, Result};
 use cap_runner::{ExitKind, KillReason, RunnerHandle, SpawnParams, TurnDecision, TurnEnded};
 use host_api::{Extension, RegisterCtx};
 use runner_core::{
-    classify_protocol_line, common_env, effective_command, log_ev, scrub_loaded_env,
-    setup_process_group, spawn_line_pump, strip_ansi, term_then_kill,
+    classify_protocol_line, common_env, effective_command, log_ev, make_initialize,
+    make_initialized, make_thread_start, make_turn_start, scrub_loaded_env, setup_process_group,
+    spawn_line_pump, strip_ansi, term_then_kill,
 };
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -87,66 +88,6 @@ fn codex_args(p: &SpawnParams<'_>) -> Vec<OsString> {
         args.extend(runner_core::codex_mcp_bridge_args(bridge));
     }
     args
-}
-
-// ---------------------------------------------------------------------------
-// JSON-RPC request builders (for unit testing)
-// ---------------------------------------------------------------------------
-
-fn make_initialize(id: u64, workspace: &str) -> Value {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "initialize",
-        "params": {
-            "clientInfo": { "name": "agentropy", "version": "0.1.0" },
-            "capabilities": { "experimentalApi": true },
-            "cwd": workspace,
-        }
-    })
-}
-
-fn make_initialized() -> Value {
-    serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} })
-}
-
-fn make_thread_start(id: u64, workspace: &str, model: Option<&str>) -> Value {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "thread/start",
-        "params": {
-            "model": model,
-            "cwd": workspace,
-            "approvalPolicy": "never",
-            "sandbox": "danger-full-access",
-            "serviceName": "agentropy",
-        }
-    })
-}
-
-fn make_turn_start(
-    id: u64,
-    thread_id: &str,
-    workspace: &str,
-    prompt: &str,
-    model: Option<&str>,
-    effort: Option<&str>,
-) -> Value {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "turn/start",
-        "params": {
-            "threadId": thread_id,
-            "input": [{ "type": "text", "text": prompt }],
-            "cwd": workspace,
-            "model": model,
-            "approvalPolicy": "never",
-            "sandboxPolicy": { "type": "dangerFullAccess" },
-            "effort": effort,
-        }
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,9 +1108,12 @@ mod tests {
     }
 
     #[test]
-    fn turn_start_null_effort_when_none() {
+    fn turn_start_omits_effort_key_when_none() {
+        // The unified runner-core builder OMITS the optional `effort` key when
+        // None (an absent field and an explicit null are equivalent to codex
+        // app-server). Previously the runner emitted `"effort": null`.
         let req = make_turn_start(3, "t1", "/ws/ISSUE-1", "do", None, None);
-        assert!(req["params"]["effort"].is_null());
+        assert!(req["params"].get("effort").is_none());
         assert!(req["params"]["model"].is_null());
     }
 

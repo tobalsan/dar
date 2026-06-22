@@ -16,6 +16,7 @@ use host_api::{Extension, RegisterCtx};
 use opencode_client::{OpenCodeEvent, OpenCodeServer};
 use runner_core::{
     classify_opencode_event, common_env, effective_command, env_with_session_dir, log_ev,
+    opencode_config, write_opencode_config,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
@@ -187,52 +188,6 @@ fn opencode_env(
         session_dir.join("cache").as_os_str().to_os_string(),
     ));
     env
-}
-
-fn opencode_config(model: Option<&str>, bridge: Option<&HostToolBridge>) -> serde_json::Value {
-    let mut config = serde_json::json!({
-        "$schema": "https://opencode.ai/config.json",
-        "permission": {
-            "*": "allow",
-            "bash": "allow",
-            "doom_loop": "allow",
-            "edit": "allow",
-            "external_directory": "allow",
-            "glob": "allow",
-            "grep": "allow",
-            "list": "allow",
-            "lsp": "allow",
-            "question": "allow",
-            "read": "allow",
-            "skill": "allow",
-            "task": "allow",
-            "todowrite": "allow",
-            "todoread": "allow",
-            "webfetch": "allow",
-            "websearch": "allow",
-            "write": "allow",
-        },
-    });
-    if let Some(model) = model {
-        config["model"] = serde_json::Value::String(model.to_string());
-    }
-    if let Some(bridge) = bridge {
-        config["mcp"] = runner_core::opencode_mcp_block(bridge);
-    }
-    config
-}
-
-fn write_opencode_config(
-    session_dir: &Path,
-    model: Option<&str>,
-    bridge: Option<&HostToolBridge>,
-) -> Result<()> {
-    let path = session_dir.join("config").join("opencode.json");
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&opencode_config(model, bridge))?,
-    )
-    .with_context(|| format!("writing opencode config {}", path.display()))
 }
 
 /// opencode reads credentials from `$XDG_DATA_HOME/opencode`, defaulting to
