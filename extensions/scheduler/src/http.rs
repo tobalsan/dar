@@ -264,6 +264,7 @@ fn job_with_runtime(api: &ApiState, job: &ScheduleJob, now_ms: i64) -> Value {
             "lastStatus".to_string(),
             json!(rt.last_status.map(|s| s.as_str())),
         );
+        map.insert("lastError".to_string(), json!(rt.last_error));
         map.insert("runningForMs".to_string(), json!(running_for_ms));
     }
     value

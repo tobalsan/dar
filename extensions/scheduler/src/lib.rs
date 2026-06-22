@@ -30,16 +30,19 @@ mod schedule;
 mod service;
 mod state;
 mod store;
+mod tab;
 
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{bail, Result};
+use cap_dashboard_tab::DashboardTabs;
 use host_api::{Extension, RegisterCtx, StartCtx};
 use serde::Deserialize;
 
 use crate::service::SchedulerConfig;
 use crate::state::SchedulerState;
 use crate::store::load_jobs;
+use crate::tab::CronTab;
 
 /// Default runner kind when `runner.use` is empty, matching the orchestrator's
 /// `runner_service_id` fallback.
@@ -163,6 +166,14 @@ impl Extension for SchedulerExtension {
             let jobs = load_jobs(&root, |m| tracing::warn!("{m}"));
             let state = Arc::new(SchedulerState::new(jobs));
             let _ = self.state.set(Arc::clone(&state));
+
+            // Contribute the read-only "Cron" dashboard tab via the
+            // cap-dashboard-tab contract. Registered only on the enabled path, so
+            // the tab is absent whenever the scheduler is not linked/enabled
+            // (dist: no `extensions.scheduler` section; FSC: crate not composed).
+            // Shares the same `SchedulerState` so the view reflects live runtime.
+            DashboardTabs::shared(&mut ctx.services)?
+                .add(Arc::new(CronTab::new(Arc::clone(&state), root.clone())));
 
             let api_state = http::ApiState { state, root };
             ctx.http.mount(host_api::HttpMount {

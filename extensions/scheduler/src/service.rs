@@ -30,7 +30,10 @@
 //! live-reloaded; the boot-time `extensions.scheduler.enabled` kill switch is
 //! not (it is read once at start).
 //!
-//! Tracked separately: dashboard tab (ALG-225).
+//! The per-job runtime this loop maintains (next/last run, last status + error,
+//! running-for) is what the read-only Cron dashboard tab ([`crate::tab`])
+//! renders via the shared [`SchedulerState`]. Scheduled runs fire the runner
+//! service directly and never reach the orchestrator's run list or `RunSnapshot`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -358,7 +361,11 @@ async fn execute_job(
             "[scheduler] Cannot create cron dir for job {}: {err:#}",
             job.id
         );
-        state.mark_finished(&job.id, LastStatus::Error);
+        state.mark_finished(
+            &job.id,
+            LastStatus::Error,
+            Some(format!("cannot create cron dir: {err:#}")),
+        );
         return;
     }
 
@@ -403,6 +410,9 @@ async fn execute_job(
         Err(err) => (RunStatus::Error, None, Some(format!("{err:#}"))),
     };
 
+    // Keep a copy of the error for runtime state before it is moved into the
+    // output writer, so the Cron tab can surface the failure reason.
+    let last_error = error.clone();
     let written = write_cron_run_output(&CronRunOutput {
         root: &config.root,
         job_id: &job.id,
@@ -420,7 +430,7 @@ async fn execute_job(
         RunStatus::Ok => LastStatus::Ok,
         RunStatus::Error => LastStatus::Error,
     };
-    state.mark_finished(&job.id, final_status);
+    state.mark_finished(&job.id, final_status, last_error);
 
     match written {
         Ok(path) => tracing::info!("[scheduler] Wrote output {}", path.display()),
@@ -600,6 +610,33 @@ mod tests {
         let out = latest_output(dir.path(), "timeout-job").expect("output written");
         assert!(out.contains("status: error"), "recorded as error: {out}");
         assert!(out.contains("timeout"), "timeout message present: {out}");
+    }
+
+    #[tokio::test]
+    async fn scheduled_run_records_runtime_status_without_orchestrator_snapshot() {
+        // A fired job's outcome lands in the scheduler's own runtime state
+        // (what the Cron tab renders) and its output file. The scheduler fires
+        // the runner service directly (`execute_job` takes only services +
+        // scheduler state — no event bus / orchestrator run handle), so a
+        // scheduled run can never reach the orchestrator's RunSnapshot or its
+        // run list. This test pins that isolation: the run completes and is
+        // visible at the cron level only.
+        let dir = tempfile::tempdir().unwrap();
+        let (services, spawns) = services_with(StdDuration::from_millis(10));
+        let config = test_config(dir.path().to_path_buf(), 60_000);
+        let job = armed("isolated", None).job;
+        let state = Arc::new(SchedulerState::new(vec![job.clone()]));
+
+        execute_job(&config, &services, &state, &job).await;
+
+        assert_eq!(spawns.load(Ordering::SeqCst), 1, "runner fired directly");
+        let rt = state.runtime("isolated");
+        assert_eq!(rt.last_status, Some(LastStatus::Ok), "status at cron level");
+        assert!(rt.last_run_at_ms.is_some(), "last run recorded for the tab");
+        assert!(
+            latest_output(dir.path(), "isolated").is_some(),
+            "output written at cron level"
+        );
     }
 
     /// Runner whose spawn future panics, to prove the overlap guard is released

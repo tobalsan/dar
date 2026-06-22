@@ -409,6 +409,7 @@ responses):
   "nextRunAtMs": 1750000000000,
   "lastRunAtMs": null,
   "lastStatus": null,             // "ok" | "error" | null
+  "lastError": null,              // error message when lastStatus == "error", else null
   "runningForMs": null
 }
 ```
@@ -432,6 +433,29 @@ curl -sS -XPATCH localhost:$PORT/scheduler/jobs/<id> \
 # Delete
 curl -sS -XDELETE localhost:$PORT/scheduler/jobs/<id>
 ```
+
+#### Cron dashboard tab (read-only)
+
+When the scheduler is enabled it contributes a read-only **"Cron"** tab to the
+web dashboard through the [dashboard-tab contract](#dashboard-tab). The tab lists
+each job with its schedule + timezone, enabled flag, next/last run times, last
+status (with the error message when the last run failed), running-for, and the
+most recent output files per job. It refreshes with the dashboard's existing
+self-poll: when the Cron tab is active the dashboard re-fetches its fragment
+into `#content` on the shared cadence (the same poller the orchestrator run view
+uses), so the fragment carries no inner poll of its own.
+
+The tab is **read-only** — there are no mutation controls. All mutation stays
+with the Scheduler HTTP API above and direct edits to `cron/jobs.json`. The tab
+is present only when the scheduler is linked and enabled: in the shipped `dist`
+binary that means an `extensions.scheduler` section that is not `enabled: false`;
+in an FSC per-agent binary it means the composer selected the scheduler crate
+(driven by the `agent.yaml` section). When the scheduler is absent or
+kill-switched, no tab is registered and the dashboard renders exactly as before.
+
+Cron activity is surfaced at the scheduler's own level: scheduled runs fire the
+runner service directly and **never** appear in the orchestrator's run list or
+its retained `RunSnapshot`. The orchestrator "Runs" view stays the default tab.
 
 ## Rules and invariants
 

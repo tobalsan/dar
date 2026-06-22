@@ -12,6 +12,7 @@ anyhow = "1"
 axum = "0.8"
 host-api = { path = "../../crates/host-api" }
 cap-runner = { path = "../../crates/cap-runner" }
+cap-dashboard-tab = { path = "../../crates/cap-dashboard-tab" }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 chrono-tz = "0.10"
 croner = "3"
@@ -23,3 +24,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+dashboard = { path = "../dashboard" }
+axum = "0.8"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
