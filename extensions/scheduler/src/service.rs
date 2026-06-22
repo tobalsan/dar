@@ -32,9 +32,7 @@
 //!
 //! Tracked separately: dashboard tab (ALG-225).
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,30 +73,34 @@ impl SchedulerConfig {
     }
 }
 
-/// RAII guard that clears a job's `running` flag on drop, so the overlap-skip
-/// guard is released even if the fire task panics (a tokio task panic unwinds
-/// through this drop but would skip any trailing statement).
-struct RunningGuard(Arc<AtomicBool>);
+/// RAII guard that releases a job's shared `running` claim on drop, so the
+/// overlap-skip gate is cleared even if the fire task panics (a tokio task panic
+/// unwinds through this drop but would skip any trailing statement). A normal
+/// completion clears `running_since_ms` via `mark_finished` first; this drop is
+/// then a no-op (idempotent) and only matters on the panic path.
+struct RunningGuard {
+    state: Arc<SchedulerState>,
+    job_id: String,
+}
 
 impl Drop for RunningGuard {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.state.clear_running(&self.job_id);
     }
 }
 
-/// A loaded job paired with its computed next-fire instant (UTC epoch millis)
-/// and its runtime guard state.
+/// A loaded job paired with its computed next-fire instant (UTC epoch millis).
+///
+/// Overlap-skip is gated entirely on shared [`SchedulerState::running_since_ms`]
+/// (via [`SchedulerState::try_claim_running`]), which is preserved across
+/// reloads for surviving jobs and pruned for removed ones, so a job edited
+/// mid-run still overlap-skips. No per-armed-job running flag is needed.
 struct ArmedJob {
     job: ScheduleJob,
     next_run_at_ms: i64,
-    /// Set while a fire of this job is in flight. A scheduled fire that lands
-    /// while this is true is skipped (overlap-skip). Shared with the spawned
-    /// run task, which clears it on completion. Preserved across reloads/re-arms
-    /// for surviving jobs so overlap-skip applies even to a job edited mid-run.
-    running: Arc<AtomicBool>,
-    /// UTC epoch millis of the last skipped fire (overlap-skip bookmark), or
-    /// `None` if none has been skipped. Run-now logic (a later slice) reads
-    /// this to distinguish a skip from a normal completion.
+    /// UTC epoch millis of the last skipped fire (overlap-skip bookmark) as seen
+    /// by this in-memory armed entry, or `None`. The authoritative bookmark
+    /// lives in shared state; this mirror is asserted in tests.
     last_skipped_at_ms: Option<i64>,
 }
 
@@ -142,7 +144,7 @@ pub async fn run(
     state: Arc<SchedulerState>,
     mut shutdown: ShutdownToken,
 ) {
-    let mut armed = arm_jobs(&state, &mut HashMap::new());
+    let mut armed = arm_jobs(&state);
     let mut fingerprint_seen = fingerprint(&config);
     if armed.is_empty() {
         tracing::info!("[scheduler] No enabled jobs; idle (polling for edits)");
@@ -159,9 +161,10 @@ pub async fn run(
             _ = shutdown.cancelled() => return,
             _ = state.changed() => {
                 // Jobs mutated over HTTP (or pushed by a reload below):
-                // recompute fires so a sooner schedule takes effect immediately,
-                // preserving in-flight overlap guards for surviving jobs.
-                armed = arm_jobs(&state, &mut guards_of(&armed));
+                // recompute fires so a sooner schedule takes effect immediately.
+                // In-flight overlap claims live in shared state and survive the
+                // re-arm for unchanged/edited jobs (pruned only for removed ones).
+                armed = arm_jobs(&state);
             }
             _ = tokio::time::sleep(poll) => {
                 maybe_reload(&config, &state, &mut fingerprint_seen);
@@ -180,16 +183,6 @@ async fn sleep_opt(delay: Option<Duration>) {
         Some(d) => tokio::time::sleep(d).await,
         None => std::future::pending().await,
     }
-}
-
-/// Snapshot the running guards of the currently-armed jobs, keyed by id, so a
-/// re-arm (HTTP mutation or file reload) that keeps a job — even with an edited
-/// schedule — keeps its in-flight overlap guard.
-fn guards_of(armed: &[ArmedJob]) -> HashMap<String, Arc<AtomicBool>> {
-    armed
-        .iter()
-        .map(|a| (a.job.id.clone(), Arc::clone(&a.running)))
-        .collect()
 }
 
 /// If `cron/jobs.json` changed since last seen, reload it from disk and push the
@@ -225,9 +218,9 @@ fn next_delay(next_at_ms: i64) -> Duration {
 /// Read jobs from shared state and compute each enabled job's next fire,
 /// publishing the computed `nextRunAt` back into runtime state. Disabled jobs
 /// clear their `nextRunAt`. Jobs whose schedule fails to parse are skipped with
-/// a warning. `guards` carries forward the overlap guard for any job id present
-/// from a prior load; jobs new to this load get a fresh, idle guard.
-fn arm_jobs(state: &SchedulerState, guards: &mut HashMap<String, Arc<AtomicBool>>) -> Vec<ArmedJob> {
+/// a warning. In-flight overlap claims are not carried here — they live in
+/// shared state and are preserved across re-arms for surviving jobs.
+fn arm_jobs(state: &SchedulerState) -> Vec<ArmedJob> {
     let now_ms = Utc::now().timestamp_millis();
     let jobs = state.jobs();
     let mut armed = Vec::new();
@@ -239,13 +232,9 @@ fn arm_jobs(state: &SchedulerState, guards: &mut HashMap<String, Arc<AtomicBool>
         match compute_next_run_at_ms(&job.schedule, now_ms) {
             Ok(next_run_at_ms) => {
                 state.set_next_run(&job.id, Some(next_run_at_ms));
-                let running = guards
-                    .remove(&job.id)
-                    .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
                 armed.push(ArmedJob {
                     job,
                     next_run_at_ms,
-                    running,
                     last_skipped_at_ms: None,
                 });
             }
@@ -282,31 +271,39 @@ async fn run_due_jobs(
 
     let config = Arc::new(config.clone());
     for &idx in &due {
-        // Overlap-skip: a previous fire of this job is still in flight. Skip
-        // this fire, bookmark it, and let the re-arm below recompute the next
-        // fire. The running task is left untouched.
-        if armed[idx].running.load(Ordering::SeqCst) {
+        let job_id = armed[idx].job.id.clone();
+        // Atomically claim the run via shared state. The claim fails when a
+        // previous fire of this job is still in flight — a scheduled run OR a
+        // manual run-now, since both go through the same `running_since_ms`
+        // gate. On a failed claim, overlap-skip: bookmark the skip in shared
+        // state so a concurrent run-now can keep the recomputed next fire, and
+        // let the re-arm below recompute. This single check-and-claim closes the
+        // publish gap a separate is_running()+mark would leave between the loop
+        // and run-now.
+        if !state.try_claim_running(&job_id, now_ms) {
             armed[idx].last_skipped_at_ms = Some(now_ms);
+            state.mark_skipped(&job_id, now_ms);
             tracing::warn!(
-                "[scheduler] Skipping fire of job {}: previous run still in progress",
-                armed[idx].job.id
+                "[scheduler] Skipping fire of job {job_id}: previous run still in progress"
             );
             continue;
         }
 
-        // Mark running and spawn the fire in its own task so a hung, panicking,
-        // or erroring run cannot block the schedule loop. The `running` flag is
-        // cleared by a drop guard so it is released even if the task panics
-        // (otherwise that job would be overlap-skipped forever).
-        armed[idx].running.store(true, Ordering::SeqCst);
+        // Spawn the fire in its own task so a hung, panicking, or erroring run
+        // cannot block the schedule loop. A `RunningGuard` releases the shared
+        // claim on drop so it is freed even if the task panics (otherwise that
+        // job would be overlap-skipped forever).
         let job = armed[idx].job.clone();
         let config = Arc::clone(&config);
         let services = services.clone();
         let state = Arc::clone(state);
-        let guard = RunningGuard(Arc::clone(&armed[idx].running));
+        let guard = RunningGuard {
+            state: Arc::clone(&state),
+            job_id,
+        };
         tokio::spawn(async move {
             let _guard = guard;
-            execute_job(&config, &services, &state, &job).await;
+            let _ = execute_job(&config, &services, &state, &job).await;
         });
     }
 
@@ -333,15 +330,29 @@ async fn run_due_jobs(
     }
 }
 
+/// Outcome of a single job fire, surfaced to the run-now HTTP handler. Scheduled
+/// fires ignore the return value.
+pub struct ExecuteResult {
+    pub status: RunStatus,
+    pub fired_at: chrono::DateTime<Utc>,
+    pub finished_at: chrono::DateTime<Utc>,
+    /// Path of the written output file, if the write succeeded.
+    pub output_path: Option<PathBuf>,
+    /// Error text for an error run (timeout, abnormal exit, runner error).
+    pub error: Option<String>,
+}
+
 /// Fire one job's runner and write its output file (for both ok and error runs).
 async fn execute_job(
     config: &SchedulerConfig,
     services: &ServiceRegistry,
     state: &SchedulerState,
     job: &ScheduleJob,
-) {
+) -> ExecuteResult {
+    // The caller (timer loop or run-now) has already claimed the run via
+    // `try_claim_running`, which set `running_since_ms`. `execute_job` only
+    // records the outcome.
     let fired_at = Utc::now();
-    state.mark_running(&job.id, fired_at.timestamp_millis());
     let schedule = format_schedule(&job.schedule);
     let name = if job.name.is_empty() {
         &job.id
@@ -359,7 +370,14 @@ async fn execute_job(
             job.id
         );
         state.mark_finished(&job.id, LastStatus::Error);
-        return;
+        let finished_at = Utc::now();
+        return ExecuteResult {
+            status: RunStatus::Error,
+            fired_at,
+            finished_at,
+            output_path: None,
+            error: Some(format!("cannot create cron dir: {err:#}")),
+        };
     }
 
     let timeout = config.timeout_for(job);
@@ -413,7 +431,7 @@ async fn execute_job(
         finished_at,
         status,
         response,
-        error,
+        error: error.clone(),
     });
 
     let final_status = match status {
@@ -422,10 +440,112 @@ async fn execute_job(
     };
     state.mark_finished(&job.id, final_status);
 
-    match written {
-        Ok(path) => tracing::info!("[scheduler] Wrote output {}", path.display()),
-        Err(err) => tracing::error!("[scheduler] Failed to write output for {}: {err:#}", job.id),
+    let output_path = match written {
+        Ok(path) => {
+            tracing::info!("[scheduler] Wrote output {}", path.display());
+            Some(path)
+        }
+        Err(err) => {
+            tracing::error!("[scheduler] Failed to write output for {}: {err:#}", job.id);
+            None
+        }
+    };
+
+    ExecuteResult {
+        status,
+        fired_at,
+        finished_at,
+        output_path,
+        error,
     }
+}
+
+/// Outcome of a `run-now` request, mapped to an HTTP status by the handler
+/// (aihub `RunResult.status` parity).
+pub enum RunNowOutcome {
+    /// The manual run completed. Carries the run result; the handler maps an
+    /// `ok` result to 200 and an `error` result to 500.
+    Ran(ExecuteResult),
+    /// The fire was skipped at execution time (the job vanished or was disabled
+    /// between the claim and the fire) — aihub `skipped` result → 202.
+    Skipped,
+    /// A run of this job was already in flight; the manual fire was rejected
+    /// → 409.
+    Conflict,
+    /// The job is disabled, so it was not fired — aihub `inactive` result → 500.
+    Disabled,
+    /// No job with this id exists → 404.
+    Unknown,
+}
+
+/// Fire a job immediately over HTTP without disturbing its schedule.
+///
+/// Mirrors aihub's run-now skipped-fire bookkeeping: the job's pre-run
+/// `nextRunAt` is captured, the job runs synchronously (marked running so a
+/// concurrent scheduled tick overlap-skips and bookmarks the skip), and
+/// afterwards the pre-run next fire is restored — UNLESS a scheduled fire was
+/// overlap-skipped during the manual run, in which case the loop's recomputed
+/// next fire stands (the skipped occurrence is consumed, not replayed).
+pub async fn run_job_now(
+    config: &SchedulerConfig,
+    services: &ServiceRegistry,
+    state: &Arc<SchedulerState>,
+    job_id: &str,
+) -> RunNowOutcome {
+    let Some(job) = state.jobs().into_iter().find(|j| j.id == job_id) else {
+        return RunNowOutcome::Unknown;
+    };
+    if !job.enabled {
+        return RunNowOutcome::Disabled;
+    }
+
+    // Capture the schedule's pre-run next fire and the current skip bookmark so
+    // we can tell, afterwards, whether a scheduled fire was skipped *during*
+    // this manual run.
+    let pre_next_run = state.runtime(&job.id).next_run_at_ms;
+    let pre_skipped = state.last_skipped_at_ms(&job.id);
+
+    // Atomically claim the run before the runner spawns. The claim fails if a
+    // scheduled fire or another run-now is already in flight — that is the
+    // already-running conflict (409). This single check-and-claim shares one
+    // gate with the timer loop, so the two can never both fire the same job.
+    if !state.try_claim_running(&job.id, Utc::now().timestamp_millis()) {
+        return RunNowOutcome::Conflict;
+    }
+    // Release the claim even if `execute_job` panics (the HTTP handler task
+    // unwinds through this drop). A normal completion clears it first via
+    // `mark_finished`, making this drop a no-op.
+    let _guard = RunningGuard {
+        state: Arc::clone(state),
+        job_id: job.id.clone(),
+    };
+
+    // Re-check the job survived the claim: a concurrent delete or disable over
+    // the CRUD API between the lookup and the claim means there is nothing to
+    // fire — report a skip rather than running a stale definition.
+    match state.jobs().into_iter().find(|j| j.id == job_id) {
+        Some(j) if j.enabled => {}
+        _ => {
+            state.clear_running(&job.id);
+            if state.last_skipped_at_ms(&job.id) == pre_skipped {
+                state.set_next_run(&job.id, pre_next_run);
+            }
+            return RunNowOutcome::Skipped;
+        }
+    }
+
+    let result = execute_job(config, services, state, &job).await;
+
+    // If a scheduled fire was overlap-skipped while this manual run was in
+    // flight, the loop already recomputed and published a fresh next fire; keep
+    // it. Otherwise restore the pre-run next fire so the manual run did not
+    // disturb the schedule.
+    let skipped_during = state.last_skipped_at_ms(&job.id) != pre_skipped;
+    if !skipped_during {
+        state.set_next_run(&job.id, pre_next_run);
+    }
+
+    RunNowOutcome::Ran(result)
 }
 
 #[cfg(test)]
@@ -433,7 +553,7 @@ mod tests {
     use super::*;
     use crate::store::{jobs_path, Payload, Schedule};
     use cap_runner::{KillReason, Runner, RunnerHandle, SpawnParams};
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration as StdDuration;
 
     /// In-test runner whose child sleeps `run_for` before exiting normally, and
@@ -497,7 +617,6 @@ mod tests {
             job: job_with(id, timeout_ms, true, "hi"),
             // Due now.
             next_run_at_ms: Utc::now().timestamp_millis() - 1,
-            running: Arc::new(AtomicBool::new(false)),
             last_skipped_at_ms: None,
         }
     }
@@ -560,11 +679,10 @@ mod tests {
         let mut jobs = vec![armed("job", None)];
         let state = Arc::new(SchedulerState::new(vec![]));
 
-        // First tick fires the job (now running). The guard is set synchronously
-        // inside `run_due_jobs`; the actual runner spawn happens in the spawned
-        // task, so give it a beat to reach `runner.spawn`.
+        // First tick claims the job in shared state (now running) and spawns the
+        // fire; give the task a beat to reach `runner.spawn`.
         run_due_jobs(&config, &services, &state, &mut jobs).await;
-        assert!(jobs[0].running.load(Ordering::SeqCst));
+        assert!(state.is_running("job"));
         tokio::time::sleep(StdDuration::from_millis(50)).await;
         assert_eq!(spawns.load(Ordering::SeqCst), 1);
         assert!(jobs[0].last_skipped_at_ms.is_none());
@@ -576,14 +694,15 @@ mod tests {
         // Overlap-skip: no new spawn, skip is bookmarked, next run recomputed.
         assert_eq!(spawns.load(Ordering::SeqCst), 1, "second fire skipped");
         assert!(jobs[0].last_skipped_at_ms.is_some(), "skip bookmarked");
+        assert!(state.last_skipped_at_ms("job").is_some(), "skip bookmarked in state");
         assert!(
             jobs[0].next_run_at_ms > Utc::now().timestamp_millis(),
             "next run recomputed forward"
         );
 
-        // Let the in-flight run finish so the guard clears.
+        // Let the in-flight run finish so the claim clears.
         tokio::time::sleep(StdDuration::from_millis(600)).await;
-        assert!(!jobs[0].running.load(Ordering::SeqCst));
+        assert!(!state.is_running("job"));
     }
 
     #[tokio::test]
@@ -628,11 +747,11 @@ mod tests {
         let state = Arc::new(SchedulerState::new(vec![]));
 
         run_due_jobs(&config, &services, &state, &mut jobs).await;
-        // The fire task panics; the drop guard must still clear `running`.
+        // The fire task panics; the drop guard must still clear the shared claim.
         tokio::time::sleep(StdDuration::from_millis(100)).await;
         assert!(
-            !jobs[0].running.load(Ordering::SeqCst),
-            "overlap guard released after a panicking fire"
+            !state.is_running("job"),
+            "overlap claim released after a panicking fire"
         );
     }
 
@@ -653,7 +772,7 @@ mod tests {
     #[test]
     fn arm_jobs_loads_enabled_jobs_from_state() {
         let state = SchedulerState::new(vec![job_with("a", None, true, "x"), job_with("b", None, true, "y")]);
-        let armed = arm_jobs(&state, &mut HashMap::new());
+        let armed = arm_jobs(&state);
         assert_eq!(armed.len(), 2);
     }
 
@@ -676,7 +795,7 @@ mod tests {
         let config = test_config(dir.path().to_path_buf(), 60_000);
         write_jobs(dir.path(), ONE_JOB);
         let state = SchedulerState::new(load_jobs(dir.path(), |_| {}));
-        let armed = arm_jobs(&state, &mut HashMap::new());
+        let armed = arm_jobs(&state);
         let mut fp = fingerprint(&config);
         assert_eq!(armed.len(), 1);
 
@@ -693,7 +812,7 @@ mod tests {
         let config = test_config(dir.path().to_path_buf(), 60_000);
         write_jobs(dir.path(), TWO_JOBS);
         let state = SchedulerState::new(load_jobs(dir.path(), |_| {}));
-        let armed = arm_jobs(&state, &mut HashMap::new());
+        let armed = arm_jobs(&state);
         let mut fp = fingerprint(&config);
         assert_eq!(armed.len(), 2);
 
@@ -706,52 +825,44 @@ mod tests {
     }
 
     #[test]
-    fn reload_preserves_running_guard_for_surviving_job() {
-        // A reload re-arms via `arm_jobs(state, guards_of(armed))`; the guard map
-        // carries the in-flight overlap guard forward for a surviving job even
-        // when its definition is edited.
+    fn reload_preserves_running_claim_for_surviving_job() {
+        // The overlap claim lives in shared state, so a re-arm (after an edit)
+        // keeps a surviving job's in-flight claim — arm_jobs does not reset it.
         let state = SchedulerState::new(vec![job_with("a", None, true, "x")]);
-        let armed = arm_jobs(&state, &mut HashMap::new());
+        let _ = arm_jobs(&state);
 
-        // Mark job "a" as running and keep a handle to its guard.
-        armed[0].running.store(true, Ordering::Release);
-        let guard = Arc::clone(&armed[0].running);
+        // Claim job "a" as running.
+        assert!(state.try_claim_running("a", Utc::now().timestamp_millis()));
 
-        // Edit "a"'s message in state, then re-arm preserving guards.
+        // Edit "a"'s message in state, then re-arm.
         state.set_jobs(vec![job_with("a", None, true, "edited")]);
-        let rearmed = arm_jobs(&state, &mut guards_of(&armed));
+        let rearmed = arm_jobs(&state);
 
         assert_eq!(rearmed.len(), 1);
-        assert!(rearmed[0].running.load(Ordering::Acquire));
-        assert!(Arc::ptr_eq(&guard, &rearmed[0].running));
+        assert!(state.is_running("a"), "surviving job keeps its claim");
         assert_eq!(rearmed[0].job.payload.message, "edited");
     }
 
     #[test]
-    fn reload_dropping_running_job_does_not_orphan_track() {
+    fn reload_dropping_running_job_prunes_its_claim() {
         let state = SchedulerState::new(vec![
             job_with("a", None, true, "x"),
             job_with("b", None, true, "y"),
         ]);
-        let armed = arm_jobs(&state, &mut HashMap::new());
+        let _ = arm_jobs(&state);
 
-        // Job "b" is running; its guard handle is held by an "in-flight task".
-        let b_idx = armed.iter().position(|a| a.job.id == "b").unwrap();
-        armed[b_idx].running.store(true, Ordering::Release);
-        let inflight_guard = Arc::clone(&armed[b_idx].running);
+        // Job "b" is running.
+        assert!(state.try_claim_running("b", Utc::now().timestamp_millis()));
 
-        // Remove "b" and re-arm preserving guards.
+        // Remove "b" and re-arm.
         state.set_jobs(vec![job_with("a", None, true, "x")]);
-        let rearmed = arm_jobs(&state, &mut guards_of(&armed));
+        let rearmed = arm_jobs(&state);
 
-        // "b" is gone from the armed set, but the in-flight task's guard is
-        // untouched (it owns its own Arc) — no double tracking.
+        // "b" is gone; set_jobs prunes its runtime claim so a recreated job with
+        // the same id starts fresh and is not falsely overlap-skipped.
         assert_eq!(rearmed.len(), 1);
         assert_eq!(rearmed[0].job.id, "a");
-        assert!(inflight_guard.load(Ordering::Acquire));
-        // The in-flight task can still release its own guard on completion.
-        inflight_guard.store(false, Ordering::Release);
-        assert!(!inflight_guard.load(Ordering::Acquire));
+        assert!(!state.is_running("b"), "removed job's claim pruned");
     }
 
     #[test]
@@ -760,7 +871,7 @@ mod tests {
         let config = test_config(dir.path().to_path_buf(), 60_000);
         write_jobs(dir.path(), ONE_JOB);
         let state = SchedulerState::new(load_jobs(dir.path(), |_| {}));
-        let armed = arm_jobs(&state, &mut HashMap::new());
+        let armed = arm_jobs(&state);
         let mut fp = fingerprint(&config);
         assert_eq!(armed.len(), 1);
 
@@ -799,7 +910,7 @@ mod tests {
         let config = test_config(dir.path().to_path_buf(), 60_000);
         write_jobs(dir.path(), ONE_JOB);
         let state = SchedulerState::new(load_jobs(dir.path(), |_| {}));
-        let armed = arm_jobs(&state, &mut HashMap::new());
+        let armed = arm_jobs(&state);
         let mut fp = fingerprint(&config);
         assert_eq!(armed.len(), 1);
 
@@ -813,7 +924,7 @@ mod tests {
             ] }"#,
         );
         maybe_reload(&config, &state, &mut fp);
-        let rearmed = arm_jobs(&state, &mut HashMap::new());
+        let rearmed = arm_jobs(&state);
         assert!(rearmed.is_empty(), "disabled job is not armed");
     }
 }

@@ -215,6 +215,11 @@ Jobs can also be managed remotely over the host HTTP server under `/scheduler`
 (list/create/update/delete); see
 [docs/extensions.md](docs/extensions.md#scheduler-http-api). A create/update/delete
 re-arms the timer in-process so a sooner schedule fires immediately.
+`POST /scheduler/jobs/{id}/run-now` fires a job immediately without disturbing
+its schedule (the next fire is preserved unless a scheduled fire was
+overlap-skipped during the manual run), and `GET /scheduler/jobs/{id}/tail`
+returns the newest output file for a job — an operator test-and-inspect loop
+over HTTP.
 
 Parity gaps vs the aihub scheduler (later slices): no per-job model override, no
 `sessionId`, no CLI, no hot reload of `cron/jobs.json`. See

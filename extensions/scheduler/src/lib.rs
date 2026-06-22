@@ -164,7 +164,24 @@ impl Extension for SchedulerExtension {
             let state = Arc::new(SchedulerState::new(jobs));
             let _ = self.state.set(Arc::clone(&state));
 
-            let api_state = http::ApiState { state, root };
+            // run-now fires a job through the same path as a scheduled fire, so
+            // the HTTP handlers need the static runner config + typed services.
+            // Settings were validated just above.
+            let settings = ctx
+                .config
+                .get(self.id())
+                .map(SchedulerSettings::parse)
+                .transpose()?
+                .unwrap_or_default();
+            let config = build_scheduler_config(&root, &settings);
+            let services = ctx.services.clone();
+
+            let api_state = http::ApiState {
+                state,
+                root,
+                config,
+                services,
+            };
             ctx.http.mount(host_api::HttpMount {
                 namespace: "/scheduler".to_string(),
                 router: http::router(api_state),
@@ -207,20 +224,7 @@ impl Extension for SchedulerExtension {
             };
 
             let root = ctx.paths.root().to_path_buf();
-            let runner = read_runner_config(&root);
-            let poll_interval_ms = if settings.poll_interval_ms == 0 {
-                DEFAULT_POLL_INTERVAL_MS
-            } else {
-                settings.poll_interval_ms
-            };
-            let config = SchedulerConfig {
-                root,
-                runner_kind: runner.0,
-                runner_command: runner.1,
-                max_run_timeout_ms: runner.2,
-                poll_interval_ms,
-                job_timeout_ms: settings.job_timeout_ms.unwrap_or(DEFAULT_JOB_TIMEOUT_MS),
-            };
+            let config = build_scheduler_config(&root, &settings);
 
             let services = ctx.host.services.clone();
             let shutdown = ctx.shutdown.clone();
@@ -229,6 +233,28 @@ impl Extension for SchedulerExtension {
             });
             Ok(())
         })
+    }
+}
+
+/// Build the static [`SchedulerConfig`] shared by the timer loop and the
+/// run-now HTTP handler from the agent root + validated scheduler settings.
+fn build_scheduler_config(
+    root: &std::path::Path,
+    settings: &SchedulerSettings,
+) -> SchedulerConfig {
+    let (runner_kind, runner_command, max_run_timeout_ms) = read_runner_config(root);
+    let poll_interval_ms = if settings.poll_interval_ms == 0 {
+        DEFAULT_POLL_INTERVAL_MS
+    } else {
+        settings.poll_interval_ms
+    };
+    SchedulerConfig {
+        root: root.to_path_buf(),
+        runner_kind,
+        runner_command,
+        max_run_timeout_ms,
+        poll_interval_ms,
+        job_timeout_ms: settings.job_timeout_ms.unwrap_or(DEFAULT_JOB_TIMEOUT_MS),
     }
 }
 
