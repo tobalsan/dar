@@ -96,29 +96,12 @@ impl Extension for TrackerLinearExtension {
                 .services
                 .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
             {
-                let endpoint = linear_graphql_endpoint(ctx.config.get(self.id()));
+                let endpoint = linear_graphql::linear_graphql_endpoint(ctx.config.get(self.id()));
                 linear_graphql::register_into(registry.as_ref(), endpoint)?;
             }
             Ok(())
         })
     }
-}
-
-/// Per-extension config for `extensions.tracker-linear` relevant to the tool.
-#[derive(Debug, Clone, Default, Deserialize)]
-struct TrackerLinearToolConfig {
-    #[serde(default)]
-    endpoint: Option<String>,
-}
-
-/// Resolve the GraphQL endpoint for the `linear_graphql` tool from the
-/// extension config, falling back to the default Linear endpoint.
-fn linear_graphql_endpoint(config: Option<&Value>) -> String {
-    config
-        .and_then(|v| serde_json::from_value::<TrackerLinearToolConfig>(v.clone()).ok())
-        .and_then(|c| c.endpoint)
-        .filter(|e| !e.is_empty())
-        .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string())
 }
 
 struct InitWorkflowCommand;

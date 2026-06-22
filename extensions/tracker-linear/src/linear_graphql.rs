@@ -23,10 +23,28 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tool_registry::{Redactor, ToolExecutor, ToolOutcome, ToolRegistryHandle, ToolSpec};
 
 use crate::{resolve_linear_auth_header, API_KEY_ENV, DEFAULT_ENDPOINT, OAUTH_TOKEN_ENV};
+
+/// Per-extension config for `extensions.tracker-linear` relevant to the tool.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct TrackerLinearToolConfig {
+    #[serde(default)]
+    endpoint: Option<String>,
+}
+
+/// Resolve the GraphQL endpoint for the `linear_graphql` tool from the
+/// extension config, falling back to the default Linear endpoint.
+pub(crate) fn linear_graphql_endpoint(config: Option<&Value>) -> String {
+    config
+        .and_then(|v| serde_json::from_value::<TrackerLinearToolConfig>(v.clone()).ok())
+        .and_then(|c| c.endpoint)
+        .filter(|e| !e.is_empty())
+        .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string())
+}
 
 /// The tool name agents call by.
 pub const TOOL_NAME: &str = "linear_graphql";
