@@ -23,7 +23,10 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use host_api::ServiceRegistry;
+
 use crate::schedule::compute_next_run_at_ms;
+use crate::service::{run_job_now, RunNowOutcome, SchedulerConfig};
 use crate::state::SchedulerState;
 use crate::store::{is_safe_job_id, save_jobs, Payload, Schedule, ScheduleJob};
 
@@ -32,6 +35,10 @@ use crate::store::{is_safe_job_id, save_jobs, Payload, Schedule, ScheduleJob};
 pub struct ApiState {
     pub state: Arc<SchedulerState>,
     pub root: std::path::PathBuf,
+    /// Static runner config + typed services needed to fire a job on `run-now`.
+    /// Built in `register` alongside the timer loop's config.
+    pub config: SchedulerConfig,
+    pub services: ServiceRegistry,
 }
 
 /// Build the scheduler router. Mounted at namespace `/scheduler`, so routes here
@@ -40,12 +47,19 @@ pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/jobs", get(list_jobs).post(create_job))
         .route("/jobs/{id}", axum::routing::patch(update_job).delete(delete_job))
+        .route("/jobs/{id}/run-now", axum::routing::post(run_now))
+        .route("/jobs/{id}/tail", get(tail))
         .with_state(state)
 }
 
 /// Route paths claimed in the host registry (namespace-relative).
 pub fn routes() -> Vec<String> {
-    vec!["/jobs".to_string(), "/jobs/{id}".to_string()]
+    vec![
+        "/jobs".to_string(),
+        "/jobs/{id}".to_string(),
+        "/jobs/{id}/run-now".to_string(),
+        "/jobs/{id}/tail".to_string(),
+    ]
 }
 
 // ---- request bodies -------------------------------------------------------
@@ -199,6 +213,115 @@ async fn delete_job(State(api): State<ApiState>, Path(id): Path<String>) -> Resp
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// `POST /scheduler/jobs/{id}/run-now` — fire a job immediately without
+/// disturbing its schedule. Maps the run outcome to HTTP (aihub parity):
+/// - `ok` result       → `200` with the run result + output path
+/// - `skipped` result  → `202` with the run result
+/// - `error`/`inactive` result → `500` with the run result
+/// - already running   → `409`
+/// - unknown job        → `404`
+///
+/// The schedule's next fire is preserved across the manual run, except when a
+/// scheduled fire was overlap-skipped during it (see [`run_job_now`]).
+async fn run_now(State(api): State<ApiState>, Path(id): Path<String>) -> Response {
+    match run_job_now(&api.config, &api.services, &api.state, &id).await {
+        RunNowOutcome::Unknown => not_found(&id),
+        RunNowOutcome::Conflict => json_ok(
+            StatusCode::CONFLICT,
+            json!({ "error": format!("job {id:?} is already running") }),
+        ),
+        // A disabled job is not fired: an "inactive" result, surfaced as 500.
+        RunNowOutcome::Disabled => json_ok(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({
+                "status": "inactive",
+                "error": format!("job {id:?} is disabled"),
+                "job": Value::Null,
+            }),
+        ),
+        // The fire was skipped (job vanished/disabled mid-claim) → 202.
+        RunNowOutcome::Skipped => json_ok(
+            StatusCode::ACCEPTED,
+            json!({
+                "status": "skipped",
+                "error": format!("job {id:?} was skipped before firing"),
+                "job": Value::Null,
+            }),
+        ),
+        RunNowOutcome::Ran(result) => {
+            let now_ms = Utc::now().timestamp_millis();
+            let body = run_result_json(&api, &id, &result, now_ms);
+            let status = match result.status {
+                crate::output::RunStatus::Ok => StatusCode::OK,
+                crate::output::RunStatus::Error => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            json_ok(status, body)
+        }
+    }
+}
+
+/// Build the JSON body for a completed run-now: run status, timestamps, output
+/// path, error (if any), plus the job merged with its post-run runtime state.
+fn run_result_json(
+    api: &ApiState,
+    job_id: &str,
+    result: &crate::service::ExecuteResult,
+    now_ms: i64,
+) -> Value {
+    let status = match result.status {
+        crate::output::RunStatus::Ok => "ok",
+        crate::output::RunStatus::Error => "error",
+    };
+    let job = api.state.jobs().into_iter().find(|j| j.id == job_id);
+    let job_value = job
+        .map(|j| job_with_runtime(api, &j, now_ms))
+        .unwrap_or_else(|| json!(null));
+    json!({
+        "status": status,
+        "firedAt": result.fired_at.to_rfc3339(),
+        "finishedAt": result.finished_at.to_rfc3339(),
+        "outputPath": result.output_path.as_ref().map(|p| p.display().to_string()),
+        "error": result.error,
+        "job": job_value,
+    })
+}
+
+/// `GET /scheduler/jobs/{id}/tail` — return the newest output file for a job
+/// (path + content). The newest file is the lexicographically-greatest entry in
+/// `cron/output/<id>/` (filenames are `YYYY-MM-DD_HH-mm-ss.md`, so lexicographic
+/// order is timestamp order). Unknown job → `404`; job with no outputs → `404`.
+async fn tail(State(api): State<ApiState>, Path(id): Path<String>) -> Response {
+    if !api.state.jobs().iter().any(|j| j.id == id) {
+        return not_found(&id);
+    }
+    let dir = api.root.join("cron").join("output").join(&id);
+    let newest = std::fs::read_dir(&dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+        })
+        .max_by_key(|e| e.file_name());
+    let Some(entry) = newest else {
+        return json_ok(
+            StatusCode::NOT_FOUND,
+            json!({ "error": format!("no outputs for job {id:?}") }),
+        );
+    };
+    let path = entry.path();
+    match std::fs::read_to_string(&path) {
+        Ok(content) => json_ok(
+            StatusCode::OK,
+            json!({ "path": path.display().to_string(), "content": content }),
+        ),
+        Err(e) => server_error(&format!("reading output {}: {e}", path.display())),
+    }
+}
+
 // ---- validation -----------------------------------------------------------
 
 /// Validate a schedule body: cron parses, tz is a real IANA zone, startAt (if
@@ -308,9 +431,22 @@ mod tests {
             ApiState {
                 state,
                 root: dir.path().to_path_buf(),
+                config: test_config(dir.path().to_path_buf()),
+                services: ServiceRegistry::default(),
             },
             dir,
         )
+    }
+
+    fn test_config(root: std::path::PathBuf) -> SchedulerConfig {
+        SchedulerConfig {
+            root,
+            runner_kind: "fake".to_string(),
+            runner_command: String::new(),
+            max_run_timeout_ms: 3_600_000,
+            poll_interval_ms: 2_000,
+            job_timeout_ms: 60_000,
+        }
     }
 
     async fn body_json(resp: Response) -> Value {
@@ -503,5 +639,226 @@ mod tests {
         let id = generate_job_id(&existing);
         assert!(is_safe_job_id(&id));
         assert_ne!(id, "job-1");
+    }
+
+    // ---- run-now & tail ---------------------------------------------------
+
+    use cap_runner::{ExitKind, KillReason, Runner, RunnerHandle, SpawnParams};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// In-test runner that exits normally after a short sleep, optionally with an
+    /// abnormal exit to drive an error run.
+    struct FakeRunner {
+        abnormal: bool,
+    }
+
+    impl Runner for FakeRunner {
+        fn spawn<'a>(
+            &self,
+            _params: SpawnParams<'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<RunnerHandle>> + Send + 'a>,
+        > {
+            let abnormal = self.abnormal;
+            Box::pin(async move {
+                let (kill_tx, _kill_rx) = tokio::sync::oneshot::channel::<KillReason>();
+                let done = tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    if abnormal {
+                        ExitKind::Abnormal(Some(1))
+                    } else {
+                        ExitKind::Normal
+                    }
+                });
+                Ok(RunnerHandle::new(0, kill_tx, done))
+            })
+        }
+    }
+
+    fn api_with_runner(abnormal: bool) -> (ApiState, tempfile::TempDir) {
+        let (mut api, dir) = api();
+        let mut services = ServiceRegistry::default();
+        services
+            .service::<dyn Runner>("fake", Arc::new(FakeRunner { abnormal }))
+            .unwrap();
+        api.services = services;
+        (api, dir)
+    }
+
+    async fn create_one(api: &ApiState) -> String {
+        let created =
+            body_json(create_job(State(api.clone()), Ok(create_body("0 0 1 1 *", "UTC", "hi"))).await)
+                .await;
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn run_now_unknown_job_is_404() {
+        let (api, _dir) = api();
+        let resp = run_now(State(api), Path("nope".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn run_now_already_running_is_409() {
+        let (api, _dir) = api();
+        let id = create_one(&api).await;
+        assert!(api.state.try_claim_running(&id, Utc::now().timestamp_millis()));
+        let resp = run_now(State(api), Path(id)).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn run_now_disabled_job_is_500_inactive() {
+        let (api, _dir) = api();
+        let id = create_one(&api).await;
+        let body = Json(UpdateBody {
+            name: None,
+            enabled: Some(false),
+            schedule: None,
+            payload: None,
+            timeout_ms: None,
+        });
+        update_job(State(api.clone()), Path(id.clone()), Ok(body)).await;
+        let resp = run_now(State(api), Path(id)).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let v = body_json(resp).await;
+        assert_eq!(v["status"], "inactive");
+    }
+
+    #[tokio::test]
+    async fn run_now_ok_returns_200_and_writes_output() {
+        let (api, dir) = api_with_runner(false);
+        let id = create_one(&api).await;
+        let resp = run_now(State(api.clone()), Path(id.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["status"], "ok");
+        let path = v["outputPath"].as_str().unwrap();
+        assert!(std::path::Path::new(path).exists(), "output written");
+        // Output landed under cron/output/<id>/.
+        assert!(dir
+            .path()
+            .join("cron/output")
+            .join(&id)
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn run_now_error_result_is_500() {
+        let (api, _dir) = api_with_runner(true);
+        let id = create_one(&api).await;
+        let resp = run_now(State(api), Path(id)).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let v = body_json(resp).await;
+        assert_eq!(v["status"], "error");
+        assert!(v["error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn run_now_preserves_next_fire() {
+        let (api, _dir) = api_with_runner(false);
+        let id = create_one(&api).await;
+        // Arm a next fire as the loop would.
+        let next = Utc::now().timestamp_millis() + 3_600_000;
+        api.state.set_next_run(&id, Some(next));
+        run_now(State(api.clone()), Path(id.clone())).await;
+        assert_eq!(
+            api.state.runtime(&id).next_run_at_ms,
+            Some(next),
+            "pre-run next fire restored"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_now_keeps_recomputed_next_fire_when_scheduled_fire_skipped() {
+        let (api, _dir) = api_with_runner(false);
+        let id = create_one(&api).await;
+        let pre = Utc::now().timestamp_millis() + 3_600_000;
+        api.state.set_next_run(&id, Some(pre));
+        // Simulate the loop overlap-skipping a scheduled fire and recomputing the
+        // next fire during the manual run: a runner whose spawn marks the skip.
+        let marker = Arc::new(AtomicBool::new(false));
+        let recomputed = Utc::now().timestamp_millis() + 7_200_000;
+        struct SkippingRunner {
+            state: Arc<SchedulerState>,
+            id: String,
+            recomputed: i64,
+            done: Arc<AtomicBool>,
+        }
+        impl Runner for SkippingRunner {
+            fn spawn<'a>(
+                &self,
+                _params: SpawnParams<'a>,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = anyhow::Result<RunnerHandle>> + Send + 'a>,
+            > {
+                // Emulate the loop's overlap-skip bookkeeping landing mid-run.
+                self.state.mark_skipped(&self.id, Utc::now().timestamp_millis());
+                self.state.set_next_run(&self.id, Some(self.recomputed));
+                self.done.store(true, Ordering::SeqCst);
+                Box::pin(async move {
+                    let (kill_tx, _rx) = tokio::sync::oneshot::channel::<KillReason>();
+                    let done = tokio::spawn(async move { ExitKind::Normal });
+                    Ok(RunnerHandle::new(0, kill_tx, done))
+                })
+            }
+        }
+        let mut services = ServiceRegistry::default();
+        services
+            .service::<dyn Runner>(
+                "fake",
+                Arc::new(SkippingRunner {
+                    state: Arc::clone(&api.state),
+                    id: id.clone(),
+                    recomputed,
+                    done: Arc::clone(&marker),
+                }),
+            )
+            .unwrap();
+        let mut api = api;
+        api.services = services;
+
+        run_now(State(api.clone()), Path(id.clone())).await;
+        assert!(marker.load(Ordering::SeqCst), "skip path exercised");
+        assert_eq!(
+            api.state.runtime(&id).next_run_at_ms,
+            Some(recomputed),
+            "recomputed next fire kept when a scheduled fire was skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn tail_unknown_job_is_404() {
+        let (api, _dir) = api();
+        let resp = tail(State(api), Path("nope".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn tail_no_outputs_is_404() {
+        let (api, _dir) = api();
+        let id = create_one(&api).await;
+        let resp = tail(State(api), Path(id)).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn tail_returns_newest_output() {
+        let (api, dir) = api();
+        let id = create_one(&api).await;
+        let out_dir = dir.path().join("cron/output").join(&id);
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(out_dir.join("2026-01-01_00-00-00.md"), "old").unwrap();
+        std::fs::write(out_dir.join("2026-06-01_12-00-00.md"), "newest").unwrap();
+        std::fs::write(out_dir.join("2026-03-01_00-00-00.md"), "mid").unwrap();
+        let resp = tail(State(api), Path(id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["content"], "newest");
+        assert!(v["path"].as_str().unwrap().ends_with("2026-06-01_12-00-00.md"));
     }
 }
