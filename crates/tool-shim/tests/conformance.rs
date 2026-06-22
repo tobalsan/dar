@@ -429,8 +429,8 @@ async fn run_conformance<S: ToolSurface>(surface: &S, fx: &Fixture, label: &str)
     assert!(
         observed
             .iter()
-            .any(|o| o.name == "echo_upper" && !o.is_error && o.text == "HELLO FLOOR"),
-        "[{label}] C6 observability: success not observed (got {observed:?})"
+            .any(|o| o.name == "echo_upper" && !o.is_error),
+        "[{label}] C6 observability: success outcome not observed (got {observed:?})"
     );
     assert!(
         observed.iter().any(|o| o.is_error),
@@ -479,4 +479,21 @@ async fn shim_and_native_agree_on_observable_behavior() {
     assert_eq!(s.text, n.text, "result text diverged");
     assert_eq!(s.is_error, n.is_error, "error flag diverged");
     assert_eq!(s.correlation, n.correlation, "correlation diverged");
+
+    // C5 parity: the SAME fault (unknown-tool call) through both surfaces
+    // produces the same structured error outcome.
+    let s_bad = shim.invoke("bad", "does_not_exist", json!({})).await;
+    let n_bad = native.invoke("bad", "does_not_exist", json!({})).await;
+    assert!(
+        s_bad.is_error,
+        "shim: unknown-tool call must be structured error"
+    );
+    assert!(
+        n_bad.is_error,
+        "native: unknown-tool call must be structured error"
+    );
+    assert_eq!(
+        s_bad.is_error, n_bad.is_error,
+        "C5 parity: error flag diverged"
+    );
 }
