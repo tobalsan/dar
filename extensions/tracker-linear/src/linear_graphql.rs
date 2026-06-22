@@ -3,13 +3,15 @@
 //! Registered through the shared [`ToolRegistry`] during the `tracker-linear`
 //! extension's `register()` pass (not via env/prompt hints). It runs **in the
 //! host runtime** via the MCP bridge, using the host-held Linear auth
-//! (`LINEAR_API_KEY`, loaded from the agent's `.env`) and the configured Linear
-//! endpoint. The agent sees only the input schema and a structured success /
+//! (`LINEAR_OAUTH_TOKEN` or `LINEAR_API_KEY`, loaded from the agent's `.env`)
+//! and the configured Linear endpoint. An OAuth app token is sent as
+//! `Authorization: Bearer <token>`; a personal API key is sent raw. The agent
+//! sees only the input schema and a structured success /
 //! failure outcome — the raw token is never returned.
 //!
 //! Failure modes are all structured (`ToolOutcome::error`, i.e. `isError: true`)
 //! so a failed call returns to the agent and the run continues:
-//!   - missing auth (`LINEAR_API_KEY` unset/empty),
+//!   - missing auth (`LINEAR_OAUTH_TOKEN`/`LINEAR_API_KEY` unset/empty),
 //!   - invalid arguments (missing/empty `query`, or `variables` not an object),
 //!   - transport failure (connection refused, timeout, …),
 //!   - response body read failure,
@@ -24,11 +26,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use tool_registry::{ToolExecutor, ToolOutcome, ToolRegistryHandle, ToolSpec};
 
-use crate::DEFAULT_ENDPOINT;
-
-/// Env var holding the host's Linear API key. Loaded into the host process from
-/// the agent's `.env`; never exposed to the agent.
-const API_KEY_ENV: &str = "LINEAR_API_KEY";
+use crate::{resolve_linear_auth_header, API_KEY_ENV, DEFAULT_ENDPOINT, OAUTH_TOKEN_ENV};
 
 /// The tool name agents call by.
 pub const TOOL_NAME: &str = "linear_graphql";
@@ -38,18 +36,19 @@ pub const TOOL_NAME: &str = "linear_graphql";
 /// env or real auth.
 #[derive(Clone)]
 pub enum AuthSource {
-    /// Read `LINEAR_API_KEY` from the process environment at call time.
+    /// Resolve the `Authorization` header value from `LINEAR_OAUTH_TOKEN`
+    /// (sent as `Bearer <token>`) or `LINEAR_API_KEY` (sent raw) at call time.
     Env,
-    /// A fixed key, for tests.
+    /// A fixed `Authorization` header value, for tests.
     #[cfg(test)]
     Static(String),
 }
 
 impl AuthSource {
-    /// Resolve the key, or `None` when unset/empty.
+    /// Resolve the `Authorization` header value, or `None` when unset/empty.
     fn resolve(&self) -> Option<String> {
         match self {
-            AuthSource::Env => std::env::var(API_KEY_ENV).ok().filter(|k| !k.is_empty()),
+            AuthSource::Env => resolve_linear_auth_header(),
             #[cfg(test)]
             AuthSource::Static(k) => Some(k.clone()).filter(|k| !k.is_empty()),
         }
@@ -137,9 +136,9 @@ impl ToolExecutor for LinearGraphqlTool {
         };
 
         // --- resolve host-held auth ---
-        let Some(api_key) = self.auth.resolve() else {
+        let Some(auth_header) = self.auth.resolve() else {
             return Ok(ToolOutcome::error(format!(
-                "linear_graphql is not configured: {API_KEY_ENV} is not set in the host environment"
+                "linear_graphql is not configured: neither {OAUTH_TOKEN_ENV} nor {API_KEY_ENV} is set in the host environment (no Linear auth token is set)"
             )));
         };
 
@@ -148,7 +147,7 @@ impl ToolExecutor for LinearGraphqlTool {
         let response = match self
             .client
             .post(&self.endpoint)
-            .header("Authorization", &api_key)
+            .header("Authorization", &auth_header)
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -292,7 +291,9 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_error);
-        assert!(out.text.contains("LINEAR_API_KEY is not set"));
+        assert!(out.text.contains("no Linear auth token is set"));
+        assert!(out.text.contains("LINEAR_OAUTH_TOKEN"));
+        assert!(out.text.contains("LINEAR_API_KEY"));
     }
 
     #[tokio::test]
