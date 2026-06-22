@@ -1,0 +1,206 @@
+//! Dashboard tab contract.
+//!
+//! A general, cap-style plug point that lets any extension contribute a tab to
+//! the web dashboard without the dashboard knowing anything about that
+//! extension (and without the extension touching dashboard internals). Both
+//! sides depend only on this crate plus `host-api`.
+//!
+//! ## Model: service-based discovery, dashboard-composed fragments
+//!
+//! Discovery is a single shared service — [`DashboardTabs`] — registered under
+//! [`DASHBOARD_TABS_SERVICE`]. Each registrant adds an `Arc<dyn DashboardTab>`
+//! to it during `register`; the dashboard reads the collected providers at
+//! `start` to build its tab navigation.
+//!
+//! Rendering is *pull*, not *push*: a tab returns an HTML **fragment** (a
+//! `String`) from [`DashboardTab::render`]. The dashboard owns one dynamic
+//! route and dispatches `GET /tabs/{id}` to the matching provider, splicing the
+//! returned fragment into the existing htmx `#content` shell. This preserves
+//! the dashboard's `innerHTML`-swap pattern (no `<body>` swap) and keeps the
+//! page-state (`window.__dashPage`) carried by the orchestrator run view
+//! untouched: only the active tab's `#content` is replaced.
+//!
+//! ### Why a fragment, not a mounted endpoint
+//!
+//! Host HTTP routes are claimed at `register` time, before any extension
+//! `start` runs, so per-extension fragment endpoints would force every
+//! registrant to also reserve dashboard-shaped routes and re-implement the
+//! shell. Returning a fragment through a dashboard-owned dispatch route keeps
+//! the contract to one trait method and lets the dashboard remain the sole
+//! owner of the htmx shell, polling cadence, and `#content` semantics.
+//!
+//! ### Polling inside the swap
+//!
+//! The dashboard's `#content` is swapped on a timer. A tab fragment that wants
+//! live updates declares its own htmx polling *inside* the fragment it returns
+//! (e.g. an inner element with `hx-get="/tabs/{id}" hx-trigger="every 2s"
+//! hx-target="..." hx-swap="innerHTML"`), exactly as the orchestrator run view
+//! does. The contract does not impose a cadence; it only guarantees the
+//! fragment is composed into `#content` via `innerHTML`.
+
+use std::sync::{Arc, Mutex};
+
+use anyhow::Result;
+use host_api::ServiceRegistry;
+
+/// Well-known service id under which the shared [`DashboardTabs`] registry is
+/// published. Keyed by id + the `DashboardTabs` type, per `host-api` service
+/// keying.
+pub const DASHBOARD_TABS_SERVICE: &str = "dashboard.tabs";
+
+/// One tab contributed to the web dashboard by an extension.
+///
+/// Implementations are stored as `Arc<dyn DashboardTab>` and may be called
+/// concurrently, so they must be `Send + Sync`.
+pub trait DashboardTab: Send + Sync {
+    /// Stable, URL-safe identifier for this tab. Used as the path segment in
+    /// `/tabs/{id}` and as the htmx target discriminator. Must be unique across
+    /// registered tabs and contain only `[A-Za-z0-9._-]`.
+    fn id(&self) -> &str;
+
+    /// Human-readable label shown in the tab navigation.
+    fn title(&self) -> &str;
+
+    /// Render the tab body as an HTML **fragment** (no `<html>`/`<body>`). The
+    /// dashboard splices this into its `#content` element via an
+    /// `innerHTML`-swap. A fragment may include its own htmx attributes for
+    /// in-place polling; it must not swap `<body>` or replace the dashboard
+    /// shell.
+    fn render(&self) -> Result<String>;
+}
+
+/// Shared, append-only registry of dashboard tab providers.
+///
+/// Created once and shared via the host [`ServiceRegistry`]. Registrants call
+/// [`DashboardTabs::shared`] (get-or-create) during their `register` and
+/// [`DashboardTabs::add`] their tab; the dashboard calls
+/// [`DashboardTabs::shared`] then [`DashboardTabs::snapshot`] to enumerate tabs.
+///
+/// Registration runs sequentially in the host's single-threaded `register`
+/// loop, so get-or-create has no race; the inner `Mutex` only guards against
+/// the `Arc` being shared into `start`-spawned tasks.
+#[derive(Default)]
+pub struct DashboardTabs {
+    tabs: Mutex<Vec<Arc<dyn DashboardTab>>>,
+}
+
+impl DashboardTabs {
+    /// Get the shared registry from `services`, creating and registering it on
+    /// first use. Idempotent across registrants. Call this from `register`
+    /// (where `services` is `&mut`); pass the same registry id everywhere.
+    pub fn shared(services: &mut ServiceRegistry) -> Result<Arc<Self>> {
+        if let Ok(existing) = services.get_named::<Self>(DASHBOARD_TABS_SERVICE) {
+            return Ok(existing);
+        }
+        let registry = Arc::new(Self::default());
+        services.register::<Self>(DASHBOARD_TABS_SERVICE, Arc::clone(&registry))?;
+        Ok(registry)
+    }
+
+    /// Get the shared registry without creating it. For consumers reading at
+    /// `start` (where the registry is frozen). Returns the registry, or an
+    /// empty one when no tabs were registered — so a dashboard with zero
+    /// registered tabs behaves exactly as before.
+    pub fn from_services(services: &ServiceRegistry) -> Arc<Self> {
+        services
+            .get_named::<Self>(DASHBOARD_TABS_SERVICE)
+            .unwrap_or_else(|_| Arc::new(Self::default()))
+    }
+
+    /// Append a tab provider. Last-writer-wins is not a concern: ids are
+    /// expected unique; duplicates simply produce two nav entries.
+    pub fn add(&self, tab: Arc<dyn DashboardTab>) {
+        self.tabs
+            .lock()
+            .expect("dashboard tabs registry poisoned")
+            .push(tab);
+    }
+
+    /// Snapshot of the registered providers, in registration order.
+    pub fn snapshot(&self) -> Vec<Arc<dyn DashboardTab>> {
+        self.tabs
+            .lock()
+            .expect("dashboard tabs registry poisoned")
+            .clone()
+    }
+
+    /// Look up a provider by id.
+    pub fn find(&self, id: &str) -> Option<Arc<dyn DashboardTab>> {
+        self.tabs
+            .lock()
+            .expect("dashboard tabs registry poisoned")
+            .iter()
+            .find(|t| t.id() == id)
+            .cloned()
+    }
+
+    /// Whether any tab is registered.
+    pub fn is_empty(&self) -> bool {
+        self.tabs
+            .lock()
+            .expect("dashboard tabs registry poisoned")
+            .is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct StubTab {
+        id: String,
+        title: String,
+        body: String,
+    }
+
+    impl DashboardTab for StubTab {
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn title(&self) -> &str {
+            &self.title
+        }
+        fn render(&self) -> Result<String> {
+            Ok(self.body.clone())
+        }
+    }
+
+    fn tab(id: &str, title: &str, body: &str) -> Arc<dyn DashboardTab> {
+        Arc::new(StubTab {
+            id: id.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+        })
+    }
+
+    #[test]
+    fn shared_is_get_or_create_idempotent() {
+        let mut services = ServiceRegistry::default();
+        let a = DashboardTabs::shared(&mut services).expect("first create");
+        let b = DashboardTabs::shared(&mut services).expect("reuse existing");
+        a.add(tab("one", "One", "<p>one</p>"));
+        // Both handles point at the same registry.
+        assert_eq!(b.snapshot().len(), 1);
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn snapshot_preserves_registration_order_and_find_works() {
+        let registry = DashboardTabs::default();
+        registry.add(tab("first", "First", "<p>1</p>"));
+        registry.add(tab("second", "Second", "<p>2</p>"));
+        let ids: Vec<String> = registry.snapshot().iter().map(|t| t.id().to_string()).collect();
+        assert_eq!(ids, vec!["first", "second"]);
+        let found = registry.find("second").expect("present");
+        assert_eq!(found.title(), "Second");
+        assert_eq!(found.render().unwrap(), "<p>2</p>");
+        assert!(registry.find("missing").is_none());
+    }
+
+    #[test]
+    fn from_services_returns_empty_when_unregistered() {
+        let services = ServiceRegistry::default();
+        let registry = DashboardTabs::from_services(&services);
+        assert!(registry.is_empty());
+    }
+}

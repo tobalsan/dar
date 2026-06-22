@@ -5,6 +5,7 @@ members = [
     "crates/agentropy-host",
     "crates/agentropy-presence",
     "crates/cap-chat",
+    "crates/cap-dashboard-tab",
     "crates/cap-tracker",
     "crates/cap-runner",
     "crates/host-api",

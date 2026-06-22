@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use anyhow::{bail, Result};
+use cap_dashboard_tab::{DashboardTab, DashboardTabs};
 use host_api::{Extension, RegisterCtx, StartCtx};
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +67,11 @@ impl Extension for ExampleExtension {
                     handled: 0,
                 },
             )?;
+
+            // Demo: contribute a tab to the web dashboard via the cap-style
+            // dashboard-tab contract. Depends only on `cap-dashboard-tab` +
+            // `host-api` — no dashboard internals, no cross-extension imports.
+            DashboardTabs::shared(&mut ctx.services)?.add(Arc::new(ExampleTab));
             Ok(())
         })
     }
@@ -123,9 +131,52 @@ impl Extension for ExampleExtension {
     }
 }
 
+/// Demo dashboard tab contributed by the example extension. Returns a static
+/// HTML fragment that the dashboard splices into its `#content` shell. A real
+/// tab can declare its own htmx polling inside the fragment.
+pub struct ExampleTab;
+
+impl DashboardTab for ExampleTab {
+    fn id(&self) -> &str {
+        "example"
+    }
+
+    fn title(&self) -> &str {
+        "Example"
+    }
+
+    fn render(&self) -> Result<String> {
+        Ok(concat!(
+            "<main style=\"padding:1rem 1.25rem\">",
+            "<section class=\"panel\">",
+            "<h2>Example tab</h2>",
+            "<p>This fragment is contributed by the <code>example</code> extension ",
+            "through the dashboard-tab contract. It is composed into the ",
+            "<code>#content</code> element via an innerHTML swap.</p>",
+            "</section>",
+            "</main>"
+        )
+        .to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn example_tab_registers_and_renders_fragment() {
+        let mut services = host_api::ServiceRegistry::default();
+        DashboardTabs::shared(&mut services)
+            .unwrap()
+            .add(Arc::new(ExampleTab));
+        let registry = DashboardTabs::from_services(&services);
+        let tab = registry.find("example").expect("example tab registered");
+        assert_eq!(tab.title(), "Example");
+        let html = tab.render().unwrap();
+        assert!(html.contains("Example tab"), "fragment body present: {html}");
+        assert!(!html.contains("<body"), "fragment is not a full page");
+    }
 
     #[tokio::test]
     async fn smoke_register_start_publish_subscribe_and_shutdown() {

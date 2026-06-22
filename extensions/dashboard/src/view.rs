@@ -2,16 +2,30 @@ use askama::Template;
 use chrono::{DateTime, Utc};
 use orchestrator_api::{ActiveRun, AgentInfo, EventRow, HistoryRow, RunRow, RunSnapshot};
 
+/// One entry in the dashboard's top tab navigation. Built from the registered
+/// `cap_dashboard_tab::DashboardTab` providers; the orchestrator run view is
+/// rendered separately as the default "Runs" tab.
+pub struct TabNav {
+    pub id: String,
+    pub title: String,
+}
+
 #[derive(Template)]
 #[template(path = "index.html")]
 pub struct DashboardTemplate {
     pub content: ContentTemplate,
+    pub tabs: Vec<TabNav>,
 }
 
 impl DashboardTemplate {
     pub fn page(snapshot: RunSnapshot) -> Self {
+        Self::page_with_tabs(snapshot, Vec::new())
+    }
+
+    pub fn page_with_tabs(snapshot: RunSnapshot, tabs: Vec<TabNav>) -> Self {
         Self {
             content: ContentTemplate::from_snapshot(snapshot),
+            tabs,
         }
     }
 }
@@ -451,6 +465,34 @@ mod tests {
             .render()
             .expect("content renders");
         assert!(!html.contains("class=\"pager\""), "no pager for a single page");
+    }
+
+    #[test]
+    fn index_without_tabs_renders_no_tab_nav() {
+        let html = DashboardTemplate::page(RunSnapshot::empty())
+            .render()
+            .expect("page renders");
+        assert!(
+            !html.contains("id=\"dash-tabs\""),
+            "no tab nav element when zero tabs registered"
+        );
+        assert!(html.contains("id=\"content\""), "content shell preserved");
+    }
+
+    #[test]
+    fn index_with_tabs_renders_nav_and_default_runs_tab() {
+        let tabs = vec![
+            TabNav { id: "scheduler".to_string(), title: "Scheduler".to_string() },
+        ];
+        let html = DashboardTemplate::page_with_tabs(RunSnapshot::empty(), tabs)
+            .render()
+            .expect("page renders");
+        assert!(html.contains("id=\"dash-tabs\""), "tab nav rendered");
+        assert!(html.contains(">Runs<"), "default Runs tab present");
+        assert!(html.contains("/tabs/scheduler"), "registered tab links to its fragment");
+        assert!(html.contains(">Scheduler<"), "registered tab title rendered");
+        assert!(html.contains("hx-swap=\"innerHTML\""), "content keeps innerHTML swap");
+        assert!(!html.contains("hx-swap=\"outerHTML\""), "no body/outer swap introduced");
     }
 
     #[test]

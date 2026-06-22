@@ -15,7 +15,8 @@ use serde::Deserialize;
 use serde_json::json;
 use orchestrator_api::{ControlMsg, RunQuery, RunSnapshot, CONTROL_TOPIC, RUN_SNAPSHOT_TOPIC};
 use std::sync::{Arc, OnceLock};
-use view::{DashboardTemplate, RunDetailTemplate};
+use cap_dashboard_tab::DashboardTabs;
+use view::{DashboardTemplate, RunDetailTemplate, TabNav};
 
 #[derive(rust_embed::Embed)]
 #[folder = "assets/"]
@@ -25,6 +26,7 @@ struct Assets;
 pub struct DashboardExtension {
     bus: Arc<OnceLock<Arc<host_api::EventBus>>>,
     runs: Arc<OnceLock<Arc<dyn RunQuery>>>,
+    tabs: Arc<OnceLock<Arc<DashboardTabs>>>,
 }
 
 impl host_api::Extension for DashboardExtension {
@@ -37,13 +39,19 @@ impl host_api::Extension for DashboardExtension {
         ctx: &'a mut host_api::RegisterCtx,
     ) -> host_api::BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
+            // Ensure the shared tab registry exists so any extension that
+            // registers a tab (in any order) shares one collector. Zero
+            // registered tabs leaves the dashboard looking exactly as before.
+            let _ = DashboardTabs::shared(&mut ctx.services);
             let state = BusApiState {
                 bus: Arc::clone(&self.bus),
                 runs: Arc::clone(&self.runs),
+                tabs: Arc::clone(&self.tabs),
             };
             let app = Router::new()
                 .route("/", get(index))
                 .route("/content", get(content))
+                .route("/tabs/{tab_id}", get(tab_fragment))
                 .route("/runs/{run_id}", get(run_detail))
                 .route("/runs/{run_id}/logs", get(run_logs))
                 .route("/runs/{run_id}/interrupt", post(run_interrupt))
@@ -59,6 +67,7 @@ impl host_api::Extension for DashboardExtension {
                 routes: vec![
                     "/".to_string(),
                     "/content".to_string(),
+                    "/tabs/{tab_id}".to_string(),
                     "/runs/{run_id}".to_string(),
                     "/runs/{run_id}/logs".to_string(),
                     "/runs/{run_id}/interrupt".to_string(),
@@ -82,6 +91,10 @@ impl host_api::Extension for DashboardExtension {
             if let Ok(runs) = ctx.host.services.get_named::<dyn RunQuery>("orchestrator") {
                 let _ = self.runs.set(runs);
             }
+            // Snapshot the registered dashboard tabs (frozen by start time).
+            let _ = self
+                .tabs
+                .set(DashboardTabs::from_services(&ctx.host.services));
             // Presence: announce this dashboard into the registry so a single
             // `agentropy dash` aggregator can discover and link to it. The host
             // surfaces the *actual* bound addr, which is what makes the
@@ -182,6 +195,23 @@ impl PresenceGuard {
 struct BusApiState {
     bus: Arc<OnceLock<Arc<host_api::EventBus>>>,
     runs: Arc<OnceLock<Arc<dyn RunQuery>>>,
+    tabs: Arc<OnceLock<Arc<DashboardTabs>>>,
+}
+
+fn tab_nav(api: &BusApiState) -> Vec<TabNav> {
+    api.tabs
+        .get()
+        .map(|registry| {
+            registry
+                .snapshot()
+                .iter()
+                .map(|t| TabNav {
+                    id: t.id().to_string(),
+                    title: t.title().to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn index(State(api): State<BusApiState>) -> Response {
@@ -191,11 +221,29 @@ async fn index(State(api): State<BusApiState>) -> Response {
     let snapshot = bus
         .read_retained::<RunSnapshot>(RUN_SNAPSHOT_TOPIC)
         .unwrap_or_else(|_| RunSnapshot::empty());
-    match DashboardTemplate::page(snapshot).render() {
+    match DashboardTemplate::page_with_tabs(snapshot, tab_nav(&api)).render() {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
             tracing::error!("dashboard render failed: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, "render error").into_response()
+        }
+    }
+}
+
+/// Dispatch `GET /tabs/{tab_id}` to the registered provider and splice its HTML
+/// fragment into `#content` (innerHTML-swap). 404 when no tab matches.
+async fn tab_fragment(State(api): State<BusApiState>, Path(tab_id): Path<String>) -> Response {
+    let Some(registry) = api.tabs.get() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "dashboard tabs unavailable").into_response();
+    };
+    let Some(tab) = registry.find(&tab_id) else {
+        return (StatusCode::NOT_FOUND, "tab not found").into_response();
+    };
+    match tab.render() {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            tracing::error!("dashboard tab {tab_id} render failed: {e:#}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "tab render error").into_response()
         }
     }
 }
@@ -501,6 +549,7 @@ mod tests {
         BusApiState {
             bus: Arc::new(OnceLock::new()),
             runs: Arc::new(OnceLock::new()),
+            tabs: Arc::new(OnceLock::new()),
         }
     }
 
@@ -524,6 +573,60 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn tab_fragment_returns_503_when_registry_absent() {
+        let state = make_state();
+        let resp = tab_fragment(
+            axum::extract::State(state),
+            axum::extract::Path("demo".to_string()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn tab_fragment_404_for_unknown_tab() {
+        let state = make_state();
+        let _ = state.tabs.set(Arc::new(DashboardTabs::default()));
+        let resp = tab_fragment(
+            axum::extract::State(state),
+            axum::extract::Path("nope".to_string()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn tab_fragment_renders_registered_provider() {
+        struct Demo;
+        impl cap_dashboard_tab::DashboardTab for Demo {
+            fn id(&self) -> &str {
+                "demo"
+            }
+            fn title(&self) -> &str {
+                "Demo"
+            }
+            fn render(&self) -> anyhow::Result<String> {
+                Ok("<p id=\"demo-body\">hi</p>".to_string())
+            }
+        }
+        let registry = Arc::new(DashboardTabs::default());
+        registry.add(Arc::new(Demo));
+        let state = make_state();
+        let _ = state.tabs.set(registry);
+        let resp = tab_fragment(
+            axum::extract::State(state),
+            axum::extract::Path("demo".to_string()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("demo-body"), "fragment body spliced: {html}");
     }
 
     #[tokio::test]
