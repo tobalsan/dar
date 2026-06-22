@@ -8,13 +8,20 @@
 //! frontmatter. All due jobs at a tick run concurrently; the timer re-arms after
 //! each tick. A malformed jobs file logs one warning and is treated as empty.
 //!
+//! Hot reload (ALG-223): the runtime polls `cron/jobs.json` on a short interval
+//! and refreshes its in-memory job set when the file changes, so an agent or a
+//! human editing the file gets schedule changes applied within seconds without
+//! restarting the host. Per-job `enabled: false` inside `cron/jobs.json` is
+//! live-reloaded; the boot-time `extensions.scheduler.enabled` kill switch is
+//! not (it is read once at start, immutable at runtime).
+//!
 //! Jobs can also be managed remotely over the host HTTP server under the
 //! `/scheduler` namespace (list/create/update/delete; see [`http`]). Mutations
 //! persist atomically to `cron/jobs.json` and re-arm the timer in-process.
 //!
 //! Reference: aihub `packages/extensions/scheduler`. Parity gaps in this slice
 //! (tracked separately): no per-job model override, no `sessionId` continuity,
-//! no CLI, no hot reload of external file edits.
+//! no CLI.
 
 mod http;
 mod output;
@@ -38,6 +45,7 @@ use crate::store::load_jobs;
 /// `runner_service_id` fallback.
 const DEFAULT_RUNNER_KIND: &str = "pi";
 const DEFAULT_MAX_RUN_TIMEOUT_MS: u64 = 3_600_000;
+const DEFAULT_POLL_INTERVAL_MS: u64 = 2_000;
 /// Default per-job execution timeout (10 minutes), matching aihub's scheduler
 /// default. Overridable by `extensions.scheduler.jobTimeoutMs` and then by a
 /// per-job `timeoutMs`.
@@ -60,13 +68,17 @@ pub fn extension() -> Box<dyn Extension> {
 /// after boot, so this is a boot-time switch — changing it requires a restart).
 ///
 /// `enabled: false` is the kill switch: the extension still loads and the jobs
-/// file stays readable/writable, but no timer is armed and no job fires.
-/// `jobTimeoutMs` sets the per-run timeout default (overridable per job via
-/// `timeoutMs`).
+/// file stays readable/writable, but no timer is armed and no job fires. It is
+/// not live-reloaded (per-job `enabled` inside `cron/jobs.json` is the live
+/// toggle). `jobTimeoutMs` sets the per-run timeout default (overridable per job
+/// via `timeoutMs`). `pollIntervalMs` tunes how quickly edits to
+/// `cron/jobs.json` are picked up by the hot-reload poll.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct SchedulerSettings {
     enabled: bool,
+    #[serde(rename = "pollIntervalMs")]
+    poll_interval_ms: u64,
     #[serde(rename = "jobTimeoutMs")]
     job_timeout_ms: Option<u64>,
 }
@@ -75,6 +87,7 @@ impl Default for SchedulerSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
             job_timeout_ms: None,
         }
     }
@@ -195,11 +208,17 @@ impl Extension for SchedulerExtension {
 
             let root = ctx.paths.root().to_path_buf();
             let runner = read_runner_config(&root);
+            let poll_interval_ms = if settings.poll_interval_ms == 0 {
+                DEFAULT_POLL_INTERVAL_MS
+            } else {
+                settings.poll_interval_ms
+            };
             let config = SchedulerConfig {
                 root,
                 runner_kind: runner.0,
                 runner_command: runner.1,
                 max_run_timeout_ms: runner.2,
+                poll_interval_ms,
                 job_timeout_ms: settings.job_timeout_ms.unwrap_or(DEFAULT_JOB_TIMEOUT_MS),
             };
 
@@ -271,15 +290,26 @@ mod tests {
 
     #[test]
     fn settings_default_enabled_true() {
-        let d = SchedulerSettings::default();
-        assert!(d.enabled);
-        assert_eq!(d.job_timeout_ms, None);
+        let s = SchedulerSettings::default();
+        assert!(s.enabled);
+        assert_eq!(s.poll_interval_ms, DEFAULT_POLL_INTERVAL_MS);
+        assert_eq!(s.job_timeout_ms, None);
     }
 
     #[test]
     fn settings_parse_kill_switch() {
         let s = SchedulerSettings::parse(&serde_json::json!({ "enabled": false })).unwrap();
         assert!(!s.enabled);
+        // Omitted poll interval falls back to the default.
+        assert_eq!(s.poll_interval_ms, DEFAULT_POLL_INTERVAL_MS);
+    }
+
+    #[test]
+    fn settings_parse_poll_interval() {
+        let s: SchedulerSettings =
+            serde_json::from_value(serde_json::json!({ "pollIntervalMs": 500 })).unwrap();
+        assert!(s.enabled);
+        assert_eq!(s.poll_interval_ms, 500);
     }
 
     #[test]
