@@ -58,7 +58,7 @@ mod tests {
                 "runner_opencode::RunnerOpenCodeExtension",
                 "runner_cli::RunnerCliExtension",
                 "runner_fake::RunnerFakeExtension",
-                "scheduler::SchedulerExtension",
+                "scheduler::SchedulerExtension::default()",
                 "chat_opencode::ChatOpenCodeExtension",
                 "chat_pi::ChatPiExtension",
                 "chat_codex::ChatCodexExtension",
