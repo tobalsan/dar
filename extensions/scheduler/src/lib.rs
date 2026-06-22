@@ -39,15 +39,13 @@ use cap_dashboard_tab::DashboardTabs;
 use host_api::{Extension, RegisterCtx, StartCtx};
 use serde::Deserialize;
 
+use cap_runner::{DEFAULT_MAX_RUN_TIMEOUT_MS, DEFAULT_RUNNER_KIND};
+
 use crate::service::SchedulerConfig;
 use crate::state::SchedulerState;
 use crate::store::load_jobs;
 use crate::tab::CronTab;
 
-/// Default runner kind when `runner.use` is empty, matching the orchestrator's
-/// `runner_service_id` fallback.
-const DEFAULT_RUNNER_KIND: &str = "pi";
-const DEFAULT_MAX_RUN_TIMEOUT_MS: u64 = 3_600_000;
 const DEFAULT_POLL_INTERVAL_MS: u64 = 2_000;
 /// Default per-job execution timeout (10 minutes), matching aihub's scheduler
 /// default. Overridable by `extensions.scheduler.jobTimeoutMs` and then by a
@@ -136,19 +134,14 @@ impl Extension for SchedulerExtension {
 
     fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            // Validate `extensions.scheduler` at boot so misconfiguration fails
-            // startup with a clean, named error rather than at first fire. The
-            // section is optional (absent => extension behaves as today); only
-            // a present-but-invalid section is an error.
-            if let Some(value) = ctx.config.get(self.id()) {
-                SchedulerSettings::parse(value)?;
-            }
-            // Same opt-in / kill-switch gate as `start`: an absent section or
-            // `enabled: false` mounts no HTTP routes and builds no state.
-            let Some(value) = ctx.config.get(self.id()) else {
-                return Ok(());
+            // Parse `extensions.scheduler` once. An absent section is the
+            // opt-out (no HTTP routes, no state); a present-but-invalid section
+            // is a boot error (same gate as `start`).
+            let settings = match ctx.config.get(self.id()) {
+                None => return Ok(()),
+                Some(value) => SchedulerSettings::parse(value)?,
             };
-            if !SchedulerSettings::parse(value)?.enabled {
+            if !settings.enabled {
                 return Ok(());
             }
             let root = ctx.paths.root().to_path_buf();
@@ -166,13 +159,6 @@ impl Extension for SchedulerExtension {
 
             // run-now fires a job through the same path as a scheduled fire, so
             // the HTTP handlers need the static runner config + typed services.
-            // Settings were validated just above.
-            let settings = ctx
-                .config
-                .get(self.id())
-                .map(SchedulerSettings::parse)
-                .transpose()?
-                .unwrap_or_default();
             let config = build_scheduler_config(&root, &settings);
             let services = ctx.services.clone();
 

@@ -145,13 +145,7 @@ async fn create_job(
     };
     jobs.push(job.clone());
 
-    if let Err(e) = save_jobs(&api.root, &jobs) {
-        return server_error(&format!("persisting jobs.json: {e}"));
-    }
-    api.state.set_jobs(jobs);
-
-    let now_ms = Utc::now().timestamp_millis();
-    json_ok(StatusCode::CREATED, job_with_runtime(&api, &job, now_ms))
+    persist_and_respond(&api, jobs, &job, StatusCode::CREATED)
 }
 
 /// `PATCH /scheduler/jobs/{id}` \u2014 patch name/enabled/schedule/payload/timeout.
@@ -195,13 +189,8 @@ async fn update_job(
     }
 
     jobs[idx] = job.clone();
-    if let Err(e) = save_jobs(&api.root, &jobs) {
-        return server_error(&format!("persisting jobs.json: {e}"));
-    }
-    api.state.set_jobs(jobs);
 
-    let now_ms = Utc::now().timestamp_millis();
-    json_ok(StatusCode::OK, job_with_runtime(&api, &job, now_ms))
+    persist_and_respond(&api, jobs, &job, StatusCode::OK)
 }
 
 /// `DELETE /scheduler/jobs/{id}` \u2014 remove the job. 204 on success, 404 unknown.
@@ -408,6 +397,22 @@ fn job_with_runtime(api: &ApiState, job: &ScheduleJob, now_ms: i64) -> Value {
         map.insert("runningForMs".to_string(), json!(running_for_ms));
     }
     value
+}
+
+/// Persist `jobs` to disk, update shared state, and return the HTTP response
+/// for `job` at `status` (201 for create, 200 for update).
+fn persist_and_respond(
+    api: &ApiState,
+    jobs: Vec<ScheduleJob>,
+    job: &ScheduleJob,
+    status: StatusCode,
+) -> Response {
+    if let Err(e) = save_jobs(&api.root, &jobs) {
+        return server_error(&format!("persisting jobs.json: {e}"));
+    }
+    api.state.set_jobs(jobs);
+    let now_ms = Utc::now().timestamp_millis();
+    json_ok(status, job_with_runtime(api, job, now_ms))
 }
 
 fn json_ok(status: StatusCode, body: Value) -> Response {

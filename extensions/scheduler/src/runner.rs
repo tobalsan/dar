@@ -14,13 +14,14 @@ use cap_runner::{ExitKind, KillReason, Runner, RunnerEventSink, RunnerEventStore
 use chrono::{DateTime, Utc};
 use host_api::{ServiceRegistry, ShutdownToken};
 
-/// Outcome of one runner fire: how it exited and the captured assistant text.
-pub struct RunOutcome {
-    pub exit: ExitKind,
-    pub response: String,
-    /// True when the scheduler's own timeout elapsed and it killed the child.
-    /// The run is recorded as an error regardless of how the child exited.
-    pub timed_out: bool,
+/// Outcome of one runner fire.
+pub enum RunOutcome {
+    /// The run completed (or was killed): carries the exit classification and
+    /// the captured assistant text.
+    Completed(ExitKind, String),
+    /// The scheduler's own timeout elapsed; the child was killed. The run is
+    /// recorded as an error regardless of how the child exited.
+    TimedOut,
 }
 
 /// Sink that discards display lines; the scheduler captures structured text via
@@ -70,23 +71,38 @@ impl RunnerEventStore for CaptureStore {
     }
 }
 
+/// All parameters for a single scheduler runner fire.
+pub struct FireRunnerRequest<'a> {
+    pub runner_kind: &'a str,
+    pub runner_command: &'a str,
+    pub workspace: &'a std::path::Path,
+    pub workspace_root: &'a std::path::Path,
+    pub agent_root: &'a std::path::Path,
+    pub prompt: String,
+    pub job_id: &'a str,
+    pub max_run_timeout_ms: u64,
+    pub job_timeout: Duration,
+}
+
 /// Resolve the named runner service (`runner.use`, default `pi`) and fire it
 /// once with `prompt` as the agent prompt. Blocks until the run completes,
 /// returning its exit classification and captured assistant text.
-#[allow(clippy::too_many_arguments)]
 pub async fn fire_runner(
+    req: FireRunnerRequest<'_>,
     services: &ServiceRegistry,
-    runner_kind: &str,
-    runner_command: &str,
-    workspace: &std::path::Path,
-    workspace_root: &std::path::Path,
-    agent_root: &std::path::Path,
-    prompt: String,
-    job_id: &str,
-    max_run_timeout_ms: u64,
-    job_timeout: Duration,
     mut shutdown: ShutdownToken,
 ) -> Result<RunOutcome> {
+    let FireRunnerRequest {
+        runner_kind,
+        runner_command,
+        workspace,
+        workspace_root,
+        agent_root,
+        prompt,
+        job_id,
+        max_run_timeout_ms,
+        job_timeout,
+    } = req;
     let runner = services
         .get_named::<dyn Runner>(runner_kind)
         .with_context(|| format!("resolving runner service {runner_kind:?}"))?;
@@ -162,11 +178,11 @@ pub async fn fire_runner(
         .clone()
         .unwrap_or_default();
 
-    Ok(RunOutcome {
-        exit,
-        response,
-        timed_out,
-    })
+    if timed_out {
+        Ok(RunOutcome::TimedOut)
+    } else {
+        Ok(RunOutcome::Completed(exit, response))
+    }
 }
 
 #[cfg(test)]
@@ -274,16 +290,18 @@ mod tests {
         let (_tx, shutdown) = shutdown_token(false);
 
         fire_runner(
+            FireRunnerRequest {
+                runner_kind: "fake",
+                runner_command: "",
+                workspace: dir.path(),
+                workspace_root: dir.path(),
+                agent_root: dir.path(),
+                prompt: "prompt".to_string(),
+                job_id: "job",
+                max_run_timeout_ms: 60_000,
+                job_timeout: Duration::from_secs(60),
+            },
             &services,
-            "fake",
-            "",
-            dir.path(),
-            dir.path(),
-            dir.path(),
-            "prompt".to_string(),
-            "job",
-            60_000,
-            Duration::from_secs(60),
             shutdown,
         )
         .await
@@ -308,16 +326,18 @@ mod tests {
         let (_tx, shutdown) = shutdown_token(false);
 
         fire_runner(
+            FireRunnerRequest {
+                runner_kind: "fake",
+                runner_command: "",
+                workspace: dir.path(),
+                workspace_root: dir.path(),
+                agent_root: dir.path(),
+                prompt: "prompt".to_string(),
+                job_id: "job",
+                max_run_timeout_ms: 60_000,
+                job_timeout: Duration::from_secs(60),
+            },
             &services,
-            "fake",
-            "",
-            dir.path(),
-            dir.path(),
-            dir.path(),
-            "prompt".to_string(),
-            "job",
-            60_000,
-            Duration::from_secs(60),
             shutdown,
         )
         .await
@@ -338,16 +358,18 @@ mod tests {
         let (_tx, shutdown) = shutdown_token(true);
 
         let err = match fire_runner(
+            FireRunnerRequest {
+                runner_kind: "fake",
+                runner_command: "",
+                workspace: dir.path(),
+                workspace_root: dir.path(),
+                agent_root: dir.path(),
+                prompt: "prompt".to_string(),
+                job_id: "job",
+                max_run_timeout_ms: 60_000,
+                job_timeout: Duration::from_secs(60),
+            },
             &services,
-            "fake",
-            "",
-            dir.path(),
-            dir.path(),
-            dir.path(),
-            "prompt".to_string(),
-            "job",
-            60_000,
-            Duration::from_secs(60),
             shutdown,
         )
         .await
@@ -412,16 +434,18 @@ mod tests {
 
         let run = tokio::spawn(async move {
             fire_runner(
+                FireRunnerRequest {
+                    runner_kind: "fake",
+                    runner_command: "",
+                    workspace: &root,
+                    workspace_root: &root,
+                    agent_root: &root,
+                    prompt: "prompt".to_string(),
+                    job_id: "job",
+                    max_run_timeout_ms: 60_000,
+                    job_timeout: Duration::from_secs(60),
+                },
                 &services_for_task,
-                "fake",
-                "",
-                &root,
-                &root,
-                &root,
-                "prompt".to_string(),
-                "job",
-                60_000,
-                Duration::from_secs(60),
                 shutdown,
             )
             .await
@@ -431,8 +455,10 @@ mod tests {
         shutdown_tx.send(true).unwrap();
         let outcome = run.await.unwrap().unwrap();
 
-        assert!(!outcome.timed_out);
-        assert!(matches!(outcome.exit, ExitKind::Interrupted { .. }));
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed(ExitKind::Interrupted { .. }, _)
+        ));
         assert!(matches!(
             *kill_reason.lock().expect("kill mutex poisoned"),
             Some(KillReason::OperatorStop)

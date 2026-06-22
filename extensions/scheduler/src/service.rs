@@ -40,12 +40,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::runner::RunOutcome;
 use cap_runner::ExitKind;
 use chrono::Utc;
 use host_api::{ServiceRegistry, ShutdownToken};
 
 use crate::output::{write_cron_run_output, CronRunOutput, RunStatus};
-use crate::runner::fire_runner;
+use crate::runner::{fire_runner, FireRunnerRequest};
 use crate::schedule::{compute_next_run_at_ms, format_schedule};
 use crate::state::{LastStatus, SchedulerState};
 use crate::store::{jobs_path, load_jobs, ScheduleJob};
@@ -351,65 +352,20 @@ fn never_shutdown() -> (tokio::sync::watch::Sender<bool>, ShutdownToken) {
     (tx, ShutdownToken::new(rx))
 }
 
-/// Fire one job's runner and write its output file (for both ok and error runs).
-async fn execute_job(
-    config: &SchedulerConfig,
-    services: &ServiceRegistry,
-    state: &SchedulerState,
-    job: &ScheduleJob,
-    shutdown: ShutdownToken,
-) -> ExecuteResult {
-    // The caller (timer loop or run-now) has already claimed the run via
-    // `try_claim_running`, which set `running_since_ms`. `execute_job` only
-    // records the outcome.
-    let fired_at = Utc::now();
-    let schedule = format_schedule(&job.schedule);
-    let name = if job.name.is_empty() {
-        &job.id
-    } else {
-        &job.name
-    };
+/// Create `<root>/cron` and return its path. Returns `Err` on failure.
+fn ensure_workspace(root: &std::path::Path) -> anyhow::Result<PathBuf> {
+    let workspace = root.join("cron");
+    std::fs::create_dir_all(&workspace)?;
+    Ok(workspace)
+}
 
-    tracing::info!("[scheduler] Firing job {} ({})", job.id, schedule);
-
-    // Run cwd is the agent's cron dir — contained under the agent root.
-    let workspace = config.root.join("cron");
-    if let Err(err) = std::fs::create_dir_all(&workspace) {
-        tracing::error!(
-            "[scheduler] Cannot create cron dir for job {}: {err:#}",
-            job.id
-        );
-        let msg = format!("cannot create cron dir: {err:#}");
-        state.mark_finished(&job.id, LastStatus::Error, Some(msg.clone()));
-        let finished_at = Utc::now();
-        return ExecuteResult {
-            status: RunStatus::Error,
-            fired_at,
-            finished_at,
-            output_path: None,
-            error: Some(msg),
-        };
-    }
-
-    let timeout = config.timeout_for(job);
-    let outcome = fire_runner(
-        services,
-        &config.runner_kind,
-        &config.runner_command,
-        &workspace,
-        &config.root,
-        &config.root,
-        job.payload.message.clone(),
-        &job.id,
-        config.max_run_timeout_ms,
-        timeout,
-        shutdown,
-    )
-    .await;
-
-    let finished_at = Utc::now();
-    let (status, response, error) = match outcome {
-        Ok(run) if run.timed_out => (
+/// Map a run result to (status, response, error) — pure, no I/O or state.
+fn classify_outcome(
+    outcome: anyhow::Result<RunOutcome>,
+    timeout: Duration,
+) -> (RunStatus, Option<String>, Option<String>) {
+    match outcome {
+        Ok(RunOutcome::TimedOut) => (
             RunStatus::Error,
             None,
             Some(format!(
@@ -417,21 +373,35 @@ async fn execute_job(
                 timeout.as_millis()
             )),
         ),
-        Ok(run) => match run.exit {
-            ExitKind::Normal => (RunStatus::Ok, Some(run.response), None),
-            ExitKind::Abnormal(code) => (
-                RunStatus::Error,
-                None,
-                Some(format!("runner exited abnormally (code {code:?})")),
-            ),
-            ExitKind::Interrupted { reason } => (
-                RunStatus::Error,
-                None,
-                Some(format!("runner interrupted: {reason}")),
-            ),
-        },
+        Ok(RunOutcome::Completed(ExitKind::Normal, text)) => (RunStatus::Ok, Some(text), None),
+        Ok(RunOutcome::Completed(ExitKind::Abnormal(code), _)) => (
+            RunStatus::Error,
+            None,
+            Some(format!("runner exited abnormally (code {code:?})")),
+        ),
+        Ok(RunOutcome::Completed(ExitKind::Interrupted { reason }, _)) => (
+            RunStatus::Error,
+            None,
+            Some(format!("runner interrupted: {reason}")),
+        ),
         Err(err) => (RunStatus::Error, None, Some(format!("{err:#}"))),
-    };
+    }
+}
+
+/// Write the output file and update shared runtime state. Returns the
+/// [`ExecuteResult`] for the caller.
+fn persist_execute_result(
+    config: &SchedulerConfig,
+    state: &SchedulerState,
+    job: &ScheduleJob,
+    name: &str,
+    fired_at: chrono::DateTime<Utc>,
+    status: RunStatus,
+    response: Option<String>,
+    error: Option<String>,
+) -> ExecuteResult {
+    let finished_at = Utc::now();
+    let schedule = format_schedule(&job.schedule);
 
     // Keep a copy of the error for runtime state before it is moved into the
     // output writer, so the Cron tab can surface the failure reason.
@@ -473,6 +443,74 @@ async fn execute_job(
         output_path,
         error,
     }
+}
+
+/// Fire one job's runner and write its output file (for both ok and error runs).
+async fn execute_job(
+    config: &SchedulerConfig,
+    services: &ServiceRegistry,
+    state: &SchedulerState,
+    job: &ScheduleJob,
+    shutdown: ShutdownToken,
+) -> ExecuteResult {
+    // The caller (timer loop or run-now) has already claimed the run via
+    // `try_claim_running`, which set `running_since_ms`. `execute_job` only
+    // records the outcome.
+    let fired_at = Utc::now();
+    let name = if job.name.is_empty() {
+        &job.id
+    } else {
+        &job.name
+    };
+
+    tracing::info!(
+        "[scheduler] Firing job {} ({})",
+        job.id,
+        format_schedule(&job.schedule)
+    );
+
+    // Run cwd is the agent's cron dir — contained under the agent root.
+    let workspace = match ensure_workspace(&config.root) {
+        Ok(ws) => ws,
+        Err(err) => {
+            tracing::error!(
+                "[scheduler] Cannot create cron dir for job {}: {err:#}",
+                job.id
+            );
+            let msg = format!("cannot create cron dir: {err:#}");
+            return persist_execute_result(
+                config,
+                state,
+                job,
+                name,
+                fired_at,
+                RunStatus::Error,
+                None,
+                Some(msg),
+            );
+        }
+    };
+
+    let timeout = config.timeout_for(job);
+    let outcome = fire_runner(
+        FireRunnerRequest {
+            runner_kind: &config.runner_kind,
+            runner_command: &config.runner_command,
+            workspace: &workspace,
+            workspace_root: &config.root,
+            agent_root: &config.root,
+            prompt: job.payload.message.clone(),
+            job_id: &job.id,
+            max_run_timeout_ms: config.max_run_timeout_ms,
+            job_timeout: timeout,
+        },
+        services,
+        shutdown,
+    )
+    .await;
+
+    let (status, response, error) = classify_outcome(outcome, timeout);
+    persist_execute_result(config, state, job, name, fired_at, status, response, error)
 }
 
 /// Outcome of a `run-now` request, mapped to an HTTP status by the handler
@@ -571,6 +609,70 @@ mod tests {
     use cap_runner::{KillReason, Runner, RunnerHandle, SpawnParams};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration as StdDuration;
+
+    // --- classify_outcome unit tests -----------------------------------------
+
+    #[test]
+    fn classify_outcome_timed_out() {
+        let timeout = Duration::from_millis(500);
+        let (status, response, error) = classify_outcome(Ok(RunOutcome::TimedOut), timeout);
+        assert_eq!(status, RunStatus::Error);
+        assert!(response.is_none());
+        let err = error.unwrap();
+        assert!(err.contains("500"), "timeout ms in message: {err}");
+        assert!(err.contains("timeout"), "mentions timeout: {err}");
+    }
+
+    #[test]
+    fn classify_outcome_normal_exit() {
+        let timeout = Duration::from_millis(60_000);
+        let (status, response, error) = classify_outcome(
+            Ok(RunOutcome::Completed(ExitKind::Normal, "hello".to_string())),
+            timeout,
+        );
+        assert_eq!(status, RunStatus::Ok);
+        assert_eq!(response.as_deref(), Some("hello"));
+        assert!(error.is_none());
+    }
+
+    #[test]
+    fn classify_outcome_abnormal_exit() {
+        let timeout = Duration::from_millis(60_000);
+        let (status, response, error) = classify_outcome(
+            Ok(RunOutcome::Completed(
+                ExitKind::Abnormal(Some(1)),
+                String::new(),
+            )),
+            timeout,
+        );
+        assert_eq!(status, RunStatus::Error);
+        assert!(response.is_none());
+        assert!(error.unwrap().contains("abnormally"));
+    }
+
+    #[test]
+    fn classify_outcome_interrupted() {
+        let timeout = Duration::from_millis(60_000);
+        let (status, response, error) = classify_outcome(
+            Ok(RunOutcome::Completed(
+                ExitKind::Interrupted { reason: "killed" },
+                String::new(),
+            )),
+            timeout,
+        );
+        assert_eq!(status, RunStatus::Error);
+        assert!(response.is_none());
+        assert!(error.unwrap().contains("interrupted"));
+    }
+
+    #[test]
+    fn classify_outcome_err() {
+        let timeout = Duration::from_millis(60_000);
+        let (status, response, error) = classify_outcome(Err(anyhow::anyhow!("boom")), timeout);
+        assert_eq!(status, RunStatus::Error);
+        assert!(response.is_none());
+        assert!(error.unwrap().contains("boom"));
+    }
 
     /// In-test runner whose child sleeps `run_for` before exiting normally, and
     /// honors the kill channel (resolving as interrupted). Counts spawns so a

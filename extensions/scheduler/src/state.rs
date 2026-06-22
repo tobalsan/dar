@@ -102,13 +102,24 @@ impl SchedulerState {
     }
 
     /// Record a job's next computed fire instant (or clear it when disabled).
+    ///
+    /// Inserting a new runtime entry only happens when `next_run_at_ms` is
+    /// `Some`: calling with `None` for an unknown job id is a no-op so that
+    /// disabled jobs don't accumulate empty runtime entries.
     pub fn set_next_run(&self, job_id: &str, next_run_at_ms: Option<i64>) {
         let mut inner = self.lock();
-        inner
-            .runtime
-            .entry(job_id.to_string())
-            .or_default()
-            .next_run_at_ms = next_run_at_ms;
+        if let Some(rt) = inner.runtime.get_mut(job_id) {
+            rt.next_run_at_ms = next_run_at_ms;
+        } else if let Some(ms) = next_run_at_ms {
+            inner.runtime.insert(
+                job_id.to_string(),
+                JobRuntime {
+                    next_run_at_ms: Some(ms),
+                    ..Default::default()
+                },
+            );
+        }
+        // Neither branch: job has no runtime entry and next_run_at_ms is None → no-op.
     }
 
     /// Atomically claim a run for this job: set `running_since_ms` and return
