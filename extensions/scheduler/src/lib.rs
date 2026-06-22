@@ -8,9 +8,16 @@
 //! frontmatter. All due jobs at a tick run concurrently; the timer re-arms after
 //! each tick. A malformed jobs file logs one warning and is treated as empty.
 //!
+//! Hot reload (ALG-223): the runtime polls `cron/jobs.json` on a short interval
+//! and refreshes its in-memory job set when the file changes, so an agent or a
+//! human editing the file gets schedule changes applied within seconds without
+//! restarting the host. Per-job `enabled: false` inside `cron/jobs.json` is
+//! live-reloaded; the boot-time `extensions.scheduler.enabled` kill switch is
+//! not (it is read once at start, immutable at runtime).
+//!
 //! Reference: aihub `packages/extensions/scheduler`. Parity gaps in this slice
 //! (tracked separately): no per-job model override, no `sessionId` continuity,
-//! no HTTP/CLI, no hot reload, no overlap/timeout guards.
+//! no HTTP/CLI, no timeout guard.
 
 mod output;
 mod runner;
@@ -28,6 +35,7 @@ use crate::service::SchedulerConfig;
 /// `runner_service_id` fallback.
 const DEFAULT_RUNNER_KIND: &str = "pi";
 const DEFAULT_MAX_RUN_TIMEOUT_MS: u64 = 3_600_000;
+const DEFAULT_POLL_INTERVAL_MS: u64 = 2_000;
 
 pub struct SchedulerExtension;
 
@@ -35,17 +43,25 @@ pub fn extension() -> Box<dyn Extension> {
     Box::new(SchedulerExtension)
 }
 
-/// `extensions.scheduler` config. `enabled: false` is a runtime kill switch:
-/// the extension still loads, but no timer is armed and no jobs fire.
+/// `extensions.scheduler` config. `enabled: false` is the boot-time kill switch:
+/// the extension still loads, but no timer is armed and no jobs fire. It is read
+/// once at start and is not live-reloaded (per-job `enabled` inside
+/// `cron/jobs.json` is the live toggle). `pollIntervalMs` tunes how quickly
+/// edits to `cron/jobs.json` are picked up.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 struct SchedulerSettings {
     enabled: bool,
+    #[serde(rename = "pollIntervalMs")]
+    poll_interval_ms: u64,
 }
 
 impl Default for SchedulerSettings {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
+        }
     }
 }
 
@@ -93,11 +109,17 @@ impl Extension for SchedulerExtension {
 
             let root = ctx.paths.root().to_path_buf();
             let runner = read_runner_config(&root);
+            let poll_interval_ms = if settings.poll_interval_ms == 0 {
+                DEFAULT_POLL_INTERVAL_MS
+            } else {
+                settings.poll_interval_ms
+            };
             let config = SchedulerConfig {
                 root,
                 runner_kind: runner.0,
                 runner_command: runner.1,
                 max_run_timeout_ms: runner.2,
+                poll_interval_ms,
             };
 
             let services = ctx.host.services.clone();
@@ -168,7 +190,9 @@ mod tests {
 
     #[test]
     fn settings_default_enabled_true() {
-        assert!(SchedulerSettings::default().enabled);
+        let s = SchedulerSettings::default();
+        assert!(s.enabled);
+        assert_eq!(s.poll_interval_ms, DEFAULT_POLL_INTERVAL_MS);
     }
 
     #[test]
@@ -176,5 +200,15 @@ mod tests {
         let s: SchedulerSettings =
             serde_json::from_value(serde_json::json!({ "enabled": false })).unwrap();
         assert!(!s.enabled);
+        // Omitted poll interval falls back to the default.
+        assert_eq!(s.poll_interval_ms, DEFAULT_POLL_INTERVAL_MS);
+    }
+
+    #[test]
+    fn settings_parse_poll_interval() {
+        let s: SchedulerSettings =
+            serde_json::from_value(serde_json::json!({ "pollIntervalMs": 500 })).unwrap();
+        assert!(s.enabled);
+        assert_eq!(s.poll_interval_ms, 500);
     }
 }

@@ -281,11 +281,15 @@ malformed `cron/jobs.json` logs one warning and is treated as empty; a missing
 file is empty.
 
 Enable it by adding the section (presence selects it; `enabled: false` is a
-runtime kill switch that still links and loads but never fires):
+**boot-time** kill switch that still links and loads but never fires — it is read
+once at start and is not live-reloaded). `pollIntervalMs` (default `2000`,
+floored at `250`) tunes how quickly edits to `cron/jobs.json` are picked up:
 
 ```yaml
 extensions:
-  scheduler: {}
+  scheduler:
+    # enabled: false      # boot-time kill switch (not live)
+    # pollIntervalMs: 2000 # hot-reload poll cadence
 ```
 
 ```jsonc
@@ -304,11 +308,39 @@ extensions:
 }
 ```
 
+#### Self-service hot reload (the file is the API)
+
+The scheduler polls `cron/jobs.json` on `pollIntervalMs` and refreshes its
+in-memory job set whenever the file changes (detected by modified-time + length).
+This makes the jobs file itself the self-service surface: a child agent — or a
+human — can add, remove, or edit a job by writing the file, and the schedule
+change is applied within the poll interval, **without restarting the host**. The
+file shape shown above *is* the API; there is no separate tool call to register
+a job (the HTTP CRUD surface is a later slice, ALG-222).
+
+Reload semantics:
+
+- **Add / change / remove** a job → reflected within the poll interval and the
+  timer is re-armed to the new earliest fire.
+- **Per-job `enabled: false`** inside `cron/jobs.json` is live-reloaded: flip it
+  and the job drops out (or back in) on the next poll. This is distinct from the
+  boot-time `extensions.scheduler.enabled` switch above, which is immutable at
+  runtime.
+- **Malformed edit** → one warning, the file is treated as empty (no jobs armed),
+  no crash; the scheduler recovers automatically on the next valid write.
+- **In-flight runs survive a reload.** Each job carries an overlap guard; a job
+  edited while one of its runs is in flight keeps that guard, so overlap-skip
+  still applies (a second fire is skipped until the first run returns). A job
+  deleted while running is dropped from the armed set but its in-flight run owns
+  its own guard handle and completes (and writes output) normally — it is never
+  orphan-tracked twice.
+- The poll loop selects on the shutdown token, so a shutdown during polling or
+  between fires stops the scheduler promptly.
+
 Parity gaps vs the aihub scheduler (tracked in follow-up slices): no per-job
-model override, no `sessionId` continuity, no HTTP API or CLI, no hot reload
-(restart after editing `cron/jobs.json`), and no overlap-skip/timeout guards —
-in this skeleton a hung run blocks the whole scheduler loop (not just that job)
-until it returns. The captured response is the runner's last assistant-side
+model override, no `sessionId` continuity, no HTTP API or CLI, and no timeout
+guard — in this slice a hung run blocks the whole scheduler loop (not just that
+job) until it returns. The captured response is the runner's last assistant-side
 output line, a best-effort proxy for plain runners. Job ids are validated to a
 single safe path segment at load (ids with `/`, `\`, `..`, or a leading dot are
 skipped with a warning) so output paths stay under the agent root.
