@@ -42,6 +42,10 @@ pub struct JobRuntime {
     pub last_run_at_ms: Option<i64>,
     /// Status of the last completed run.
     pub last_status: Option<LastStatus>,
+    /// Error message of the last completed run, set only when that run ended in
+    /// [`LastStatus::Error`]. Cleared on the next successful run. Surfaced by the
+    /// dashboard Cron tab so a failed job shows *why* it failed.
+    pub last_error: Option<String>,
     /// When the currently-executing run started (UTC epoch millis); `Some` only
     /// while a run is in flight, used to compute `running-for`.
     pub running_since_ms: Option<i64>,
@@ -146,12 +150,17 @@ impl SchedulerState {
             .and_then(|rt| rt.last_skipped_at_ms)
     }
 
-    /// Mark a run as finished with its status.
-    pub fn mark_finished(&self, job_id: &str, status: LastStatus) {
+    /// Mark a run as finished with its status and, for an error run, the error
+    /// message (cleared on a subsequent `ok` run).
+    pub fn mark_finished(&self, job_id: &str, status: LastStatus, error: Option<String>) {
         let mut inner = self.lock();
         let rt = inner.runtime.entry(job_id.to_string()).or_default();
         rt.running_since_ms = None;
         rt.last_status = Some(status);
+        rt.last_error = match status {
+            LastStatus::Error => error,
+            LastStatus::Ok => None,
+        };
     }
 
     /// Release a run claim without recording a status. Idempotent: used by the
@@ -213,11 +222,25 @@ mod tests {
         assert_eq!(state.runtime("a").running_since_ms, Some(100));
         // A second claim while running is rejected.
         assert!(!state.try_claim_running("a", 200));
-        state.mark_finished("a", LastStatus::Ok);
+        state.mark_finished("a", LastStatus::Ok, None);
         let rt = state.runtime("a");
         assert_eq!(rt.running_since_ms, None);
         assert_eq!(rt.last_status, Some(LastStatus::Ok));
         assert_eq!(rt.last_run_at_ms, Some(100));
+    }
+
+    #[test]
+    fn error_run_records_message_and_ok_run_clears_it() {
+        let state = SchedulerState::new(vec![job("a")]);
+        assert!(state.try_claim_running("a", 100));
+        state.mark_finished("a", LastStatus::Error, Some("boom".to_string()));
+        let rt = state.runtime("a");
+        assert_eq!(rt.last_status, Some(LastStatus::Error));
+        assert_eq!(rt.last_error.as_deref(), Some("boom"));
+        // A later ok run clears the stale error.
+        assert!(state.try_claim_running("a", 200));
+        state.mark_finished("a", LastStatus::Ok, None);
+        assert!(state.runtime("a").last_error.is_none());
     }
 
     #[tokio::test]

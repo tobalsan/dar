@@ -2288,16 +2288,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
+ "cap-dashboard-tab",
  "cap-runner",
  "chrono",
  "chrono-tz",
  "croner",
+ "dashboard",
  "host-api",
+ "http-body-util",
  "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
  "tokio",
+ "tower",
  "tracing",
 ]
 
