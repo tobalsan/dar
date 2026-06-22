@@ -475,8 +475,12 @@ Create a file `hello.md` in this workspace with the text "hello from agentropy".
 
 Set `tracker.use: linear` (or `tracker.kind: linear` in WORKFLOW.md). Requires:
 
-- `LINEAR_API_KEY` environment variable with a valid Linear API key, either in
-  the process environment or in `<agent-folder>/.env`.
+- A Linear auth token, either in the process environment or in
+  `<agent-folder>/.env`. Two token types are supported via the same header:
+  - `LINEAR_API_KEY` — a personal API key, sent raw (`Authorization: <key>`).
+  - `LINEAR_OAUTH_TOKEN` — an OAuth app access token (`actor=app`), sent as
+    `Authorization: Bearer <token>`. App tokens are long-lived and don't
+    consume a workspace seat. When both are set, `LINEAR_OAUTH_TOKEN` wins.
 - `tracker.project_slug` set to the Linear project's slugId.
 
 The Linear tracker polls via GraphQL, scopes to the configured project, and
@@ -643,7 +647,9 @@ Prerequisites: `cargo`/`rustc` on PATH, plus the `cargo-agentropy` helper
                             # (TUI chat backend follows runner.use)
    ```
 
-   The Linear tracker needs `LINEAR_API_KEY` in `~/agents/worker/.env`.
+   The Linear tracker needs `LINEAR_API_KEY` (personal API key) or
+   `LINEAR_OAUTH_TOKEN` (OAuth app token, sent with a `Bearer ` prefix) in
+   `~/agents/worker/.env`.
 
 2. Scaffold the prompt and one local extension (run from inside the folder):
 
