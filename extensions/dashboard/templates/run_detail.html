@@ -21,6 +21,8 @@
     <div class="kv"><span class="k">Outcome</span><span class="v">{% if outcome.is_empty() %}-{% else %}{{ outcome }}{% endif %}</span></div>
     <div class="kv"><span class="k">Exit code</span><span class="v">{{ exit_code }}</span></div>
     <div class="kv"><span class="k">PID</span><span class="v">{{ pid }}</span></div>
+    <div class="kv"><span class="k">Runner</span><span class="v">{{ runner }}</span></div>
+    <div class="kv"><span class="k">Model</span><span class="v">{{ model }}</span></div>
     <div class="kv"><span class="k">Workspace</span><span class="v">{% if workspace.is_empty() %}-{% else %}{{ workspace }}{% endif %}</span></div>
     <div class="kv"><span class="k">Started</span><span class="v">{{ started_at }}</span></div>
     <div class="kv"><span class="k">Finished</span><span class="v">{% if finished_at.is_empty() %}-{% else %}{{ finished_at }}{% endif %}</span></div>

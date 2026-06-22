@@ -276,20 +276,47 @@ runner (`runner.use`) with the job's `payload.message` as the prompt. The
 captured response is written to `cron/output/<job_id>/<timestamp>.md` with
 aihub-shape frontmatter (job id, run type, fired/finished, status, duration,
 schedule) plus a readable prompt/response body, for both ok and error runs. All
-jobs due at one tick run concurrently; the timer re-arms after each tick. A
-malformed `cron/jobs.json` logs one warning and is treated as empty; a missing
-file is empty.
+jobs due at one tick run concurrently in their own tasks; the timer re-arms after
+every tick — including after a skipped, hung, erroring, or panicking job — so one
+bad job never wedges the schedule loop. A malformed `cron/jobs.json` logs one
+warning and is treated as empty; a missing file is empty.
 
-Enable it by adding the section (presence selects it; `enabled: false` is a
-**boot-time** kill switch that still links and loads but never fires — it is read
-once at start and is not live-reloaded). `pollIntervalMs` (default `2000`,
-floored at `250`) tunes how quickly edits to `cron/jobs.json` are picked up:
+#### Execution guards
+
+The scheduler enforces three safety semantics so it is trustworthy unattended:
+
+- **Overlap-skip.** A scheduled fire of a job whose previous run is still in
+  flight is skipped: a warning is logged, the skip is bookmarked (so later
+  run-now logic can tell a skip from a normal completion), and the job's next
+  fire is recomputed so the timer re-arms forward. The same job never overlaps
+  itself.
+- **Timeout.** Every run is bounded by a timeout. The effective timeout is the
+  per-job `timeoutMs`, else `extensions.scheduler.jobTimeoutMs`, else a
+  10-minute default. On timeout the runner child is killed and the run is
+  recorded as an `error` output file with a timeout message; the job's next fire
+  is still computed.
+- **Kill switch (boot-time).** `extensions.scheduler.enabled: false` prevents
+  arming any timers — nothing fires — while `cron/jobs.json` stays
+  readable/writable. Because the host freezes the whole `extensions.*` config map
+  after boot (it is not live-reloaded), flipping `enabled` or changing
+  `jobTimeoutMs` takes effect only after a host **restart**. Per-job `enabled:
+  false` inside `cron/jobs.json`, by contrast, is read from the (hot-reloaded)
+  jobs file: a disabled job never fires and never gets a next-run.
+
+Invalid `extensions.scheduler` config (unknown field, wrong type, or a zero
+`jobTimeoutMs`) fails boot with a clean error naming the problem, rather than
+surfacing at first fire.
+
+Enable it by adding the section (presence selects it). `pollIntervalMs`
+(default `2000`, floored at `250`) tunes how quickly external edits to
+`cron/jobs.json` are hot-reloaded:
 
 ```yaml
 extensions:
   scheduler:
-    # enabled: false      # boot-time kill switch (not live)
-    # pollIntervalMs: 2000 # hot-reload poll cadence
+    enabled: true        # `false` = boot-time kill switch (CRUD stays live, no fires)
+    jobTimeoutMs: 600000 # optional; default per-run timeout in ms (10 min)
+    pollIntervalMs: 2000 # optional; hot-reload poll cadence in ms (floored at 250)
 ```
 
 ```jsonc
@@ -302,11 +329,15 @@ extensions:
       "name": "Morning digest",
       "enabled": true,
       "schedule": { "cron": "0 8 * * *", "tz": "Europe/Paris", "startAt": "2026-05-19T07:00:00.000Z" },
-      "payload": { "message": "Summarize overnight events." }
+      "payload": { "message": "Summarize overnight events." },
+      "timeoutMs": 300000
     }
   ]
 }
 ```
+
+A per-job timeout override is set with `timeoutMs` on the job (milliseconds),
+taking precedence over `extensions.scheduler.jobTimeoutMs` and the default.
 
 #### Self-service hot reload (the file is the API)
 
@@ -316,7 +347,8 @@ This makes the jobs file itself the self-service surface: a child agent — or a
 human — can add, remove, or edit a job by writing the file, and the schedule
 change is applied within the poll interval, **without restarting the host**. The
 file shape shown above *is* the API; there is no separate tool call to register
-a job (the HTTP CRUD surface is a later slice, ALG-222).
+a job. The same job set is also exposed over the Scheduler HTTP API (below);
+file edits and HTTP mutations feed the same in-memory state.
 
 Reload semantics:
 
@@ -338,12 +370,68 @@ Reload semantics:
   between fires stops the scheduler promptly.
 
 Parity gaps vs the aihub scheduler (tracked in follow-up slices): no per-job
-model override, no `sessionId` continuity, no HTTP API or CLI, and no timeout
-guard — in this slice a hung run blocks the whole scheduler loop (not just that
-job) until it returns. The captured response is the runner's last assistant-side
-output line, a best-effort proxy for plain runners. Job ids are validated to a
-single safe path segment at load (ids with `/`, `\`, `..`, or a leading dot are
-skipped with a warning) so output paths stay under the agent root.
+model override, no `sessionId` continuity, and no CLI. The captured response is
+the runner's last assistant-side output line, a best-effort proxy for plain
+runners. Job ids are validated to a single safe path segment at load (ids with
+`/`, `\`, `..`, or a leading dot are skipped with a warning) so output paths
+stay under the agent root.
+
+#### Scheduler HTTP API
+
+When the scheduler is enabled it mounts a job-management API on the host HTTP
+server under the `/scheduler` namespace. These are **single-agent** paths: the
+agent is implied by the host process, so there are no `agentId` segments (unlike
+the aihub multi-agent API). Mutations validate the request, persist the new job
+set atomically to `cron/jobs.json` (temp file + rename), and re-arm the timer
+immediately so a sooner schedule fires without waiting for the current sleep.
+Runtime state (next/last run, last status, running-for) lives in memory and is
+never written to disk; it is merged into list/create/update responses.
+
+| Method   | Path                   | Description                                                                  |
+| -------- | ---------------------- | ---------------------------------------------------------------------------- |
+| `GET`    | `/scheduler/jobs`      | List jobs, each merged with runtime state.                                   |
+| `POST`   | `/scheduler/jobs`      | Create a job. The id is generated server-side; `enabled` defaults to `true`. Returns `201` with the new job. |
+| `PATCH`  | `/scheduler/jobs/{id}` | Patch any of `name`, `enabled`, `schedule`, `payload`, `timeoutMs`. Re-arms when the schedule changes. |
+| `DELETE` | `/scheduler/jobs/{id}` | Remove a job. Returns `204`.                                                 |
+
+Request/response job shape (runtime fields are read-only and present only on
+responses):
+
+```jsonc
+{
+  "id": "job-1750000000000",      // server-generated on create
+  "name": "Morning digest",
+  "enabled": true,                  // defaults to true on create
+  "schedule": { "cron": "0 8 * * *", "tz": "Europe/Paris", "startAt": "2026-05-19T07:00:00.000Z" },
+  "payload": { "message": "Summarize overnight events." },
+  "timeoutMs": 60000,              // optional; falls back to runner.max_run_timeout_ms
+  // runtime-only (responses):
+  "nextRunAtMs": 1750000000000,
+  "lastRunAtMs": null,
+  "lastStatus": null,             // "ok" | "error" | null
+  "runningForMs": null
+}
+```
+
+Validation: a bad cron expression, a missing or unknown `tz`, an out-of-range
+`startAt`, or an empty `payload.message` returns `400` with an `{ "error": ... }`
+body; an unknown job id on update/delete returns `404`.
+
+Example lifecycle with `curl` (replace `$PORT` with the agent's bound HTTP port):
+
+```bash
+# Create
+curl -sS -XPOST localhost:$PORT/scheduler/jobs \
+  -H content-type:application/json \
+  -d '{"name":"digest","schedule":{"cron":"0 8 * * *","tz":"UTC"},"payload":{"message":"hi"}}'
+# List
+curl -sS localhost:$PORT/scheduler/jobs
+# Update (patch)
+curl -sS -XPATCH localhost:$PORT/scheduler/jobs/<id> \
+  -H content-type:application/json -d '{"enabled":false}'
+# Delete
+curl -sS -XDELETE localhost:$PORT/scheduler/jobs/<id>
+```
 
 ## Rules and invariants
 

@@ -94,7 +94,7 @@ const STOCK_EXTENSIONS: &[StockExtension] = &[
     },
     StockExtension {
         package: "scheduler",
-        factory: "scheduler::SchedulerExtension",
+        factory: "scheduler::SchedulerExtension::default()",
     },
 ];
 

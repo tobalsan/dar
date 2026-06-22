@@ -7,9 +7,10 @@
 //! text — the parity equivalent of aihub's `latestAssistantText(result.payloads)`.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use cap_runner::{ExitKind, Runner, RunnerEventSink, RunnerEventStore, SpawnParams};
+use cap_runner::{ExitKind, KillReason, Runner, RunnerEventSink, RunnerEventStore, SpawnParams};
 use chrono::{DateTime, Utc};
 use host_api::ServiceRegistry;
 
@@ -17,6 +18,9 @@ use host_api::ServiceRegistry;
 pub struct RunOutcome {
     pub exit: ExitKind,
     pub response: String,
+    /// True when the scheduler's own timeout elapsed and it killed the child.
+    /// The run is recorded as an error regardless of how the child exited.
+    pub timed_out: bool,
 }
 
 /// Sink that discards display lines; the scheduler captures structured text via
@@ -80,6 +84,7 @@ pub async fn fire_runner(
     prompt: String,
     job_id: &str,
     max_run_timeout_ms: u64,
+    job_timeout: Duration,
 ) -> Result<RunOutcome> {
     let runner = services
         .get_named::<dyn Runner>(runner_kind)
@@ -107,7 +112,32 @@ pub async fn fire_runner(
     .build();
 
     let handle = runner.spawn(params).await.context("spawning runner")?;
-    let exit = handle.wait().await;
+
+    // Scheduler-owned per-run timeout. Poll the supervising task for completion
+    // until the deadline; on elapse, kill the child and wait for it to exit so
+    // we never leak a runaway process. This guard is independent of (and
+    // typically tighter than) the runner's own `max_run_timeout_ms` hard cap.
+    let deadline = tokio::time::Instant::now() + job_timeout;
+    let (exit, timed_out) = loop {
+        // A run that completes on its own (even right at the deadline) is
+        // collected as a normal exit; only a child still running past the
+        // deadline is killed and flagged timed-out.
+        if handle.is_finished() {
+            break (handle.wait().await, false);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!(
+                "[scheduler] Job {job_id} exceeded {}ms timeout; killing runner",
+                job_timeout.as_millis()
+            );
+            let exit = handle.request_kill_and_wait(KillReason::Timeout).await;
+            break (exit, true);
+        }
+        // Poll cadence is small relative to any realistic job timeout; a kill is
+        // never delayed by more than this interval past the deadline.
+        let next_poll = (tokio::time::Instant::now() + Duration::from_millis(50)).min(deadline);
+        tokio::time::sleep_until(next_poll).await;
+    };
 
     let response = capture
         .latest_assistant
@@ -116,7 +146,11 @@ pub async fn fire_runner(
         .clone()
         .unwrap_or_default();
 
-    Ok(RunOutcome { exit, response })
+    Ok(RunOutcome {
+        exit,
+        response,
+        timed_out,
+    })
 }
 
 #[cfg(test)]

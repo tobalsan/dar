@@ -66,6 +66,9 @@ fn into_api_run(r: crate::store::RunRow) -> RunRow {
         outcome: r.outcome,
         exit_code: r.exit_code,
         process_alive: r.process_alive,
+        runner: r.runner,
+        model: r.model,
+        provider: r.provider,
     }
 }
 

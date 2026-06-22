@@ -28,6 +28,26 @@ use tool_registry::{ToolRegistryHandle, TOOL_REGISTRY_SERVICE};
 mod linear_graphql;
 
 pub(crate) const DEFAULT_ENDPOINT: &str = "https://api.linear.app/graphql";
+/// Env var holding a personal Linear API key. Sent raw, with no prefix.
+pub(crate) const API_KEY_ENV: &str = "LINEAR_API_KEY";
+/// Env var holding a Linear OAuth app access token (`actor=app`). Sent with a
+/// `Bearer ` prefix. Takes precedence over `LINEAR_API_KEY` when both are set.
+pub(crate) const OAUTH_TOKEN_ENV: &str = "LINEAR_OAUTH_TOKEN";
+
+/// Resolve the Linear `Authorization` header value from the environment.
+///
+/// Linear accepts two token types via the same header:
+/// - a personal API key, sent raw: `Authorization: <token>`
+/// - an OAuth app access token, sent prefixed: `Authorization: Bearer <token>`
+///
+/// `LINEAR_OAUTH_TOKEN` takes precedence over `LINEAR_API_KEY` when both are
+/// set. Returns `None` when neither is set (or both are empty).
+pub(crate) fn resolve_linear_auth_header() -> Option<String> {
+    if let Some(token) = std::env::var(OAUTH_TOKEN_ENV).ok().filter(|t| !t.is_empty()) {
+        return Some(format!("Bearer {token}"));
+    }
+    std::env::var(API_KEY_ENV).ok().filter(|k| !k.is_empty())
+}
 /// Initial sentinel: no real observation yet.
 const UNSET_MIN: i64 = i64::MAX;
 /// Page size for GraphQL pagination.
@@ -35,6 +55,8 @@ const PAGE_SIZE: u64 = 50;
 
 pub struct LinearTrackerConfig {
     pub endpoint: String,
+    /// The full `Authorization` header value (raw API key, or `Bearer <token>`
+    /// for an OAuth app token). Built via [`resolve_linear_auth_header`].
     pub api_key: String,
     pub project_slug: String, // "" = unconstrained
     pub team: Option<String>,
@@ -146,10 +168,12 @@ struct LinearTrackerFactory;
 
 impl TrackerFactory for LinearTrackerFactory {
     fn build(&self, cfg: TrackerBuildConfig) -> Result<Arc<dyn Tracker>> {
-        let api_key = match std::env::var("LINEAR_API_KEY") {
-            Ok(k) if !k.is_empty() => k,
-            _ => {
-                tracing::warn!("LINEAR_API_KEY is not set; Linear API requests will fail with 401");
+        let api_key = match resolve_linear_auth_header() {
+            Some(header) => header,
+            None => {
+                tracing::warn!(
+                    "neither {OAUTH_TOKEN_ENV} nor {API_KEY_ENV} is set; Linear API requests will fail with 401"
+                );
                 String::new()
             }
         };
@@ -346,10 +370,8 @@ fn export_linear_project(
             tracker_cfg.use_
         );
     }
-    let api_key = std::env::var("LINEAR_API_KEY")
-        .ok()
-        .filter(|key| !key.is_empty())
-        .context("LINEAR_API_KEY is required for Linear export")?;
+    let api_key = resolve_linear_auth_header()
+        .context("LINEAR_OAUTH_TOKEN or LINEAR_API_KEY is required for Linear export")?;
     let project_slug = tracker_cfg
         .project_slug
         .clone()
@@ -1330,7 +1352,45 @@ mod tests {
 
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
-    use super::{LinearTracker, LinearTrackerConfig, RawIssue, UNSET_MIN};
+    use super::{
+        resolve_linear_auth_header, LinearTracker, LinearTrackerConfig, RawIssue, API_KEY_ENV,
+        OAUTH_TOKEN_ENV, UNSET_MIN,
+    };
+
+    /// Serializes the env-var mutation tests below: they share process env.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn auth_header_prefers_oauth_token_with_bearer_prefix() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var(OAUTH_TOKEN_ENV, "oauth-abc");
+        std::env::set_var(API_KEY_ENV, "lin_api_xyz");
+        assert_eq!(resolve_linear_auth_header().as_deref(), Some("Bearer oauth-abc"));
+        std::env::remove_var(OAUTH_TOKEN_ENV);
+        std::env::remove_var(API_KEY_ENV);
+    }
+
+    #[test]
+    fn auth_header_uses_raw_api_key_when_no_oauth_token() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(OAUTH_TOKEN_ENV);
+        std::env::set_var(API_KEY_ENV, "lin_api_xyz");
+        assert_eq!(resolve_linear_auth_header().as_deref(), Some("lin_api_xyz"));
+        std::env::remove_var(API_KEY_ENV);
+    }
+
+    #[test]
+    fn auth_header_none_when_unset_or_empty() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(OAUTH_TOKEN_ENV);
+        std::env::remove_var(API_KEY_ENV);
+        assert_eq!(resolve_linear_auth_header(), None);
+        std::env::set_var(OAUTH_TOKEN_ENV, "");
+        std::env::set_var(API_KEY_ENV, "");
+        assert_eq!(resolve_linear_auth_header(), None);
+        std::env::remove_var(OAUTH_TOKEN_ENV);
+        std::env::remove_var(API_KEY_ENV);
+    }
 
     fn make_tracker() -> LinearTracker {
         LinearTracker::new(LinearTrackerConfig {
