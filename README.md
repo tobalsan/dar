@@ -199,8 +199,10 @@ extensions:
   scheduler: {}          # presence selects it; `enabled: false` = runtime kill switch
 ```
 
+Jobs can also be managed remotely over the host HTTP server under `/scheduler`
+(list/create/update/delete); see [docs/extensions.md](docs/extensions.md#scheduler-http-api).
 Parity gaps vs the aihub scheduler (later slices): no per-job model override, no
-`sessionId`, no HTTP API or CLI, no hot reload, no overlap/timeout guards. See
+`sessionId`, no CLI, no hot reload of file edits, no overlap/timeout guards. See
 [docs/extensions.md](docs/extensions.md#scheduler) for the job schema and output
 format.
 

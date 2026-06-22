@@ -9,6 +9,7 @@ factory = "scheduler::extension"
 
 [dependencies]
 anyhow = "1"
+axum = "0.8"
 host-api = { path = "../../crates/host-api" }
 cap-runner = { path = "../../crates/cap-runner" }
 chrono = { version = "0.4", features = ["clock", "serde"] }

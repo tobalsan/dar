@@ -9,26 +9,31 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+/// On-disk file version, mirroring the aihub disk shape.
+const JOBS_FILE_VERSION: u32 = 1;
 
 /// Cron + IANA timezone + optional ISO `startAt` anchor.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Schedule {
     pub cron: String,
     pub tz: String,
-    #[serde(rename = "startAt", default)]
+    #[serde(rename = "startAt", skip_serializing_if = "Option::is_none", default)]
     pub start_at: Option<String>,
 }
 
 /// Prompt payload. Only `message` is used by the walking skeleton; `sessionId`
 /// is a documented parity gap (no session continuity yet).
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Payload {
     pub message: String,
 }
 
-/// One scheduled job as loaded from disk.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+/// One scheduled job. This is the on-disk shape: it holds *only* configuration.
+/// Runtime state (next/last run, status, running-for) is never serialized here —
+/// it lives in-memory ([`crate::state`]) and is merged into list responses.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ScheduleJob {
     pub id: String,
     #[serde(default)]
@@ -37,16 +42,30 @@ pub struct ScheduleJob {
     pub enabled: bool,
     pub schedule: Schedule,
     pub payload: Payload,
+    /// Optional per-job run timeout in milliseconds. `None` falls back to the
+    /// agent's `runner.max_run_timeout_ms`.
+    #[serde(
+        rename = "timeoutMs",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub timeout_ms: Option<u64>,
 }
 
 fn default_enabled() -> bool {
     true
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct JobsFile {
+    #[serde(default = "default_version")]
+    version: u32,
     #[serde(default)]
     jobs: Vec<ScheduleJob>,
+}
+
+fn default_version() -> u32 {
+    JOBS_FILE_VERSION
 }
 
 /// `<root>/cron/jobs.json`.
@@ -102,10 +121,44 @@ pub fn load_jobs(root: &Path, mut warn: impl FnMut(String)) -> Vec<ScheduleJob> 
         .collect()
 }
 
+/// Atomically persist `jobs` to `<root>/cron/jobs.json` using a temp file +
+/// rename so a concurrent reader (or a crash mid-write) never observes a
+/// partially written file. Only configuration is written — runtime state lives
+/// in memory and never reaches disk. The `cron/` directory is created if absent.
+pub fn save_jobs(root: &Path, jobs: &[ScheduleJob]) -> std::io::Result<()> {
+    let path = jobs_path(root);
+    let dir = path.parent().expect("jobs_path always has a parent");
+    std::fs::create_dir_all(dir)?;
+
+    let file = JobsFile {
+        version: JOBS_FILE_VERSION,
+        jobs: jobs.to_vec(),
+    };
+    let mut body = serde_json::to_string_pretty(&file)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    body.push('\n');
+
+    // Write to a unique temp file in the same directory (same filesystem, so
+    // the rename is atomic) then rename over the target. The name combines the
+    // pid with a process-wide counter so two concurrent saves never share a
+    // temp path and clobber each other's bytes.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".jobs.json.{}.{seq}.tmp", std::process::id()));
+    std::fs::write(&tmp, body.as_bytes())?;
+    match std::fs::rename(&tmp, &path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(err)
+        }
+    }
+}
+
 /// A job id must be a single, non-empty path component with no separators,
 /// parent-traversal, or leading dot, so it is always contained under
 /// `cron/output/`.
-fn is_safe_job_id(id: &str) -> bool {
+pub fn is_safe_job_id(id: &str) -> bool {
     !id.is_empty()
         && !id.starts_with('.')
         && !id.contains('/')
@@ -227,6 +280,116 @@ mod tests {
         assert!(!is_safe_job_id("a\\b"));
         assert!(!is_safe_job_id("/abs"));
         assert!(!is_safe_job_id(".hidden"));
+    }
+
+    fn sample_job(id: &str) -> ScheduleJob {
+        ScheduleJob {
+            id: id.to_string(),
+            name: "Sample".to_string(),
+            enabled: true,
+            schedule: Schedule {
+                cron: "0 8 * * *".to_string(),
+                tz: "Europe/Paris".to_string(),
+                start_at: Some("2026-05-19T07:00:00.000Z".to_string()),
+            },
+            payload: Payload {
+                message: "do the thing".to_string(),
+            },
+            timeout_ms: Some(60_000),
+        }
+    }
+
+    #[test]
+    fn save_load_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs = vec![sample_job("a"), {
+            let mut j = sample_job("b");
+            j.schedule.start_at = None;
+            j.timeout_ms = None;
+            j.enabled = false;
+            j
+        }];
+        save_jobs(dir.path(), &jobs).unwrap();
+        let (loaded, warnings) = collect_warnings(dir.path());
+        assert!(warnings.is_empty());
+        assert_eq!(loaded, jobs);
+    }
+
+    #[test]
+    fn save_omits_runtime_state_and_writes_version() {
+        let dir = tempfile::tempdir().unwrap();
+        save_jobs(dir.path(), &[sample_job("a")]).unwrap();
+        let raw = std::fs::read_to_string(jobs_path(dir.path())).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        // Disk shape: version + jobs, each job is config-only.
+        assert_eq!(value["version"], 1);
+        let job = &value["jobs"][0];
+        let keys: Vec<&str> = job.as_object().unwrap().keys().map(String::as_str).collect();
+        for key in &keys {
+            assert!(
+                matches!(
+                    *key,
+                    "id" | "name" | "enabled" | "schedule" | "payload" | "timeoutMs"
+                ),
+                "unexpected disk key {key:?}"
+            );
+        }
+        // No runtime-state fields ever persisted.
+        for forbidden in [
+            "nextRunAt",
+            "lastRunAt",
+            "lastStatus",
+            "status",
+            "runningForMs",
+            "agentId",
+        ] {
+            assert!(job.get(forbidden).is_none(), "{forbidden} must not be on disk");
+        }
+    }
+
+    #[test]
+    fn save_omits_absent_optional_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut job = sample_job("a");
+        job.schedule.start_at = None;
+        job.timeout_ms = None;
+        save_jobs(dir.path(), &[job]).unwrap();
+        let raw = std::fs::read_to_string(jobs_path(dir.path())).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let j = &value["jobs"][0];
+        assert!(j.get("timeoutMs").is_none());
+        assert!(j["schedule"].get("startAt").is_none());
+    }
+
+    #[test]
+    fn save_is_atomic_no_temp_left_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        save_jobs(dir.path(), &[sample_job("a")]).unwrap();
+        // After a successful save only jobs.json exists in cron/ — no stray temp.
+        let entries: Vec<String> = std::fs::read_dir(dir.path().join("cron"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["jobs.json".to_string()]);
+    }
+
+    #[test]
+    fn save_creates_cron_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // cron/ does not exist yet.
+        assert!(!dir.path().join("cron").exists());
+        save_jobs(dir.path(), &[sample_job("a")]).unwrap();
+        assert!(jobs_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn save_overwrites_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        save_jobs(dir.path(), &[sample_job("a"), sample_job("b")]).unwrap();
+        save_jobs(dir.path(), &[sample_job("c")]).unwrap();
+        let (loaded, _) = collect_warnings(dir.path());
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "c");
     }
 
     #[test]
