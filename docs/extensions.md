@@ -276,16 +276,44 @@ runner (`runner.use`) with the job's `payload.message` as the prompt. The
 captured response is written to `cron/output/<job_id>/<timestamp>.md` with
 aihub-shape frontmatter (job id, run type, fired/finished, status, duration,
 schedule) plus a readable prompt/response body, for both ok and error runs. All
-jobs due at one tick run concurrently; the timer re-arms after each tick. A
-malformed `cron/jobs.json` logs one warning and is treated as empty; a missing
-file is empty.
+jobs due at one tick run concurrently in their own tasks; the timer re-arms after
+every tick — including after a skipped, hung, erroring, or panicking job — so one
+bad job never wedges the schedule loop. A malformed `cron/jobs.json` logs one
+warning and is treated as empty; a missing file is empty.
 
-Enable it by adding the section (presence selects it; `enabled: false` is a
-runtime kill switch that still links and loads but never fires):
+#### Execution guards
+
+The scheduler enforces three safety semantics so it is trustworthy unattended:
+
+- **Overlap-skip.** A scheduled fire of a job whose previous run is still in
+  flight is skipped: a warning is logged, the skip is bookmarked (so later
+  run-now logic can tell a skip from a normal completion), and the job's next
+  fire is recomputed so the timer re-arms forward. The same job never overlaps
+  itself.
+- **Timeout.** Every run is bounded by a timeout. The effective timeout is the
+  per-job `timeoutMs`, else `extensions.scheduler.jobTimeoutMs`, else a
+  10-minute default. On timeout the runner child is killed and the run is
+  recorded as an `error` output file with a timeout message; the job's next fire
+  is still computed.
+- **Kill switch (boot-time).** `extensions.scheduler.enabled: false` prevents
+  arming any timers — nothing fires — while `cron/jobs.json` stays
+  readable/writable. Because the host freezes the whole `extensions.*` config map
+  after boot (it is not live-reloaded), flipping `enabled` or changing
+  `jobTimeoutMs` takes effect only after a host **restart**. Per-job `enabled:
+  false` inside `cron/jobs.json`, by contrast, is read from the (hot-reloaded)
+  jobs file: a disabled job never fires and never gets a next-run.
+
+Invalid `extensions.scheduler` config (unknown field, wrong type, or a zero
+`jobTimeoutMs`) fails boot with a clean error naming the problem, rather than
+surfacing at first fire.
+
+Enable it by adding the section (presence selects it):
 
 ```yaml
 extensions:
-  scheduler: {}
+  scheduler:
+    enabled: true        # `false` = boot-time kill switch (CRUD stays live, no fires)
+    jobTimeoutMs: 600000 # optional; default per-run timeout in ms (10 min)
 ```
 
 ```jsonc
@@ -298,17 +326,19 @@ extensions:
       "name": "Morning digest",
       "enabled": true,
       "schedule": { "cron": "0 8 * * *", "tz": "Europe/Paris", "startAt": "2026-05-19T07:00:00.000Z" },
-      "payload": { "message": "Summarize overnight events." }
+      "payload": { "message": "Summarize overnight events." },
+      "timeoutMs": 300000
     }
   ]
 }
 ```
 
+A per-job timeout override is set with `timeoutMs` on the job (milliseconds),
+taking precedence over `extensions.scheduler.jobTimeoutMs` and the default.
+
 Parity gaps vs the aihub scheduler (tracked in follow-up slices): no per-job
-model override, no `sessionId` continuity, no HTTP API or CLI, no hot reload
-(restart after editing `cron/jobs.json`), and no overlap-skip/timeout guards —
-in this skeleton a hung run blocks the whole scheduler loop (not just that job)
-until it returns. The captured response is the runner's last assistant-side
+model override, no `sessionId` continuity, no HTTP API or CLI, and no hot reload
+(restart after editing `cron/jobs.json`). The captured response is the runner's last assistant-side
 output line, a best-effort proxy for plain runners. Job ids are validated to a
 single safe path segment at load (ids with `/`, `\`, `..`, or a leading dot are
 skipped with a warning) so output paths stay under the agent root.
