@@ -9,6 +9,7 @@ anyhow = "1"
 askama = "0.13"
 axum = { version = "0.8", features = ["ws"] }
 agentropy-presence = { path = "../../crates/agentropy-presence" }
+cap-dashboard-tab = { path = "../../crates/cap-dashboard-tab" }
 cap-tracker = { path = "../../crates/cap-tracker" }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
@@ -32,4 +33,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 pulldown-cmark = "0.13"
 
 [dev-dependencies]
+example = { path = "../example" }
+http-body-util = "0.1"
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

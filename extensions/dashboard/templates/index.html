@@ -84,25 +84,68 @@
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
     ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
     ::-webkit-scrollbar-track { background: transparent; }
+    .dash-tabs {
+      display: flex; gap: .35rem; padding: .55rem 1.25rem 0;
+      border-bottom: 1px solid var(--border); background: #15181d;
+    }
+    .dash-tab {
+      border: 1px solid var(--border); border-bottom: none; background: var(--panel-2);
+      color: var(--muted); border-radius: 6px 6px 0 0; padding: .4rem .8rem;
+      font: inherit; cursor: pointer;
+    }
+    .dash-tab:hover { color: var(--fg); border-color: var(--accent); }
+    .dash-tab.active { color: var(--fg); background: var(--panel); border-color: var(--accent); }
     @media (max-width: 760px) {
       header, main { padding-left: .8rem; padding-right: .8rem; }
       main { grid-template-columns: 1fr; }
       .drawer { width: 100%; }
+      .dash-tabs { padding-left: .8rem; padding-right: .8rem; flex-wrap: wrap; }
     }
   </style>
 </head>
 <body>
+  {% if !tabs.is_empty() %}
+  <nav class="dash-tabs" id="dash-tabs" aria-label="Dashboard tabs">
+    <button class="dash-tab active" data-tab-url="/content"
+            onclick="activateDashTab(this,'/content')">Runs</button>
+    {% for t in tabs %}
+    <button class="dash-tab" data-tab-url="/tabs/{{ t.id }}"
+            onclick="activateDashTab(this,'/tabs/{{ t.id }}')">{{ t.title }}</button>
+    {% endfor %}
+  </nav>
+  {% endif %}
   <div id="content" hx-get="/content" hx-trigger="every 2s" hx-swap="innerHTML">
     {{ content|safe }}
   </div>
   <div id="run-detail"></div>
   <script>
     window.__dashPage = window.__dashPage || 1;
+    // Active tab URL the #content poller re-fetches. Defaults to the
+    // orchestrator run view so a dashboard with zero registered tabs behaves
+    // exactly as before.
+    window.__dashTab = window.__dashTab || '/content';
     document.body.addEventListener('htmx:configRequest', function (ev) {
-      if ((ev.detail.path || '').indexOf('/content') === 0) {
+      var path = ev.detail.path || '';
+      // Only the run view carries pagination page-state.
+      if (path.indexOf('/content') === 0) {
         ev.detail.parameters['page'] = window.__dashPage;
       }
     });
+    // Switch the active tab: repoint the #content poller at the tab's fragment
+    // URL and load it immediately. Preserves the htmx innerHTML-swap of
+    // #content (no <body> swap); the run view stays the default tab.
+    function activateDashTab(btn, url) {
+      window.__dashTab = url;
+      var nav = document.getElementById('dash-tabs');
+      if (nav) {
+        nav.querySelectorAll('.dash-tab').forEach(function (b) { b.classList.remove('active'); });
+      }
+      btn.classList.add('active');
+      var content = document.getElementById('content');
+      content.setAttribute('hx-get', url);
+      htmx.process(content);
+      htmx.ajax('GET', url, { target: '#content', swap: 'innerHTML' });
+    }
     function closeDrawer() {
       document.getElementById('run-detail').innerHTML = '';
     }

@@ -396,6 +396,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cap-dashboard-tab"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "host-api",
+]
+
+[[package]]
 name = "cap-runner"
 version = "0.2.0"
 dependencies = [
@@ -678,11 +686,14 @@ dependencies = [
  "anyhow",
  "askama",
  "axum 0.8.9",
+ "cap-dashboard-tab",
  "cap-tracker",
  "chrono",
+ "example",
  "hex",
  "hmac",
  "host-api",
+ "http-body-util",
  "mime_guess",
  "minijinja",
  "orchestrator-api",
@@ -697,6 +708,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -763,6 +775,7 @@ name = "example"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "cap-dashboard-tab",
  "host-api",
  "serde",
  "serde_json",

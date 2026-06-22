@@ -98,6 +98,54 @@ Real ids in the shipped mix: runners `dyn Runner` under `pi` / `codex` /
 form the key, so `dyn ChatBackend @ "pi"` coexists with `dyn Runner @ "pi"`.
 (`register` is an alias for `service`.)
 
+### Dashboard tab
+
+Any extension can contribute a tab to the web dashboard via the cap-style
+contract crate `cap-dashboard-tab`. Both the dashboard and a registering
+extension depend only on that crate plus `host-api` — no dashboard internals,
+no cross-extension imports.
+
+Discovery is service-based: a single shared `DashboardTabs` registry lives in
+the host `ServiceRegistry` under `cap_dashboard_tab::DASHBOARD_TABS_SERVICE`.
+Rendering is *pull* — a tab returns an HTML **fragment** (a `String`); the
+dashboard owns one dynamic route and dispatches `GET /tabs/{id}` to the matching
+provider, splicing the fragment into its existing `#content` element via an
+`innerHTML`-swap (never a `<body>` swap). The orchestrator run view stays the
+default "Runs" tab; with zero registered tabs the dashboard looks exactly as
+before (no tab nav is rendered).
+
+Implement `DashboardTab` and add it to the shared registry in `register`
+(get-or-create is idempotent and order-independent across extensions):
+
+```rust
+use std::sync::Arc;
+use cap_dashboard_tab::{DashboardTab, DashboardTabs};
+
+struct MyTab;
+impl DashboardTab for MyTab {
+    fn id(&self) -> &str { "my-tab" }       // URL-safe; path segment in /tabs/{id}
+    fn title(&self) -> &str { "My Tab" }    // label in the tab nav
+    fn render(&self) -> anyhow::Result<String> {
+        // HTML fragment only — no <html>/<body>. May include its own htmx
+        // attributes for in-place polling inside #content.
+        Ok("<main><section class=\"panel\"><h2>Hello</h2></section></main>".into())
+    }
+}
+
+// in register():
+DashboardTabs::shared(&mut ctx.services)?.add(Arc::new(MyTab));
+```
+
+Live updates: while a tab is active the dashboard's `#content` poller already
+re-fetches `/tabs/{id}` on the shared cadence, so the whole fragment refreshes
+for free — a static `render()` is enough for simple tabs. Declare your own inner
+htmx polling only for a finer-grained sub-target (e.g. appending rows to an inner
+list with `hx-swap="beforeend"`), the way the run-detail drawer streams events;
+otherwise the outer poll would tear down and recreate an inner whole-fragment
+poller every cycle. The contract imposes no cadence; it only guarantees the
+fragment is composed into `#content`. The `example` extension ships a reference
+tab.
+
 ### Event bus
 
 Two topic classes (semantics documented at the top of `crates/host-api/src/lib.rs`):
