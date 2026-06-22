@@ -306,7 +306,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(SchedulerState::new(vec![job("digest", "Morning digest", true)]));
         state.set_next_run("digest", Some(Utc.with_ymd_and_hms(2026, 6, 14, 6, 0, 0).unwrap().timestamp_millis()));
-        state.mark_running("digest", Utc::now().timestamp_millis());
+        assert!(state.try_claim_running("digest", Utc::now().timestamp_millis()));
         state.mark_finished("digest", LastStatus::Ok, None);
         let tab = tab_with(state, dir.path().to_path_buf());
         let html = tab.render().unwrap();
@@ -321,7 +321,7 @@ mod tests {
     fn failed_run_shows_error_message() {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(SchedulerState::new(vec![job("j", "Job", true)]));
-        state.mark_running("j", Utc::now().timestamp_millis());
+        assert!(state.try_claim_running("j", Utc::now().timestamp_millis()));
         state.mark_finished("j", LastStatus::Error, Some("runner exited abnormally".to_string()));
         let tab = tab_with(state, dir.path().to_path_buf());
         let html = tab.render().unwrap();

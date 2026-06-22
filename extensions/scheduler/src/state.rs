@@ -49,6 +49,10 @@ pub struct JobRuntime {
     /// When the currently-executing run started (UTC epoch millis); `Some` only
     /// while a run is in flight, used to compute `running-for`.
     pub running_since_ms: Option<i64>,
+    /// UTC epoch millis of the last scheduled fire that was overlap-skipped
+    /// because a run was already in flight. Run-now reads this to decide whether
+    /// to restore the pre-run next fire or keep the loop's recomputed one.
+    pub last_skipped_at_ms: Option<i64>,
 }
 
 /// Shared, mutable scheduler state. Cheap to clone behind an `Arc`.
@@ -101,12 +105,49 @@ impl SchedulerState {
         inner.runtime.entry(job_id.to_string()).or_default().next_run_at_ms = next_run_at_ms;
     }
 
-    /// Mark a run as started.
-    pub fn mark_running(&self, job_id: &str, started_at_ms: i64) {
+    /// Atomically claim a run for this job: set `running_since_ms` and return
+    /// `true` only if no run was already in flight. This is the single source of
+    /// truth both the timer loop and the run-now handler use to gate overlap, so
+    /// there is no publish gap between a "claimed" check and the mark — a
+    /// concurrent scheduled fire and manual run-now (or two run-nows) can never
+    /// both win the claim.
+    pub fn try_claim_running(&self, job_id: &str, started_at_ms: i64) -> bool {
         let mut inner = self.lock();
         let rt = inner.runtime.entry(job_id.to_string()).or_default();
+        if rt.running_since_ms.is_some() {
+            return false;
+        }
         rt.running_since_ms = Some(started_at_ms);
         rt.last_run_at_ms = Some(started_at_ms);
+        true
+    }
+
+    /// True if a run of this job is currently in flight (scheduled or manual).
+    /// Test-only: production overlap gating goes through `try_claim_running`.
+    #[cfg(test)]
+    pub fn is_running(&self, job_id: &str) -> bool {
+        self.lock()
+            .runtime
+            .get(job_id)
+            .is_some_and(|rt| rt.running_since_ms.is_some())
+    }
+
+    /// Bookmark a scheduled fire that was overlap-skipped at `at_ms`.
+    pub fn mark_skipped(&self, job_id: &str, at_ms: i64) {
+        let mut inner = self.lock();
+        inner
+            .runtime
+            .entry(job_id.to_string())
+            .or_default()
+            .last_skipped_at_ms = Some(at_ms);
+    }
+
+    /// The last overlap-skip bookmark for a job, if any.
+    pub fn last_skipped_at_ms(&self, job_id: &str) -> Option<i64> {
+        self.lock()
+            .runtime
+            .get(job_id)
+            .and_then(|rt| rt.last_skipped_at_ms)
     }
 
     /// Mark a run as finished with its status and, for an error run, the error
@@ -120,6 +161,15 @@ impl SchedulerState {
             LastStatus::Error => error,
             LastStatus::Ok => None,
         };
+    }
+
+    /// Release a run claim without recording a status. Idempotent: used by the
+    /// fire task's drop guard so a panicking run still frees the overlap gate
+    /// (a normal completion already cleared it via `mark_finished`).
+    pub fn clear_running(&self, job_id: &str) {
+        if let Some(rt) = self.lock().runtime.get_mut(job_id) {
+            rt.running_since_ms = None;
+        }
     }
 
     /// Wait until the next `set_jobs` mutation. Used by the loop to re-arm.
@@ -157,8 +207,8 @@ mod tests {
     #[test]
     fn set_jobs_prunes_runtime_for_removed_jobs() {
         let state = SchedulerState::new(vec![job("a"), job("b")]);
-        state.mark_running("a", 1);
-        state.mark_running("b", 2);
+        assert!(state.try_claim_running("a", 1));
+        assert!(state.try_claim_running("b", 2));
         state.set_jobs(vec![job("a")]);
         assert!(state.runtime("a").last_run_at_ms.is_some());
         // b removed → runtime cleared.
@@ -168,8 +218,10 @@ mod tests {
     #[test]
     fn running_then_finished_updates_status() {
         let state = SchedulerState::new(vec![job("a")]);
-        state.mark_running("a", 100);
+        assert!(state.try_claim_running("a", 100));
         assert_eq!(state.runtime("a").running_since_ms, Some(100));
+        // A second claim while running is rejected.
+        assert!(!state.try_claim_running("a", 200));
         state.mark_finished("a", LastStatus::Ok, None);
         let rt = state.runtime("a");
         assert_eq!(rt.running_since_ms, None);
@@ -180,13 +232,13 @@ mod tests {
     #[test]
     fn error_run_records_message_and_ok_run_clears_it() {
         let state = SchedulerState::new(vec![job("a")]);
-        state.mark_running("a", 100);
+        assert!(state.try_claim_running("a", 100));
         state.mark_finished("a", LastStatus::Error, Some("boom".to_string()));
         let rt = state.runtime("a");
         assert_eq!(rt.last_status, Some(LastStatus::Error));
         assert_eq!(rt.last_error.as_deref(), Some("boom"));
         // A later ok run clears the stale error.
-        state.mark_running("a", 200);
+        assert!(state.try_claim_running("a", 200));
         state.mark_finished("a", LastStatus::Ok, None);
         assert!(state.runtime("a").last_error.is_none());
     }

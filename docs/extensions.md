@@ -393,6 +393,8 @@ never written to disk; it is merged into list/create/update responses.
 | `POST`   | `/scheduler/jobs`      | Create a job. The id is generated server-side; `enabled` defaults to `true`. Returns `201` with the new job. |
 | `PATCH`  | `/scheduler/jobs/{id}` | Patch any of `name`, `enabled`, `schedule`, `payload`, `timeoutMs`. Re-arms when the schedule changes. |
 | `DELETE` | `/scheduler/jobs/{id}` | Remove a job. Returns `204`.                                                 |
+| `POST`   | `/scheduler/jobs/{id}/run-now` | Fire the job immediately without disturbing its schedule. See below. |
+| `GET`    | `/scheduler/jobs/{id}/tail`    | Return the newest output file for the job (path + content). |
 
 Request/response job shape (runtime fields are read-only and present only on
 responses):
@@ -418,6 +420,36 @@ Validation: a bad cron expression, a missing or unknown `tz`, an out-of-range
 `startAt`, or an empty `payload.message` returns `400` with an `{ "error": ... }`
 body; an unknown job id on update/delete returns `404`.
 
+##### Run now and tail (operator test-and-inspect loop)
+
+`POST /scheduler/jobs/{id}/run-now` fires a job **immediately** through the same
+path as a scheduled fire — the output file is written to
+`cron/output/<job_id>/<timestamp>.md` like any scheduled run — **without
+disturbing the schedule**. The job's previously computed next fire is restored
+after the manual run, _unless_ a scheduled fire was overlap-skipped while the
+manual run was in flight; in that case the loop's recomputed next fire stands
+(the skipped occurrence is consumed, not replayed — aihub's skipped-fire
+bookkeeping). The response carries the run result:
+
+| Outcome                          | Status | Body                                            |
+| -------------------------------- | ------ | ----------------------------------------------- |
+| Ran ok                           | `200`  | `{ status: "ok", firedAt, finishedAt, outputPath, error: null, job }` |
+| Ran with error                   | `500`  | `{ status: "error", ..., error: "<message>", job }` |
+| Job disabled (inactive)          | `500`  | `{ status: "inactive", error, job: null }`      |
+| Fire skipped before running      | `202`  | `{ status: "skipped", error, job: null }`       |
+| Job already running              | `409`  | `{ error: "job ... is already running" }`       |
+| Unknown job id                   | `404`  | `{ error: ... }`                                |
+
+`GET /scheduler/jobs/{id}/tail` returns the **newest** output file for the job —
+the lexicographically-greatest entry in `cron/output/<job_id>/` (filenames are
+`YYYY-MM-DD_HH-mm-ss.md`, so lexicographic order is timestamp order):
+
+| Outcome             | Status | Body                                  |
+| ------------------- | ------ | ------------------------------------- |
+| Newest output found | `200`  | `{ "path": "...", "content": "..." }` |
+| Job has no outputs  | `404`  | `{ "error": ... }`                    |
+| Unknown job id      | `404`  | `{ "error": ... }`                    |
+
 Example lifecycle with `curl` (replace `$PORT` with the agent's bound HTTP port):
 
 ```bash
@@ -430,6 +462,9 @@ curl -sS localhost:$PORT/scheduler/jobs
 # Update (patch)
 curl -sS -XPATCH localhost:$PORT/scheduler/jobs/<id> \
   -H content-type:application/json -d '{"enabled":false}'
+# Run now, then read the fresh output
+curl -sS -XPOST localhost:$PORT/scheduler/jobs/<id>/run-now
+curl -sS localhost:$PORT/scheduler/jobs/<id>/tail
 # Delete
 curl -sS -XDELETE localhost:$PORT/scheduler/jobs/<id>
 ```
