@@ -211,6 +211,60 @@ tokio::spawn(async move {
 });
 ```
 
+## Stock extensions
+
+Most stock extensions (orchestrator, dashboard, trackers, runners, chats, tui)
+are baseline and always linked. A few are **opt-in**: they link into a composed
+per-agent binary only when their `extensions.<id>` section is present in
+`agent.yaml`, so a binary without the section behaves exactly as before.
+
+### `scheduler`
+
+Fires per-agent cron jobs and writes their output as markdown. On boot it loads
+`cron/jobs.json`, computes each enabled job's next fire from its cron expression
++ IANA timezone (+ optional `startAt` anchor, anchored at `max(now, startAt)`),
+arms a single timer for the earliest, and when due spawns the agent's default
+runner (`runner.use`) with the job's `payload.message` as the prompt. The
+captured response is written to `cron/output/<job_id>/<timestamp>.md` with
+aihub-shape frontmatter (job id, run type, fired/finished, status, duration,
+schedule) plus a readable prompt/response body, for both ok and error runs. All
+jobs due at one tick run concurrently; the timer re-arms after each tick. A
+malformed `cron/jobs.json` logs one warning and is treated as empty; a missing
+file is empty.
+
+Enable it by adding the section (presence selects it; `enabled: false` is a
+runtime kill switch that still links and loads but never fires):
+
+```yaml
+extensions:
+  scheduler: {}
+```
+
+```jsonc
+// cron/jobs.json
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "morning-digest",
+      "name": "Morning digest",
+      "enabled": true,
+      "schedule": { "cron": "0 8 * * *", "tz": "Europe/Paris", "startAt": "2026-05-19T07:00:00.000Z" },
+      "payload": { "message": "Summarize overnight events." }
+    }
+  ]
+}
+```
+
+Parity gaps vs the aihub scheduler (tracked in follow-up slices): no per-job
+model override, no `sessionId` continuity, no HTTP API or CLI, no hot reload
+(restart after editing `cron/jobs.json`), and no overlap-skip/timeout guards —
+in this skeleton a hung run blocks the whole scheduler loop (not just that job)
+until it returns. The captured response is the runner's last assistant-side
+output line, a best-effort proxy for plain runners. Job ids are validated to a
+single safe path segment at load (ids with `/`, `\`, `..`, or a leading dot are
+skipped with a warning) so output paths stay under the agent root.
+
 ## Rules and invariants
 
 - **Never write issue state.** Issue `state:` is owned by the tracker and changed

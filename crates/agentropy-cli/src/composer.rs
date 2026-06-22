@@ -92,6 +92,10 @@ const STOCK_EXTENSIONS: &[StockExtension] = &[
         package: "tui",
         factory: "tui::TuiExtension",
     },
+    StockExtension {
+        package: "scheduler",
+        factory: "scheduler::SchedulerExtension",
+    },
 ];
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -107,6 +111,21 @@ struct AgentSelection {
     runner: SelectedUse,
     #[serde(default = "default_foreground")]
     foreground: String,
+    /// Per-extension config sections. Presence of an opt-in stock extension's
+    /// key here selects it into the composed binary.
+    #[serde(default)]
+    extensions: std::collections::HashMap<String, serde_yaml::Value>,
+}
+
+impl AgentSelection {
+    /// Whether an opt-in stock extension is linked into the composed binary.
+    /// Selection is by *presence* of the `extensions.<id>` section. The
+    /// `enabled: false` flag is a runtime kill switch (the extension still
+    /// links and loads, but stays idle), mirroring aihub, so it does not
+    /// affect build-time selection.
+    fn extension_selected(&self, id: &str) -> bool {
+        self.extensions.contains_key(id)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,6 +194,11 @@ fn selected_stock_extensions(agent: &Path) -> Result<Vec<&'static StockExtension
     ];
     packages.extend_from_slice(ALL_RUNNERS);
     packages.extend(foreground_packages(&selection)?);
+    // Opt-in stock extensions: selected only when present in agent.yaml's
+    // `extensions` map. Absent → binary behaves as today.
+    if selection.extension_selected("scheduler") {
+        packages.push("scheduler");
+    }
     packages.sort_unstable();
     packages.dedup();
 
@@ -1004,6 +1028,59 @@ extensions:
             main.contains("dashboard::DashboardExtension::default()"),
             "dashboard extension must be in the generated plugins! list"
         );
+    }
+
+    #[test]
+    fn scheduler_absent_from_agent_yaml_is_not_linked() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(agent, "files", "fake", "logs", "");
+
+        compose(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
+        let main = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
+        assert!(
+            !manifest.contains("scheduler = { git = "),
+            "scheduler must be opt-in: absent agent.yaml section → not linked"
+        );
+        assert!(!main.contains("scheduler::SchedulerExtension"));
+    }
+
+    #[test]
+    fn scheduler_selected_when_present_in_agent_yaml() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(agent, "files", "fake", "logs", "extensions:\n  scheduler: {}\n");
+
+        compose(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
+        let main = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
+        assert!(manifest.contains("scheduler = { git = "));
+        assert!(manifest.contains("stock-scheduler = [\"dep:scheduler\"]"));
+        assert!(main.contains("#[cfg(feature = \"stock-scheduler\")]"));
+        assert!(main.contains("scheduler::SchedulerExtension"));
+    }
+
+    #[test]
+    fn scheduler_disabled_flag_still_links_for_kill_switch() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(
+            agent,
+            "files",
+            "fake",
+            "logs",
+            "extensions:\n  scheduler:\n    enabled: false\n",
+        );
+
+        compose(agent).unwrap();
+
+        // enabled:false is a runtime kill switch, not a build-time exclusion:
+        // the extension still links and loads, then stays idle at runtime.
+        let main = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
+        assert!(main.contains("scheduler::SchedulerExtension"));
     }
 
     #[test]
