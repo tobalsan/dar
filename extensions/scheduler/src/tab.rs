@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use cap_dashboard_tab::DashboardTab;
+use cap_dashboard_tab::{escape_html, DashboardTab};
 use chrono::{TimeZone, Utc};
 
 use crate::schedule::format_schedule;
@@ -120,8 +120,8 @@ impl JobRow {
             .running_since_ms
             .map(|since| fmt_duration((now_ms - since).max(0)));
         JobRow {
-            name: he(display_name),
-            schedule: he(schedule),
+            name: escape_html(display_name),
+            schedule: escape_html(schedule),
             enabled,
             next_run: fmt_instant(rt.next_run_at_ms),
             last_run: fmt_instant(rt.last_run_at_ms),
@@ -131,9 +131,9 @@ impl JobRow {
                 .last_error
                 .as_deref()
                 .filter(|e| !e.trim().is_empty())
-                .map(he),
+                .map(escape_html),
             running_for,
-            outputs: outputs.iter().map(|o| he(o)).collect(),
+            outputs: outputs.iter().map(|o| escape_html(o)).collect(),
         }
     }
 }
@@ -241,15 +241,6 @@ fn fmt_duration(ms: i64) -> String {
     } else {
         format!("{}d", secs / 86_400)
     }
-}
-
-/// Minimal HTML-escape for text spliced into the fragment.
-fn he(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 #[cfg(test)]

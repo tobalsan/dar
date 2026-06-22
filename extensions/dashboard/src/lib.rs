@@ -11,7 +11,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use cap_dashboard_tab::DashboardTabs;
+use cap_dashboard_tab::{escape_html, DashboardTabs};
 use orchestrator_api::{ControlMsg, RunQuery, RunSnapshot, CONTROL_TOPIC, RUN_SNAPSHOT_TOPIC};
 use serde::Deserialize;
 use serde_json::json;
@@ -316,6 +316,28 @@ fn send_control(_api: &BusApiState, msg: ControlMsg) -> StatusCode {
     }
 }
 
+/// Parse an event payload into `(row_type, text)`.  For a `protocol_event`
+/// envelope the inner `log_row` and `text` fields are returned; for any other
+/// payload the event kind and raw payload string are returned unchanged.
+fn protocol_event_parts(payload: &str, kind: &str) -> (String, String) {
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(payload) {
+        if map.get("type").and_then(|v| v.as_str()) == Some("protocol_event") {
+            let rt = map
+                .get("log_row")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let tx = map
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            return (rt, tx);
+        }
+    }
+    (kind.to_string(), payload.to_string())
+}
+
 #[derive(Deserialize)]
 struct LogsQuery {
     since: Option<i64>,
@@ -339,41 +361,21 @@ async fn run_logs(
             let events = runs.events_for_run(&run_id, since, i64::MAX as usize);
             let mut html = String::new();
             for e in &events {
-                let (row_type, text) = if let Ok(serde_json::Value::Object(map)) =
-                    serde_json::from_str::<serde_json::Value>(&e.payload)
-                {
-                    if map.get("type").and_then(|v| v.as_str()) == Some("protocol_event") {
-                        let rt = map
-                            .get("log_row")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let tx = map
-                            .get("text")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        (rt, tx)
-                    } else {
-                        (e.kind.clone(), e.payload.clone())
-                    }
-                } else {
-                    (e.kind.clone(), e.payload.clone())
-                };
+                let (row_type, text) = protocol_event_parts(&e.payload, &e.kind);
                 if row_type.is_empty() && text.is_empty() {
                     continue;
                 }
                 let tag = if row_type.is_empty() {
-                    view::he(&e.kind)
+                    escape_html(&e.kind)
                 } else {
-                    view::he(&row_type)
+                    escape_html(&row_type)
                 };
                 html.push_str(&format!(
                     "<div class=\"ev-row\" data-event-id=\"{}\"><span class=\"ev-meta\"><span class=\"ev-tag\">{}</span><span class=\"ev-ts\">{}</span></span><span class=\"ev-text\">{}</span></div>",
                     e.event_id,
                     tag,
-                    view::he(&view::fmt_event_ts(&e.ts)),
-                    view::he(&text),
+                    escape_html(&view::fmt_event_ts(&e.ts)),
+                    escape_html(&text),
                 ));
             }
             // Empty body = no-op for hx-swap="beforeend".
@@ -421,27 +423,7 @@ async fn run_logs(
     let rows: Vec<serde_json::Value> = events
         .into_iter()
         .map(|e| {
-            let (row_type, text) = if let Ok(serde_json::Value::Object(map)) =
-                serde_json::from_str::<serde_json::Value>(&e.payload)
-            {
-                if map.get("type").and_then(|v| v.as_str()) == Some("protocol_event") {
-                    let rt = map
-                        .get("log_row")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let tx = map
-                        .get("text")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    (rt, tx)
-                } else {
-                    (e.kind.clone(), e.payload.clone())
-                }
-            } else {
-                (e.kind.clone(), e.payload.clone())
-            };
+            let (row_type, text) = protocol_event_parts(&e.payload, &e.kind);
             json!({
                 "event_id": e.event_id,
                 "kind": e.kind,
@@ -460,18 +442,21 @@ async fn run_logs(
         .into_response()
 }
 
-async fn run_interrupt(State(api): State<BusApiState>, Path(run_id): Path<String>) -> Response {
+/// Shared plumbing for run-scoped control messages that carry a reply channel.
+/// Checks the bus, publishes `msg`, awaits the reply with a 5 s timeout, and
+/// maps the three outcomes to HTTP responses.  The caller creates the reply
+/// channel and embeds `reply_tx` into `msg` before calling this helper.
+async fn send_run_control(
+    api: &BusApiState,
+    msg: ControlMsg,
+    reply_rx: tokio::sync::oneshot::Receiver<orchestrator_api::ControlReply>,
+) -> Response {
     let Some(bus) = api.bus.get() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             json!({"ok":false,"message":"bus unavailable"}).to_string(),
         )
             .into_response();
-    };
-    let (reply_tx, reply_rx) = orchestrator_api::reply_channel();
-    let msg = ControlMsg::Interrupt {
-        run_id,
-        reply: reply_tx,
     };
     if bus.publish(CONTROL_TOPIC, msg).is_err() {
         return (
@@ -504,48 +489,22 @@ async fn run_interrupt(State(api): State<BusApiState>, Path(run_id): Path<String
     }
 }
 
-async fn run_kill(State(api): State<BusApiState>, Path(run_id): Path<String>) -> Response {
-    let Some(bus) = api.bus.get() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"ok":false,"message":"bus unavailable"}).to_string(),
-        )
-            .into_response();
+async fn run_interrupt(State(api): State<BusApiState>, Path(run_id): Path<String>) -> Response {
+    let (reply_tx, reply_rx) = orchestrator_api::reply_channel();
+    let msg = ControlMsg::Interrupt {
+        run_id,
+        reply: reply_tx,
     };
+    send_run_control(&api, msg, reply_rx).await
+}
+
+async fn run_kill(State(api): State<BusApiState>, Path(run_id): Path<String>) -> Response {
     let (reply_tx, reply_rx) = orchestrator_api::reply_channel();
     let msg = ControlMsg::Kill {
         run_id,
         reply: reply_tx,
     };
-    if bus.publish(CONTROL_TOPIC, msg).is_err() {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"ok":false,"message":"bus unavailable"}).to_string(),
-        )
-            .into_response();
-    }
-    match tokio::time::timeout(std::time::Duration::from_secs(5), reply_rx).await {
-        Ok(Ok(reply)) => {
-            if reply.ok {
-                (
-                    [(header::CONTENT_TYPE, "application/json")],
-                    json!({"ok":true,"message":reply.message}).to_string(),
-                )
-                    .into_response()
-            } else {
-                (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    json!({"ok":false,"message":reply.message}).to_string(),
-                )
-                    .into_response()
-            }
-        }
-        _ => (
-            StatusCode::GATEWAY_TIMEOUT,
-            json!({"ok":false,"message":"timeout"}).to_string(),
-        )
-            .into_response(),
-    }
+    send_run_control(&api, msg, reply_rx).await
 }
 
 async fn asset(Path(path): Path<String>) -> Response {

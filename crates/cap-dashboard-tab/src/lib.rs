@@ -147,6 +147,16 @@ fn is_url_safe_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// Escape the five HTML-unsafe characters (`& < > " '`) for safe text
+/// interpolation into HTML fragments.
+pub fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,4 +1,5 @@
 use askama::Template;
+use cap_dashboard_tab::escape_html;
 use chrono::{DateTime, Utc};
 use orchestrator_api::{ActiveRun, AgentInfo, EventRow, HistoryRow, RunRow, RunSnapshot};
 
@@ -336,21 +337,13 @@ fn history_bucket(run: &RunRow) -> (&'static str, &'static str) {
     }
 }
 
-pub(crate) fn he(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
 fn render_markdown(md: &str) -> String {
     use pulldown_cmark::{html, Event, Options, Parser};
     let parser = Parser::new_ext(md, Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES);
     let safe_parser = parser.map(|event| match event {
-        Event::Html(s) | Event::InlineHtml(s) => {
-            Event::Text(pulldown_cmark::CowStr::Boxed(he(&s).into_boxed_str()))
-        }
+        Event::Html(s) | Event::InlineHtml(s) => Event::Text(pulldown_cmark::CowStr::Boxed(
+            escape_html(&s).into_boxed_str(),
+        )),
         other => other,
     });
     let mut output = String::new();
@@ -371,42 +364,42 @@ pub(crate) fn render_log_row(ev: &EventLine) -> String {
         "thinking" => {
             format!(
                 "<details class=\"log-think\" data-eid=\"{}\" data-event-id=\"{}\"><summary>Thinking</summary><pre class=\"log-pre\">{}</pre></details>",
-                ev.event_id, ev.event_id, he(&ev.text)
+                ev.event_id, ev.event_id, escape_html(&ev.text)
             )
         }
         "tool_call" => {
             let body = if ev.detail.is_empty() {
-                format!("$ {}", he(&ev.text))
+                format!("$ {}", escape_html(&ev.text))
             } else {
-                format!("$ {}\n\n{}", he(&ev.text), he(&ev.detail))
+                format!("$ {}\n\n{}", escape_html(&ev.text), escape_html(&ev.detail))
             };
             format!(
                 "<details class=\"log-tool\" data-eid=\"{}\" data-event-id=\"{}\"><summary><span class=\"log-pill\">tool</span><span class=\"log-cmd\">{}</span></summary><pre class=\"log-pre\">{}</pre></details>",
-                ev.event_id, ev.event_id, he(&ev.text), body
+                ev.event_id, ev.event_id, escape_html(&ev.text), body
             )
         }
         "tool_output" => {
             format!(
                 "<details class=\"log-tool\" data-eid=\"{}\" data-event-id=\"{}\"><summary><span class=\"log-pill\">output</span><span class=\"log-cmd\">{}</span></summary><pre class=\"log-pre\">{}</pre></details>",
-                ev.event_id, ev.event_id, he(&ev.text), he(&ev.text)
+                ev.event_id, ev.event_id, escape_html(&ev.text), escape_html(&ev.text)
             )
         }
         "error" => {
             format!(
                 "<div class=\"log-error\" data-event-id=\"{}\"><span class=\"log-ts\">{}</span><pre class=\"log-pre\">{}</pre></div>",
-                ev.event_id, time_part, he(&ev.text)
+                ev.event_id, time_part, escape_html(&ev.text)
             )
         }
         "user" => {
             format!(
                 "<div class=\"log-user\" data-event-id=\"{}\"><pre class=\"log-pre\">{}</pre></div>",
-                ev.event_id, he(&ev.text)
+                ev.event_id, escape_html(&ev.text)
             )
         }
         other => {
             format!(
                 "<div class=\"log-line\" data-event-id=\"{}\"><span class=\"kind\">{}</span><span class=\"ev-text\">{}</span></div>",
-                ev.event_id, he(other), he(&ev.text)
+                ev.event_id, escape_html(other), escape_html(&ev.text)
             )
         }
     }
