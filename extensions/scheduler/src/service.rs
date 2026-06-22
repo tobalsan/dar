@@ -1,5 +1,8 @@
-//! Scheduler runtime: load jobs, compute next fires, arm a single timer for the
-//! earliest, and on each tick fire all due jobs concurrently before re-arming.
+//! Scheduler runtime: read jobs from shared state, compute next fires, arm a
+//! single timer for the earliest, and on each tick fire all due jobs
+//! concurrently before re-arming. A create/update/delete over the HTTP API
+//! wakes the loop ([`SchedulerState::changed`]) so a sooner schedule takes
+//! effect immediately instead of after the current sleep.
 //!
 //! Execution guards (ALG-221):
 //! - **Overlap-skip:** a scheduled fire of a job that is still running from a
@@ -14,7 +17,7 @@
 //!   job never wedges the loop, and a `RunningGuard` clears the overlap flag on
 //!   drop so even a panicking fire releases the job for its next occurrence.
 //!
-//! Tracked separately: HTTP CRUD (ALG-222), hot reload (ALG-223), dashboard tab
+//! Tracked separately: hot reload of file edits (ALG-223), dashboard tab
 //! (ALG-225).
 
 use std::path::PathBuf;
@@ -29,7 +32,8 @@ use host_api::{ServiceRegistry, ShutdownToken};
 use crate::output::{write_cron_run_output, CronRunOutput, RunStatus};
 use crate::runner::fire_runner;
 use crate::schedule::{compute_next_run_at_ms, format_schedule};
-use crate::store::{load_jobs, ScheduleJob};
+use crate::state::{LastStatus, SchedulerState};
+use crate::store::ScheduleJob;
 
 /// Static configuration the runtime needs to fire runs, resolved once at start
 /// from `agent.yaml`.
@@ -79,10 +83,17 @@ struct ArmedJob {
     last_skipped_at_ms: Option<i64>,
 }
 
-/// Run the scheduler loop until shutdown. Loads jobs once at boot (hot reload is
-/// a later slice), then repeatedly arms the earliest fire and ticks.
-pub async fn run(config: SchedulerConfig, services: ServiceRegistry, mut shutdown: ShutdownToken) {
-    let mut armed = arm_jobs(&config);
+/// Run the scheduler loop until shutdown. Jobs are read from shared state, so a
+/// create/update/delete over the HTTP API is picked up on the next re-arm. The
+/// loop selects on a shutdown signal, a sleep until the earliest fire, and a
+/// `changed` notification that re-arms immediately when jobs are mutated.
+pub async fn run(
+    config: SchedulerConfig,
+    services: ServiceRegistry,
+    state: Arc<SchedulerState>,
+    mut shutdown: ShutdownToken,
+) {
+    let mut armed = arm_jobs(&state);
     if armed.is_empty() {
         tracing::info!("[scheduler] No enabled jobs; idle");
     } else {
@@ -90,17 +101,30 @@ pub async fn run(config: SchedulerConfig, services: ServiceRegistry, mut shutdow
     }
 
     loop {
-        let Some(next_at_ms) = armed.iter().map(|a| a.next_run_at_ms).min() else {
-            // No armed jobs: wait for shutdown only.
-            shutdown.cancelled().await;
-            return;
-        };
-        let delay = next_delay(next_at_ms);
-
-        tokio::select! {
-            _ = shutdown.cancelled() => return,
-            _ = tokio::time::sleep(delay) => {
-                run_due_jobs(&config, &services, &mut armed).await;
+        let next = armed.iter().map(|a| a.next_run_at_ms).min();
+        match next {
+            Some(next_at_ms) => {
+                let delay = next_delay(next_at_ms);
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = state.changed() => {
+                        // Jobs mutated over HTTP: recompute fires so a sooner
+                        // schedule takes effect immediately.
+                        armed = arm_jobs(&state);
+                    }
+                    _ = tokio::time::sleep(delay) => {
+                        run_due_jobs(&config, &services, &state, &mut armed).await;
+                    }
+                }
+            }
+            None => {
+                // No armed jobs: wait for shutdown or a mutation that adds one.
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = state.changed() => {
+                        armed = arm_jobs(&state);
+                    }
+                }
             }
         }
     }
@@ -112,24 +136,31 @@ fn next_delay(next_at_ms: i64) -> Duration {
     Duration::from_millis((next_at_ms - now).max(0) as u64)
 }
 
-/// Load jobs from disk and compute each enabled job's next fire. Jobs whose
-/// schedule fails to parse are skipped with a warning.
-fn arm_jobs(config: &SchedulerConfig) -> Vec<ArmedJob> {
+/// Read jobs from shared state and compute each enabled job's next fire,
+/// publishing the computed `nextRunAt` back into runtime state. Disabled jobs
+/// clear their `nextRunAt`. Jobs whose schedule fails to parse are skipped with
+/// a warning (defensive: the HTTP API validates schedules before persisting).
+fn arm_jobs(state: &SchedulerState) -> Vec<ArmedJob> {
     let now_ms = Utc::now().timestamp_millis();
-    let jobs = load_jobs(&config.root, |m| tracing::warn!("{m}"));
+    let jobs = state.jobs();
     let mut armed = Vec::new();
     for job in jobs {
         if !job.enabled {
+            state.set_next_run(&job.id, None);
             continue;
         }
         match compute_next_run_at_ms(&job.schedule, now_ms) {
-            Ok(next_run_at_ms) => armed.push(ArmedJob {
-                job,
-                next_run_at_ms,
-                running: Arc::new(AtomicBool::new(false)),
-                last_skipped_at_ms: None,
-            }),
+            Ok(next_run_at_ms) => {
+                state.set_next_run(&job.id, Some(next_run_at_ms));
+                armed.push(ArmedJob {
+                    job,
+                    next_run_at_ms,
+                    running: Arc::new(AtomicBool::new(false)),
+                    last_skipped_at_ms: None,
+                });
+            }
             Err(err) => {
+                state.set_next_run(&job.id, None);
                 tracing::warn!("[scheduler] Skipping job {}: bad schedule: {err:#}", job.id)
             }
         }
@@ -144,6 +175,7 @@ fn arm_jobs(config: &SchedulerConfig) -> Vec<ArmedJob> {
 async fn run_due_jobs(
     config: &SchedulerConfig,
     services: &ServiceRegistry,
+    state: &Arc<SchedulerState>,
     armed: &mut [ArmedJob],
 ) {
     let now_ms = Utc::now().timestamp_millis();
@@ -180,34 +212,46 @@ async fn run_due_jobs(
         let job = armed[idx].job.clone();
         let config = Arc::clone(&config);
         let services = services.clone();
+        let state = Arc::clone(state);
         let guard = RunningGuard(Arc::clone(&armed[idx].running));
         tokio::spawn(async move {
             let _guard = guard;
-            execute_job(&config, &services, &job).await;
+            execute_job(&config, &services, &state, &job).await;
         });
     }
 
     // Re-arm every due job forward from now so the next tick lands on the
-    // following occurrence. Runs in flight from this or a prior tick keep
-    // ticking independently in their own tasks.
+    // following occurrence, publishing the new `nextRunAt` into runtime state.
+    // Runs in flight from this or a prior tick keep ticking independently in
+    // their own tasks.
     let after_ms = Utc::now().timestamp_millis();
     for &idx in &due {
         match compute_next_run_at_ms(&armed[idx].job.schedule, after_ms) {
-            Ok(next) => armed[idx].next_run_at_ms = next,
+            Ok(next) => {
+                armed[idx].next_run_at_ms = next;
+                state.set_next_run(&armed[idx].job.id, Some(next));
+            }
             Err(err) => {
                 tracing::warn!(
                     "[scheduler] Re-arm failed for job {}: {err:#}; pushing 1h out",
                     armed[idx].job.id
                 );
                 armed[idx].next_run_at_ms = after_ms + 3_600_000;
+                state.set_next_run(&armed[idx].job.id, Some(after_ms + 3_600_000));
             }
         }
     }
 }
 
 /// Fire one job's runner and write its output file (for both ok and error runs).
-async fn execute_job(config: &SchedulerConfig, services: &ServiceRegistry, job: &ScheduleJob) {
+async fn execute_job(
+    config: &SchedulerConfig,
+    services: &ServiceRegistry,
+    state: &SchedulerState,
+    job: &ScheduleJob,
+) {
     let fired_at = Utc::now();
+    state.mark_running(&job.id, fired_at.timestamp_millis());
     let schedule = format_schedule(&job.schedule);
     let name = if job.name.is_empty() {
         &job.id
@@ -224,6 +268,7 @@ async fn execute_job(config: &SchedulerConfig, services: &ServiceRegistry, job: 
             "[scheduler] Cannot create cron dir for job {}: {err:#}",
             job.id
         );
+        state.mark_finished(&job.id, LastStatus::Error);
         return;
     }
 
@@ -280,6 +325,12 @@ async fn execute_job(config: &SchedulerConfig, services: &ServiceRegistry, job: 
         response,
         error,
     });
+
+    let final_status = match status {
+        RunStatus::Ok => LastStatus::Ok,
+        RunStatus::Error => LastStatus::Error,
+    };
+    state.mark_finished(&job.id, final_status);
 
     match written {
         Ok(path) => tracing::info!("[scheduler] Wrote output {}", path.display()),
@@ -398,11 +449,12 @@ mod tests {
         let (services, spawns) = services_with(StdDuration::from_millis(400));
         let config = test_config(dir.path().to_path_buf(), 60_000);
         let mut jobs = vec![armed("job", None)];
+        let state = Arc::new(SchedulerState::new(vec![]));
 
         // First tick fires the job (now running). The guard is set synchronously
         // inside `run_due_jobs`; the actual runner spawn happens in the spawned
         // task, so give it a beat to reach `runner.spawn`.
-        run_due_jobs(&config, &services, &mut jobs).await;
+        run_due_jobs(&config, &services, &state, &mut jobs).await;
         assert!(jobs[0].running.load(Ordering::SeqCst));
         tokio::time::sleep(StdDuration::from_millis(50)).await;
         assert_eq!(spawns.load(Ordering::SeqCst), 1);
@@ -410,7 +462,7 @@ mod tests {
 
         // Force the job due again while the first run is still in flight.
         jobs[0].next_run_at_ms = Utc::now().timestamp_millis() - 1;
-        run_due_jobs(&config, &services, &mut jobs).await;
+        run_due_jobs(&config, &services, &state, &mut jobs).await;
 
         // Overlap-skip: no new spawn, skip is bookmarked, next run recomputed.
         assert_eq!(spawns.load(Ordering::SeqCst), 1, "second fire skipped");
@@ -432,8 +484,9 @@ mod tests {
         let (services, _spawns) = services_with(StdDuration::from_secs(10));
         let config = test_config(dir.path().to_path_buf(), 150);
         let job = armed("timeout-job", None).job;
+        let state = Arc::new(SchedulerState::new(vec![]));
 
-        execute_job(&config, &services, &job).await;
+        execute_job(&config, &services, &state, &job).await;
 
         let out = latest_output(dir.path(), "timeout-job").expect("output written");
         assert!(out.contains("status: error"), "recorded as error: {out}");
@@ -463,8 +516,9 @@ mod tests {
             .unwrap();
         let config = test_config(dir.path().to_path_buf(), 60_000);
         let mut jobs = vec![armed("job", None)];
+        let state = Arc::new(SchedulerState::new(vec![]));
 
-        run_due_jobs(&config, &services, &mut jobs).await;
+        run_due_jobs(&config, &services, &state, &mut jobs).await;
         // The fire task panics; the drop guard must still clear `running`.
         tokio::time::sleep(StdDuration::from_millis(100)).await;
         assert!(
@@ -479,8 +533,9 @@ mod tests {
         let (services, _spawns) = services_with(StdDuration::from_millis(50));
         let config = test_config(dir.path().to_path_buf(), 60_000);
         let mut jobs = vec![armed("job", None)];
+        let state = Arc::new(SchedulerState::new(vec![]));
         let before = jobs[0].next_run_at_ms;
-        run_due_jobs(&config, &services, &mut jobs).await;
+        run_due_jobs(&config, &services, &state, &mut jobs).await;
         assert!(jobs[0].next_run_at_ms > before, "timer re-armed forward");
     }
 }

@@ -8,21 +8,31 @@
 //! frontmatter. All due jobs at a tick run concurrently; the timer re-arms after
 //! each tick. A malformed jobs file logs one warning and is treated as empty.
 //!
+//! Jobs can also be managed remotely over the host HTTP server under the
+//! `/scheduler` namespace (list/create/update/delete; see [`http`]). Mutations
+//! persist atomically to `cron/jobs.json` and re-arm the timer in-process.
+//!
 //! Reference: aihub `packages/extensions/scheduler`. Parity gaps in this slice
 //! (tracked separately): no per-job model override, no `sessionId` continuity,
-//! no HTTP/CLI, no hot reload, no overlap/timeout guards.
+//! no CLI, no hot reload of external file edits.
 
+mod http;
 mod output;
 mod runner;
 mod schedule;
 mod service;
+mod state;
 mod store;
+
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{bail, Result};
 use host_api::{Extension, RegisterCtx, StartCtx};
 use serde::Deserialize;
 
 use crate::service::SchedulerConfig;
+use crate::state::SchedulerState;
+use crate::store::load_jobs;
 
 /// Default runner kind when `runner.use` is empty, matching the orchestrator's
 /// `runner_service_id` fallback.
@@ -33,10 +43,17 @@ const DEFAULT_MAX_RUN_TIMEOUT_MS: u64 = 3_600_000;
 /// per-job `timeoutMs`.
 pub(crate) const DEFAULT_JOB_TIMEOUT_MS: u64 = 600_000;
 
-pub struct SchedulerExtension;
+#[derive(Default)]
+pub struct SchedulerExtension {
+    /// Shared between the HTTP CRUD router (mounted in `register`) and the timer
+    /// loop (spawned in `start`). Set in `register` only when the extension is
+    /// enabled, so a disabled/absent extension mounts no routes and spawns no
+    /// loop.
+    state: OnceLock<Arc<SchedulerState>>,
+}
 
 pub fn extension() -> Box<dyn Extension> {
-    Box::new(SchedulerExtension)
+    Box::new(SchedulerExtension::default())
 }
 
 /// `extensions.scheduler` config, read once at boot (`extensions.*` is frozen
@@ -96,6 +113,20 @@ struct RunnerSection {
     max_run_timeout_ms: u64,
 }
 
+impl SchedulerExtension {
+    /// Opt-in gate shared by `register` and `start`: the extension is active
+    /// only when the `extensions.scheduler` section is present and not
+    /// `enabled: false`. An absent section means "behave exactly as today".
+    fn is_enabled(&self, config: &host_api::ConfigStore) -> bool {
+        let Some(value) = config.get(self.id()) else {
+            return false;
+        };
+        serde_json::from_value::<SchedulerSettings>(value.clone())
+            .unwrap_or_default()
+            .enabled
+    }
+}
+
 impl Extension for SchedulerExtension {
     fn id(&self) -> &'static str {
         "scheduler"
@@ -110,6 +141,23 @@ impl Extension for SchedulerExtension {
             if let Some(value) = ctx.config.get(self.id()) {
                 SchedulerSettings::parse(value)?;
             }
+            // Same opt-in / kill-switch gate as `start`: an absent section or
+            // `enabled: false` mounts no HTTP routes and builds no state.
+            if !self.is_enabled(&ctx.config) {
+                return Ok(());
+            }
+            let root = ctx.paths.root().to_path_buf();
+            let jobs = load_jobs(&root, |m| tracing::warn!("{m}"));
+            let state = Arc::new(SchedulerState::new(jobs));
+            let _ = self.state.set(Arc::clone(&state));
+
+            let api_state = http::ApiState { state, root };
+            ctx.http.mount(host_api::HttpMount {
+                namespace: "/scheduler".to_string(),
+                router: http::router(api_state),
+                routes: http::routes(),
+                claim_root: false,
+            })?;
             Ok(())
         })
     }
@@ -134,6 +182,17 @@ impl Extension for SchedulerExtension {
                 return Ok(());
             }
 
+            // `register` built and stored the shared state alongside the HTTP
+            // router. Reuse it so the loop and the API observe the same jobs.
+            let state = match self.state.get() {
+                Some(state) => Arc::clone(state),
+                None => {
+                    // HTTP was disabled (e.g. headless): build state from disk.
+                    let jobs = load_jobs(ctx.paths.root(), |m| tracing::warn!("{m}"));
+                    Arc::new(SchedulerState::new(jobs))
+                }
+            };
+
             let root = ctx.paths.root().to_path_buf();
             let runner = read_runner_config(&root);
             let config = SchedulerConfig {
@@ -147,7 +206,7 @@ impl Extension for SchedulerExtension {
             let services = ctx.host.services.clone();
             let shutdown = ctx.shutdown.clone();
             tokio::spawn(async move {
-                service::run(config, services, shutdown).await;
+                service::run(config, services, state, shutdown).await;
             });
             Ok(())
         })

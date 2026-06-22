@@ -337,11 +337,70 @@ A per-job timeout override is set with `timeoutMs` on the job (milliseconds),
 taking precedence over `extensions.scheduler.jobTimeoutMs` and the default.
 
 Parity gaps vs the aihub scheduler (tracked in follow-up slices): no per-job
-model override, no `sessionId` continuity, no HTTP API or CLI, and no hot reload
-(restart after editing `cron/jobs.json`). The captured response is the runner's last assistant-side
-output line, a best-effort proxy for plain runners. Job ids are validated to a
-single safe path segment at load (ids with `/`, `\`, `..`, or a leading dot are
-skipped with a warning) so output paths stay under the agent root.
+model override, no `sessionId` continuity, no CLI, and no hot reload of external
+file edits (the HTTP API re-arms in-process, but editing `cron/jobs.json` by hand
+still needs a restart). The captured response is the runner's last
+assistant-side output line, a best-effort proxy for plain runners. Job ids are
+validated to a single safe path segment at load (ids with `/`, `\`, `..`, or a
+leading dot are skipped with a warning) so output paths stay under the agent
+root.
+
+#### Scheduler HTTP API
+
+When the scheduler is enabled it mounts a job-management API on the host HTTP
+server under the `/scheduler` namespace. These are **single-agent** paths: the
+agent is implied by the host process, so there are no `agentId` segments (unlike
+the aihub multi-agent API). Mutations validate the request, persist the new job
+set atomically to `cron/jobs.json` (temp file + rename), and re-arm the timer
+immediately so a sooner schedule fires without waiting for the current sleep.
+Runtime state (next/last run, last status, running-for) lives in memory and is
+never written to disk; it is merged into list/create/update responses.
+
+| Method   | Path                   | Description                                                                  |
+| -------- | ---------------------- | ---------------------------------------------------------------------------- |
+| `GET`    | `/scheduler/jobs`      | List jobs, each merged with runtime state.                                   |
+| `POST`   | `/scheduler/jobs`      | Create a job. The id is generated server-side; `enabled` defaults to `true`. Returns `201` with the new job. |
+| `PATCH`  | `/scheduler/jobs/{id}` | Patch any of `name`, `enabled`, `schedule`, `payload`, `timeoutMs`. Re-arms when the schedule changes. |
+| `DELETE` | `/scheduler/jobs/{id}` | Remove a job. Returns `204`.                                                 |
+
+Request/response job shape (runtime fields are read-only and present only on
+responses):
+
+```jsonc
+{
+  "id": "job-1750000000000",      // server-generated on create
+  "name": "Morning digest",
+  "enabled": true,                  // defaults to true on create
+  "schedule": { "cron": "0 8 * * *", "tz": "Europe/Paris", "startAt": "2026-05-19T07:00:00.000Z" },
+  "payload": { "message": "Summarize overnight events." },
+  "timeoutMs": 60000,              // optional; falls back to runner.max_run_timeout_ms
+  // runtime-only (responses):
+  "nextRunAtMs": 1750000000000,
+  "lastRunAtMs": null,
+  "lastStatus": null,             // "ok" | "error" | null
+  "runningForMs": null
+}
+```
+
+Validation: a bad cron expression, a missing or unknown `tz`, an out-of-range
+`startAt`, or an empty `payload.message` returns `400` with an `{ "error": ... }`
+body; an unknown job id on update/delete returns `404`.
+
+Example lifecycle with `curl` (replace `$PORT` with the agent's bound HTTP port):
+
+```bash
+# Create
+curl -sS -XPOST localhost:$PORT/scheduler/jobs \
+  -H content-type:application/json \
+  -d '{"name":"digest","schedule":{"cron":"0 8 * * *","tz":"UTC"},"payload":{"message":"hi"}}'
+# List
+curl -sS localhost:$PORT/scheduler/jobs
+# Update (patch)
+curl -sS -XPATCH localhost:$PORT/scheduler/jobs/<id> \
+  -H content-type:application/json -d '{"enabled":false}'
+# Delete
+curl -sS -XDELETE localhost:$PORT/scheduler/jobs/<id>
+```
 
 ## Rules and invariants
 

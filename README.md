@@ -211,8 +211,13 @@ readable/writable. Because `extensions.*` config is frozen after boot, flipping
 the switch (or `jobTimeoutMs`) takes effect only after a host restart. Invalid
 `extensions.scheduler` config fails boot with a clean error naming the problem.
 
+Jobs can also be managed remotely over the host HTTP server under `/scheduler`
+(list/create/update/delete); see
+[docs/extensions.md](docs/extensions.md#scheduler-http-api). A create/update/delete
+re-arms the timer in-process so a sooner schedule fires immediately.
+
 Parity gaps vs the aihub scheduler (later slices): no per-job model override, no
-`sessionId`, no HTTP API or CLI, no hot reload of `cron/jobs.json`. See
+`sessionId`, no CLI, no hot reload of `cron/jobs.json`. See
 [docs/extensions.md](docs/extensions.md#scheduler) for the job schema and output
 format.
 
