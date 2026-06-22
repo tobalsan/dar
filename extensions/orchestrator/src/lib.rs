@@ -1618,6 +1618,9 @@ impl Orchestrator {
                 pid: 0,
                 worker_id: Some("orchestrator"),
                 started_at,
+                runner: Some(&self.effective_cfg.runner_kind),
+                model: self.effective_cfg.model.as_deref(),
+                provider: self.effective_cfg.provider.as_deref(),
             }) {
                 tracing::warn!(issue = %issue.identifier, "insert_run (hook_failed) SQLite write failed: {e:#}");
             }
@@ -1686,6 +1689,9 @@ impl Orchestrator {
                     pid,
                     worker_id: None,
                     started_at,
+                    runner: Some(&self.effective_cfg.runner_kind),
+                    model: self.effective_cfg.model.as_deref(),
+                    provider: self.effective_cfg.provider.as_deref(),
                 }) {
                     tracing::warn!(issue = %issue.identifier, "insert_run SQLite write failed: {e:#}");
                 }
@@ -1800,6 +1806,9 @@ impl Orchestrator {
             pid: 0,
             worker_id: Some("orchestrator"),
             started_at,
+            runner: Some(&self.effective_cfg.runner_kind),
+            model: self.effective_cfg.model.as_deref(),
+            provider: self.effective_cfg.provider.as_deref(),
         }) {
             tracing::warn!(issue = %issue.identifier, "insert_run (dispatch_failed) SQLite write failed: {e:#}");
         }
@@ -2082,6 +2091,9 @@ impl Orchestrator {
             pid: 0,
             worker_id: Some("orchestrator"),
             started_at: now,
+            runner: Some(&self.effective_cfg.runner_kind),
+            model: self.effective_cfg.model.as_deref(),
+            provider: self.effective_cfg.provider.as_deref(),
         }) {
             tracing::warn!(issue = %issue.identifier, "insert park_barrier run failed: {e:#}");
             return;
@@ -2525,6 +2537,9 @@ fn api_run_row(row: store::RunRow) -> orchestrator_api::RunRow {
         outcome: row.outcome,
         exit_code: row.exit_code,
         process_alive: row.process_alive,
+        runner: row.runner,
+        model: row.model,
+        provider: row.provider,
     }
 }
 
@@ -3345,6 +3360,9 @@ dashboard:
                 pid: 42,
                 worker_id: None,
                 started_at,
+                runner: None,
+                model: None,
+                provider: None,
             })
             .unwrap();
         let claim_id = store
@@ -3497,6 +3515,9 @@ dashboard:
                 pid: 42,
                 worker_id: None,
                 started_at,
+                runner: None,
+                model: None,
+                provider: None,
             })
             .unwrap();
         orchestrator.slots.push(RunSlot {
@@ -3574,6 +3595,9 @@ dashboard:
                 pid: 42,
                 worker_id: None,
                 started_at,
+                runner: None,
+                model: None,
+                provider: None,
             })
             .unwrap();
         orchestrator.slots.push(RunSlot {
@@ -3658,6 +3682,9 @@ dashboard:
                 pid: 42,
                 worker_id: None,
                 started_at,
+                runner: None,
+                model: None,
+                provider: None,
             })
             .unwrap();
         let claim_id = store
@@ -3817,6 +3844,9 @@ dashboard:
                 pid: 42,
                 worker_id: None,
                 started_at,
+                runner: None,
+                model: None,
+                provider: None,
             })
             .unwrap();
         orchestrator.slots.push(RunSlot {
@@ -3878,6 +3908,9 @@ dashboard:
                     pid: 42,
                     worker_id: None,
                     started_at,
+                    runner: None,
+                    model: None,
+                    provider: None,
                 })
                 .unwrap();
             store
@@ -3971,6 +4004,9 @@ dashboard:
                 pid: 42,
                 worker_id: None,
                 started_at,
+                runner: None,
+                model: None,
+                provider: None,
             })
             .unwrap();
         store
@@ -4535,6 +4571,9 @@ dashboard:
                 pid: 42,
                 worker_id: None,
                 started_at,
+                runner: None,
+                model: None,
+                provider: None,
             })
             .unwrap();
         let (handle, harness) = turn_handle_for_test(42);
@@ -4714,6 +4753,9 @@ dashboard:
                     pid: 42,
                     worker_id: None,
                     started_at,
+                    runner: None,
+                    model: None,
+                    provider: None,
                 })
                 .unwrap();
             store

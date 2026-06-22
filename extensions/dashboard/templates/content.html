@@ -11,6 +11,10 @@
     <button class="danger" hx-post="/control/stop" hx-swap="none">Stop</button>
   </div>
   <div class="folder">{{ agent.id }} · {{ agent.folder }}</div>
+  <div class="runner">
+    <span class="runner-pill">{% if agent.runner.is_empty() %}—{% else %}{{ agent.runner }}{% endif %}</span>
+    <span class="runner-model">{{ agent_model }}</span>
+  </div>
 </header>
 
 <main>
