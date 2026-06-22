@@ -4,6 +4,14 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use tokio::sync::oneshot;
 
+/// Default runner kind when `runner.use` is empty or blank.
+pub const DEFAULT_RUNNER_KIND: &str = "pi";
+
+/// Default per-run timeout (1 hour) used when `runner.max_run_timeout_ms` is
+/// absent from `agent.yaml`. Each extension owns its own 0-handling policy
+/// (orchestrator rejects 0 at boot; scheduler silently coerces 0 to this value).
+pub const DEFAULT_MAX_RUN_TIMEOUT_MS: u64 = 3_600_000;
+
 pub const AGENT_ISSUE_IDENTIFIER: &str = "AGENT_ISSUE_IDENTIFIER";
 pub const AGENT_ISSUE_ID: &str = "AGENT_ISSUE_ID";
 pub const AGENT_RUN_ID: &str = "AGENT_RUN_ID";

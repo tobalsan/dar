@@ -28,6 +28,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use cap_runner::DEFAULT_RUNNER_KIND;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{AgentConfig, StringOrVec};
@@ -403,7 +404,7 @@ impl EffectiveLoopConfig {
         let runner_override = a.and_then(|a| a.effective_runner());
         let runner_kind = runner_override.map(str::to_string).unwrap_or_else(|| {
             if base.runner.use_.trim().is_empty() {
-                "pi".to_string()
+                DEFAULT_RUNNER_KIND.to_string()
             } else {
                 base.runner.use_.clone()
             }

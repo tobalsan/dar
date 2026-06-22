@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use cap_runner::DEFAULT_MAX_RUN_TIMEOUT_MS;
 use serde::{Deserialize, Serialize};
 
 /// A YAML scalar or list, normalised to `Vec<String>`. Used by tracker `label`.
@@ -128,7 +129,7 @@ pub struct RunnerConfig {
 }
 
 fn default_turn_timeout_ms() -> u64 {
-    60 * 60 * 1000
+    DEFAULT_MAX_RUN_TIMEOUT_MS
 }
 
 fn default_max_turns() -> u32 {
