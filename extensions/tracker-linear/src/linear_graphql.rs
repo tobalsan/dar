@@ -106,6 +106,9 @@ impl LinearGraphqlTool {
                 "additionalProperties": false,
             }),
         )
+        // GraphQL documents may be queries (read) or mutations (write); mark
+        // both so logs flag a potential state change.
+        .with_access(true, true)
     }
 }
 

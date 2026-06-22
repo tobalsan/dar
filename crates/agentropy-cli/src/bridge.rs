@@ -24,7 +24,7 @@ use anyhow::{Context, Result};
 use host_api::Extension;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tool_registry::{ToolRegistryHandle, TOOL_REGISTRY_SERVICE};
+use tool_registry::{Redactor, ToolCallObservation, ToolRegistryHandle, TOOL_REGISTRY_SERVICE};
 
 /// MCP protocol version this bridge advertises.
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -36,22 +36,29 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 pub async fn build_registry(
     root: &Path,
     plugins: Vec<Arc<dyn Extension>>,
-) -> Result<Arc<dyn ToolRegistryHandle>> {
+) -> Result<(Arc<dyn ToolRegistryHandle>, Redactor)> {
     // Load the agent's secrets into this process so executors can use them.
-    orchestrator::dotenv::load_agent_env(root)
+    // Build a redactor from exactly those `.env`-loaded keys so the same
+    // secrets `runner-core::scrub_loaded_env` strips from child spawns are also
+    // masked out of anything this bridge logs (args/results) — extending the
+    // scrub guarantee to the bridge process.
+    let report = orchestrator::dotenv::load_agent_env(root)
         .with_context(|| format!("loading .env for {}", root.display()))?;
+    let redactor = Redactor::from_env_keys(report.loaded);
     let services = crate::plugin_services(root, plugins).await?;
-    services
+    let registry = services
         .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
-        .context("tool registry service not registered (tool-registry-host extension missing?)")
+        .context("tool registry service not registered (tool-registry-host extension missing?)")?;
+    Ok((registry, redactor))
 }
 
 /// Entry point for the `__mcp-bridge` subcommand: build the registry and serve
 /// MCP over stdin/stdout until EOF.
 pub async fn serve(root: &Path, plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
-    let registry = build_registry(root, plugins).await?;
+    let (registry, redactor) = build_registry(root, plugins).await?;
     serve_stdio(
         registry,
+        redactor,
         tokio::io::stdin(),
         tokio::io::stdout(),
     )
@@ -62,6 +69,7 @@ pub async fn serve(root: &Path, plugins: Vec<Arc<dyn Extension>>) -> Result<()> 
 /// integration tests can drive it over pipes).
 pub async fn serve_stdio<R, W>(
     registry: Arc<dyn ToolRegistryHandle>,
+    redactor: Redactor,
     input: R,
     mut output: W,
 ) -> Result<()>
@@ -82,7 +90,7 @@ where
                 continue;
             }
         };
-        if let Some(response) = handle_message(&registry, &request).await {
+        if let Some(response) = handle_message(&registry, &redactor, &request).await {
             write_message(&mut output, &response).await?;
         }
     }
@@ -93,6 +101,7 @@ where
 /// for notifications (no `id`).
 async fn handle_message(
     registry: &Arc<dyn ToolRegistryHandle>,
+    redactor: &Redactor,
     request: &Value,
 ) -> Option<Value> {
     let method = request.get("method").and_then(Value::as_str);
@@ -113,7 +122,7 @@ async fn handle_message(
             let tools: Vec<Value> = registry.list().iter().map(|s| s.to_mcp_tool()).collect();
             result(id, json!({ "tools": tools }))
         }
-        Some("tools/call") => handle_tools_call(registry, id, request).await,
+        Some("tools/call") => handle_tools_call(registry, redactor, id, request).await,
         Some("ping") => result(id, json!({})),
         _ => error(id, -32601, "method not found"),
     };
@@ -122,6 +131,7 @@ async fn handle_message(
 
 async fn handle_tools_call(
     registry: &Arc<dyn ToolRegistryHandle>,
+    redactor: &Redactor,
     id: Value,
     request: &Value,
 ) -> Value {
@@ -138,9 +148,20 @@ async fn handle_tools_call(
         .unwrap_or_else(|| json!({}));
 
     // A failed tool is a *result* (`isError: true`), not a JSON-RPC error — it
-    // returns to the agent so the run continues.
-    let outcome = registry.dispatch(name, args).await;
+    // returns to the agent so the run continues. Dispatch through the observed
+    // path so each call emits a redacted+truncated runtime log carrying tool
+    // name, status, duration, and read/write metadata — no raw payload dumps.
+    let (outcome, observation) = registry.dispatch_observed(name, args, redactor).await;
+    emit_observation(&observation);
     result(id, outcome.to_mcp_result())
+}
+
+/// Emit a tool-call observation as a runtime log line. stdout is the MCP
+/// JSON-RPC channel, so the human-readable line goes to stderr, which the host
+/// captures as the MCP server's log stream. The line is already redacted and
+/// truncated by `dispatch_observed`, so no host secret or raw payload appears.
+fn emit_observation(observation: &ToolCallObservation) {
+    eprintln!("[agentropy:tool] {}", observation.log_line());
 }
 
 fn result(id: Value, result: Value) -> Value {
@@ -210,7 +231,7 @@ mod tests {
             input.push('\n');
         }
         let mut output: Vec<u8> = Vec::new();
-        serve_stdio(registry, input.as_bytes(), &mut output)
+        serve_stdio(registry, Redactor::default(), input.as_bytes(), &mut output)
             .await
             .unwrap();
         String::from_utf8(output)
@@ -279,10 +300,63 @@ mod tests {
         let registry = registry_with_echo();
         let input = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string();
         let mut output: Vec<u8> = Vec::new();
-        serve_stdio(registry, format!("{input}\n").as_bytes(), &mut output)
-            .await
-            .unwrap();
+        serve_stdio(
+            registry,
+            Redactor::default(),
+            format!("{input}\n").as_bytes(),
+            &mut output,
+        )
+        .await
+        .unwrap();
         assert!(output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tools_list_surfaces_read_write_metadata() {
+        // echo_upper carries no access flags -> readOnlyHint false, destructive false.
+        let out = roundtrip(&[json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/list" })]).await;
+        let tool = &out[0]["result"]["tools"][0];
+        assert!(tool["annotations"].is_object());
+        assert_eq!(tool["annotations"]["readOnlyHint"], false);
+        assert_eq!(tool["annotations"]["destructiveHint"], false);
+    }
+
+    struct LeaksSecret(String);
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for LeaksSecret {
+        async fn execute(&self, _args: Value) -> Result<ToolOutcome> {
+            Ok(ToolOutcome::ok(format!("used token {} ok", self.0)))
+        }
+    }
+
+    #[tokio::test]
+    async fn observed_dispatch_redacts_secret_in_args_and_result() {
+        let secret = "shhh-bridge-secret-value-123".to_string();
+        let reg = ToolRegistry::new();
+        reg.register_tool(
+            ToolSpec::new("leaky", "desc", json!({ "type": "object" })).writes(),
+            Arc::new(LeaksSecret(secret.clone())),
+        )
+        .unwrap();
+        let registry: Arc<dyn ToolRegistryHandle> = Arc::new(reg);
+        let redactor = Redactor::from_secret_values([secret.clone()]);
+
+        let (outcome, observation) = registry
+            .dispatch_observed("leaky", json!({ "token": secret.clone() }), &redactor)
+            .await;
+
+        // Agent still sees the real result; observation is a side channel.
+        assert!(outcome.text.contains(&secret));
+        // The log-facing summary never contains the secret.
+        assert!(!observation.args_summary.contains(&secret));
+        assert!(!observation.result_summary.contains(&secret));
+        // Required fields present.
+        let line = observation.log_line();
+        assert!(line.contains("tool=leaky"));
+        assert!(line.contains("status=ok"));
+        assert!(line.contains("duration_ms="));
+        assert!(line.contains("access=write"));
     }
 
     #[tokio::test]
@@ -293,7 +367,7 @@ mod tests {
             json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/list" })
         );
         let mut output: Vec<u8> = Vec::new();
-        serve_stdio(registry, input.as_bytes(), &mut output)
+        serve_stdio(registry, Redactor::default(), input.as_bytes(), &mut output)
             .await
             .unwrap();
         let lines: Vec<Value> = String::from_utf8(output)

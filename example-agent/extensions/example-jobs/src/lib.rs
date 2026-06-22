@@ -117,7 +117,8 @@ pub fn register_into(registry: &dyn ToolRegistryHandle, path: PathBuf) -> Result
                 "required": ["id", "name", "schedule", "command"],
                 "additionalProperties": false,
             }),
-        ),
+        )
+        .with_access(false, true),
         Arc::new(JobsCreate {
             store: Arc::clone(&store),
         }),
@@ -140,7 +141,8 @@ pub fn register_into(registry: &dyn ToolRegistryHandle, path: PathBuf) -> Result
                 "required": ["id"],
                 "additionalProperties": false,
             }),
-        ),
+        )
+        .with_access(true, true),
         Arc::new(JobsEdit {
             store: Arc::clone(&store),
         }),
@@ -156,7 +158,8 @@ pub fn register_into(registry: &dyn ToolRegistryHandle, path: PathBuf) -> Result
                 "properties": {},
                 "additionalProperties": false,
             }),
-        ),
+        )
+        .reads(),
         Arc::new(JobsList {
             store: Arc::clone(&store),
         }),
