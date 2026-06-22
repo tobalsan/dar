@@ -14,7 +14,7 @@
 //!
 //! Reference: aihub `packages/extensions/scheduler`. Parity gaps in this slice
 //! (tracked separately): no per-job model override, no `sessionId` continuity,
-//! no CLI, no hot reload of external file edits, no overlap/timeout guards.
+//! no CLI, no hot reload of external file edits.
 
 mod http;
 mod output;
@@ -26,7 +26,7 @@ mod store;
 
 use std::sync::{Arc, OnceLock};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use host_api::{Extension, RegisterCtx, StartCtx};
 use serde::Deserialize;
 
@@ -38,6 +38,10 @@ use crate::store::load_jobs;
 /// `runner_service_id` fallback.
 const DEFAULT_RUNNER_KIND: &str = "pi";
 const DEFAULT_MAX_RUN_TIMEOUT_MS: u64 = 3_600_000;
+/// Default per-job execution timeout (10 minutes), matching aihub's scheduler
+/// default. Overridable by `extensions.scheduler.jobTimeoutMs` and then by a
+/// per-job `timeoutMs`.
+pub(crate) const DEFAULT_JOB_TIMEOUT_MS: u64 = 600_000;
 
 #[derive(Default)]
 pub struct SchedulerExtension {
@@ -52,17 +56,41 @@ pub fn extension() -> Box<dyn Extension> {
     Box::new(SchedulerExtension::default())
 }
 
-/// `extensions.scheduler` config. `enabled: false` is a runtime kill switch:
-/// the extension still loads, but no timer is armed and no jobs fire.
+/// `extensions.scheduler` config, read once at boot (`extensions.*` is frozen
+/// after boot, so this is a boot-time switch — changing it requires a restart).
+///
+/// `enabled: false` is the kill switch: the extension still loads and the jobs
+/// file stays readable/writable, but no timer is armed and no job fires.
+/// `jobTimeoutMs` sets the per-run timeout default (overridable per job via
+/// `timeoutMs`).
 #[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct SchedulerSettings {
     enabled: bool,
+    #[serde(rename = "jobTimeoutMs")]
+    job_timeout_ms: Option<u64>,
 }
 
 impl Default for SchedulerSettings {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            job_timeout_ms: None,
+        }
+    }
+}
+
+impl SchedulerSettings {
+    /// Parse the `extensions.scheduler` section, naming the offending field on
+    /// failure so a boot error points at the problem. Rejects a zero
+    /// `jobTimeoutMs` (a zero timeout would kill every run instantly).
+    fn parse(value: &serde_json::Value) -> Result<Self> {
+        let settings: SchedulerSettings = serde_json::from_value(value.clone())
+            .map_err(|e| anyhow::anyhow!("invalid extensions.scheduler config: {e}"))?;
+        if settings.job_timeout_ms == Some(0) {
+            bail!("invalid extensions.scheduler config: jobTimeoutMs must be greater than 0");
+        }
+        Ok(settings)
     }
 }
 
@@ -106,8 +134,15 @@ impl Extension for SchedulerExtension {
 
     fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // Validate `extensions.scheduler` at boot so misconfiguration fails
+            // startup with a clean, named error rather than at first fire. The
+            // section is optional (absent => extension behaves as today); only
+            // a present-but-invalid section is an error.
+            if let Some(value) = ctx.config.get(self.id()) {
+                SchedulerSettings::parse(value)?;
+            }
             // Same opt-in / kill-switch gate as `start`: an absent section or
-            // `enabled: false` mounts no HTTP routes.
+            // `enabled: false` mounts no HTTP routes and builds no state.
             if !self.is_enabled(&ctx.config) {
                 return Ok(());
             }
@@ -135,7 +170,14 @@ impl Extension for SchedulerExtension {
             // shipped dist binary always links the crate, so we also gate at
             // runtime: an absent section means "behave exactly as today" (do
             // not arm a timer, do not read cron/jobs.json).
-            if !self.is_enabled(&ctx.config) {
+            let Some(value) = ctx.config.get(self.id()) else {
+                return Ok(());
+            };
+            // Already validated in `register` (boot fails on bad config), so
+            // this parse cannot fail; propagate rather than silently default,
+            // which would risk re-enabling a kill-switched scheduler.
+            let settings = SchedulerSettings::parse(value)?;
+            if !settings.enabled {
                 tracing::info!("[scheduler] Disabled via extensions.scheduler.enabled=false");
                 return Ok(());
             }
@@ -158,6 +200,7 @@ impl Extension for SchedulerExtension {
                 runner_kind: runner.0,
                 runner_command: runner.1,
                 max_run_timeout_ms: runner.2,
+                job_timeout_ms: settings.job_timeout_ms.unwrap_or(DEFAULT_JOB_TIMEOUT_MS),
             };
 
             let services = ctx.host.services.clone();
@@ -228,13 +271,52 @@ mod tests {
 
     #[test]
     fn settings_default_enabled_true() {
-        assert!(SchedulerSettings::default().enabled);
+        let d = SchedulerSettings::default();
+        assert!(d.enabled);
+        assert_eq!(d.job_timeout_ms, None);
     }
 
     #[test]
     fn settings_parse_kill_switch() {
-        let s: SchedulerSettings =
-            serde_json::from_value(serde_json::json!({ "enabled": false })).unwrap();
+        let s = SchedulerSettings::parse(&serde_json::json!({ "enabled": false })).unwrap();
         assert!(!s.enabled);
+    }
+
+    #[test]
+    fn settings_parse_job_timeout_ms() {
+        let s = SchedulerSettings::parse(&serde_json::json!({ "jobTimeoutMs": 120000 })).unwrap();
+        assert!(s.enabled);
+        assert_eq!(s.job_timeout_ms, Some(120000));
+    }
+
+    #[test]
+    fn settings_parse_empty_section_is_defaults() {
+        let s = SchedulerSettings::parse(&serde_json::json!({})).unwrap();
+        assert!(s.enabled);
+        assert_eq!(s.job_timeout_ms, None);
+    }
+
+    #[test]
+    fn settings_parse_rejects_unknown_field() {
+        let err = SchedulerSettings::parse(&serde_json::json!({ "jobTimoutMs": 5 }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("extensions.scheduler"), "named error: {err}");
+    }
+
+    #[test]
+    fn settings_parse_rejects_zero_timeout() {
+        let err = SchedulerSettings::parse(&serde_json::json!({ "jobTimeoutMs": 0 }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("jobTimeoutMs"), "named error: {err}");
+    }
+
+    #[test]
+    fn settings_parse_rejects_wrong_type() {
+        let err = SchedulerSettings::parse(&serde_json::json!({ "enabled": "yes" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("extensions.scheduler"), "named error: {err}");
     }
 }

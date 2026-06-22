@@ -101,6 +101,16 @@ pub struct RunRow {
     pub outcome: Option<String>,
     pub exit_code: Option<i32>,
     pub process_alive: bool,
+    /// Runner kind this run was dispatched with (e.g. `pi`, `opencode`,
+    /// `codex`, `fake`). Persisted per-run for historical fidelity.
+    #[serde(default)]
+    pub runner: Option<String>,
+    /// Model this run was dispatched with, or `None` when unset in config.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Model provider this run was dispatched with (multi-provider runners only).
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

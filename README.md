@@ -196,13 +196,28 @@ fires per-agent cron jobs from `cron/jobs.json` (cron + IANA timezone, optional
 
 ```yaml
 extensions:
-  scheduler: {}          # presence selects it; `enabled: false` = runtime kill switch
+  scheduler:
+    enabled: true        # presence selects it; `enabled: false` = boot-time kill switch
+    jobTimeoutMs: 600000 # default per-run timeout (10 min); per-job `timeoutMs` overrides
 ```
 
+Execution guards (the no-drift parity semantics): a scheduled fire of a job that
+is still running is skipped (and bookmarked) with its next run recomputed; every
+run is bounded by a timeout (`extensions.scheduler.jobTimeoutMs`, default 10
+minutes, overridable per job via `timeoutMs`) that kills the runner child and
+records an error output. `extensions.scheduler.enabled: false` is a **boot-time**
+kill switch: no timers arm and nothing fires, but `cron/jobs.json` stays
+readable/writable. Because `extensions.*` config is frozen after boot, flipping
+the switch (or `jobTimeoutMs`) takes effect only after a host restart. Invalid
+`extensions.scheduler` config fails boot with a clean error naming the problem.
+
 Jobs can also be managed remotely over the host HTTP server under `/scheduler`
-(list/create/update/delete); see [docs/extensions.md](docs/extensions.md#scheduler-http-api).
+(list/create/update/delete); see
+[docs/extensions.md](docs/extensions.md#scheduler-http-api). A create/update/delete
+re-arms the timer in-process so a sooner schedule fires immediately.
+
 Parity gaps vs the aihub scheduler (later slices): no per-job model override, no
-`sessionId`, no CLI, no hot reload of file edits, no overlap/timeout guards. See
+`sessionId`, no CLI, no hot reload of `cron/jobs.json`. See
 [docs/extensions.md](docs/extensions.md#scheduler) for the job schema and output
 format.
 
@@ -477,8 +492,12 @@ Create a file `hello.md` in this workspace with the text "hello from agentropy".
 
 Set `tracker.use: linear` (or `tracker.kind: linear` in WORKFLOW.md). Requires:
 
-- `LINEAR_API_KEY` environment variable with a valid Linear API key, either in
-  the process environment or in `<agent-folder>/.env`.
+- A Linear auth token, either in the process environment or in
+  `<agent-folder>/.env`. Two token types are supported via the same header:
+  - `LINEAR_API_KEY` — a personal API key, sent raw (`Authorization: <key>`).
+  - `LINEAR_OAUTH_TOKEN` — an OAuth app access token (`actor=app`), sent as
+    `Authorization: Bearer <token>`. App tokens are long-lived and don't
+    consume a workspace seat. When both are set, `LINEAR_OAUTH_TOKEN` wins.
 - `tracker.project_slug` set to the Linear project's slugId.
 
 The Linear tracker polls via GraphQL, scopes to the configured project, and
@@ -645,7 +664,9 @@ Prerequisites: `cargo`/`rustc` on PATH, plus the `cargo-agentropy` helper
                             # (TUI chat backend follows runner.use)
    ```
 
-   The Linear tracker needs `LINEAR_API_KEY` in `~/agents/worker/.env`.
+   The Linear tracker needs `LINEAR_API_KEY` (personal API key) or
+   `LINEAR_OAUTH_TOKEN` (OAuth app token, sent with a `Bearer ` prefix) in
+   `~/agents/worker/.env`.
 
 2. Scaffold the prompt and one local extension (run from inside the folder):
 
