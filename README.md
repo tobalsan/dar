@@ -187,6 +187,23 @@ extensions:
     port: 7878
 ```
 
+Some stock extensions are **opt-in**: in an agent-specific build they link only
+when their `extensions.<id>` section is present, so a binary without the section
+behaves exactly as before. The **`scheduler`** extension is opt-in this way — it
+fires per-agent cron jobs from `cron/jobs.json` (cron + IANA timezone, optional
+`startAt`) on the agent's default runner and writes each run to
+`cron/output/<job_id>/<timestamp>.md`:
+
+```yaml
+extensions:
+  scheduler: {}          # presence selects it; `enabled: false` = runtime kill switch
+```
+
+Parity gaps vs the aihub scheduler (later slices): no per-job model override, no
+`sessionId`, no HTTP API or CLI, no hot reload, no overlap/timeout guards. See
+[docs/extensions.md](docs/extensions.md#scheduler) for the job schema and output
+format.
+
 See [Configuration](#configuration-agentyaml) for the full `agent.yaml` reference.
 
 ## CLI

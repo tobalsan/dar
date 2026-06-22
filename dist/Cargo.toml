@@ -29,6 +29,7 @@ runner-codex = { path = "../extensions/runner-codex" }
 runner-cli = { path = "../extensions/runner-cli" }
 runner-fake = { path = "../extensions/runner-fake" }
 runner-opencode = { path = "../extensions/runner-opencode" }
+scheduler = { path = "../extensions/scheduler" }
 chat-opencode = { path = "../extensions/chat-opencode" }
 chat-pi = { path = "../extensions/chat-pi" }
 chat-codex = { path = "../extensions/chat-codex" }

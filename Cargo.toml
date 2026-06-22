@@ -25,6 +25,7 @@ members = [
     "extensions/runner-fake",
     "extensions/runner-opencode",
     "extensions/runner-pi",
+    "extensions/scheduler",
     "extensions/tool-registry-host",
     "extensions/tracker-files",
     "extensions/tracker-linear",

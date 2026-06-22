@@ -48,6 +48,12 @@ extensions:
   example-jobs:
     path: ./jobs.json
 
+  # Scheduler extension (ALG-219). Presence of this key opts the agent into the
+  # scheduler at build time. It loads cron/jobs.json on boot and fires the
+  # default runner on schedule, writing cron/output/<job_id>/<ts>.md.
+  # `enabled: false` is a runtime kill switch (still loads, never fires).
+  scheduler: {}
+
 # extensions:
 #   tui:
 #     chat:

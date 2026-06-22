@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "minutely-ping",
+      "name": "Minutely ping",
+      "enabled": true,
+      "schedule": { "cron": "* * * * *", "tz": "UTC" },
+      "payload": { "message": "Scheduler demo: say hello and report the time." }
+    }
+  ]
+}
