@@ -48,6 +48,12 @@ pub struct NewRun<'a> {
     pub pid: u32,
     pub worker_id: Option<&'a str>,
     pub started_at: DateTime<Utc>,
+    /// Runner kind this run is dispatched with (e.g. `pi`, `codex`, `fake`).
+    pub runner: Option<&'a str>,
+    /// Model this run is dispatched with (None = unset in config).
+    pub model: Option<&'a str>,
+    /// Model provider this run is dispatched with (None = none/single-provider).
+    pub provider: Option<&'a str>,
 }
 
 /// Fields written when a run finishes (outcome, timing, exit code).
@@ -76,6 +82,9 @@ pub struct RunRow {
     pub outcome: Option<String>,
     pub exit_code: Option<i32>,
     pub process_alive: bool,
+    pub runner: Option<String>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
 }
 
 /// Parameters for inserting one event (child stdout/stderr or lifecycle event).
@@ -164,7 +173,10 @@ impl Store {
                 finished_at     TEXT,
                 outcome         TEXT,
                 exit_code       INTEGER,
-                process_alive   INTEGER NOT NULL DEFAULT 1
+                process_alive   INTEGER NOT NULL DEFAULT 1,
+                runner          TEXT,
+                model           TEXT,
+                provider        TEXT
             );
             CREATE INDEX IF NOT EXISTS runs_identifier ON runs(issue_identifier);
             CREATE INDEX IF NOT EXISTS runs_started_at ON runs(started_at);
@@ -214,6 +226,22 @@ impl Store {
             )
             .context("adding claims.issue_id")?;
         }
+        // Add per-run runner/model/provider columns on pre-existing DBs so
+        // historical rows simply carry NULLs (rendered as defaults).
+        let run_cols = conn
+            .prepare("PRAGMA table_info(runs)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for (col, sql) in [
+            ("runner", "ALTER TABLE runs ADD COLUMN runner TEXT"),
+            ("model", "ALTER TABLE runs ADD COLUMN model TEXT"),
+            ("provider", "ALTER TABLE runs ADD COLUMN provider TEXT"),
+        ] {
+            if !run_cols.iter().any(|name| name == col) {
+                conn.execute(sql, [])
+                    .with_context(|| format!("adding runs.{col}"))?;
+            }
+        }
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS claims_active_issue_id
              ON claims(issue_id) WHERE released_at IS NULL AND issue_id <> ''",
@@ -232,8 +260,9 @@ impl Store {
             "INSERT OR IGNORE INTO runs
              (run_id, issue_id, issue_identifier, workspace,
               profile_json, workflow_path, workflow_sha,
-              pid, worker_id, started_at, process_alive)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1)",
+              pid, worker_id, started_at, process_alive,
+              runner, model, provider)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,?11,?12,?13)",
             params![
                 r.run_id,
                 r.issue_id,
@@ -245,6 +274,9 @@ impl Store {
                 r.pid as i64,
                 r.worker_id,
                 r.started_at.to_rfc3339(),
+                r.runner,
+                r.model,
+                r.provider,
             ],
         )
         .context("insert_run")?;
@@ -392,7 +424,8 @@ impl Store {
             "SELECT run_id, issue_id, issue_identifier, workspace,
                     profile_json, workflow_path, workflow_sha,
                     pid, worker_id, started_at, finished_at,
-                    outcome, exit_code, process_alive
+                    outcome, exit_code, process_alive,
+                    runner, model, provider
              FROM runs
              ORDER BY started_at DESC
              LIMIT ?1 OFFSET ?2",
@@ -414,6 +447,9 @@ impl Store {
                 outcome: row.get(11)?,
                 exit_code: row.get(12)?,
                 process_alive: row.get::<_, i64>(13).unwrap_or(0) != 0,
+                runner: row.get(14)?,
+                model: row.get(15)?,
+                provider: row.get(16)?,
             })
         })?;
 
@@ -434,7 +470,8 @@ impl Store {
             "SELECT run_id, issue_id, issue_identifier, workspace,
                     profile_json, workflow_path, workflow_sha,
                     pid, worker_id, started_at, finished_at,
-                    outcome, exit_code, process_alive
+                    outcome, exit_code, process_alive,
+                    runner, model, provider
              FROM runs
              WHERE run_id = ?1",
         )?;
@@ -454,6 +491,9 @@ impl Store {
                 outcome: row.get(11)?,
                 exit_code: row.get(12)?,
                 process_alive: row.get::<_, i64>(13).unwrap_or(0) != 0,
+                runner: row.get(14)?,
+                model: row.get(15)?,
+                provider: row.get(16)?,
             })
         })?;
         rows.next().transpose().context("get_run")
@@ -763,6 +803,57 @@ mod tests {
     }
 
     #[test]
+    fn insert_run_persists_runner_model_provider() {
+        let store = open_tmp();
+        let now = Utc::now();
+        let run_id = new_run_id("TEST-RM", &now);
+        store
+            .insert_run(&NewRun {
+                run_id: &run_id,
+                issue_id: "rm",
+                issue_identifier: "TEST-RM",
+                workspace: "/tmp/ws",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 7,
+                worker_id: None,
+                started_at: now,
+                runner: Some("opencode"),
+                model: Some("claude-opus-4-8"),
+                provider: Some("anthropic"),
+            })
+            .unwrap();
+        let row = store.get_run(&run_id).unwrap().expect("run present");
+        assert_eq!(row.runner.as_deref(), Some("opencode"));
+        assert_eq!(row.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(row.provider.as_deref(), Some("anthropic"));
+        // Defaults to NULL when not provided.
+        let run_id2 = new_run_id("TEST-RM2", &now);
+        store
+            .insert_run(&NewRun {
+                run_id: &run_id2,
+                issue_id: "rm2",
+                issue_identifier: "TEST-RM2",
+                workspace: "/tmp/ws",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 8,
+                worker_id: None,
+                started_at: now,
+                runner: Some("fake"),
+                model: None,
+                provider: None,
+            })
+            .unwrap();
+        let row2 = store.get_run(&run_id2).unwrap().expect("run present");
+        assert_eq!(row2.runner.as_deref(), Some("fake"));
+        assert_eq!(row2.model, None);
+        assert_eq!(row2.provider, None);
+    }
+
+    #[test]
     fn run_lifecycle_persists_and_loads() {
         let store = open_tmp();
         let now = Utc::now();
@@ -780,6 +871,9 @@ mod tests {
                 pid: 9999,
                 worker_id: None,
                 started_at: now,
+                runner: None,
+                model: None,
+                provider: None,
             })
             .unwrap();
 
@@ -819,6 +913,9 @@ mod tests {
                     pid: 9999,
                     worker_id: None,
                     started_at,
+                    runner: None,
+                    model: None,
+                    provider: None,
                 })
                 .unwrap();
             store
@@ -890,6 +987,9 @@ mod tests {
                 pid: 4242,
                 worker_id: None,
                 started_at: now,
+                runner: None,
+                model: None,
+                provider: None,
             })
             .unwrap();
 
@@ -931,6 +1031,9 @@ mod tests {
                     pid,
                     worker_id: None,
                     started_at: now,
+                    runner: None,
+                    model: None,
+                    provider: None,
                 })
                 .unwrap();
             if finish {
@@ -968,6 +1071,9 @@ mod tests {
                 pid: 1234,
                 worker_id: None,
                 started_at: now,
+                runner: None,
+                model: None,
+                provider: None,
             })
             .unwrap();
 
@@ -1003,6 +1109,9 @@ mod tests {
                 pid: 5555,
                 worker_id: None,
                 started_at: now,
+                runner: None,
+                model: None,
+                provider: None,
             })
             .unwrap();
 
@@ -1040,6 +1149,9 @@ mod tests {
                 pid: 6666,
                 worker_id: None,
                 started_at: now,
+                runner: None,
+                model: None,
+                provider: None,
             })
             .unwrap();
 
@@ -1107,6 +1219,9 @@ mod tests {
                 pid: 1,
                 worker_id: None,
                 started_at: now,
+                runner: None,
+                model: None,
+                provider: None,
             })
             .unwrap();
         store
@@ -1143,6 +1258,9 @@ mod tests {
                 pid: 2,
                 worker_id: None,
                 started_at: now,
+                runner: None,
+                model: None,
+                provider: None,
             })
             .unwrap();
         for _ in 0..2 {

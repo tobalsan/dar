@@ -44,6 +44,8 @@ pub struct PageLink {
 #[template(path = "content.html")]
 pub struct ContentTemplate {
     pub agent: AgentInfo,
+    /// Active model formatted for display (`provider/model`, bare model, or `—`).
+    pub agent_model: String,
     pub active_runs: Vec<ActiveRun>,
     pub history: Vec<HistoryRow>,
     pub rate_limit_min_remaining: Option<i64>,
@@ -94,8 +96,14 @@ impl ContentTemplate {
                 current: p == page,
             })
             .collect::<Vec<_>>();
+        let agent_model = fmt_model_display(
+            &s.agent.runner,
+            s.agent.model.as_deref(),
+            s.agent.provider.as_deref(),
+        );
         Self {
             agent: s.agent,
+            agent_model,
             active_count: s.active_runs.len(),
             recent_count,
             active_runs: s.active_runs,
@@ -109,6 +117,24 @@ impl ContentTemplate {
             has_prev: page > 1,
             has_next: page < total_pages,
         }
+    }
+}
+
+/// Format the dispatched/active model for display.
+///
+/// Returns `—` when no model is configured. When a provider is set *and* the
+/// runner is multi-provider (`opencode`/`pi`), the model is prefixed as
+/// `provider/model`. `codex` is OpenAI-only, so it never carries a provider
+/// prefix; the model name is shown alone.
+fn fmt_model_display(runner: &str, model: Option<&str>, provider: Option<&str>) -> String {
+    let model = match model.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => m,
+        None => return "\u{2014}".to_string(),
+    };
+    let multi_provider = matches!(runner, "opencode" | "pi");
+    match provider.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) if multi_provider => format!("{p}/{model}"),
+        _ => model.to_string(),
     }
 }
 
@@ -168,6 +194,10 @@ pub struct RunDetailTemplate {
     pub workspace: String,
     pub started_at: String,
     pub finished_at: String,
+    /// Runner this run was dispatched with, or `—` when unknown (legacy rows).
+    pub runner: String,
+    /// Model this run was dispatched with, formatted for display.
+    pub model: String,
     pub events: Vec<EventLine>,
     pub event_count: usize,
     pub process_alive: bool,
@@ -219,6 +249,17 @@ impl RunDetailTemplate {
             workspace: run.workspace,
             started_at: run.started_at,
             finished_at: run.finished_at.unwrap_or_default(),
+            runner: run
+                .runner
+                .as_deref()
+                .map(str::to_string)
+                .filter(|r| !r.is_empty())
+                .unwrap_or_else(|| "\u{2014}".to_string()),
+            model: fmt_model_display(
+                run.runner.as_deref().unwrap_or_default(),
+                run.model.as_deref(),
+                run.provider.as_deref(),
+            ),
             process_alive: run.process_alive,
             workflow_content,
             log_events,
@@ -384,6 +425,9 @@ mod tests {
             outcome: Some("completed".to_string()),
             exit_code: Some(0),
             process_alive: false,
+            runner: Some("codex".to_string()),
+            model: Some("gpt-5".to_string()),
+            provider: None,
         }
     }
 
@@ -527,6 +571,11 @@ mod tests {
         assert!(html.contains("/tmp/ws"), "workspace shown");
         assert!(html.contains("4242"), "pid shown");
         assert!(html.contains("completed"), "outcome shown");
+        // Dispatched runner + model (codex is OpenAI-only: no provider prefix).
+        assert!(html.contains(">Runner<"), "runner label shown");
+        assert!(html.contains(">codex<"), "dispatched runner shown");
+        assert!(html.contains(">Model<"), "model label shown");
+        assert!(html.contains(">gpt-5<"), "dispatched model shown without provider prefix");
         // protocol_event unwrapped to log_row + text.
         assert!(html.contains("tool_call"), "log_row tag shown");
         assert!(html.contains("<details"), "tool_call renders as details block");
@@ -580,6 +629,54 @@ mod tests {
             .expect("renders");
         // process_alive=false in sample_run, so buttons should have disabled
         assert!(html.contains("disabled"), "buttons disabled for finished run");
+    }
+
+    #[test]
+    fn model_display_unset_shows_dash() {
+        assert_eq!(fmt_model_display("fake", None, None), "\u{2014}");
+        assert_eq!(fmt_model_display("pi", Some(""), Some("anthropic")), "\u{2014}");
+    }
+
+    #[test]
+    fn model_display_multi_provider_prefixes() {
+        assert_eq!(
+            fmt_model_display("opencode", Some("claude-opus-4-8"), Some("anthropic")),
+            "anthropic/claude-opus-4-8"
+        );
+        assert_eq!(
+            fmt_model_display("pi", Some("claude-opus-4-8"), Some("anthropic")),
+            "anthropic/claude-opus-4-8"
+        );
+    }
+
+    #[test]
+    fn model_display_codex_never_prefixes_provider() {
+        // codex is OpenAI-only: provider is ignored, model shown alone.
+        assert_eq!(
+            fmt_model_display("codex", Some("gpt-5"), Some("openai")),
+            "gpt-5"
+        );
+    }
+
+    #[test]
+    fn model_display_no_provider_shows_bare_model() {
+        assert_eq!(fmt_model_display("pi", Some("some-model"), None), "some-model");
+    }
+
+    #[test]
+    fn content_header_renders_active_runner_and_model() {
+        let mut s = RunSnapshot::empty();
+        s.agent.runner = "opencode".to_string();
+        s.agent.model = Some("claude-opus-4-8".to_string());
+        s.agent.provider = Some("anthropic".to_string());
+        let html = ContentTemplate::from_snapshot(s)
+            .render()
+            .expect("content renders");
+        assert!(html.contains("opencode"), "active runner shown");
+        assert!(
+            html.contains("anthropic/claude-opus-4-8"),
+            "active model shown with provider prefix"
+        );
     }
 
     #[test]
