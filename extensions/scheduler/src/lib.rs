@@ -129,20 +129,6 @@ struct RunnerSection {
     max_run_timeout_ms: u64,
 }
 
-impl SchedulerExtension {
-    /// Opt-in gate shared by `register` and `start`: the extension is active
-    /// only when the `extensions.scheduler` section is present and not
-    /// `enabled: false`. An absent section means "behave exactly as today".
-    fn is_enabled(&self, config: &host_api::ConfigStore) -> bool {
-        let Some(value) = config.get(self.id()) else {
-            return false;
-        };
-        serde_json::from_value::<SchedulerSettings>(value.clone())
-            .unwrap_or_default()
-            .enabled
-    }
-}
-
 impl Extension for SchedulerExtension {
     fn id(&self) -> &'static str {
         "scheduler"
@@ -159,7 +145,10 @@ impl Extension for SchedulerExtension {
             }
             // Same opt-in / kill-switch gate as `start`: an absent section or
             // `enabled: false` mounts no HTTP routes and builds no state.
-            if !self.is_enabled(&ctx.config) {
+            let Some(value) = ctx.config.get(self.id()) else {
+                return Ok(());
+            };
+            if !SchedulerSettings::parse(value)?.enabled {
                 return Ok(());
             }
             let root = ctx.paths.root().to_path_buf();
@@ -173,7 +162,7 @@ impl Extension for SchedulerExtension {
             // (dist: no `extensions.scheduler` section; FSC: crate not composed).
             // Shares the same `SchedulerState` so the view reflects live runtime.
             DashboardTabs::shared(&mut ctx.services)?
-                .add(Arc::new(CronTab::new(Arc::clone(&state), root.clone())));
+                .add(Arc::new(CronTab::new(Arc::clone(&state), root.clone())))?;
 
             // run-now fires a job through the same path as a scheduled fire, so
             // the HTTP handlers need the static runner config + typed services.
@@ -225,14 +214,11 @@ impl Extension for SchedulerExtension {
 
             // `register` built and stored the shared state alongside the HTTP
             // router. Reuse it so the loop and the API observe the same jobs.
-            let state = match self.state.get() {
-                Some(state) => Arc::clone(state),
-                None => {
-                    // HTTP was disabled (e.g. headless): build state from disk.
-                    let jobs = load_jobs(ctx.paths.root(), |m| tracing::warn!("{m}"));
-                    Arc::new(SchedulerState::new(jobs))
-                }
-            };
+            let state = Arc::clone(
+                self.state
+                    .get()
+                    .expect("scheduler state must be initialized during register when enabled"),
+            );
 
             let root = ctx.paths.root().to_path_buf();
             let config = build_scheduler_config(&root, &settings);
@@ -249,10 +235,7 @@ impl Extension for SchedulerExtension {
 
 /// Build the static [`SchedulerConfig`] shared by the timer loop and the
 /// run-now HTTP handler from the agent root + validated scheduler settings.
-fn build_scheduler_config(
-    root: &std::path::Path,
-    settings: &SchedulerSettings,
-) -> SchedulerConfig {
+fn build_scheduler_config(root: &std::path::Path, settings: &SchedulerSettings) -> SchedulerConfig {
     let (runner_kind, runner_command, max_run_timeout_ms) = read_runner_config(root);
     let poll_interval_ms = if settings.poll_interval_ms == 0 {
         DEFAULT_POLL_INTERVAL_MS

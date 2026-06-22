@@ -52,7 +52,10 @@ fn codex_app_server_calls_echo_upper_through_host_bridge() {
         .args(["-c", "approval_policy=\"never\""])
         .args(["-c", "sandbox_permissions=[\"disk-full-read-access\"]"])
         .args(["-c", &format!("mcp_servers.agentropy.command={bridge:?}")])
-        .args(["-c", &format!("mcp_servers.agentropy.args={:?}", ["--suffix", SUFFIX])])
+        .args([
+            "-c",
+            &format!("mcp_servers.agentropy.args={:?}", ["--suffix", SUFFIX]),
+        ])
         .current_dir(workspace.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

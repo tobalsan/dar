@@ -33,9 +33,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use serde_json::{json, Value};
-use tool_registry::{
-    ToolExecutor, ToolOutcome, ToolRegistry, ToolRegistryHandle, ToolSpec,
-};
+use tool_registry::{ToolExecutor, ToolOutcome, ToolRegistry, ToolRegistryHandle, ToolSpec};
 use tool_shim::{ShimObservation, ShimTransport, ShimTurn, CALL_BEGIN, CALL_END};
 
 // ---------------------------------------------------------------------------
@@ -200,7 +198,10 @@ impl ToolSurface for ShimSurface {
     async fn advertised_tools(&self) -> Vec<String> {
         // The advertise prompt documents each tool under a `### \`<name>\`` head.
         let prompt = self.shim.advertise();
-        assert!(prompt.contains(CALL_BEGIN), "advertise documents the marker");
+        assert!(
+            prompt.contains(CALL_BEGIN),
+            "advertise documents the marker"
+        );
         prompt
             .lines()
             .filter_map(|l| l.strip_prefix("### `").and_then(|s| s.strip_suffix("`")))
@@ -228,7 +229,10 @@ impl ToolSurface for ShimSurface {
         let after = self
             .invoke("recover", "echo_upper", json!({ "text": "still alive" }))
             .await;
-        assert_eq!(after.text, "STILL ALIVE", "surface stalled after malformed call");
+        assert_eq!(
+            after.text, "STILL ALIVE",
+            "surface stalled after malformed call"
+        );
         // The malformed attempt was observed too (structured, not swallowed).
         assert!(self.observed.lock().unwrap().len() > before);
         result
@@ -302,7 +306,10 @@ impl NativeBridgeSurface {
     fn observe_result(&self, name: &str, resp: &Value) -> SurfaceResult {
         let result = &resp["result"];
         let is_error = result["isError"].as_bool().unwrap_or(false);
-        let text = result["content"][0]["text"].as_str().unwrap_or("").to_string();
+        let text = result["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
         self.observed.lock().unwrap().push(Observed {
             name: name.to_string(),
             is_error,
@@ -347,16 +354,26 @@ impl ToolSurface for NativeBridgeSurface {
             ])
             .await;
         // No JSON-RPC transport error: the failure is a result.
-        assert!(out[0].get("error").is_none(), "must be structured, not transport error");
+        assert!(
+            out[0].get("error").is_none(),
+            "must be structured, not transport error"
+        );
         let recover = self.observe_result("echo_upper", &out[1]);
-        assert_eq!(recover.text, "STILL ALIVE", "surface stalled after bad call");
+        assert_eq!(
+            recover.text, "STILL ALIVE",
+            "surface stalled after bad call"
+        );
         self.observe_result("does_not_exist", &out[0])
     }
 
     async fn yields_continuation(&self, call_id: &str) -> bool {
         // After a call, the same server accepts another request in-session.
         let out = self
-            .rpc(&[Self::call_request(call_id, "echo_upper", json!({ "text": "again" }))])
+            .rpc(&[Self::call_request(
+                call_id,
+                "echo_upper",
+                json!({ "text": "again" }),
+            )])
             .await;
         out[0].get("result").is_some() && out[0]["id"] == call_id
     }
@@ -376,7 +393,10 @@ async fn run_conformance<S: ToolSurface>(surface: &S, fx: &Fixture, label: &str)
     );
 
     // C2 invoke + C3 host-execute + C4 correlated-return.
-    assert!(!fx.witness.ran(), "[{label}] executor ran before any invoke");
+    assert!(
+        !fx.witness.ran(),
+        "[{label}] executor ran before any invoke"
+    );
     let r = surface
         .invoke("call-42", "echo_upper", json!({ "text": "hello floor" }))
         .await;
@@ -407,7 +427,9 @@ async fn run_conformance<S: ToolSurface>(surface: &S, fx: &Fixture, label: &str)
     // C6 observability: every call emitted the same structured outcome signal.
     let observed = fx.observed.lock().unwrap();
     assert!(
-        observed.iter().any(|o| o.name == "echo_upper" && !o.is_error && o.text == "HELLO FLOOR"),
+        observed
+            .iter()
+            .any(|o| o.name == "echo_upper" && !o.is_error && o.text == "HELLO FLOOR"),
         "[{label}] C6 observability: success not observed (got {observed:?})"
     );
     assert!(

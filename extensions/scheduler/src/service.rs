@@ -35,6 +35,7 @@
 //! renders via the shared [`SchedulerState`]. Scheduled runs fire the runner
 //! service directly and never reach the orchestrator's run list or `RunSnapshot`.
 
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -101,37 +102,23 @@ impl Drop for RunningGuard {
 struct ArmedJob {
     job: ScheduleJob,
     next_run_at_ms: i64,
-    /// UTC epoch millis of the last skipped fire (overlap-skip bookmark) as seen
-    /// by this in-memory armed entry, or `None`. The authoritative bookmark
-    /// lives in shared state; this mirror is asserted in tests.
-    last_skipped_at_ms: Option<i64>,
 }
 
-/// Fingerprint of `cron/jobs.json` used to detect edits cheaply: modified time
-/// plus length. A change in either triggers a reload. `None` means the file is
-/// currently absent.
-///
-/// Blind spot: a same-length edit landing within the same modified-time tick (on
-/// filesystems with coarse mtime granularity) can be missed. For the
-/// human/agent-paced self-service edit case this is acceptable; a content hash
-/// would be the robust-but-heavier alternative.
+/// Fingerprint of `cron/jobs.json` used to detect edits cheaply. Content hash
+/// avoids missing same-length edits that land within one filesystem mtime tick.
 #[derive(Clone, PartialEq, Eq)]
 struct FileFingerprint {
-    mtime_ms: i64,
     len: u64,
+    hash: u64,
 }
 
 fn fingerprint(config: &SchedulerConfig) -> Option<FileFingerprint> {
-    let meta = std::fs::metadata(jobs_path(&config.root)).ok()?;
-    let mtime_ms = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
+    let bytes = std::fs::read(jobs_path(&config.root)).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
     Some(FileFingerprint {
-        mtime_ms,
-        len: meta.len(),
+        len: bytes.len() as u64,
+        hash: hasher.finish(),
     })
 }
 
@@ -148,6 +135,7 @@ pub async fn run(
     mut shutdown: ShutdownToken,
 ) {
     let mut armed = arm_jobs(&state);
+    let mut fires = tokio::task::JoinSet::new();
     let mut fingerprint_seen = fingerprint(&config);
     if armed.is_empty() {
         tracing::info!("[scheduler] No enabled jobs; idle (polling for edits)");
@@ -158,10 +146,22 @@ pub async fn run(
     let poll = Duration::from_millis(config.poll_interval_ms.max(MIN_POLL_INTERVAL_MS));
 
     loop {
+        while let Some(result) = fires.try_join_next() {
+            if let Err(err) = result {
+                tracing::warn!("[scheduler] Fire task ended unexpectedly: {err}");
+            }
+        }
         let next = armed.iter().map(|a| a.next_run_at_ms).min();
         let fire_delay = next.map(next_delay);
         tokio::select! {
-            _ = shutdown.cancelled() => return,
+            _ = shutdown.cancelled() => {
+                while let Some(result) = fires.join_next().await {
+                    if let Err(err) = result {
+                        tracing::warn!("[scheduler] Fire task ended unexpectedly during shutdown: {err}");
+                    }
+                }
+                return;
+            }
             _ = state.changed() => {
                 // Jobs mutated over HTTP (or pushed by a reload below):
                 // recompute fires so a sooner schedule takes effect immediately.
@@ -173,7 +173,7 @@ pub async fn run(
                 maybe_reload(&config, &state, &mut fingerprint_seen);
             }
             _ = sleep_opt(fire_delay), if fire_delay.is_some() => {
-                run_due_jobs(&config, &services, &state, &mut armed).await;
+                run_due_jobs(&config, &services, &state, &mut armed, &mut fires, &shutdown).await;
             }
         }
     }
@@ -238,7 +238,6 @@ fn arm_jobs(state: &SchedulerState) -> Vec<ArmedJob> {
                 armed.push(ArmedJob {
                     job,
                     next_run_at_ms,
-                    last_skipped_at_ms: None,
                 });
             }
             Err(err) => {
@@ -259,6 +258,8 @@ async fn run_due_jobs(
     services: &ServiceRegistry,
     state: &Arc<SchedulerState>,
     armed: &mut [ArmedJob],
+    fires: &mut tokio::task::JoinSet<()>,
+    shutdown: &ShutdownToken,
 ) {
     let now_ms = Utc::now().timestamp_millis();
     let due: Vec<usize> = armed
@@ -284,7 +285,6 @@ async fn run_due_jobs(
         // publish gap a separate is_running()+mark would leave between the loop
         // and run-now.
         if !state.try_claim_running(&job_id, now_ms) {
-            armed[idx].last_skipped_at_ms = Some(now_ms);
             state.mark_skipped(&job_id, now_ms);
             tracing::warn!(
                 "[scheduler] Skipping fire of job {job_id}: previous run still in progress"
@@ -304,9 +304,10 @@ async fn run_due_jobs(
             state: Arc::clone(&state),
             job_id,
         };
-        tokio::spawn(async move {
+        let shutdown = shutdown.clone();
+        fires.spawn(async move {
             let _guard = guard;
-            let _ = execute_job(&config, &services, &state, &job).await;
+            let _ = execute_job(&config, &services, &state, &job, shutdown).await;
         });
     }
 
@@ -345,12 +346,18 @@ pub struct ExecuteResult {
     pub error: Option<String>,
 }
 
+fn never_shutdown() -> (tokio::sync::watch::Sender<bool>, ShutdownToken) {
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    (tx, ShutdownToken::new(rx))
+}
+
 /// Fire one job's runner and write its output file (for both ok and error runs).
 async fn execute_job(
     config: &SchedulerConfig,
     services: &ServiceRegistry,
     state: &SchedulerState,
     job: &ScheduleJob,
+    shutdown: ShutdownToken,
 ) -> ExecuteResult {
     // The caller (timer loop or run-now) has already claimed the run via
     // `try_claim_running`, which set `running_since_ms`. `execute_job` only
@@ -396,6 +403,7 @@ async fn execute_job(
         &job.id,
         config.max_run_timeout_ms,
         timeout,
+        shutdown,
     )
     .await;
 
@@ -541,7 +549,8 @@ pub async fn run_job_now(
         }
     }
 
-    let result = execute_job(config, services, state, &job).await;
+    let (_shutdown_tx, shutdown) = never_shutdown();
+    let result = execute_job(config, services, state, &job, shutdown).await;
 
     // If a scheduled fire was overlap-skipped while this manual run was in
     // flight, the loop already recomputed and published a fresh next fire; keep
@@ -624,7 +633,6 @@ mod tests {
             job: job_with(id, timeout_ms, true, "hi"),
             // Due now.
             next_run_at_ms: Utc::now().timestamp_millis() - 1,
-            last_skipped_at_ms: None,
         }
     }
 
@@ -647,7 +655,10 @@ mod tests {
 
     fn latest_output(root: &std::path::Path, job_id: &str) -> Option<String> {
         let dir = root.join("cron").join("output").join(job_id);
-        let mut entries: Vec<_> = std::fs::read_dir(&dir).ok()?.filter_map(|e| e.ok()).collect();
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .collect();
         entries.sort_by_key(|e| e.file_name());
         let last = entries.last()?;
         std::fs::read_to_string(last.path()).ok()
@@ -673,7 +684,10 @@ mod tests {
         let config = test_config(dir.path().to_path_buf(), 5_000);
         let with_override = armed("j", Some(250)).job;
         let without = armed("j", None).job;
-        assert_eq!(config.timeout_for(&with_override), Duration::from_millis(250));
+        assert_eq!(
+            config.timeout_for(&with_override),
+            Duration::from_millis(250)
+        );
         assert_eq!(config.timeout_for(&without), Duration::from_millis(5_000));
     }
 
@@ -688,20 +702,24 @@ mod tests {
 
         // First tick claims the job in shared state (now running) and spawns the
         // fire; give the task a beat to reach `runner.spawn`.
-        run_due_jobs(&config, &services, &state, &mut jobs).await;
+        let mut fires = tokio::task::JoinSet::new();
+        let (_shutdown_tx, shutdown) = never_shutdown();
+        run_due_jobs(&config, &services, &state, &mut jobs, &mut fires, &shutdown).await;
         assert!(state.is_running("job"));
         tokio::time::sleep(StdDuration::from_millis(50)).await;
         assert_eq!(spawns.load(Ordering::SeqCst), 1);
-        assert!(jobs[0].last_skipped_at_ms.is_none());
+        assert!(state.last_skipped_at_ms("job").is_none());
 
         // Force the job due again while the first run is still in flight.
         jobs[0].next_run_at_ms = Utc::now().timestamp_millis() - 1;
-        run_due_jobs(&config, &services, &state, &mut jobs).await;
+        run_due_jobs(&config, &services, &state, &mut jobs, &mut fires, &shutdown).await;
 
         // Overlap-skip: no new spawn, skip is bookmarked, next run recomputed.
         assert_eq!(spawns.load(Ordering::SeqCst), 1, "second fire skipped");
-        assert!(jobs[0].last_skipped_at_ms.is_some(), "skip bookmarked");
-        assert!(state.last_skipped_at_ms("job").is_some(), "skip bookmarked in state");
+        assert!(
+            state.last_skipped_at_ms("job").is_some(),
+            "skip bookmarked in state"
+        );
         assert!(
             jobs[0].next_run_at_ms > Utc::now().timestamp_millis(),
             "next run recomputed forward"
@@ -721,7 +739,8 @@ mod tests {
         let job = armed("timeout-job", None).job;
         let state = Arc::new(SchedulerState::new(vec![]));
 
-        execute_job(&config, &services, &state, &job).await;
+        let (_shutdown_tx, shutdown) = never_shutdown();
+        execute_job(&config, &services, &state, &job, shutdown).await;
 
         let out = latest_output(dir.path(), "timeout-job").expect("output written");
         assert!(out.contains("status: error"), "recorded as error: {out}");
@@ -747,7 +766,8 @@ mod tests {
         // records the outcome. Mirror that here so the claimed `last_run_at_ms`
         // is set, as it would be in production.
         assert!(state.try_claim_running("isolated", Utc::now().timestamp_millis()));
-        execute_job(&config, &services, &state, &job).await;
+        let (_shutdown_tx, shutdown) = never_shutdown();
+        execute_job(&config, &services, &state, &job, shutdown).await;
 
         assert_eq!(spawns.load(Ordering::SeqCst), 1, "runner fired directly");
         let rt = state.runtime("isolated");
@@ -784,7 +804,9 @@ mod tests {
         let mut jobs = vec![armed("job", None)];
         let state = Arc::new(SchedulerState::new(vec![]));
 
-        run_due_jobs(&config, &services, &state, &mut jobs).await;
+        let mut fires = tokio::task::JoinSet::new();
+        let (_shutdown_tx, shutdown) = never_shutdown();
+        run_due_jobs(&config, &services, &state, &mut jobs, &mut fires, &shutdown).await;
         // The fire task panics; the drop guard must still clear the shared claim.
         tokio::time::sleep(StdDuration::from_millis(100)).await;
         assert!(
@@ -801,7 +823,9 @@ mod tests {
         let mut jobs = vec![armed("job", None)];
         let state = Arc::new(SchedulerState::new(vec![]));
         let before = jobs[0].next_run_at_ms;
-        run_due_jobs(&config, &services, &state, &mut jobs).await;
+        let mut fires = tokio::task::JoinSet::new();
+        let (_shutdown_tx, shutdown) = never_shutdown();
+        run_due_jobs(&config, &services, &state, &mut jobs, &mut fires, &shutdown).await;
         assert!(jobs[0].next_run_at_ms > before, "timer re-armed forward");
     }
 
@@ -809,7 +833,10 @@ mod tests {
 
     #[test]
     fn arm_jobs_loads_enabled_jobs_from_state() {
-        let state = SchedulerState::new(vec![job_with("a", None, true, "x"), job_with("b", None, true, "y")]);
+        let state = SchedulerState::new(vec![
+            job_with("a", None, true, "x"),
+            job_with("b", None, true, "y"),
+        ]);
         let armed = arm_jobs(&state);
         assert_eq!(armed.len(), 2);
     }
@@ -939,7 +966,10 @@ mod tests {
         state.set_jobs(vec![]);
         maybe_reload(&config, &state, &mut fp);
         assert!(before == fp);
-        assert!(state.jobs().is_empty(), "no reload when fingerprint unchanged");
+        assert!(
+            state.jobs().is_empty(),
+            "no reload when fingerprint unchanged"
+        );
     }
 
     #[test]

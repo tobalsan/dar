@@ -98,8 +98,7 @@ impl PiChatSession {
         // `<host> __mcp-bridge`, plus `MCP_DIRECT_TOOLS`. Reuses the runner's
         // config writer so chat and worker spawns stay identical.
         if let Some(bridge) = &params.host_tool_bridge {
-            let (bridge_args, env) =
-                runner_core::pi_mcp_config_args(&params.session_dir, bridge)?;
+            let (bridge_args, env) = runner_core::pi_mcp_config_args(&params.session_dir, bridge)?;
             cmd.args(bridge_args);
             cmd.envs(env);
         }
@@ -1162,7 +1161,10 @@ done"#;
             wait_handle: tokio::spawn(async {}),
         };
 
-        assert!(session.accept_turn(prompt_command("t1", "first")).await.is_err());
+        assert!(session
+            .accept_turn(prompt_command("t1", "first"))
+            .await
+            .is_err());
         let queue = queue.lock().await;
         assert!(!queue.busy);
         assert!(queue.pending.is_empty());

@@ -35,9 +35,7 @@ use sha2::{Digest, Sha256};
 /// infallible for callers that just want a sensible default.
 pub fn default_registry_dir() -> PathBuf {
     match std::env::var_os("HOME") {
-        Some(home) if !home.is_empty() => {
-            Path::new(&home).join(".agentropy").join("dashboards")
-        }
+        Some(home) if !home.is_empty() => Path::new(&home).join(".agentropy").join("dashboards"),
         _ => PathBuf::from(".agentropy").join("dashboards"),
     }
 }

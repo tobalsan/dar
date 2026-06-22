@@ -25,7 +25,10 @@ fn install_current(dest: &Path) {
 
 /// Write a `.prev` shell script that records that it ran, then exits 0.
 fn install_prev_marker(prev: &Path, marker: &Path) {
-    let script = format!("#!/bin/sh\necho rolled-back > {}\nexit 0\n", marker.display());
+    let script = format!(
+        "#!/bin/sh\necho rolled-back > {}\nexit 0\n",
+        marker.display()
+    );
     fs::write(prev, script).unwrap();
     fs::set_permissions(prev, fs::Permissions::from_mode(0o755)).unwrap();
 }
@@ -96,5 +99,8 @@ fn healthy_self_check_boots_without_rollback() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("probe: booted"), "stdout: {stdout}");
-    assert!(!marker.exists(), ".prev must not run when self-check passes");
+    assert!(
+        !marker.exists(),
+        ".prev must not run when self-check passes"
+    );
 }

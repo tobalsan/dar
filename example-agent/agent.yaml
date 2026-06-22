@@ -46,6 +46,7 @@ extensions:
   # jobs_create / jobs_edit / jobs_list against this generic jobs file instead
   # of the agent editing it ad hoc.
   example-jobs:
+    # Agent-root-relative only; absolute paths, `..`, and symlink escapes fail boot.
     path: ./jobs.json
 
   # Scheduler extension (ALG-219). Presence of this key opts the agent into the

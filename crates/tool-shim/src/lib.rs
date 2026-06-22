@@ -120,7 +120,9 @@ pub fn advertise_prompt(tools: &[ToolSpec]) -> String {
     );
     out.push_str(CALL_BEGIN);
     out.push('\n');
-    out.push_str("{\"call_id\": \"<your-id>\", \"name\": \"<tool-name>\", \"arguments\": { ... }}\n");
+    out.push_str(
+        "{\"call_id\": \"<your-id>\", \"name\": \"<tool-name>\", \"arguments\": { ... }}\n",
+    );
     out.push_str(CALL_END);
     out.push_str("\n\n");
     out.push_str(
@@ -493,6 +495,9 @@ mod tests {
         shim.handle_output(&out).await;
         let rows = seen.lock().unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0], ("obs1".to_string(), "echo_upper".to_string(), false));
+        assert_eq!(
+            rows[0],
+            ("obs1".to_string(), "echo_upper".to_string(), false)
+        );
     }
 }

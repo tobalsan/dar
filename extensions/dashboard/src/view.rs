@@ -212,9 +212,7 @@ impl RunDetailTemplate {
         let workflow_content = run
             .workflow_path
             .as_deref()
-            .map(|p| {
-                std::fs::read_to_string(p).unwrap_or_else(|_| "unavailable".to_string())
-            })
+            .map(|p| std::fs::read_to_string(p).unwrap_or_else(|_| "unavailable".to_string()))
             .unwrap_or_else(|| "unavailable".to_string());
         let last_event_id = events.iter().map(|e| e.event_id).max().unwrap_or(0);
         let event_lines: Vec<EventLine> = events.into_iter().map(event_line).collect();
@@ -271,12 +269,17 @@ impl RunDetailTemplate {
 
 pub(crate) fn fmt_event_ts(ts: &str) -> String {
     DateTime::parse_from_rfc3339(ts)
-        .map(|dt| dt.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(|dt| {
+            dt.with_timezone(&Utc)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_else(|_| ts.to_string())
 }
 
 fn event_line(e: EventRow) -> EventLine {
-    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&e.payload)
+    if let Ok(serde_json::Value::Object(map)) =
+        serde_json::from_str::<serde_json::Value>(&e.payload)
     {
         if map.get("type").and_then(|v| v.as_str()) == Some("protocol_event") {
             let row_type = map
@@ -289,7 +292,11 @@ fn event_line(e: EventRow) -> EventLine {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let detail = map.get("detail").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let detail = map
+                .get("detail")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             return EventLine {
                 event_id: e.event_id,
                 ts: fmt_event_ts(&e.ts),
@@ -331,10 +338,10 @@ fn history_bucket(run: &RunRow) -> (&'static str, &'static str) {
 
 pub(crate) fn he(s: &str) -> String {
     s.replace('&', "&amp;")
-     .replace('<', "&lt;")
-     .replace('>', "&gt;")
-     .replace('"', "&quot;")
-     .replace('\'', "&#39;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 fn render_markdown(md: &str) -> String {
@@ -463,7 +470,10 @@ mod tests {
         assert_eq!(t.page, 3);
         assert!(t.has_prev);
         assert!(!t.has_next);
-        assert_eq!(t.history[0].identifier, "ALG-20", "page 3 starts at index 20");
+        assert_eq!(
+            t.history[0].identifier, "ALG-20",
+            "page 3 starts at index 20"
+        );
     }
 
     #[test]
@@ -497,10 +507,22 @@ mod tests {
             .render()
             .expect("content renders");
         assert!(html.contains("class=\"pager\""), "pager rendered");
-        assert!(html.contains("hx-get=\"/content\""), "pager uses /content endpoint");
-        assert!(html.contains("window.__dashPage=1"), "first-page control present");
-        assert!(html.contains("window.__dashPage=3"), "last-page control present");
-        assert!(html.contains("aria-current=\"page\""), "current page marked");
+        assert!(
+            html.contains("hx-get=\"/content\""),
+            "pager uses /content endpoint"
+        );
+        assert!(
+            html.contains("window.__dashPage=1"),
+            "first-page control present"
+        );
+        assert!(
+            html.contains("window.__dashPage=3"),
+            "last-page control present"
+        );
+        assert!(
+            html.contains("aria-current=\"page\""),
+            "current page marked"
+        );
     }
 
     #[test]
@@ -508,7 +530,10 @@ mod tests {
         let html = ContentTemplate::from_snapshot_page(snapshot_with_runs(7), 1)
             .render()
             .expect("content renders");
-        assert!(!html.contains("class=\"pager\""), "no pager for a single page");
+        assert!(
+            !html.contains("class=\"pager\""),
+            "no pager for a single page"
+        );
     }
 
     #[test]
@@ -525,18 +550,31 @@ mod tests {
 
     #[test]
     fn index_with_tabs_renders_nav_and_default_runs_tab() {
-        let tabs = vec![
-            TabNav { id: "scheduler".to_string(), title: "Scheduler".to_string() },
-        ];
+        let tabs = vec![TabNav {
+            id: "scheduler".to_string(),
+            title: "Scheduler".to_string(),
+        }];
         let html = DashboardTemplate::page_with_tabs(RunSnapshot::empty(), tabs)
             .render()
             .expect("page renders");
         assert!(html.contains("id=\"dash-tabs\""), "tab nav rendered");
         assert!(html.contains(">Runs<"), "default Runs tab present");
-        assert!(html.contains("/tabs/scheduler"), "registered tab links to its fragment");
-        assert!(html.contains(">Scheduler<"), "registered tab title rendered");
-        assert!(html.contains("hx-swap=\"innerHTML\""), "content keeps innerHTML swap");
-        assert!(!html.contains("hx-swap=\"outerHTML\""), "no body/outer swap introduced");
+        assert!(
+            html.contains("/tabs/scheduler"),
+            "registered tab links to its fragment"
+        );
+        assert!(
+            html.contains(">Scheduler<"),
+            "registered tab title rendered"
+        );
+        assert!(
+            html.contains("hx-swap=\"innerHTML\""),
+            "content keeps innerHTML swap"
+        );
+        assert!(
+            !html.contains("hx-swap=\"outerHTML\""),
+            "no body/outer swap introduced"
+        );
     }
 
     #[test]
@@ -575,17 +613,29 @@ mod tests {
         assert!(html.contains(">Runner<"), "runner label shown");
         assert!(html.contains(">codex<"), "dispatched runner shown");
         assert!(html.contains(">Model<"), "model label shown");
-        assert!(html.contains(">gpt-5<"), "dispatched model shown without provider prefix");
+        assert!(
+            html.contains(">gpt-5<"),
+            "dispatched model shown without provider prefix"
+        );
         // protocol_event unwrapped to log_row + text.
         assert!(html.contains("tool_call"), "log_row tag shown");
-        assert!(html.contains("<details"), "tool_call renders as details block");
+        assert!(
+            html.contains("<details"),
+            "tool_call renders as details block"
+        );
         assert!(html.contains("ran bash"), "protocol text shown");
         // Non-protocol payload rendered raw.
-        assert!(html.contains("dispatch attempt=0 pid=4242"), "raw payload shown");
+        assert!(
+            html.contains("dispatch attempt=0 pid=4242"),
+            "raw payload shown"
+        );
         // Formatted timestamp.
         assert!(html.contains("2026-06-12 00:00:30"), "formatted ts shown");
         // Close button clears the drawer.
-        assert!(html.contains("getElementById('run-detail')"), "close button present");
+        assert!(
+            html.contains("getElementById('run-detail')"),
+            "close button present"
+        );
     }
 
     #[test]
@@ -619,7 +669,10 @@ mod tests {
         assert!(html.contains("Kill"), "Kill button present");
         let interrupt_pos = html.find("Interrupt").unwrap();
         let snippet = &html[interrupt_pos.saturating_sub(100)..interrupt_pos];
-        assert!(!snippet.contains("disabled"), "Interrupt button enabled for live run");
+        assert!(
+            !snippet.contains("disabled"),
+            "Interrupt button enabled for live run"
+        );
     }
 
     #[test]
@@ -628,13 +681,19 @@ mod tests {
             .render()
             .expect("renders");
         // process_alive=false in sample_run, so buttons should have disabled
-        assert!(html.contains("disabled"), "buttons disabled for finished run");
+        assert!(
+            html.contains("disabled"),
+            "buttons disabled for finished run"
+        );
     }
 
     #[test]
     fn model_display_unset_shows_dash() {
         assert_eq!(fmt_model_display("fake", None, None), "\u{2014}");
-        assert_eq!(fmt_model_display("pi", Some(""), Some("anthropic")), "\u{2014}");
+        assert_eq!(
+            fmt_model_display("pi", Some(""), Some("anthropic")),
+            "\u{2014}"
+        );
     }
 
     #[test]
@@ -660,7 +719,10 @@ mod tests {
 
     #[test]
     fn model_display_no_provider_shows_bare_model() {
-        assert_eq!(fmt_model_display("pi", Some("some-model"), None), "some-model");
+        assert_eq!(
+            fmt_model_display("pi", Some("some-model"), None),
+            "some-model"
+        );
     }
 
     #[test]
@@ -691,7 +753,10 @@ mod tests {
             rendered: String::new(),
         };
         let html = render_log_row(&ev);
-        assert!(html.contains("<strong>bold</strong>"), "markdown rendered: {html}");
+        assert!(
+            html.contains("<strong>bold</strong>"),
+            "markdown rendered: {html}"
+        );
     }
 
     #[test]
@@ -706,7 +771,10 @@ mod tests {
             rendered: String::new(),
         };
         let html = render_log_row(&ev);
-        assert!(!html.contains("<script>"), "raw script tag not in output: {html}");
+        assert!(
+            !html.contains("<script>"),
+            "raw script tag not in output: {html}"
+        );
         // pulldown-cmark treats bare angle brackets as inline HTML and escapes them;
         // the Rust string will contain either &lt;script&gt; or &amp;lt;script — both
         // indicate the tag is neutralised and will not execute in a browser.

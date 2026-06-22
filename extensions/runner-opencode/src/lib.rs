@@ -75,7 +75,12 @@ async fn spawn_opencode(p: SpawnParams<'_>) -> Result<RunnerHandle> {
 
     let command = effective_command(p.command, "opencode");
     let args = opencode_args(0);
-    let env = opencode_env(&p, &session_dir, model.as_deref(), p.host_tool_bridge.as_ref());
+    let env = opencode_env(
+        &p,
+        &session_dir,
+        model.as_deref(),
+        p.host_tool_bridge.as_ref(),
+    );
     let server = OpenCodeServer::spawn(command.clone(), args.clone(), env, p.workspace).await?;
     let pid = server.pid().context("opencode serve has no pid")?;
 
@@ -545,7 +550,15 @@ fn emit_event(ctx: &TurnLoopCtx, event: &OpenCodeEvent) {
         .unwrap_or("")
         .to_string();
 
-    store_card(ctx, event, &format!("{part_id}:call"), pl.row_type, &pl.text, &pl.detail, ts);
+    store_card(
+        ctx,
+        event,
+        &format!("{part_id}:call"),
+        pl.row_type,
+        &pl.text,
+        &pl.detail,
+        ts,
+    );
 
     // A completed tool needs a second tool_output row carrying its output.
     if pl.row_type == "tool_call" {
@@ -556,7 +569,15 @@ fn emit_event(ctx: &TurnLoopCtx, event: &OpenCodeEvent) {
             .and_then(|s| s.get("output"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        store_card(ctx, event, &format!("{part_id}:out"), "tool_output", output, "", ts);
+        store_card(
+            ctx,
+            event,
+            &format!("{part_id}:out"),
+            "tool_output",
+            output,
+            "",
+            ts,
+        );
     }
 }
 
@@ -700,7 +721,10 @@ mod tests {
     }
 
     fn sse(data: &str) -> OpenCodeEvent {
-        OpenCodeEvent { event: Some("message.part.updated".to_string()), data: data.to_string() }
+        OpenCodeEvent {
+            event: Some("message.part.updated".to_string()),
+            data: data.to_string(),
+        }
     }
 
     fn stored_rows(store: &RecordingStore) -> Vec<serde_json::Value> {
@@ -716,7 +740,9 @@ mod tests {
     #[test]
     fn emit_streaming_text_part_pushes_live_log_but_stores_nothing() {
         let (ctx, sink, store) = recording_ctx();
-        let ev = sse(r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p1","type":"text","text":"par","time":{"start":1}}}}"#);
+        let ev = sse(
+            r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p1","type":"text","text":"par","time":{"start":1}}}}"#,
+        );
         emit_event(&ctx, &ev);
         assert_eq!(sink.lines.lock().unwrap().len(), 1);
         assert_eq!(store.events.lock().unwrap().len(), 0);
@@ -725,7 +751,9 @@ mod tests {
     #[test]
     fn emit_final_text_part_stores_assistant_once() {
         let (ctx, _sink, store) = recording_ctx();
-        let ev = sse(r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p1","type":"text","text":"all done","time":{"start":1,"end":2}}}}"#);
+        let ev = sse(
+            r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p1","type":"text","text":"all done","time":{"start":1,"end":2}}}}"#,
+        );
         emit_event(&ctx, &ev);
         emit_event(&ctx, &ev);
         let rows = stored_rows(&store);
@@ -737,7 +765,9 @@ mod tests {
     #[test]
     fn emit_completed_tool_stores_call_and_output() {
         let (ctx, _sink, store) = recording_ctx();
-        let ev = sse(r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p2","type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"ls"},"output":"file1"}}}}"#);
+        let ev = sse(
+            r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p2","type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"ls"},"output":"file1"}}}}"#,
+        );
         emit_event(&ctx, &ev);
         let rows = stored_rows(&store);
         assert_eq!(rows.len(), 2);
@@ -754,7 +784,9 @@ mod tests {
     #[test]
     fn emit_tool_running_stores_nothing() {
         let (ctx, sink, store) = recording_ctx();
-        let ev = sse(r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p3","type":"tool","tool":"bash","state":{"status":"running","input":{"command":"ls"}}}}}"#);
+        let ev = sse(
+            r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p3","type":"tool","tool":"bash","state":{"status":"running","input":{"command":"ls"}}}}}"#,
+        );
         emit_event(&ctx, &ev);
         assert_eq!(store.events.lock().unwrap().len(), 0);
         assert_eq!(sink.lines.lock().unwrap().len(), 1);
@@ -763,7 +795,9 @@ mod tests {
     #[test]
     fn emit_reasoning_final_stores_thinking() {
         let (ctx, _sink, store) = recording_ctx();
-        let ev = sse(r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p4","type":"reasoning","text":"ponder","time":{"start":1,"end":2}}}}"#);
+        let ev = sse(
+            r#"{"type":"message.part.updated","properties":{"sessionID":"s1","part":{"id":"p4","type":"reasoning","text":"ponder","time":{"start":1,"end":2}}}}"#,
+        );
         emit_event(&ctx, &ev);
         let rows = stored_rows(&store);
         assert_eq!(rows.len(), 1);
@@ -901,12 +935,20 @@ mod tests {
     fn opencode_env_embeds_mcp_block_in_config_content_when_bridge_present() {
         let workspace_root = Path::new("/tmp/agent/workspaces");
         let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
-        let p = params(Some("anthropic/claude-sonnet".into()), workspace, workspace_root);
+        let p = params(
+            Some("anthropic/claude-sonnet".into()),
+            workspace,
+            workspace_root,
+        );
         let session_dir = session_dir(&p);
         let model = effective_model(p.model.as_deref(), p.provider.as_deref());
         let bridge = HostToolBridge {
             command: "/opt/agentropy".to_string(),
-            args: vec!["__mcp-bridge".to_string(), "--dir".to_string(), "/tmp/agent".to_string()],
+            args: vec![
+                "__mcp-bridge".to_string(),
+                "--dir".to_string(),
+                "/tmp/agent".to_string(),
+            ],
         };
         let env = opencode_env(&p, &session_dir, model.as_deref(), Some(&bridge));
         let content = env
@@ -925,7 +967,11 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("config")).unwrap();
         let bridge = HostToolBridge {
             command: "/opt/agentropy".to_string(),
-            args: vec!["__mcp-bridge".to_string(), "--dir".to_string(), "/tmp/agent".to_string()],
+            args: vec![
+                "__mcp-bridge".to_string(),
+                "--dir".to_string(),
+                "/tmp/agent".to_string(),
+            ],
         };
         write_opencode_config(dir.path(), Some("anthropic/claude-sonnet"), Some(&bridge)).unwrap();
         let written = std::fs::read_to_string(dir.path().join("config/opencode.json")).unwrap();
@@ -1126,7 +1172,10 @@ PY"#;
         assert!(contents.contains("fake"), "auth.json contents should match");
 
         let dst_account = session_dir.path().join("data/opencode/account.json");
-        assert!(!dst_account.exists(), "account.json should not be created when source is absent");
+        assert!(
+            !dst_account.exists(),
+            "account.json should not be created when source is absent"
+        );
     }
 
     #[test]
@@ -1142,7 +1191,10 @@ PY"#;
         seed_opencode_auth_from(&src, session_dir.path()).unwrap();
 
         assert!(session_dir.path().join("data/opencode/auth.json").exists());
-        assert!(session_dir.path().join("data/opencode/account.json").exists());
+        assert!(session_dir
+            .path()
+            .join("data/opencode/account.json")
+            .exists());
     }
 
     #[test]

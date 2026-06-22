@@ -23,10 +23,7 @@ use tool_registry::{ToolRegistry, ToolRegistryHandle};
 async fn main() -> Result<()> {
     let suffix = parse_suffix(std::env::args().skip(1));
     let registry = ToolRegistry::new();
-    example_tool::register_into_with_config(
-        &registry,
-        example_tool::ExampleToolConfig { suffix },
-    )?;
+    example_tool::register_into_with_config(&registry, example_tool::ExampleToolConfig { suffix })?;
     let registry: Arc<dyn ToolRegistryHandle> = Arc::new(registry);
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -54,8 +51,7 @@ async fn main() -> Result<()> {
                 }
             }),
             Some("tools/list") => {
-                let tools: Vec<Value> =
-                    registry.list().iter().map(|s| s.to_mcp_tool()).collect();
+                let tools: Vec<Value> = registry.list().iter().map(|s| s.to_mcp_tool()).collect();
                 json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tools } })
             }
             Some("tools/call") => {

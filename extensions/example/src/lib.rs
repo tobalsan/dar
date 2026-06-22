@@ -71,7 +71,7 @@ impl Extension for ExampleExtension {
             // Demo: contribute a tab to the web dashboard via the cap-style
             // dashboard-tab contract. Depends only on `cap-dashboard-tab` +
             // `host-api` — no dashboard internals, no cross-extension imports.
-            DashboardTabs::shared(&mut ctx.services)?.add(Arc::new(ExampleTab));
+            DashboardTabs::shared(&mut ctx.services)?.add(Arc::new(ExampleTab))?;
             Ok(())
         })
     }
@@ -169,12 +169,16 @@ mod tests {
         let mut services = host_api::ServiceRegistry::default();
         DashboardTabs::shared(&mut services)
             .unwrap()
-            .add(Arc::new(ExampleTab));
+            .add(Arc::new(ExampleTab))
+            .unwrap();
         let registry = DashboardTabs::from_services(&services);
         let tab = registry.find("example").expect("example tab registered");
         assert_eq!(tab.title(), "Example");
         let html = tab.render().unwrap();
-        assert!(html.contains("Example tab"), "fragment body present: {html}");
+        assert!(
+            html.contains("Example tab"),
+            "fragment body present: {html}"
+        );
         assert!(!html.contains("<body"), "fragment is not a full page");
     }
 

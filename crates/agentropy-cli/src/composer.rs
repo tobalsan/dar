@@ -1051,7 +1051,13 @@ extensions:
     fn scheduler_selected_when_present_in_agent_yaml() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
-        write_agent_yaml(agent, "files", "fake", "logs", "extensions:\n  scheduler: {}\n");
+        write_agent_yaml(
+            agent,
+            "files",
+            "fake",
+            "logs",
+            "extensions:\n  scheduler: {}\n",
+        );
 
         compose(agent).unwrap();
 

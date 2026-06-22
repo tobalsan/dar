@@ -24,13 +24,13 @@
 //! the structured result.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{bail, Result};
+use jsonschema::JSONSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::Mutex;
 
 pub mod observe;
 pub use observe::{Redactor, ToolCallObservation};
@@ -137,9 +137,19 @@ impl ToolSpec {
 /// is data, not a transport error — it returns to the agent so the run
 /// continues.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolError {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolOutcome {
     pub text: String,
     pub is_error: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ToolError>,
 }
 
 impl ToolOutcome {
@@ -147,22 +157,68 @@ impl ToolOutcome {
         Self {
             text: text.into(),
             is_error: false,
+            error: None,
         }
     }
 
     pub fn error(text: impl Into<String>) -> Self {
+        let text = text.into();
         Self {
-            text: text.into(),
+            text: text.clone(),
             is_error: true,
+            error: Some(ToolError {
+                code: "tool_error".to_string(),
+                message: text,
+                hint: None,
+            }),
+        }
+    }
+
+    pub fn error_code(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        hint: Option<impl Into<String>>,
+    ) -> Self {
+        let code = code.into();
+        let message = message.into();
+        let hint = hint.map(Into::into);
+        let text = match &hint {
+            Some(hint) if !hint.is_empty() => format!("{message}\nHint: {hint}"),
+            _ => message.clone(),
+        };
+        Self {
+            text,
+            is_error: true,
+            error: Some(ToolError {
+                code,
+                message,
+                hint,
+            }),
+        }
+    }
+
+    pub fn redacted(&self, redactor: &Redactor) -> Self {
+        Self {
+            text: redactor.redact(&self.text),
+            is_error: self.is_error,
+            error: self.error.as_ref().map(|err| ToolError {
+                code: err.code.clone(),
+                message: redactor.redact(&err.message),
+                hint: err.hint.as_ref().map(|hint| redactor.redact(hint)),
+            }),
         }
     }
 
     /// Render as an MCP `tools/call` result object.
     pub fn to_mcp_result(&self) -> Value {
-        json!({
+        let mut result = json!({
             "content": [{ "type": "text", "text": self.text }],
             "isError": self.is_error,
-        })
+        });
+        if let Some(error) = &self.error {
+            result["structuredContent"] = json!({ "error": error });
+        }
+        result
     }
 }
 
@@ -206,6 +262,7 @@ pub trait ToolRegistryHandle: Send + Sync {
 
 struct RegisteredTool {
     spec: ToolSpec,
+    schema: Arc<JSONSchema>,
     executor: Arc<dyn ToolExecutor>,
 }
 
@@ -227,29 +284,43 @@ impl ToolRegistry {
     /// executor, or an executor `Err` are all normalized to `is_error: true`
     /// instead of propagating as a transport error.
     pub async fn dispatch(&self, name: &str, args: Value) -> ToolOutcome {
-        let executor = {
-            let tools = self.tools.lock().await;
+        let (executor, schema) = {
+            let tools = self.tools.lock().expect("tool registry mutex poisoned");
             match tools.get(name) {
-                Some(tool) => Arc::clone(&tool.executor),
+                Some(tool) => (Arc::clone(&tool.executor), Arc::clone(&tool.schema)),
                 None => {
-                    return ToolOutcome::error(format!("unknown tool {name:?}"));
+                    return ToolOutcome::error_code(
+                        "unknown_tool",
+                        format!("unknown tool {name:?}"),
+                        None::<String>,
+                    );
                 }
             }
         };
+        if let Err(message) = validate_args_against_schema(&args, &schema) {
+            return ToolOutcome::error_code("invalid_args", message, None::<String>);
+        }
 
         // Catch executor panics so one tool can never take down the bridge or
         // stall the agent's run; normalize to a structured error.
-        let result =
-            match tokio::spawn(async move { executor.execute(args).await }).await {
-                Ok(inner) => inner,
-                Err(join_err) => {
-                    return ToolOutcome::error(format!("tool {name:?} panicked: {join_err}"));
-                }
-            };
+        let result = match tokio::spawn(async move { executor.execute(args).await }).await {
+            Ok(inner) => inner,
+            Err(join_err) => {
+                return ToolOutcome::error_code(
+                    "tool_panic",
+                    format!("tool {name:?} panicked: {join_err}"),
+                    None::<String>,
+                );
+            }
+        };
 
         match result {
             Ok(outcome) => outcome,
-            Err(err) => ToolOutcome::error(format!("tool {name:?} failed: {err:#}")),
+            Err(err) => ToolOutcome::error_code(
+                "executor_error",
+                format!("tool {name:?} failed: {err:#}"),
+                None::<String>,
+            ),
         }
     }
 
@@ -268,7 +339,7 @@ impl ToolRegistry {
         redactor: &Redactor,
     ) -> (ToolOutcome, ToolCallObservation) {
         let access = {
-            let tools = self.tools.lock().await;
+            let tools = self.tools.lock().expect("tool registry mutex poisoned");
             tools.get(name).map(|t| t.spec.access)
         };
         let started = Instant::now();
@@ -286,16 +357,34 @@ impl ToolRegistry {
     }
 }
 
+fn compile_schema(schema: &Value) -> Result<JSONSchema> {
+    if !schema.is_object() {
+        bail!("tool input schema must be a JSON object");
+    }
+    JSONSchema::compile(schema).map_err(|err| anyhow::anyhow!("invalid tool input schema: {err}"))
+}
+
+fn validate_args_against_schema(
+    args: &Value,
+    schema: &JSONSchema,
+) -> std::result::Result<(), String> {
+    schema.validate(args).map_err(|errors| {
+        let messages = errors
+            .map(|err| err.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!("invalid arguments: {messages}")
+    })
+}
+
 #[async_trait::async_trait]
 impl ToolRegistryHandle for ToolRegistry {
     fn register_tool(&self, spec: ToolSpec, executor: Arc<dyn ToolExecutor>) -> Result<()> {
         if spec.name.trim().is_empty() {
             bail!("tool name must not be empty");
         }
-        let mut tools = self
-            .tools
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("tool registry is busy during registration"))?;
+        let schema = Arc::new(compile_schema(&spec.input_schema)?);
+        let mut tools = self.tools.lock().expect("tool registry mutex poisoned");
         if tools.contains_key(&spec.name) {
             bail!(
                 "duplicate tool name {:?}: a tool with this name is already registered \
@@ -305,27 +394,29 @@ impl ToolRegistryHandle for ToolRegistry {
         }
         tools.insert(
             spec.name.clone(),
-            RegisteredTool { spec, executor },
+            RegisteredTool {
+                spec,
+                schema,
+                executor,
+            },
         );
         Ok(())
     }
 
     fn list(&self) -> Vec<ToolSpec> {
-        // `dispatch` clones the executor `Arc` and releases the lock before any
-        // await, and registration is synchronous, so the lock is only ever held
-        // briefly. Fall back to an empty list on the (unreachable) contended
-        // case rather than panicking the bridge.
-        match self.tools.try_lock() {
-            Ok(tools) => tools.values().map(|t| t.spec.clone()).collect(),
-            Err(_) => Vec::new(),
-        }
+        self.tools
+            .lock()
+            .expect("tool registry mutex poisoned")
+            .values()
+            .map(|t| t.spec.clone())
+            .collect()
     }
 
     fn is_empty(&self) -> bool {
         self.tools
-            .try_lock()
-            .map(|t| t.is_empty())
-            .unwrap_or(false)
+            .lock()
+            .expect("tool registry mutex poisoned")
+            .is_empty()
     }
 
     async fn dispatch(&self, name: &str, args: Value) -> ToolOutcome {
@@ -398,6 +489,10 @@ mod tests {
         )
     }
 
+    fn loose_spec(name: &str) -> ToolSpec {
+        ToolSpec::new(name, "desc", json!({ "type": "object" }))
+    }
+
     #[tokio::test]
     async fn registers_and_dispatches() {
         let reg = ToolRegistry::new();
@@ -436,8 +531,10 @@ mod tests {
     #[test]
     fn list_exposes_schema_metadata_sorted() {
         let reg = ToolRegistry::new();
-        reg.register_tool(spec("b_tool"), Arc::new(EchoUpper)).unwrap();
-        reg.register_tool(spec("a_tool"), Arc::new(EchoUpper)).unwrap();
+        reg.register_tool(spec("b_tool"), Arc::new(EchoUpper))
+            .unwrap();
+        reg.register_tool(spec("a_tool"), Arc::new(EchoUpper))
+            .unwrap();
         let names: Vec<_> = reg.list().into_iter().map(|s| s.name).collect();
         assert_eq!(names, vec!["a_tool", "b_tool"]);
 
@@ -460,7 +557,7 @@ mod tests {
     #[tokio::test]
     async fn executor_ok_error_outcome_passes_through() {
         let reg = ToolRegistry::new();
-        reg.register_tool(spec("fails"), Arc::new(AlwaysErrOutcome))
+        reg.register_tool(loose_spec("fails"), Arc::new(AlwaysErrOutcome))
             .unwrap();
         let out = reg.dispatch("fails", json!({})).await;
         assert!(out.is_error);
@@ -470,7 +567,7 @@ mod tests {
     #[tokio::test]
     async fn executor_err_is_normalized() {
         let reg = ToolRegistry::new();
-        reg.register_tool(spec("faults"), Arc::new(AlwaysFault))
+        reg.register_tool(loose_spec("faults"), Arc::new(AlwaysFault))
             .unwrap();
         let out = reg.dispatch("faults", json!({})).await;
         assert!(out.is_error);
@@ -480,7 +577,8 @@ mod tests {
     #[tokio::test]
     async fn executor_panic_is_normalized_and_does_not_stall() {
         let reg = ToolRegistry::new();
-        reg.register_tool(spec("panics"), Arc::new(Panics)).unwrap();
+        reg.register_tool(loose_spec("panics"), Arc::new(Panics))
+            .unwrap();
         let out = reg.dispatch("panics", json!({})).await;
         assert!(out.is_error);
         assert!(out.text.contains("panicked"));
@@ -492,11 +590,31 @@ mod tests {
         assert_eq!(ok, ToolOutcome::ok("OK"));
     }
 
+    #[tokio::test]
+    async fn dispatch_rejects_schema_invalid_args_before_executor() {
+        let reg = ToolRegistry::new();
+        reg.register_tool(spec("echo_upper"), Arc::new(EchoUpper))
+            .unwrap();
+        let out = reg.dispatch("echo_upper", json!({ "text": 7 })).await;
+        assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "invalid_args");
+        assert!(out.text.contains("invalid arguments"));
+    }
+
+    #[test]
+    fn invalid_json_schema_rejected_at_registration() {
+        let reg = ToolRegistry::new();
+        let bad = ToolSpec::new("bad", "bad", json!({ "type": 7 }));
+        let err = reg.register_tool(bad, Arc::new(EchoUpper)).unwrap_err();
+        assert!(err.to_string().contains("invalid tool input schema"));
+    }
+
     #[test]
     fn mcp_result_shape_matches_protocol() {
-        let result = ToolOutcome::error("bad").to_mcp_result();
+        let result = ToolOutcome::error_code("bad_code", "bad", None::<String>).to_mcp_result();
         assert_eq!(result["isError"], true);
         assert_eq!(result["content"][0]["type"], "text");
         assert_eq!(result["content"][0]["text"], "bad");
+        assert_eq!(result["structuredContent"]["error"]["code"], "bad_code");
     }
 }

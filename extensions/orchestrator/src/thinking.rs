@@ -138,7 +138,10 @@ mod tests {
         let err = validate_thinking_for_runner("pi", Some("8000")).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("numeric budget"), "{msg}");
-        assert!(msg.contains("none, minimal, low, medium, high, xhigh"), "{msg}");
+        assert!(
+            msg.contains("none, minimal, low, medium, high, xhigh"),
+            "{msg}"
+        );
     }
 
     #[test]

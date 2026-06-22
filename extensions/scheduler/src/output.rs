@@ -5,6 +5,7 @@
 //! no `model`, no `result_status`. Frontmatter keeps the core run fields
 //! (job id, run type, fired/finished, status, duration, schedule).
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -54,10 +55,36 @@ pub fn write_cron_run_output(input: &CronRunOutput<'_>) -> Result<PathBuf> {
     let dir = input.root.join("cron").join("output").join(input.job_id);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating cron output dir {}", dir.display()))?;
-    let file_path = dir.join(format!("{}.md", file_timestamp(input.fired_at)));
-    std::fs::write(&file_path, render_cron_run_output(input))
-        .with_context(|| format!("writing cron output {}", file_path.display()))?;
-    Ok(file_path)
+    let body = render_cron_run_output(input);
+    let stem = file_timestamp(input.fired_at);
+    for seq in 0..10_000u32 {
+        let suffix = if seq == 0 {
+            String::new()
+        } else {
+            format!("-{seq:04}")
+        };
+        let file_path = dir.join(format!("{stem}{suffix}.md"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&file_path)
+        {
+            Ok(mut file) => {
+                file.write_all(body.as_bytes())
+                    .with_context(|| format!("writing cron output {}", file_path.display()))?;
+                return Ok(file_path);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("writing cron output {}", file_path.display()));
+            }
+        }
+    }
+    anyhow::bail!(
+        "could not allocate cron output filename in {}",
+        dir.display()
+    )
 }
 
 /// Render the hybrid frontmatter + markdown body for one run.
@@ -119,9 +146,9 @@ fn iso(dt: DateTime<Utc>) -> String {
     dt.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-/// `YYYY-MM-DD_HH-mm-ss` (UTC), matching aihub's filename format.
+/// `YYYY-MM-DD_HH-mm-ss.sss` (UTC), sortable and collision-resistant.
 fn file_timestamp(dt: DateTime<Utc>) -> String {
-    dt.format("%Y-%m-%d_%H-%M-%S").to_string()
+    dt.format("%Y-%m-%d_%H-%M-%S%.3f").to_string()
 }
 
 /// `YYYY-MM-DD HH:mm:ss` (UTC), for the readable body.
@@ -229,10 +256,39 @@ mod tests {
 
         assert_eq!(
             path,
-            dir.path().join("cron/output/job-1/2026-05-19_07-00-00.md")
+            dir.path()
+                .join("cron/output/job-1/2026-05-19_07-00-00.000.md")
         );
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("## Error"));
         assert!(content.contains("boom"));
+    }
+
+    #[test]
+    fn writes_collision_safe_output_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let fired_at = Utc.with_ymd_and_hms(2026, 5, 19, 7, 0, 0).unwrap();
+        let input = |error: &str| CronRunOutput {
+            root: dir.path(),
+            job_id: "job-1",
+            name: "Job One",
+            prompt: "Ping",
+            schedule: "* * * * * UTC",
+            fired_at,
+            finished_at: fired_at,
+            status: RunStatus::Error,
+            response: None,
+            error: Some(error.to_string()),
+        };
+        let first = write_cron_run_output(&input("first")).unwrap();
+        let second = write_cron_run_output(&input("second")).unwrap();
+        assert_ne!(first, second);
+        assert!(first.exists());
+        assert!(second.exists());
+        assert!(second
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("-0001"));
     }
 }

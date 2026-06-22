@@ -133,7 +133,7 @@ impl DashboardTab for MyTab {
 }
 
 // in register():
-DashboardTabs::shared(&mut ctx.services)?.add(Arc::new(MyTab));
+DashboardTabs::shared(&mut ctx.services)?.add(Arc::new(MyTab))?;
 ```
 
 Live updates: while a tab is active the dashboard's `#content` poller already

@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use tool_registry::{ToolExecutor, ToolOutcome, ToolRegistryHandle, ToolSpec};
+use tool_registry::{Redactor, ToolExecutor, ToolOutcome, ToolRegistryHandle, ToolSpec};
 
 use crate::{resolve_linear_auth_header, API_KEY_ENV, DEFAULT_ENDPOINT, OAUTH_TOKEN_ENV};
 
@@ -116,31 +116,43 @@ impl ToolExecutor for LinearGraphqlTool {
     async fn execute(&self, args: Value) -> Result<ToolOutcome> {
         // --- validate arguments (structured failure, not a host fault) ---
         let Some(query) = args.get("query").and_then(Value::as_str) else {
-            return Ok(ToolOutcome::error(
+            return Ok(ToolOutcome::error_code(
+                "invalid_args",
                 "linear_graphql requires a 'query' string argument",
+                None::<String>,
             ));
         };
         if query.trim().is_empty() {
-            return Ok(ToolOutcome::error(
+            return Ok(ToolOutcome::error_code(
+                "invalid_args",
                 "linear_graphql 'query' must not be empty",
+                None::<String>,
             ));
         }
         let variables = match args.get("variables") {
             None | Some(Value::Null) => json!({}),
             Some(v @ Value::Object(_)) => v.clone(),
             Some(_) => {
-                return Ok(ToolOutcome::error(
+                return Ok(ToolOutcome::error_code(
+                    "invalid_args",
                     "linear_graphql 'variables' must be an object",
+                    None::<String>,
                 ));
             }
         };
 
         // --- resolve host-held auth ---
         let Some(auth_header) = self.auth.resolve() else {
-            return Ok(ToolOutcome::error(format!(
-                "linear_graphql is not configured: neither {OAUTH_TOKEN_ENV} nor {API_KEY_ENV} is set in the host environment (no Linear auth token is set)"
-            )));
+            return Ok(ToolOutcome::error_code(
+                "missing_auth",
+                format!(
+                    "linear_graphql is not configured: neither {OAUTH_TOKEN_ENV} nor {API_KEY_ENV} is set in the host environment (no Linear auth token is set)"
+                ),
+                Some(format!("Set {OAUTH_TOKEN_ENV} or {API_KEY_ENV} in the agent .env")),
+            ));
         };
+
+        let redactor = auth_redactor(&auth_header);
 
         // --- execute in-host; the token only leaves as the Authorization header ---
         let body = json!({ "query": query, "variables": variables });
@@ -157,9 +169,11 @@ impl ToolExecutor for LinearGraphqlTool {
             Err(err) => {
                 // Transport failure (refused connection, timeout, DNS, …). Keep
                 // the message free of the token (reqwest does not echo headers).
-                return Ok(ToolOutcome::error(format!(
-                    "linear_graphql transport error: {err}"
-                )));
+                return Ok(ToolOutcome::error_code(
+                    "transport_error",
+                    format!("linear_graphql transport error: {err}"),
+                    None::<String>,
+                ));
             }
         };
 
@@ -167,26 +181,34 @@ impl ToolExecutor for LinearGraphqlTool {
         let text = match response.text().await {
             Ok(text) => text,
             Err(err) => {
-                return Ok(ToolOutcome::error(format!(
-                    "linear_graphql failed reading response body: {err}"
-                )));
+                return Ok(ToolOutcome::error_code(
+                    "response_read_error",
+                    format!("linear_graphql failed reading response body: {err}"),
+                    None::<String>,
+                ));
             }
         };
 
         if !status.is_success() {
-            return Ok(ToolOutcome::error(format!(
-                "linear_graphql HTTP {}: {}",
-                status.as_u16(),
-                truncate(&text, 500)
-            )));
+            return Ok(ToolOutcome::error_code(
+                "http_error",
+                format!(
+                    "linear_graphql HTTP {}: {}",
+                    status.as_u16(),
+                    truncate(&redactor.redact(&text), 500)
+                ),
+                None::<String>,
+            ));
         }
 
         let parsed: Value = match serde_json::from_str(&text) {
             Ok(v) => v,
             Err(err) => {
-                return Ok(ToolOutcome::error(format!(
-                    "linear_graphql received a non-JSON response: {err}"
-                )));
+                return Ok(ToolOutcome::error_code(
+                    "non_json_response",
+                    format!("linear_graphql received a non-JSON response: {err}"),
+                    None::<String>,
+                ));
             }
         };
 
@@ -194,16 +216,20 @@ impl ToolExecutor for LinearGraphqlTool {
         if let Some(errors) = parsed.get("errors") {
             let non_empty = errors.as_array().map(|a| !a.is_empty()).unwrap_or(true);
             if non_empty {
-                return Ok(ToolOutcome::error(format!(
-                    "linear_graphql GraphQL errors: {errors}"
-                )));
+                return Ok(ToolOutcome::error_code(
+                    "graphql_error",
+                    format!(
+                        "linear_graphql GraphQL errors: {}",
+                        redactor.redact(&errors.to_string())
+                    ),
+                    None::<String>,
+                ));
             }
         }
 
         // Success: return just the `data` payload (or the whole body if absent).
         let data = parsed.get("data").cloned().unwrap_or(parsed);
-        let rendered = serde_json::to_string(&data)
-            .unwrap_or_else(|_| "{}".to_string());
+        let rendered = serde_json::to_string(&data).unwrap_or_else(|_| "{}".to_string());
         Ok(ToolOutcome::ok(rendered))
     }
 }
@@ -214,6 +240,14 @@ impl ToolExecutor for LinearGraphqlTool {
 pub fn register_into(registry: &dyn ToolRegistryHandle, endpoint: String) -> Result<()> {
     let tool = LinearGraphqlTool::new(endpoint, AuthSource::Env)?;
     registry.register_tool(LinearGraphqlTool::spec(), Arc::new(tool))
+}
+
+fn auth_redactor(auth_header: &str) -> Redactor {
+    let mut secrets = vec![auth_header.to_string()];
+    if let Some(token) = auth_header.strip_prefix("Bearer ") {
+        secrets.push(token.to_string());
+    }
+    Redactor::from_secret_values(secrets)
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -257,6 +291,7 @@ mod tests {
         let tool = tool_for("http://127.0.0.1:1");
         let out = tool.execute(json!({})).await.unwrap();
         assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "invalid_args");
         assert!(out.text.contains("requires a 'query'"));
     }
 
@@ -291,6 +326,7 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "missing_auth");
         assert!(out.text.contains("no Linear auth token is set"));
         assert!(out.text.contains("LINEAR_OAUTH_TOKEN"));
         assert!(out.text.contains("LINEAR_API_KEY"));
@@ -305,6 +341,7 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "transport_error");
         assert!(out.text.contains("transport error"));
         // The token must never appear in any error text.
         assert!(!out.text.contains("test-key"));
@@ -414,13 +451,31 @@ mod tests {
         .await;
 
         let tool = tool_for(&url);
+        let out = tool.execute(json!({ "query": "{ bogus }" })).await.unwrap();
+        assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "graphql_error");
+        assert!(out.text.contains("GraphQL errors"));
+        assert!(out.text.contains("bogus"));
+    }
+
+    #[tokio::test]
+    async fn graphql_errors_redact_echoed_authorization_header() {
+        let url = mock_server(
+            "200 OK",
+            r#"{"errors":[{"message":"Authorization: test-key"}],"data":null}"#,
+            no_inspect(),
+        )
+        .await;
+
+        let tool = tool_for(&url);
         let out = tool
-            .execute(json!({ "query": "{ bogus }" }))
+            .execute(json!({ "query": "{ viewer { id } }" }))
             .await
             .unwrap();
         assert!(out.is_error);
-        assert!(out.text.contains("GraphQL errors"));
-        assert!(out.text.contains("bogus"));
+        assert_eq!(out.error.as_ref().unwrap().code, "graphql_error");
+        assert!(!out.text.contains("test-key"));
+        assert!(out.text.contains("[REDACTED]"));
     }
 
     #[tokio::test]
@@ -433,6 +488,27 @@ mod tests {
             .unwrap();
         assert!(out.is_error);
         assert!(out.text.contains("non-JSON response"));
+    }
+
+    #[tokio::test]
+    async fn http_failure_redacts_echoed_authorization_header() {
+        let url = mock_server(
+            "401 Unauthorized",
+            r#"{"error":"Authorization: test-key"}"#,
+            no_inspect(),
+        )
+        .await;
+
+        let tool = tool_for(&url);
+        let out = tool
+            .execute(json!({ "query": "{ viewer { id } }" }))
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "http_error");
+        assert!(out.text.contains("HTTP 401"));
+        assert!(!out.text.contains("test-key"));
+        assert!(out.text.contains("[REDACTED]"));
     }
 
     #[tokio::test]
@@ -450,6 +526,7 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "http_error");
         assert!(out.text.contains("HTTP 401"));
         assert!(!out.text.contains("test-key"));
     }

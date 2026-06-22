@@ -76,13 +76,19 @@ async fn example_tab_appears_in_nav_and_renders_fragment() {
     // Tab nav present on the index page, linking to the fragment route.
     let (status, html) = get(&router, "/").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(html.contains("id=\"dash-tabs\""), "tab nav rendered: {html}");
+    assert!(
+        html.contains("id=\"dash-tabs\""),
+        "tab nav rendered: {html}"
+    );
     assert!(html.contains(">Runs<"), "default Runs tab present");
     assert!(html.contains("/tabs/example"), "example tab linked");
     assert!(html.contains(">Example<"), "example tab title in nav");
     // htmx #content innerHTML-swap shell preserved (no body swap).
     assert!(html.contains("id=\"content\""), "content shell preserved");
-    assert!(!html.contains("hx-swap=\"outerHTML\""), "no outer/body swap");
+    assert!(
+        !html.contains("hx-swap=\"outerHTML\""),
+        "no outer/body swap"
+    );
 
     // The fragment renders at the dashboard-owned dispatch route.
     let (status, frag) = get(&router, "/tabs/example").await;

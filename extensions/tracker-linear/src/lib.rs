@@ -43,7 +43,10 @@ pub(crate) const OAUTH_TOKEN_ENV: &str = "LINEAR_OAUTH_TOKEN";
 /// `LINEAR_OAUTH_TOKEN` takes precedence over `LINEAR_API_KEY` when both are
 /// set. Returns `None` when neither is set (or both are empty).
 pub(crate) fn resolve_linear_auth_header() -> Option<String> {
-    if let Some(token) = std::env::var(OAUTH_TOKEN_ENV).ok().filter(|t| !t.is_empty()) {
+    if let Some(token) = std::env::var(OAUTH_TOKEN_ENV)
+        .ok()
+        .filter(|t| !t.is_empty())
+    {
         return Some(format!("Bearer {token}"));
     }
     std::env::var(API_KEY_ENV).ok().filter(|k| !k.is_empty())
@@ -890,8 +893,11 @@ query AgentropyCandidates($filter: IssueFilter, $after: String, $first: Int!) {
             if !self.active.contains(&r.state.name) {
                 continue;
             }
-            let blocker_ids: Vec<&str> =
-                r.blocked_by().iter().map(|b| b.identifier.as_str()).collect();
+            let blocker_ids: Vec<&str> = r
+                .blocked_by()
+                .iter()
+                .map(|b| b.identifier.as_str())
+                .collect();
             if !is_blocked(&blocker_ids, &state_map, &self.terminal) {
                 out.push(raw_to_issue(r));
             }
@@ -1365,7 +1371,10 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var(OAUTH_TOKEN_ENV, "oauth-abc");
         std::env::set_var(API_KEY_ENV, "lin_api_xyz");
-        assert_eq!(resolve_linear_auth_header().as_deref(), Some("Bearer oauth-abc"));
+        assert_eq!(
+            resolve_linear_auth_header().as_deref(),
+            Some("Bearer oauth-abc")
+        );
         std::env::remove_var(OAUTH_TOKEN_ENV);
         std::env::remove_var(API_KEY_ENV);
     }
@@ -1730,7 +1739,10 @@ mod tests {
             ..Default::default()
         };
         let f = build_issue_filter(&dims, &[]);
-        assert_eq!(f, json!({ "and": [{ "team": { "key": { "eq": "ALG" } } }] }));
+        assert_eq!(
+            f,
+            json!({ "and": [{ "team": { "key": { "eq": "ALG" } } }] })
+        );
     }
 
     #[test]

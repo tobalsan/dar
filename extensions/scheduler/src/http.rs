@@ -46,7 +46,10 @@ pub struct ApiState {
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/jobs", get(list_jobs).post(create_job))
-        .route("/jobs/{id}", axum::routing::patch(update_job).delete(delete_job))
+        .route(
+            "/jobs/{id}",
+            axum::routing::patch(update_job).delete(delete_job),
+        )
         .route("/jobs/{id}/run-now", axum::routing::post(run_now))
         .route("/jobs/{id}/tail", get(tail))
         .with_state(state)
@@ -112,7 +115,10 @@ async fn list_jobs(State(api): State<ApiState>) -> Response {
 
 /// `POST /scheduler/jobs` \u2014 create with a server-generated id, default
 /// `enabled: true`. Returns 201 with the new job (config + runtime).
-async fn create_job(State(api): State<ApiState>, body: Result<Json<CreateBody>, axum::extract::rejection::JsonRejection>) -> Response {
+async fn create_job(
+    State(api): State<ApiState>,
+    body: Result<Json<CreateBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
     let Json(body) = match body {
         Ok(b) => b,
         Err(e) => return bad_request(&e.body_text()),
@@ -287,9 +293,9 @@ fn run_result_json(
 }
 
 /// `GET /scheduler/jobs/{id}/tail` — return the newest output file for a job
-/// (path + content). The newest file is the lexicographically-greatest entry in
-/// `cron/output/<id>/` (filenames are `YYYY-MM-DD_HH-mm-ss.md`, so lexicographic
-/// order is timestamp order). Unknown job → `404`; job with no outputs → `404`.
+/// (path + content). The newest file is selected by timestamp stem plus
+/// collision suffix (`-0001` beats unsuffixed for same timestamp). Unknown job
+/// → `404`; job with no outputs → `404`.
 async fn tail(State(api): State<ApiState>, Path(id): Path<String>) -> Response {
     if !api.state.jobs().iter().any(|j| j.id == id) {
         return not_found(&id);
@@ -300,12 +306,12 @@ async fn tail(State(api): State<ApiState>, Path(id): Path<String>) -> Response {
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            output_sort_key(&name).map(|key| (key, e))
         })
-        .max_by_key(|e| e.file_name());
+        .max_by_key(|(key, _)| key.clone())
+        .map(|(_, e)| e);
     let Some(entry) = newest else {
         return json_ok(
             StatusCode::NOT_FOUND,
@@ -320,6 +326,19 @@ async fn tail(State(api): State<ApiState>, Path(id): Path<String>) -> Response {
         ),
         Err(e) => server_error(&format!("reading output {}: {e}", path.display())),
     }
+}
+
+fn output_sort_key(name: &str) -> Option<(String, u32)> {
+    let stem = name.strip_suffix(".md")?;
+    let (ts, seq) = match stem.rsplit_once('-') {
+        Some((prefix, suffix))
+            if suffix.len() == 4 && suffix.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            (prefix, suffix.parse().ok()?)
+        }
+        _ => (stem, 0),
+    };
+    Some((ts.to_string(), seq))
 }
 
 // ---- validation -----------------------------------------------------------
@@ -376,9 +395,7 @@ fn generate_job_id(existing: &[ScheduleJob]) -> String {
 /// Merge a job's config with its in-memory runtime state into a JSON object.
 fn job_with_runtime(api: &ApiState, job: &ScheduleJob, now_ms: i64) -> Value {
     let rt = api.state.runtime(&job.id);
-    let running_for_ms = rt
-        .running_since_ms
-        .map(|since| (now_ms - since).max(0));
+    let running_for_ms = rt.running_since_ms.map(|since| (now_ms - since).max(0));
     let mut value = serde_json::to_value(job).unwrap_or_else(|_| json!({}));
     if let Value::Object(map) = &mut value {
         map.insert("nextRunAtMs".to_string(), json!(rt.next_run_at_ms));
@@ -474,7 +491,11 @@ mod tests {
     #[tokio::test]
     async fn create_returns_201_with_id_and_defaults_enabled() {
         let (api, _dir) = api();
-        let resp = create_job(State(api.clone()), Ok(create_body("0 8 * * *", "UTC", "hi"))).await;
+        let resp = create_job(
+            State(api.clone()),
+            Ok(create_body("0 8 * * *", "UTC", "hi")),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::CREATED);
         let v = body_json(resp).await;
         assert!(v["id"].as_str().unwrap().starts_with("job-"));
@@ -528,7 +549,11 @@ mod tests {
     #[tokio::test]
     async fn list_includes_runtime_fields() {
         let (api, _dir) = api();
-        create_job(State(api.clone()), Ok(create_body("0 8 * * *", "UTC", "hi"))).await;
+        create_job(
+            State(api.clone()),
+            Ok(create_body("0 8 * * *", "UTC", "hi")),
+        )
+        .await;
         let resp = list_jobs(State(api)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
@@ -542,7 +567,11 @@ mod tests {
     async fn update_patches_fields() {
         let (api, _dir) = api();
         let created = body_json(
-            create_job(State(api.clone()), Ok(create_body("0 8 * * *", "UTC", "hi"))).await,
+            create_job(
+                State(api.clone()),
+                Ok(create_body("0 8 * * *", "UTC", "hi")),
+            )
+            .await,
         )
         .await;
         let id = created["id"].as_str().unwrap().to_string();
@@ -579,7 +608,11 @@ mod tests {
     async fn update_bad_schedule_is_400() {
         let (api, _dir) = api();
         let created = body_json(
-            create_job(State(api.clone()), Ok(create_body("0 8 * * *", "UTC", "hi"))).await,
+            create_job(
+                State(api.clone()),
+                Ok(create_body("0 8 * * *", "UTC", "hi")),
+            )
+            .await,
         )
         .await;
         let id = created["id"].as_str().unwrap().to_string();
@@ -602,7 +635,11 @@ mod tests {
     async fn delete_removes_and_returns_204() {
         let (api, _dir) = api();
         let created = body_json(
-            create_job(State(api.clone()), Ok(create_body("0 8 * * *", "UTC", "hi"))).await,
+            create_job(
+                State(api.clone()),
+                Ok(create_body("0 8 * * *", "UTC", "hi")),
+            )
+            .await,
         )
         .await;
         let id = created["id"].as_str().unwrap().to_string();
@@ -687,9 +724,14 @@ mod tests {
     }
 
     async fn create_one(api: &ApiState) -> String {
-        let created =
-            body_json(create_job(State(api.clone()), Ok(create_body("0 0 1 1 *", "UTC", "hi"))).await)
-                .await;
+        let created = body_json(
+            create_job(
+                State(api.clone()),
+                Ok(create_body("0 0 1 1 *", "UTC", "hi")),
+            )
+            .await,
+        )
+        .await;
         created["id"].as_str().unwrap().to_string()
     }
 
@@ -704,7 +746,9 @@ mod tests {
     async fn run_now_already_running_is_409() {
         let (api, _dir) = api();
         let id = create_one(&api).await;
-        assert!(api.state.try_claim_running(&id, Utc::now().timestamp_millis()));
+        assert!(api
+            .state
+            .try_claim_running(&id, Utc::now().timestamp_millis()));
         let resp = run_now(State(api), Path(id)).await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
@@ -798,7 +842,8 @@ mod tests {
                 Box<dyn std::future::Future<Output = anyhow::Result<RunnerHandle>> + Send + 'a>,
             > {
                 // Emulate the loop's overlap-skip bookkeeping landing mid-run.
-                self.state.mark_skipped(&self.id, Utc::now().timestamp_millis());
+                self.state
+                    .mark_skipped(&self.id, Utc::now().timestamp_millis());
                 self.state.set_next_run(&self.id, Some(self.recomputed));
                 self.done.store(true, Ordering::SeqCst);
                 Box::pin(async move {
@@ -860,6 +905,27 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert_eq!(v["content"], "newest");
-        assert!(v["path"].as_str().unwrap().ends_with("2026-06-01_12-00-00.md"));
+        assert!(v["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("2026-06-01_12-00-00.md"));
+    }
+
+    #[tokio::test]
+    async fn tail_returns_newest_collision_output() {
+        let (api, dir) = api();
+        let id = create_one(&api).await;
+        let out_dir = dir.path().join("cron/output").join(&id);
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(out_dir.join("2026-06-01_12-00-00.000.md"), "first").unwrap();
+        std::fs::write(out_dir.join("2026-06-01_12-00-00.000-0001.md"), "second").unwrap();
+        let resp = tail(State(api), Path(id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["content"], "second");
+        assert!(v["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("2026-06-01_12-00-00.000-0001.md"));
     }
 }

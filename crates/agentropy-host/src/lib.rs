@@ -54,10 +54,7 @@ impl HostOptions {
 
     /// Register a callback fired when any extension's `register`/`start` or the
     /// foreground handoff returns an error during boot.
-    pub fn on_startup_error(
-        mut self,
-        hook: impl Fn(&str, &str) + Send + Sync + 'static,
-    ) -> Self {
+    pub fn on_startup_error(mut self, hook: impl Fn(&str, &str) + Send + Sync + 'static) -> Self {
         self.on_startup_error = Some(Arc::new(hook));
         self
     }

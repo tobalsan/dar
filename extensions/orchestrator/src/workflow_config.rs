@@ -568,7 +568,7 @@ mod tests {
                 command: "fake".into(),
                 model: None,
                 provider: None,
-            thinking: None,
+                thinking: None,
                 max_run_timeout_ms: 1_800_000,
                 stall_timeout_ms: 300_000,
                 max_turns: 20,
@@ -687,10 +687,7 @@ body"#;
             Some(true)
         );
         assert_eq!(fm.agent.as_ref().unwrap().sdk, Some("fake".into()));
-        assert_eq!(
-            fm.agent.as_ref().unwrap().model,
-            Some("fake-model".into())
-        );
+        assert_eq!(fm.agent.as_ref().unwrap().model, Some("fake-model".into()));
         assert_eq!(
             fm.hooks.as_ref().unwrap().after_create,
             Some("./after-create.sh".into())

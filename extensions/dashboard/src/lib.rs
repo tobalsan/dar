@@ -11,11 +11,11 @@ use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use cap_dashboard_tab::DashboardTabs;
+use orchestrator_api::{ControlMsg, RunQuery, RunSnapshot, CONTROL_TOPIC, RUN_SNAPSHOT_TOPIC};
 use serde::Deserialize;
 use serde_json::json;
-use orchestrator_api::{ControlMsg, RunQuery, RunSnapshot, CONTROL_TOPIC, RUN_SNAPSHOT_TOPIC};
 use std::sync::{Arc, OnceLock};
-use cap_dashboard_tab::DashboardTabs;
 use view::{DashboardTemplate, RunDetailTemplate, TabNav};
 
 #[derive(rust_embed::Embed)]
@@ -139,8 +139,8 @@ struct AgentIdOnly {
 fn read_agent_id(root: &std::path::Path) -> anyhow::Result<String> {
     use anyhow::Context as _;
     let path = root.join("agent.yaml");
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let parsed: AgentIdOnly = serde_yaml::from_str(&raw)
         .with_context(|| format!("parsing id from {}", path.display()))?;
     Ok(parsed.id)
@@ -159,7 +159,10 @@ fn registry_dir(ctx: &host_api::StartCtx) -> std::path::PathBuf {
 fn register_presence(
     ctx: &host_api::StartCtx,
     addr: std::net::SocketAddr,
-) -> anyhow::Result<(agentropy_presence::Registry, agentropy_presence::PresenceEntry)> {
+) -> anyhow::Result<(
+    agentropy_presence::Registry,
+    agentropy_presence::PresenceEntry,
+)> {
     let root = ctx.paths.root();
     let id = read_agent_id(root)?;
     let folder = root.to_string_lossy().to_string();
@@ -234,7 +237,11 @@ async fn index(State(api): State<BusApiState>) -> Response {
 /// fragment into `#content` (innerHTML-swap). 404 when no tab matches.
 async fn tab_fragment(State(api): State<BusApiState>, Path(tab_id): Path<String>) -> Response {
     let Some(registry) = api.tabs.get() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "dashboard tabs unavailable").into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dashboard tabs unavailable",
+        )
+            .into_response();
     };
     let Some(tab) = registry.find(&tab_id) else {
         return (StatusCode::NOT_FOUND, "tab not found").into_response();
@@ -336,8 +343,16 @@ async fn run_logs(
                     serde_json::from_str::<serde_json::Value>(&e.payload)
                 {
                     if map.get("type").and_then(|v| v.as_str()) == Some("protocol_event") {
-                        let rt = map.get("log_row").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let tx = map.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let rt = map
+                            .get("log_row")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let tx = map
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         (rt, tx)
                     } else {
                         (e.kind.clone(), e.payload.clone())
@@ -348,7 +363,11 @@ async fn run_logs(
                 if row_type.is_empty() && text.is_empty() {
                     continue;
                 }
-                let tag = if row_type.is_empty() { view::he(&e.kind) } else { view::he(&row_type) };
+                let tag = if row_type.is_empty() {
+                    view::he(&e.kind)
+                } else {
+                    view::he(&row_type)
+                };
                 html.push_str(&format!(
                     "<div class=\"ev-row\" data-event-id=\"{}\"><span class=\"ev-meta\"><span class=\"ev-tag\">{}</span><span class=\"ev-ts\">{}</span></span><span class=\"ev-text\">{}</span></div>",
                     e.event_id,
@@ -377,8 +396,16 @@ async fn run_logs(
                         ts: view::fmt_event_ts(&e.ts),
                         kind: e.kind.clone(),
                         row_type: rt.to_string(),
-                        text: map.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                        detail: map.get("detail").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        text: map
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        detail: map
+                            .get("detail")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                         rendered: String::new(),
                     };
                     html.push_str(&view::render_log_row(&el));
@@ -433,10 +460,7 @@ async fn run_logs(
         .into_response()
 }
 
-async fn run_interrupt(
-    State(api): State<BusApiState>,
-    Path(run_id): Path<String>,
-) -> Response {
+async fn run_interrupt(State(api): State<BusApiState>, Path(run_id): Path<String>) -> Response {
     let Some(bus) = api.bus.get() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -480,10 +504,7 @@ async fn run_interrupt(
     }
 }
 
-async fn run_kill(
-    State(api): State<BusApiState>,
-    Path(run_id): Path<String>,
-) -> Response {
+async fn run_kill(State(api): State<BusApiState>, Path(run_id): Path<String>) -> Response {
     let Some(bus) = api.bus.get() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -613,7 +634,7 @@ mod tests {
             }
         }
         let registry = Arc::new(DashboardTabs::default());
-        registry.add(Arc::new(Demo));
+        registry.add(Arc::new(Demo)).unwrap();
         let state = make_state();
         let _ = state.tabs.set(registry);
         let resp = tab_fragment(
@@ -637,9 +658,14 @@ mod tests {
         let resp = run_logs(
             axum::extract::State(state),
             axum::extract::Path("r1".to_string()),
-            axum::extract::Query(LogsQuery { since: Some(0), limit: None, view: None }),
+            axum::extract::Query(LogsQuery {
+                since: Some(0),
+                limit: None,
+                view: None,
+            }),
             headers,
-        ).await;
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

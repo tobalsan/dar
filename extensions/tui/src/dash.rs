@@ -387,7 +387,9 @@ mod tests {
         let now = Utc::now();
         let rows = lines(&populated_snapshot(now), now).join("\n");
         assert!(rows.contains("active runs (1):"));
-        assert!(rows.contains("  ISSUE-1  Running  state=doing  pid=123  started 1m ago  tool: cargo test"));
+        assert!(rows.contains(
+            "  ISSUE-1  Running  state=doing  pid=123  started 1m ago  tool: cargo test"
+        ));
         assert!(rows.contains("queue (1):"));
         assert!(rows.contains("  ISSUE-2  state=todo  priority=1  Fix the flaky test"));
         assert!(rows.contains("retry (1):"));

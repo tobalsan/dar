@@ -153,7 +153,11 @@ impl CodexChatSession {
         send_value(&mut stdin, make_initialize(1, &workspace)).await?;
         wait_for_response(&mut lines, 1).await?;
         send_value(&mut stdin, make_initialized()).await?;
-        send_value(&mut stdin, make_thread_start(2, &workspace, params.model.as_deref())).await?;
+        send_value(
+            &mut stdin,
+            make_thread_start(2, &workspace, params.model.as_deref()),
+        )
+        .await?;
         let thread_result = wait_for_response(&mut lines, 2).await?;
         let thread_id = extract_thread_id(&thread_result)
             .with_context(|| format!("thread/start: no thread.id in result: {thread_result}"))?;
@@ -374,7 +378,9 @@ async fn send_value(stdin: &mut ChildStdin, value: Value) -> Result<()> {
 
 async fn write_value_to(stdin: &Arc<Mutex<Option<ChildStdin>>>, value: Value) -> Result<()> {
     let mut guard = stdin.lock().await;
-    let stdin = guard.as_mut().context("codex chat session stdin is closed")?;
+    let stdin = guard
+        .as_mut()
+        .context("codex chat session stdin is closed")?;
     send_value(stdin, value).await
 }
 
@@ -612,8 +618,13 @@ fn map_completed_item(item: Option<&Value>) -> Vec<ChatEvent> {
     };
     match item.get("type").and_then(Value::as_str).unwrap_or("") {
         "agentMessage" | "reasoning" => Vec::new(),
-        "commandExecution" | "fileChange" | "mcpToolCall" | "webSearch" | "dynamicToolCall"
-        | "collabToolCall" | "collabAgentToolCall" => tool_events(item),
+        "commandExecution"
+        | "fileChange"
+        | "mcpToolCall"
+        | "webSearch"
+        | "dynamicToolCall"
+        | "collabToolCall"
+        | "collabAgentToolCall" => tool_events(item),
         _ => Vec::new(),
     }
 }
@@ -829,10 +840,7 @@ async fn abort_queued_turns(queue: &Arc<Mutex<TurnQueue>>, tx: &Sender<ChatEvent
     send_failed_finishes(tx, dropped, "aborted").await;
 }
 
-async fn current_main_turn_id(
-    queue: &Arc<Mutex<TurnQueue>>,
-    thread_id: &str,
-) -> Option<String> {
+async fn current_main_turn_id(queue: &Arc<Mutex<TurnQueue>>, thread_id: &str) -> Option<String> {
     queue
         .lock()
         .await
@@ -1200,8 +1208,8 @@ done
         );
         let sessions = temp.path().join("data").join("tui").join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
-        let params = ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions)
-            .build();
+        let params =
+            ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions).build();
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let mut session = CodexChatSession::spawn(&params, tx).await.unwrap();
         let pid = session.pid;
@@ -1257,8 +1265,8 @@ done
         );
         let sessions = temp.path().join("data").join("tui").join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
-        let params = ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions)
-            .build();
+        let params =
+            ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions).build();
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let mut session = CodexChatSession::spawn(&params, tx).await.unwrap();
 

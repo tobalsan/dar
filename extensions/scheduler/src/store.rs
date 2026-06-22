@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::schedule::compute_next_run_at_ms;
+
 /// On-disk file version, mirroring the aihub disk shape.
 const JOBS_FILE_VERSION: u32 = 1;
 
@@ -46,16 +48,43 @@ pub struct ScheduleJob {
     /// extension-level `jobTimeoutMs` and the 10-minute default. `null`/absent
     /// means "inherit the extension/global default". Omitted from disk when
     /// `None` so the persisted shape stays config-only.
-    #[serde(
-        rename = "timeoutMs",
-        skip_serializing_if = "Option::is_none",
-        default
-    )]
+    #[serde(rename = "timeoutMs", skip_serializing_if = "Option::is_none", default)]
     pub timeout_ms: Option<u64>,
 }
 
 fn default_enabled() -> bool {
     true
+}
+
+impl Schedule {
+    pub(crate) fn validate(&self, now_ms: i64) -> Result<(), String> {
+        if self.cron.trim().is_empty() {
+            return Err("cron must not be empty".to_string());
+        }
+        compute_next_run_at_ms(self, now_ms)
+            .map(|_| ())
+            .map_err(|err| format!("bad schedule: {err:#}"))
+    }
+}
+
+impl Payload {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.message.trim().is_empty() {
+            return Err("payload.message must not be empty".to_string());
+        }
+        Ok(())
+    }
+}
+
+impl ScheduleJob {
+    pub(crate) fn validate(&self, now_ms: i64) -> Result<(), String> {
+        if !is_safe_job_id(&self.id) {
+            return Err(format!("unsafe job id {:?}", self.id));
+        }
+        self.schedule.validate(now_ms)?;
+        self.payload.validate()?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -104,23 +133,20 @@ pub fn load_jobs(root: &Path, mut warn: impl FnMut(String)) -> Vec<ScheduleJob> 
         }
     };
 
-    // Job ids become filesystem path segments (`cron/output/<job_id>/`). Reject
-    // any id that is not a single safe path segment so a crafted id cannot
-    // escape the agent root.
-    jobs.into_iter()
-        .filter(|job| {
-            if is_safe_job_id(&job.id) {
-                true
-            } else {
-                warn(format!(
-                    "[scheduler] Skipping job with unsafe id {:?} in {}",
-                    job.id,
-                    path.display()
-                ));
-                false
-            }
-        })
-        .collect()
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if let Some((job, err)) = jobs
+        .iter()
+        .find_map(|job| job.validate(now_ms).err().map(|err| (job, err)))
+    {
+        warn(format!(
+            "[scheduler] Invalid {}; treating as empty: job {:?}: {err}",
+            path.display(),
+            job.id
+        ));
+        return Vec::new();
+    }
+
+    jobs
 }
 
 /// Atomically persist `jobs` to `<root>/cron/jobs.json` using a temp file +
@@ -254,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_jobs_with_unsafe_ids() {
+    fn invalid_job_makes_whole_file_empty() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("cron")).unwrap();
         std::fs::write(
@@ -270,9 +296,46 @@ mod tests {
         )
         .unwrap();
         let (jobs, warnings) = collect_warnings(dir.path());
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].id, "good-job");
-        assert_eq!(warnings.len(), 3);
+        assert!(jobs.is_empty());
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn semantic_invalid_jobs_make_whole_file_empty_with_one_warning() {
+        let cases = [
+            (
+                "bad-cron",
+                r#"{ "id": "bad-cron", "schedule": { "cron": "not cron", "tz": "UTC" }, "payload": { "message": "x" } }"#,
+            ),
+            (
+                "bad-timezone",
+                r#"{ "id": "bad-timezone", "schedule": { "cron": "* * * * *", "tz": "Mars/Base" }, "payload": { "message": "x" } }"#,
+            ),
+            (
+                "bad-start-at",
+                r#"{ "id": "bad-start-at", "schedule": { "cron": "* * * * *", "tz": "UTC", "startAt": "tomorrow" }, "payload": { "message": "x" } }"#,
+            ),
+            (
+                "empty-message",
+                r#"{ "id": "empty-message", "schedule": { "cron": "* * * * *", "tz": "UTC" }, "payload": { "message": "" } }"#,
+            ),
+            (
+                "mixed-valid-invalid",
+                r#"{ "id": "valid", "schedule": { "cron": "* * * * *", "tz": "UTC" }, "payload": { "message": "x" } }, { "id": "invalid", "schedule": { "cron": "bad", "tz": "UTC" }, "payload": { "message": "x" } }"#,
+            ),
+        ];
+        for (name, jobs_json) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("cron")).unwrap();
+            std::fs::write(
+                jobs_path(dir.path()),
+                format!(r#"{{ "jobs": [ {jobs_json} ] }}"#),
+            )
+            .unwrap();
+            let (jobs, warnings) = collect_warnings(dir.path());
+            assert!(jobs.is_empty(), "{name}");
+            assert_eq!(warnings.len(), 1, "{name}");
+        }
     }
 
     #[test]
@@ -330,7 +393,12 @@ mod tests {
         // Disk shape: version + jobs, each job is config-only.
         assert_eq!(value["version"], 1);
         let job = &value["jobs"][0];
-        let keys: Vec<&str> = job.as_object().unwrap().keys().map(String::as_str).collect();
+        let keys: Vec<&str> = job
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         for key in &keys {
             assert!(
                 matches!(
@@ -349,7 +417,10 @@ mod tests {
             "runningForMs",
             "agentId",
         ] {
-            assert!(job.get(forbidden).is_none(), "{forbidden} must not be on disk");
+            assert!(
+                job.get(forbidden).is_none(),
+                "{forbidden} must not be on disk"
+            );
         }
     }
 

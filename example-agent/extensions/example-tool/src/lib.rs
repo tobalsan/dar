@@ -110,7 +110,11 @@ impl ToolExecutor for EchoUpper {
                 "echo_upper requires a 'text' string argument",
             ));
         };
-        Ok(ToolOutcome::ok(format!("{}{}", text.to_uppercase(), self.suffix)))
+        Ok(ToolOutcome::ok(format!(
+            "{}{}",
+            text.to_uppercase(),
+            self.suffix
+        )))
     }
 }
 
@@ -120,19 +124,23 @@ mod tests {
 
     #[tokio::test]
     async fn echo_upper_uppercases() {
-        let out = EchoUpper { suffix: String::new() }
-            .execute(json!({ "text": "hello from spike" }))
-            .await
-            .unwrap();
+        let out = EchoUpper {
+            suffix: String::new(),
+        }
+        .execute(json!({ "text": "hello from spike" }))
+        .await
+        .unwrap();
         assert_eq!(out, ToolOutcome::ok("HELLO FROM SPIKE"));
     }
 
     #[tokio::test]
     async fn echo_upper_missing_arg_is_structured_error() {
-        let out = EchoUpper { suffix: String::new() }
-            .execute(json!({}))
-            .await
-            .unwrap();
+        let out = EchoUpper {
+            suffix: String::new(),
+        }
+        .execute(json!({}))
+        .await
+        .unwrap();
         assert!(out.is_error);
     }
 

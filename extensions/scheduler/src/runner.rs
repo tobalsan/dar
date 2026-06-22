@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use cap_runner::{ExitKind, KillReason, Runner, RunnerEventSink, RunnerEventStore, SpawnParams};
 use chrono::{DateTime, Utc};
-use host_api::ServiceRegistry;
+use host_api::{ServiceRegistry, ShutdownToken};
 
 /// Outcome of one runner fire: how it exited and the captured assistant text.
 pub struct RunOutcome {
@@ -85,6 +85,7 @@ pub async fn fire_runner(
     job_id: &str,
     max_run_timeout_ms: u64,
     job_timeout: Duration,
+    mut shutdown: ShutdownToken,
 ) -> Result<RunOutcome> {
     let runner = services
         .get_named::<dyn Runner>(runner_kind)
@@ -94,6 +95,10 @@ pub async fn fire_runner(
     let events: Arc<dyn RunnerEventSink> = Arc::new(NullSink);
     let store: Arc<dyn RunnerEventStore> = capture.clone();
     let last_event_at = Arc::new(std::sync::Mutex::new(Utc::now()));
+
+    if shutdown.is_cancelled() {
+        anyhow::bail!("scheduler shutdown before runner spawn");
+    }
 
     let params = SpawnParams::builder(
         runner_command,
@@ -109,9 +114,13 @@ pub async fn fire_runner(
         store,
         last_event_at,
     )
+    .host_tool_bridge(runner_core::host_tool_bridge(services, agent_root))
     .build();
 
-    let handle = runner.spawn(params).await.context("spawning runner")?;
+    let handle = tokio::select! {
+        _ = shutdown.cancelled() => anyhow::bail!("scheduler shutdown before runner spawn"),
+        handle = runner.spawn(params) => handle.context("spawning runner")?,
+    };
 
     // Scheduler-owned per-run timeout. Poll the supervising task for completion
     // until the deadline; on elapse, kill the child and wait for it to exit so
@@ -136,7 +145,14 @@ pub async fn fire_runner(
         // Poll cadence is small relative to any realistic job timeout; a kill is
         // never delayed by more than this interval past the deadline.
         let next_poll = (tokio::time::Instant::now() + Duration::from_millis(50)).min(deadline);
-        tokio::time::sleep_until(next_poll).await;
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                tracing::warn!("[scheduler] Shutdown requested; killing runner for job {job_id}");
+                let exit = handle.request_kill_and_wait(KillReason::OperatorStop).await;
+                break (exit, false);
+            }
+            _ = tokio::time::sleep_until(next_poll) => {}
+        }
     };
 
     let response = capture
@@ -157,6 +173,89 @@ pub async fn fire_runner(
 mod tests {
     use super::*;
 
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use cap_runner::{HostToolBridge, RunnerHandle};
+    use serde_json::{json, Value};
+    use tool_registry::{
+        ToolExecutor, ToolOutcome, ToolRegistry, ToolRegistryHandle, ToolSpec,
+        TOOL_REGISTRY_SERVICE,
+    };
+
+    fn shutdown_token(cancelled: bool) -> (tokio::sync::watch::Sender<bool>, ShutdownToken) {
+        let (tx, rx) = tokio::sync::watch::channel(cancelled);
+        (tx, ShutdownToken::new(rx))
+    }
+
+    struct CapturingRunner {
+        spawns: Arc<AtomicUsize>,
+        bridge: Arc<Mutex<Option<Option<HostToolBridge>>>>,
+    }
+
+    impl Runner for CapturingRunner {
+        fn spawn<'a>(
+            &self,
+            params: SpawnParams<'a>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RunnerHandle>> + Send + 'a>>
+        {
+            self.spawns.fetch_add(1, Ordering::SeqCst);
+            *self.bridge.lock().expect("bridge mutex poisoned") =
+                Some(params.host_tool_bridge.clone());
+            Box::pin(async move {
+                let (kill_tx, _kill_rx) = tokio::sync::oneshot::channel();
+                let done = tokio::spawn(async { ExitKind::Normal });
+                Ok(RunnerHandle::new(0, kill_tx, done))
+            })
+        }
+    }
+
+    struct NoopTool;
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for NoopTool {
+        async fn execute(&self, _args: Value) -> Result<ToolOutcome> {
+            Ok(ToolOutcome::ok("ok"))
+        }
+    }
+
+    fn services_with_capture(
+        registry: Option<ToolRegistry>,
+    ) -> (
+        ServiceRegistry,
+        Arc<AtomicUsize>,
+        Arc<Mutex<Option<Option<HostToolBridge>>>>,
+    ) {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let bridge = Arc::new(Mutex::new(None));
+        let mut services = ServiceRegistry::default();
+        services
+            .service::<dyn Runner>(
+                "fake",
+                Arc::new(CapturingRunner {
+                    spawns: Arc::clone(&spawns),
+                    bridge: Arc::clone(&bridge),
+                }),
+            )
+            .unwrap();
+        if let Some(registry) = registry {
+            services
+                .service::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE, Arc::new(registry))
+                .unwrap();
+        }
+        (services, spawns, bridge)
+    }
+
+    fn registry_with_tool() -> ToolRegistry {
+        let registry = ToolRegistry::new();
+        registry
+            .register_tool(
+                ToolSpec::new("noop", "noop", json!({ "type": "object" })),
+                Arc::new(NoopTool),
+            )
+            .unwrap();
+        registry
+    }
+
     fn protocol_event(log_row: &str, text: &str) -> String {
         serde_json::json!({
             "type": "protocol_event",
@@ -166,6 +265,178 @@ mod tests {
             "detail": "",
         })
         .to_string()
+    }
+
+    #[tokio::test]
+    async fn host_tool_bridge_is_passed_to_scheduler_spawn_params_when_tools_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let (services, spawns, bridge) = services_with_capture(Some(registry_with_tool()));
+        let (_tx, shutdown) = shutdown_token(false);
+
+        fire_runner(
+            &services,
+            "fake",
+            "",
+            dir.path(),
+            dir.path(),
+            dir.path(),
+            "prompt".to_string(),
+            "job",
+            60_000,
+            Duration::from_secs(60),
+            shutdown,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        let bridge = bridge
+            .lock()
+            .expect("bridge mutex poisoned")
+            .clone()
+            .flatten();
+        let bridge = bridge.expect("host tool bridge passed to runner");
+        assert_eq!(bridge.args[0], "__mcp-bridge");
+        assert_eq!(bridge.args[1], "--dir");
+        assert_eq!(bridge.args[2], dir.path().display().to_string());
+    }
+
+    #[tokio::test]
+    async fn host_tool_bridge_is_none_for_scheduler_spawn_params_when_registry_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let (services, spawns, bridge) = services_with_capture(Some(ToolRegistry::new()));
+        let (_tx, shutdown) = shutdown_token(false);
+
+        fire_runner(
+            &services,
+            "fake",
+            "",
+            dir.path(),
+            dir.path(),
+            dir.path(),
+            "prompt".to_string(),
+            "job",
+            60_000,
+            Duration::from_secs(60),
+            shutdown,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *bridge.lock().expect("bridge mutex poisoned"),
+            Some(None),
+            "empty registry keeps scheduler runner tool-blind"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_before_spawn_returns_without_calling_runner() {
+        let dir = tempfile::tempdir().unwrap();
+        let (services, spawns, _bridge) = services_with_capture(Some(registry_with_tool()));
+        let (_tx, shutdown) = shutdown_token(true);
+
+        let err = match fire_runner(
+            &services,
+            "fake",
+            "",
+            dir.path(),
+            dir.path(),
+            dir.path(),
+            "prompt".to_string(),
+            "job",
+            60_000,
+            Duration::from_secs(60),
+            shutdown,
+        )
+        .await
+        {
+            Ok(_) => panic!("fire_runner unexpectedly spawned after shutdown"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("shutdown before runner spawn"));
+        assert_eq!(spawns.load(Ordering::SeqCst), 0);
+    }
+
+    struct KillCapturingRunner {
+        kill_reason: Arc<Mutex<Option<KillReason>>>,
+        spawned: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    }
+
+    impl Runner for KillCapturingRunner {
+        fn spawn<'a>(
+            &self,
+            _params: SpawnParams<'a>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RunnerHandle>> + Send + 'a>>
+        {
+            if let Some(tx) = self.spawned.lock().expect("spawned mutex poisoned").take() {
+                let _ = tx.send(());
+            }
+            let kill_reason = Arc::clone(&self.kill_reason);
+            Box::pin(async move {
+                let (kill_tx, kill_rx) = tokio::sync::oneshot::channel();
+                let done = tokio::spawn(async move {
+                    match kill_rx.await {
+                        Ok(reason) => {
+                            *kill_reason.lock().expect("kill mutex poisoned") = Some(reason);
+                            ExitKind::Interrupted { reason: "killed" }
+                        }
+                        Err(_) => ExitKind::Normal,
+                    }
+                });
+                Ok(RunnerHandle::new(0, kill_tx, done))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_kills_running_runner_with_operator_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let kill_reason = Arc::new(Mutex::new(None));
+        let (spawned_tx, spawned_rx) = tokio::sync::oneshot::channel();
+        let mut services = ServiceRegistry::default();
+        services
+            .service::<dyn Runner>(
+                "fake",
+                Arc::new(KillCapturingRunner {
+                    kill_reason: Arc::clone(&kill_reason),
+                    spawned: Mutex::new(Some(spawned_tx)),
+                }),
+            )
+            .unwrap();
+        let (shutdown_tx, shutdown) = shutdown_token(false);
+        let root = dir.path().to_path_buf();
+        let services_for_task = services.clone();
+
+        let run = tokio::spawn(async move {
+            fire_runner(
+                &services_for_task,
+                "fake",
+                "",
+                &root,
+                &root,
+                &root,
+                "prompt".to_string(),
+                "job",
+                60_000,
+                Duration::from_secs(60),
+                shutdown,
+            )
+            .await
+        });
+
+        spawned_rx.await.unwrap();
+        shutdown_tx.send(true).unwrap();
+        let outcome = run.await.unwrap().unwrap();
+
+        assert!(!outcome.timed_out);
+        assert!(matches!(outcome.exit, ExitKind::Interrupted { .. }));
+        assert!(matches!(
+            *kill_reason.lock().expect("kill mutex poisoned"),
+            Some(KillReason::OperatorStop)
+        ));
     }
 
     #[test]

@@ -128,10 +128,7 @@ mod tests {
             "config beats a followable runner"
         );
         // Even an unregistered override is taken as-is; the open reports it.
-        assert_eq!(
-            resolve(Some("fake"), &services, &bus),
-            backend("fake")
-        );
+        assert_eq!(resolve(Some("fake"), &services, &bus), backend("fake"));
     }
 
     #[test]
@@ -171,7 +168,10 @@ mod tests {
         let services = registry(&["pi"]);
         let bus = bus_with_snapshot(7, "fake");
         match resolve(None, &services, &bus) {
-            Resolution::Backend { id, notice: Some(notice) } => {
+            Resolution::Backend {
+                id,
+                notice: Some(notice),
+            } => {
                 assert_eq!(id, "pi");
                 assert_eq!(
                     notice,

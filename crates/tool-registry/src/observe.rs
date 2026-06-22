@@ -63,11 +63,11 @@ impl Redactor {
     {
         let mut secrets: Vec<String> = values
             .into_iter()
-            .map(Into::into)
-            .filter(|v| v.trim().len() >= 4)
+            .map(|v| v.into().trim().to_string())
+            .filter(|v| v.len() >= 4)
             .collect();
         // Longest first so a secret that contains another redacts as one unit.
-        secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        secrets.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         secrets.dedup();
         Self {
             secrets,
@@ -144,7 +144,7 @@ fn redact_token_shapes(input: &str) -> String {
 fn split_keeping_delims(input: &str) -> Vec<&str> {
     let is_tok = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '+' | '.');
     let mut parts = Vec::new();
-    let bytes = input.char_indices().peekable();
+    let bytes = input.char_indices();
     let mut start = 0usize;
     let mut cur_tok: Option<bool> = None;
     for (idx, c) in bytes {
@@ -182,7 +182,9 @@ fn is_secret_shaped(token: &str) -> bool {
     }
     // Long high-entropy-ish opaque run (letters+digits, >= 32 chars).
     if token.len() >= 32
-        && token.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '/'))
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '/'))
         && token.chars().any(|c| c.is_ascii_digit())
         && token.chars().any(|c| c.is_ascii_alphabetic())
     {
@@ -238,10 +240,7 @@ impl ToolCallObservation {
             &serde_json::to_string(&args_redacted).unwrap_or_else(|_| "<unserializable>".into()),
             DEFAULT_MAX_SUMMARY_LEN,
         );
-        let result_summary = truncate(
-            &redactor.redact(&outcome.text),
-            DEFAULT_MAX_SUMMARY_LEN,
-        );
+        let result_summary = truncate(&redactor.redact(&outcome.text), DEFAULT_MAX_SUMMARY_LEN);
         Self {
             tool: tool.to_string(),
             access,
@@ -265,20 +264,6 @@ impl ToolCallObservation {
             self.result_summary,
         )
     }
-
-    /// A structured JSON object for event-store persistence / machine consumers.
-    pub fn to_json(&self) -> Value {
-        serde_json::json!({
-            "type": "tool_call",
-            "tool": self.tool,
-            "status": self.status,
-            "duration_ms": self.duration.as_millis() as u64,
-            "read": self.access.read,
-            "write": self.access.write,
-            "args_summary": self.args_summary,
-            "result_summary": self.result_summary,
-        })
-    }
 }
 
 #[cfg(test)]
@@ -291,6 +276,14 @@ mod tests {
         let r = Redactor::from_secret_values(["super-secret-token-value"]);
         let masked = r.redact("auth header: Bearer super-secret-token-value done");
         assert!(!masked.contains("super-secret-token-value"));
+        assert!(masked.contains(REDACTED));
+    }
+
+    #[test]
+    fn redactor_trims_known_secret_values_before_storing() {
+        let r = Redactor::from_secret_values(["  abcd-secret  "]);
+        let masked = r.redact("token=abcd-secret");
+        assert!(!masked.contains("abcd-secret"));
         assert!(masked.contains(REDACTED));
     }
 
@@ -332,7 +325,10 @@ mod tests {
         let outcome = ToolOutcome::error("failed using topsecret-value-123 internally");
         let obs = ToolCallObservation::build(
             "jobs_create",
-            ToolAccess { read: false, write: true },
+            ToolAccess {
+                read: false,
+                write: true,
+            },
             &outcome,
             Duration::from_millis(42),
             &json!({ "token": "topsecret-value-123", "id": "j1" }),
@@ -369,24 +365,5 @@ mod tests {
         );
         assert!(obs.result_summary.len() <= DEFAULT_MAX_SUMMARY_LEN + 32);
         assert!(obs.result_summary.len() < big.len());
-    }
-
-    #[test]
-    fn to_json_exposes_status_duration_and_access() {
-        let obs = ToolCallObservation::build(
-            "jobs_list",
-            ToolAccess { read: true, write: false },
-            &ToolOutcome::ok("[]"),
-            Duration::from_millis(7),
-            &json!({}),
-            &Redactor::default(),
-        );
-        let v = obs.to_json();
-        assert_eq!(v["type"], "tool_call");
-        assert_eq!(v["tool"], "jobs_list");
-        assert_eq!(v["status"], "ok");
-        assert_eq!(v["duration_ms"], 7);
-        assert_eq!(v["read"], true);
-        assert_eq!(v["write"], false);
     }
 }

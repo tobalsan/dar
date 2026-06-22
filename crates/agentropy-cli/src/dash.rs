@@ -42,11 +42,7 @@ pub struct DashOptions {
 }
 
 impl DashOptions {
-    pub fn resolve(
-        bind: Option<IpAddr>,
-        port: Option<u16>,
-        registry_dir: Option<PathBuf>,
-    ) -> Self {
+    pub fn resolve(bind: Option<IpAddr>, port: Option<u16>, registry_dir: Option<PathBuf>) -> Self {
         Self {
             bind: bind.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
             port: port.unwrap_or(7878),
@@ -392,8 +388,13 @@ mod tests {
     async fn api_agents_returns_only_live() {
         let dir = tempfile::tempdir().unwrap();
         let reg = Registry::new(dir.path());
-        reg.write(&entry("ALG-LIVE", "/agents/live", "0.0.0.0:51000", std::process::id()))
-            .unwrap();
+        reg.write(&entry(
+            "ALG-LIVE",
+            "/agents/live",
+            "0.0.0.0:51000",
+            std::process::id(),
+        ))
+        .unwrap();
         reg.write(&entry("ALG-DEAD", "/agents/dead", "0.0.0.0:51001", 999_999))
             .unwrap();
         let state = DashState { registry: reg };
@@ -412,8 +413,13 @@ mod tests {
     async fn index_renders_seeded_registry() {
         let dir = tempfile::tempdir().unwrap();
         let reg = Registry::new(dir.path());
-        reg.write(&entry("ALG-X", "/agents/x", "0.0.0.0:52000", std::process::id()))
-            .unwrap();
+        reg.write(&entry(
+            "ALG-X",
+            "/agents/x",
+            "0.0.0.0:52000",
+            std::process::id(),
+        ))
+        .unwrap();
         let state = DashState { registry: reg };
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, "studio.ts.net:7878".parse().unwrap());

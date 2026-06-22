@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use cap_runner::{
-    ExitKind, KillReason, RunnerEventSink, RunnerEventStore, RunnerHandle, SpawnParams, TurnDecision,
-    TurnEnded,
+    ExitKind, KillReason, RunnerEventSink, RunnerEventStore, RunnerHandle, SpawnParams,
+    TurnDecision, TurnEnded,
 };
 use chrono::{DateTime, Utc};
 use host_api::{Extension, RegisterCtx};
@@ -198,8 +198,14 @@ async fn spawn_pi(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     );
 
     let stdin = child.stdin.take().context("no stdin handle after spawn")?;
-    let stdout = child.stdout.take().context("no stdout handle after spawn")?;
-    let stderr = child.stderr.take().context("no stderr handle after spawn")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("no stdout handle after spawn")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("no stderr handle after spawn")?;
 
     // stderr streams straight through to events/store (no protocol meaning).
     runner_core::spawn_line_pump(
@@ -406,11 +412,19 @@ async fn reap_exit(ctx: &TurnLoopCtx, child: &mut tokio::process::Child) -> Exit
             ExitKind::Normal
         }
         Ok(status) => {
-            log_ev(&ctx.issue_id, "exit", &format!("status={status} (abnormal)"));
+            log_ev(
+                &ctx.issue_id,
+                "exit",
+                &format!("status={status} (abnormal)"),
+            );
             ExitKind::Abnormal(status.code())
         }
         Err(e) => {
-            log_ev(&ctx.issue_id, "exit", &format!("wait error: {e} (abnormal)"));
+            log_ev(
+                &ctx.issue_id,
+                "exit",
+                &format!("wait error: {e} (abnormal)"),
+            );
             ExitKind::Abnormal(None)
         }
     }
@@ -722,7 +736,10 @@ mod tests {
         assert!(config_path.exists(), "config file must be written");
         let written: Value =
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-        assert_eq!(written["mcpServers"]["agentropy"]["command"], "/opt/agentropy");
+        assert_eq!(
+            written["mcpServers"]["agentropy"]["command"],
+            "/opt/agentropy"
+        );
 
         // Direct-tool promotion scoped to our server. We must NOT override
         // PI_CODING_AGENT_DIR (that would drop the adapter that registers
@@ -763,7 +780,10 @@ mod tests {
 
     #[test]
     fn agent_end_maps_to_turn_ended() {
-        assert!(matches!(map_line(r#"{"type":"agent_end"}"#), Mapped::TurnEnded));
+        assert!(matches!(
+            map_line(r#"{"type":"agent_end"}"#),
+            Mapped::TurnEnded
+        ));
     }
 
     #[test]
@@ -776,7 +796,10 @@ mod tests {
     fn deltas_and_unknowns_are_ignored() {
         let delta = r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"hi"}}"#;
         assert!(matches!(map_line(delta), Mapped::Ignore));
-        assert!(matches!(map_line(r#"{"type":"queue_update"}"#), Mapped::Ignore));
+        assert!(matches!(
+            map_line(r#"{"type":"queue_update"}"#),
+            Mapped::Ignore
+        ));
         assert!(matches!(map_line("not json"), Mapped::Ignore));
         assert!(matches!(map_line("   "), Mapped::Ignore));
     }
@@ -931,10 +954,21 @@ done"#;
 
         // The SAME process saw two distinct prompts.
         let log = std::fs::read_to_string(&received).unwrap();
-        let prompts: Vec<&str> = log.lines().filter(|l| l.contains("\"type\":\"prompt\"")).collect();
+        let prompts: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("\"type\":\"prompt\""))
+            .collect();
         assert_eq!(prompts.len(), 2, "expected two prompts, got: {log}");
-        assert!(prompts[0].contains("initial prompt"), "first: {}", prompts[0]);
-        assert!(prompts[1].contains("second prompt"), "second: {}", prompts[1]);
+        assert!(
+            prompts[0].contains("initial prompt"),
+            "first: {}",
+            prompts[0]
+        );
+        assert!(
+            prompts[1].contains("second prompt"),
+            "second: {}",
+            prompts[1]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -974,7 +1008,10 @@ done"#;
             if nix::sys::signal::kill(pgid, None).is_err() {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "child {pid} still alive");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child {pid} still alive"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
@@ -1003,7 +1040,9 @@ done"#;
     impl RecordingSink {
         fn build() -> (Arc<dyn cap_runner::RunnerEventSink>, Recorder) {
             let lines = Arc::new(Mutex::new(Vec::new()));
-            let inner = Arc::new(RecordingInner { lines: Arc::clone(&lines) });
+            let inner = Arc::new(RecordingInner {
+                lines: Arc::clone(&lines),
+            });
             let sink = RecordingSink { inner };
             (Arc::new(sink), Recorder { lines })
         }
@@ -1042,7 +1081,9 @@ done"#;
     impl RecordingStore {
         fn build() -> (Arc<dyn cap_runner::RunnerEventStore>, StoreRecorder) {
             let payloads = Arc::new(Mutex::new(Vec::new()));
-            let inner = Arc::new(RecordingStoreInner { payloads: Arc::clone(&payloads) });
+            let inner = Arc::new(RecordingStoreInner {
+                payloads: Arc::clone(&payloads),
+            });
             let store = RecordingStore { inner };
             (Arc::new(store), StoreRecorder { payloads })
         }
@@ -1057,7 +1098,11 @@ done"#;
             payload: &str,
             _ts: DateTime<Utc>,
         ) {
-            self.inner.payloads.lock().unwrap().push(payload.to_string());
+            self.inner
+                .payloads
+                .lock()
+                .unwrap()
+                .push(payload.to_string());
         }
     }
 
@@ -1112,7 +1157,10 @@ done"#;
         assert_eq!(sink.count(), 1, "raw line goes to live log");
         assert_eq!(store.count(), 1, "structured tool_call is stored");
         let payload = store.payload(0);
-        assert!(payload.contains("\"log_row\":\"tool_call\""), "payload={payload}");
+        assert!(
+            payload.contains("\"log_row\":\"tool_call\""),
+            "payload={payload}"
+        );
         assert!(payload.contains("\"text\":\"bash\""), "payload={payload}");
     }
 
@@ -1124,7 +1172,10 @@ done"#;
         assert_eq!(sink.count(), 1);
         assert_eq!(store.count(), 1);
         let payload = store.payload(0);
-        assert!(payload.contains("\"log_row\":\"tool_output\""), "payload={payload}");
+        assert!(
+            payload.contains("\"log_row\":\"tool_output\""),
+            "payload={payload}"
+        );
         assert!(payload.contains("total 4"), "payload={payload}");
     }
 
@@ -1160,7 +1211,10 @@ done"#;
         assert_eq!(sink.count(), 1);
         assert_eq!(store.count(), 1);
         let payload = store.payload(0);
-        assert!(payload.contains("\"log_row\":\"assistant\""), "payload={payload}");
+        assert!(
+            payload.contains("\"log_row\":\"assistant\""),
+            "payload={payload}"
+        );
         assert!(payload.contains("Done."), "payload={payload}");
     }
 
@@ -1186,7 +1240,10 @@ done"#;
         assert_eq!(sink.count(), 1);
         assert_eq!(store.count(), 1);
         let payload = store.payload(0);
-        assert!(payload.contains("\"log_row\":\"tool_call\""), "payload={payload}");
+        assert!(
+            payload.contains("\"log_row\":\"tool_call\""),
+            "payload={payload}"
+        );
     }
 
     #[test]

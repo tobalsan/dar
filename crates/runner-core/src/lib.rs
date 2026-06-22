@@ -18,8 +18,8 @@ use tokio::sync::oneshot;
 
 pub mod bridge;
 pub use bridge::{
-    codex_mcp_bridge_args, opencode_mcp_block, pi_mcp_config_args, BridgeInvocation,
-    BRIDGE_SERVER_NAME,
+    codex_mcp_bridge_args, host_tool_bridge, opencode_mcp_block, pi_mcp_config_args,
+    BridgeInvocation, BRIDGE_SERVER_NAME,
 };
 
 /// Configure a child command to run in its own process group, so signalling the
@@ -323,7 +323,11 @@ fn persist_runner_event(
 /// to text heuristics for plain text output.
 pub fn classify_protocol_line(stream: &str, text: &str) -> ProtocolLine {
     if stream == "stderr" {
-        return ProtocolLine { row_type: "error", text: text.to_string(), detail: String::new() };
+        return ProtocolLine {
+            row_type: "error",
+            text: text.to_string(),
+            detail: String::new(),
+        };
     }
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
         // Codex JSON-RPC path: has "method" OR has "id" + ("result"|"error") without top-level "type"
@@ -343,9 +347,17 @@ pub fn classify_protocol_line(stream: &str, text: &str) -> ProtocolLine {
         }
         let row_type = map_event_type(&value);
         let display = extract_display_text(&value).unwrap_or_else(|| text.to_string());
-        ProtocolLine { row_type, text: display, detail: String::new() }
+        ProtocolLine {
+            row_type,
+            text: display,
+            detail: String::new(),
+        }
     } else {
-        ProtocolLine { row_type: normalize_log_row(stream, text), text: text.to_string(), detail: String::new() }
+        ProtocolLine {
+            row_type: normalize_log_row(stream, text),
+            text: text.to_string(),
+            detail: String::new(),
+        }
     }
 }
 
@@ -393,7 +405,10 @@ fn classify_pi_line(v: &serde_json::Value) -> Option<ProtocolLine> {
     if !is_pi_event(v) {
         return None;
     }
-    let t = v.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+    let t = v
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
     let pl = match t {
         // Turn boundary / lifecycle: hidden. `runner-pi`'s turn loop also
         // watches these for `agent_end` to end the current turn.
@@ -429,7 +444,11 @@ fn classify_pi_line(v: &serde_json::Value) -> Option<ProtocolLine> {
 }
 
 fn hidden() -> ProtocolLine {
-    ProtocolLine { row_type: "", text: String::new(), detail: String::new() }
+    ProtocolLine {
+        row_type: "",
+        text: String::new(),
+        detail: String::new(),
+    }
 }
 
 fn classify_message_start(v: &serde_json::Value) -> ProtocolLine {
@@ -451,17 +470,31 @@ fn classify_message_end(v: &serde_json::Value) -> ProtocolLine {
         _ => return hidden(),
     };
     match role.as_deref() {
-        Some("assistant") => ProtocolLine { row_type: "assistant", text, detail: String::new() },
-        Some("user") => ProtocolLine { row_type: "user", text, detail: String::new() },
+        Some("assistant") => ProtocolLine {
+            row_type: "assistant",
+            text,
+            detail: String::new(),
+        },
+        Some("user") => ProtocolLine {
+            row_type: "user",
+            text,
+            detail: String::new(),
+        },
         _ => hidden(),
     }
 }
 
 fn classify_message_update(v: &serde_json::Value) -> ProtocolLine {
-    let Some(inner) = v.get("assistantMessageEvent").and_then(serde_json::Value::as_object) else {
+    let Some(inner) = v
+        .get("assistantMessageEvent")
+        .and_then(serde_json::Value::as_object)
+    else {
         return hidden();
     };
-    let inner_type = inner.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+    let inner_type = inner
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
     match inner_type {
         // Streaming tokens: not interesting as a card, but the caller still
         // bumps `last_event_at` and pushes a line to the live log.
@@ -477,7 +510,11 @@ fn classify_message_update(v: &serde_json::Value) -> ProtocolLine {
             if text.is_empty() {
                 hidden()
             } else {
-                ProtocolLine { row_type: "thinking", text: strip_ansi(&text), detail: String::new() }
+                ProtocolLine {
+                    row_type: "thinking",
+                    text: strip_ansi(&text),
+                    detail: String::new(),
+                }
             }
         }
         "toolcall_start" | "toolcall_end" => {
@@ -489,9 +526,19 @@ fn classify_message_update(v: &serde_json::Value) -> ProtocolLine {
                 .to_string();
             let detail = call
                 .and_then(|c| c.get("arguments"))
-                .map(|a| if a.is_string() { a.as_str().unwrap().to_string() } else { a.to_string() })
+                .map(|a| {
+                    if a.is_string() {
+                        a.as_str().unwrap().to_string()
+                    } else {
+                        a.to_string()
+                    }
+                })
                 .unwrap_or_default();
-            ProtocolLine { row_type: "tool_call", text: name, detail: strip_ansi(&detail) }
+            ProtocolLine {
+                row_type: "tool_call",
+                text: name,
+                detail: strip_ansi(&detail),
+            }
         }
         "error" => {
             let msg = inner
@@ -500,7 +547,11 @@ fn classify_message_update(v: &serde_json::Value) -> ProtocolLine {
                 .or_else(|| inner.get("reason").and_then(serde_json::Value::as_str))
                 .unwrap_or("assistant error")
                 .to_string();
-            ProtocolLine { row_type: "error", text: msg, detail: String::new() }
+            ProtocolLine {
+                row_type: "error",
+                text: msg,
+                detail: String::new(),
+            }
         }
         _ => hidden(),
     }
@@ -525,12 +576,24 @@ fn classify_tool_execution_end(v: &serde_json::Value) -> ProtocolLine {
     let is_error = v
         .get("isError")
         .and_then(serde_json::Value::as_bool)
-        .or_else(|| result.and_then(|r| r.get("isError")).and_then(serde_json::Value::as_bool))
+        .or_else(|| {
+            result
+                .and_then(|r| r.get("isError"))
+                .and_then(serde_json::Value::as_bool)
+        })
         .unwrap_or(false);
     if is_error {
-        return ProtocolLine { row_type: "error", text: strip_ansi(&text), detail: String::new() };
+        return ProtocolLine {
+            row_type: "error",
+            text: strip_ansi(&text),
+            detail: String::new(),
+        };
     }
-    ProtocolLine { row_type: "tool_output", text: strip_ansi(&text), detail: String::new() }
+    ProtocolLine {
+        row_type: "tool_output",
+        text: strip_ansi(&text),
+        detail: String::new(),
+    }
 }
 
 /// Classify an opencode SSE event payload (the UNWRAPPED value returned by the
@@ -559,20 +622,37 @@ pub fn classify_opencode_event(payload: &serde_json::Value) -> Option<ProtocolLi
     else {
         return Some(hidden());
     };
-    let part_type = part.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+    let part_type = part
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
     let pl = match part_type {
         "text" => {
             if part_time_ended(part) {
-                let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
-                ProtocolLine { row_type: "assistant", text: strip_ansi(text), detail: String::new() }
+                let text = part
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                ProtocolLine {
+                    row_type: "assistant",
+                    text: strip_ansi(text),
+                    detail: String::new(),
+                }
             } else {
                 hidden()
             }
         }
         "reasoning" => {
             if part_time_ended(part) {
-                let text = part.get("text").and_then(serde_json::Value::as_str).unwrap_or("");
-                ProtocolLine { row_type: "thinking", text: strip_ansi(text), detail: String::new() }
+                let text = part
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                ProtocolLine {
+                    row_type: "thinking",
+                    text: strip_ansi(text),
+                    detail: String::new(),
+                }
             } else {
                 hidden()
             }
@@ -585,19 +665,32 @@ pub fn classify_opencode_event(payload: &serde_json::Value) -> Option<ProtocolLi
                 .unwrap_or("");
             match status {
                 "completed" => {
-                    let tool = part.get("tool").and_then(serde_json::Value::as_str).unwrap_or("tool");
+                    let tool = part
+                        .get("tool")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("tool");
                     let detail = state
                         .and_then(|s| s.get("input"))
                         .map(serde_json::Value::to_string)
                         .unwrap_or_default();
-                    ProtocolLine { row_type: "tool_call", text: strip_ansi(tool), detail }
+                    ProtocolLine {
+                        row_type: "tool_call",
+                        text: strip_ansi(tool),
+                        detail,
+                    }
                 }
                 "error" => {
                     let msg = state
                         .and_then(|s| s.get("output").and_then(serde_json::Value::as_str))
-                        .or_else(|| state.and_then(|s| s.get("error").and_then(serde_json::Value::as_str)))
+                        .or_else(|| {
+                            state.and_then(|s| s.get("error").and_then(serde_json::Value::as_str))
+                        })
                         .unwrap_or("error");
-                    ProtocolLine { row_type: "error", text: strip_ansi(msg), detail: String::new() }
+                    ProtocolLine {
+                        row_type: "error",
+                        text: strip_ansi(msg),
+                        detail: String::new(),
+                    }
                 }
                 _ => hidden(),
             }
@@ -638,13 +731,24 @@ fn join_text_entries(arr: Option<&serde_json::Value>) -> Option<String> {
         .iter()
         .filter_map(|entry| {
             if let Some(s) = entry.as_str() {
-                if !s.is_empty() { Some(s) } else { None }
+                if !s.is_empty() {
+                    Some(s)
+                } else {
+                    None
+                }
             } else {
-                entry.get("text").and_then(|t| t.as_str()).filter(|s| !s.is_empty())
+                entry
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .filter(|s| !s.is_empty())
             }
         })
         .collect();
-    if parts.is_empty() { None } else { Some(parts.join("\n")) }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
 }
 
 fn classify_jsonrpc_line(v: &serde_json::Value) -> ProtocolLine {
@@ -654,21 +758,36 @@ fn classify_jsonrpc_line(v: &serde_json::Value) -> ProtocolLine {
     // RPC response: has "id" but no "method"
     if method.is_none() {
         if let Some(err) = v.get("error") {
-            let msg = err.get("message").and_then(|m| m.as_str())
+            let msg = err
+                .get("message")
+                .and_then(|m| m.as_str())
                 .unwrap_or("rpc error")
                 .to_string();
-            return ProtocolLine { row_type: "error", text: msg, detail: String::new() };
+            return ProtocolLine {
+                row_type: "error",
+                text: msg,
+                detail: String::new(),
+            };
         }
         // id+result or anything else with id → hidden
-        return ProtocolLine { row_type: "", text: String::new(), detail: String::new() };
+        return ProtocolLine {
+            row_type: "",
+            text: String::new(),
+            detail: String::new(),
+        };
     }
 
     let method = method.unwrap();
     let params_obj = params.and_then(|p| p.as_object());
 
     // Extract item and item_type from params
-    let item = params_obj.and_then(|p| p.get("item")).and_then(|i| i.as_object());
-    let item_type = item.and_then(|i| i.get("type")).and_then(|t| t.as_str()).unwrap_or("");
+    let item = params_obj
+        .and_then(|p| p.get("item"))
+        .and_then(|i| i.as_object());
+    let item_type = item
+        .and_then(|i| i.get("type"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
 
     // Hidden conditions
     if method.starts_with("turn/")
@@ -680,12 +799,20 @@ fn classify_jsonrpc_line(v: &serde_json::Value) -> ProtocolLine {
         || method.contains("/delta/")
         || method == "item/started"
     {
-        return ProtocolLine { row_type: "", text: String::new(), detail: String::new() };
+        return ProtocolLine {
+            row_type: "",
+            text: String::new(),
+            detail: String::new(),
+        };
     }
 
     // agentMessage that is NOT /completed → hidden
     if item_type == "agentMessage" && !method.ends_with("/completed") {
-        return ProtocolLine { row_type: "", text: String::new(), detail: String::new() };
+        return ProtocolLine {
+            row_type: "",
+            text: String::new(),
+            detail: String::new(),
+        };
     }
 
     // error notification
@@ -693,16 +820,29 @@ fn classify_jsonrpc_line(v: &serde_json::Value) -> ProtocolLine {
         let msg = params_obj
             .and_then(|p| p.get("error"))
             .and_then(|e| e.get("message").and_then(|m| m.as_str()))
-            .or_else(|| params_obj.and_then(|p| p.get("message")).and_then(|m| m.as_str()))
+            .or_else(|| {
+                params_obj
+                    .and_then(|p| p.get("message"))
+                    .and_then(|m| m.as_str())
+            })
             .unwrap_or("server error");
-        return ProtocolLine { row_type: "error", text: msg.to_string(), detail: String::new() };
+        return ProtocolLine {
+            row_type: "error",
+            text: msg.to_string(),
+            detail: String::new(),
+        };
     }
     if let Some(p) = params_obj {
         if p.contains_key("error") {
-            let msg = p.get("error")
+            let msg = p
+                .get("error")
                 .and_then(|e| e.get("message").and_then(|m| m.as_str()))
                 .unwrap_or("server error");
-            return ProtocolLine { row_type: "error", text: msg.to_string(), detail: String::new() };
+            return ProtocolLine {
+                row_type: "error",
+                text: msg.to_string(),
+                detail: String::new(),
+            };
         }
     }
 
@@ -712,7 +852,11 @@ fn classify_jsonrpc_line(v: &serde_json::Value) -> ProtocolLine {
             .and_then(|i| i.get("text").and_then(|t| t.as_str()))
             .unwrap_or("")
             .to_string();
-        return ProtocolLine { row_type: "assistant", text: strip_ansi(&text), detail: String::new() };
+        return ProtocolLine {
+            row_type: "assistant",
+            text: strip_ansi(&text),
+            detail: String::new(),
+        };
     }
 
     // thinking: summary/content are arrays of strings or {text} objects
@@ -725,33 +869,63 @@ fn classify_jsonrpc_line(v: &serde_json::Value) -> ProtocolLine {
             .or_else(|| join_text_entries(item_val.as_ref().and_then(|v| v.get("content"))))
             .unwrap_or_default();
         if text.is_empty() {
-            return ProtocolLine { row_type: "", text: String::new(), detail: String::new() };
+            return ProtocolLine {
+                row_type: "",
+                text: String::new(),
+                detail: String::new(),
+            };
         }
-        return ProtocolLine { row_type: "thinking", text: strip_ansi(&text), detail: String::new() };
+        return ProtocolLine {
+            row_type: "thinking",
+            text: strip_ansi(&text),
+            detail: String::new(),
+        };
     }
 
     // userMessage: content is array of {type:"text", text:…}
     if item_type == "userMessage" {
         let item_val = item.map(|i| serde_json::Value::Object(i.clone()));
-        let text = join_text_entries(item_val.as_ref().and_then(|v| v.get("content")))
-            .unwrap_or_default();
+        let text =
+            join_text_entries(item_val.as_ref().and_then(|v| v.get("content"))).unwrap_or_default();
         if text.is_empty() {
-            return ProtocolLine { row_type: "", text: String::new(), detail: String::new() };
+            return ProtocolLine {
+                row_type: "",
+                text: String::new(),
+                detail: String::new(),
+            };
         }
-        return ProtocolLine { row_type: "user", text: strip_ansi(&text), detail: String::new() };
+        return ProtocolLine {
+            row_type: "user",
+            text: strip_ansi(&text),
+            detail: String::new(),
+        };
     }
 
     // tool_call
-    let tool_types = ["commandExecution", "fileChange", "mcpToolCall", "webSearch", "dynamicToolCall", "collabToolCall", "collabAgentToolCall"];
+    let tool_types = [
+        "commandExecution",
+        "fileChange",
+        "mcpToolCall",
+        "webSearch",
+        "dynamicToolCall",
+        "collabToolCall",
+        "collabAgentToolCall",
+    ];
     if tool_types.contains(&item_type) {
         let (text, detail) = if item_type == "commandExecution" {
-            let cmd = item.and_then(|i| i.get("command").and_then(|c| c.as_str())).unwrap_or("").to_string();
+            let cmd = item
+                .and_then(|i| i.get("command").and_then(|c| c.as_str()))
+                .unwrap_or("")
+                .to_string();
             // camelCase first, snake_case fallback
-            let raw_out = item.and_then(|i| {
-                i.get("aggregatedOutput")
-                    .or_else(|| i.get("aggregated_output"))
-                    .and_then(|o| o.as_str())
-            }).unwrap_or("").to_string();
+            let raw_out = item
+                .and_then(|i| {
+                    i.get("aggregatedOutput")
+                        .or_else(|| i.get("aggregated_output"))
+                        .and_then(|o| o.as_str())
+                })
+                .unwrap_or("")
+                .to_string();
             let exit_code = item.and_then(|i| {
                 i.get("exitCode")
                     .or_else(|| i.get("exit_code"))
@@ -770,40 +944,81 @@ fn classify_jsonrpc_line(v: &serde_json::Value) -> ProtocolLine {
             let label = match (server, tool) {
                 (Some(s), Some(t)) => format!("{}.{}", s, t),
                 (None, Some(t)) => t.to_string(),
-                _ => item.and_then(|i| i.get("name").or_else(|| i.get("toolName")).and_then(|n| n.as_str())).unwrap_or(item_type).to_string(),
+                _ => item
+                    .and_then(|i| {
+                        i.get("name")
+                            .or_else(|| i.get("toolName"))
+                            .and_then(|n| n.as_str())
+                    })
+                    .unwrap_or(item_type)
+                    .to_string(),
             };
             let item_val = item.map(|i| serde_json::Value::Object(i.clone()));
-            let detail = item_val.as_ref()
+            let detail = item_val
+                .as_ref()
                 .and_then(|v| v.get("result"))
                 .and_then(|r| r.get("content"))
                 .and_then(|c| join_text_entries(Some(c)))
                 .or_else(|| {
-                    item.and_then(|i| i.get("arguments")).map(|a| {
-                        serde_json::to_string(a).unwrap_or_default()
-                    })
+                    item.and_then(|i| i.get("arguments"))
+                        .map(|a| serde_json::to_string(a).unwrap_or_default())
                 })
                 .unwrap_or_default();
             (strip_ansi(&label), strip_ansi(&detail))
         } else if item_type == "collabAgentToolCall" {
-            let label = item.and_then(|i| i.get("tool").and_then(|t| t.as_str())).unwrap_or(item_type).to_string();
-            let detail = item.and_then(|i| i.get("prompt").and_then(|p| p.as_str())).unwrap_or("").to_string();
+            let label = item
+                .and_then(|i| i.get("tool").and_then(|t| t.as_str()))
+                .unwrap_or(item_type)
+                .to_string();
+            let detail = item
+                .and_then(|i| i.get("prompt").and_then(|p| p.as_str()))
+                .unwrap_or("")
+                .to_string();
             (strip_ansi(&label), strip_ansi(&detail))
         } else {
             let label = match item_type {
-                "fileChange" => item.and_then(|i| i.get("filename").or_else(|| i.get("path")).and_then(|n| n.as_str())).unwrap_or(item_type).to_string(),
-                "webSearch" => item.and_then(|i| i.get("query").and_then(|q| q.as_str())).unwrap_or(item_type).to_string(),
-                _ => item.and_then(|i| i.get("name").and_then(|n| n.as_str())).unwrap_or(item_type).to_string(),
+                "fileChange" => item
+                    .and_then(|i| {
+                        i.get("filename")
+                            .or_else(|| i.get("path"))
+                            .and_then(|n| n.as_str())
+                    })
+                    .unwrap_or(item_type)
+                    .to_string(),
+                "webSearch" => item
+                    .and_then(|i| i.get("query").and_then(|q| q.as_str()))
+                    .unwrap_or(item_type)
+                    .to_string(),
+                _ => item
+                    .and_then(|i| i.get("name").and_then(|n| n.as_str()))
+                    .unwrap_or(item_type)
+                    .to_string(),
             };
-            let detail = item.and_then(|i| i.get("output").or_else(|| i.get("result")))
-                .map(|v| if v.is_string() { v.as_str().unwrap().to_string() } else { v.to_string() })
+            let detail = item
+                .and_then(|i| i.get("output").or_else(|| i.get("result")))
+                .map(|v| {
+                    if v.is_string() {
+                        v.as_str().unwrap().to_string()
+                    } else {
+                        v.to_string()
+                    }
+                })
                 .unwrap_or_default();
             (strip_ansi(&label), strip_ansi(&detail))
         };
-        return ProtocolLine { row_type: "tool_call", text, detail };
+        return ProtocolLine {
+            row_type: "tool_call",
+            text,
+            detail,
+        };
     }
 
     // Default: hidden for unrecognized
-    ProtocolLine { row_type: "", text: String::new(), detail: String::new() }
+    ProtocolLine {
+        row_type: "",
+        text: String::new(),
+        detail: String::new(),
+    }
 }
 
 /// Map a parsed JSON protocol event's `type` field to a normalized UI row type.
@@ -1111,7 +1326,11 @@ mod tests {
         let line = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"commandExecution","command":"echo hi","aggregatedOutput":"hi","exitCode":0}}}"#;
         let pl = classify_protocol_line("stdout", line);
         assert_eq!(pl.row_type, "tool_call");
-        assert!(!pl.detail.contains("[exit"), "detail should not have exit suffix: {}", pl.detail);
+        assert!(
+            !pl.detail.contains("[exit"),
+            "detail should not have exit suffix: {}",
+            pl.detail
+        );
     }
 
     #[test]
@@ -1137,7 +1356,8 @@ mod tests {
 
     #[test]
     fn jsonrpc_id_error_is_error() {
-        let line = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid request"}}"#;
+        let line =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid request"}}"#;
         let pl = classify_protocol_line("stdout", line);
         assert_eq!(pl.row_type, "error");
         assert!(pl.text.contains("Invalid request"));
@@ -1284,7 +1504,8 @@ mod tests {
     #[test]
     fn pi_tool_execution_start_and_update_are_hidden() {
         let start = r#"{"type":"tool_execution_start","toolCallId":"c1","toolName":"bash","args":{"command":"ls"}}"#;
-        let update = r#"{"type":"tool_execution_update","toolCallId":"c1","partialResult":"total 4"}"#;
+        let update =
+            r#"{"type":"tool_execution_update","toolCallId":"c1","partialResult":"total 4"}"#;
         assert_eq!(pi_pl(start).row_type, "");
         assert_eq!(pi_pl(update).row_type, "");
     }

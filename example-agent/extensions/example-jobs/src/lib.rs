@@ -90,14 +90,38 @@ impl Extension for ExampleJobsExtension {
                 .services
                 .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
                 .context("example-jobs requires the tool-registry-host extension")?;
-            register_into(registry.as_ref(), config.path)
+            let path = resolve_store_path(&ctx.paths, &config.path)?;
+            register_into(registry.as_ref(), path)
         })
     }
 }
 
+fn resolve_store_path(paths: &host_api::HostPaths, path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        anyhow::bail!("example-jobs path must be relative to the agent root");
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        anyhow::bail!("example-jobs path must not contain '..'");
+    }
+    let full = paths.root().join(path);
+    if let Some(parent) = full.parent() {
+        let mut existing = parent;
+        while !existing.exists() {
+            existing = existing
+                .parent()
+                .context("finding existing parent for example-jobs path")?;
+        }
+        paths.assert_contained(existing)?;
+    }
+    Ok(full)
+}
+
 /// Register the three jobs tools against `registry`, all backed by the JSON file
-/// at `path`. Shared by the extension `register()` pass and the tests.
-pub fn register_into(registry: &dyn ToolRegistryHandle, path: PathBuf) -> Result<()> {
+/// at `path` after extension config containment checks.
+fn register_into(registry: &dyn ToolRegistryHandle, path: PathBuf) -> Result<()> {
     let store = Arc::new(JobStore::new(path));
 
     registry.register_tool(
@@ -211,7 +235,7 @@ impl JobStore {
                 return Ok(JobsDoc::default());
             }
             Err(err) => {
-                return Err(StoreError::Io(format!(
+                return Err(StoreError(format!(
                     "could not read jobs file {}: {err}",
                     self.path.display()
                 )));
@@ -221,7 +245,7 @@ impl JobStore {
             return Ok(JobsDoc::default());
         }
         serde_json::from_str::<JobsDoc>(&raw).map_err(|err| {
-            StoreError::Malformed(format!(
+            StoreError(format!(
                 "jobs file {} is malformed and was left untouched: {err}",
                 self.path.display()
             ))
@@ -234,7 +258,7 @@ impl JobStore {
         if let Some(parent) = self.path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|err| {
-                    StoreError::Io(format!(
+                    StoreError(format!(
                         "could not create directory {}: {err}",
                         parent.display()
                     ))
@@ -242,18 +266,18 @@ impl JobStore {
             }
         }
         let mut serialized = serde_json::to_string_pretty(doc)
-            .map_err(|err| StoreError::Io(format!("could not serialize jobs: {err}")))?;
+            .map_err(|err| StoreError(format!("could not serialize jobs: {err}")))?;
         serialized.push('\n');
 
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, serialized.as_bytes()).map_err(|err| {
-            StoreError::Io(format!(
+            StoreError(format!(
                 "could not write temp jobs file {}: {err}",
                 tmp.display()
             ))
         })?;
         std::fs::rename(&tmp, &self.path).map_err(|err| {
-            StoreError::Io(format!(
+            StoreError(format!(
                 "could not replace jobs file {}: {err}",
                 self.path.display()
             ))
@@ -262,17 +286,12 @@ impl JobStore {
     }
 }
 
-/// Internal store error, rendered to a structured `ToolOutcome::error`.
-enum StoreError {
-    Io(String),
-    Malformed(String),
-}
+/// Internal store error, rendered to a structured `ToolOutcome::error_code`.
+struct StoreError(String);
 
 impl StoreError {
     fn message(&self) -> &str {
-        match self {
-            StoreError::Io(m) | StoreError::Malformed(m) => m,
-        }
+        &self.0
     }
 }
 
@@ -316,24 +335,35 @@ impl ToolExecutor for JobsCreate {
     async fn execute(&self, args: Value) -> Result<ToolOutcome> {
         let job = match build_new_job(&args) {
             Ok(job) => job,
-            Err(msg) => return Ok(ToolOutcome::error(msg)),
+            Err(msg) => return Ok(ToolOutcome::error_code("invalid_args", msg, None::<String>)),
         };
 
         let mut doc = match self.store.load() {
             Ok(doc) => doc,
-            Err(err) => return Ok(ToolOutcome::error(err.message())),
+            Err(err) => {
+                return Ok(ToolOutcome::error_code(
+                    "store_error",
+                    err.message(),
+                    None::<String>,
+                ))
+            }
         };
 
         if doc.jobs.iter().any(|j| j.id == job.id) {
-            return Ok(ToolOutcome::error(format!(
-                "a job with id '{}' already exists",
-                job.id
-            )));
+            return Ok(ToolOutcome::error_code(
+                "duplicate_id",
+                format!("a job with id '{}' already exists", job.id),
+                None::<String>,
+            ));
         }
 
         doc.jobs.push(job.clone());
         if let Err(err) = self.store.save(&doc) {
-            return Ok(ToolOutcome::error(err.message()));
+            return Ok(ToolOutcome::error_code(
+                "store_error",
+                err.message(),
+                None::<String>,
+            ));
         }
         Ok(ToolOutcome::ok(format!(
             "created job '{}' ({})",
@@ -363,29 +393,33 @@ struct JobsEdit {
 impl ToolExecutor for JobsEdit {
     async fn execute(&self, args: Value) -> Result<ToolOutcome> {
         if !args.is_object() {
-            return Ok(ToolOutcome::error("arguments must be an object"));
+            return Ok(ToolOutcome::error_code(
+                "invalid_args",
+                "arguments must be an object",
+                None::<String>,
+            ));
         }
         let id = match require_str(&args, "id") {
             Ok(id) => id,
-            Err(msg) => return Ok(ToolOutcome::error(msg)),
+            Err(msg) => return Ok(ToolOutcome::error_code("invalid_args", msg, None::<String>)),
         };
 
         // Validate optional fields before touching the file.
         let new_name = match optional_str(&args, "name") {
             Ok(v) => v,
-            Err(msg) => return Ok(ToolOutcome::error(msg)),
+            Err(msg) => return Ok(ToolOutcome::error_code("invalid_args", msg, None::<String>)),
         };
         let new_schedule = match optional_str(&args, "schedule") {
             Ok(v) => v,
-            Err(msg) => return Ok(ToolOutcome::error(msg)),
+            Err(msg) => return Ok(ToolOutcome::error_code("invalid_args", msg, None::<String>)),
         };
         let new_command = match optional_str(&args, "command") {
             Ok(v) => v,
-            Err(msg) => return Ok(ToolOutcome::error(msg)),
+            Err(msg) => return Ok(ToolOutcome::error_code("invalid_args", msg, None::<String>)),
         };
         let new_enabled = match optional_bool(&args, "enabled") {
             Ok(v) => v,
-            Err(msg) => return Ok(ToolOutcome::error(msg)),
+            Err(msg) => return Ok(ToolOutcome::error_code("invalid_args", msg, None::<String>)),
         };
 
         if new_name.is_none()
@@ -393,18 +427,30 @@ impl ToolExecutor for JobsEdit {
             && new_command.is_none()
             && new_enabled.is_none()
         {
-            return Ok(ToolOutcome::error(
+            return Ok(ToolOutcome::error_code(
+                "invalid_args",
                 "no fields to edit: provide at least one of name, schedule, command, enabled",
+                None::<String>,
             ));
         }
 
         let mut doc = match self.store.load() {
             Ok(doc) => doc,
-            Err(err) => return Ok(ToolOutcome::error(err.message())),
+            Err(err) => {
+                return Ok(ToolOutcome::error_code(
+                    "store_error",
+                    err.message(),
+                    None::<String>,
+                ))
+            }
         };
 
         let Some(job) = doc.jobs.iter_mut().find(|j| j.id == id) else {
-            return Ok(ToolOutcome::error(format!("no job with id '{id}'")));
+            return Ok(ToolOutcome::error_code(
+                "not_found",
+                format!("no job with id '{id}'"),
+                None::<String>,
+            ));
         };
 
         if let Some(name) = new_name {
@@ -421,7 +467,11 @@ impl ToolExecutor for JobsEdit {
         }
 
         if let Err(err) = self.store.save(&doc) {
-            return Ok(ToolOutcome::error(err.message()));
+            return Ok(ToolOutcome::error_code(
+                "store_error",
+                err.message(),
+                None::<String>,
+            ));
         }
         Ok(ToolOutcome::ok(format!("edited job '{id}'")))
     }
@@ -436,12 +486,16 @@ impl ToolExecutor for JobsList {
     async fn execute(&self, _args: Value) -> Result<ToolOutcome> {
         let doc = match self.store.load() {
             Ok(doc) => doc,
-            Err(err) => return Ok(ToolOutcome::error(err.message())),
+            Err(err) => {
+                return Ok(ToolOutcome::error_code(
+                    "store_error",
+                    err.message(),
+                    None::<String>,
+                ))
+            }
         };
-        let payload =
-            serde_json::to_string_pretty(&json!({ "jobs": doc.jobs })).map_err(|err| {
-                anyhow::anyhow!("could not serialize jobs list: {err}")
-            })?;
+        let payload = serde_json::to_string_pretty(&json!({ "jobs": doc.jobs }))
+            .map_err(|err| anyhow::anyhow!("could not serialize jobs list: {err}"))?;
         Ok(ToolOutcome::ok(payload))
     }
 }
@@ -502,6 +556,7 @@ mod tests {
         create.execute(args.clone()).await.unwrap();
         let out = create.execute(args).await.unwrap();
         assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "duplicate_id");
         assert!(out.text.contains("already exists"));
         // Only the first job persisted.
         assert_eq!(read_jobs(&path).unwrap().len(), 1);
@@ -521,6 +576,7 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "invalid_args");
         assert!(out.text.contains("'command' is required"));
 
         // Blank required field.
@@ -587,6 +643,7 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "not_found");
         assert!(out.text.contains("no job with id 'ghost'"));
     }
 
@@ -650,6 +707,7 @@ mod tests {
         .await
         .unwrap();
         assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "store_error");
         assert!(out.text.contains("malformed"));
 
         // create fails too — and must NOT overwrite the existing (bad) file.
@@ -666,6 +724,24 @@ mod tests {
 
         // The original bytes are intact — no corruption / clobbering.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), garbage);
+    }
+
+    #[test]
+    fn configured_path_is_root_contained() {
+        let dir = tempdir().unwrap();
+        let paths = host_api::HostPaths::new(dir.path()).unwrap();
+
+        let nested = resolve_store_path(&paths, Path::new("nested/missing/jobs.json")).unwrap();
+        assert_eq!(nested, paths.root().join("nested/missing/jobs.json"));
+
+        assert!(resolve_store_path(&paths, Path::new("../escape.json")).is_err());
+        assert!(resolve_store_path(&paths, Path::new("/tmp/escape.json")).is_err());
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/tmp", dir.path().join("out")).unwrap();
+            assert!(resolve_store_path(&paths, Path::new("out/jobs.json")).is_err());
+        }
     }
 
     #[tokio::test]

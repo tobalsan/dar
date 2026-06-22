@@ -243,10 +243,7 @@ mod tests {
         fn id(&self) -> &'static str {
             "cfg-tool"
         }
-        fn register<'a>(
-            &'a self,
-            ctx: &'a mut RegisterCtx,
-        ) -> host_api::BoxFuture<'a, Result<()>> {
+        fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
             Box::pin(async move {
                 let registry: Arc<ToolRegistry> = Arc::new(ToolRegistry::new());
                 let handle: Arc<dyn ToolRegistryHandle> = registry.clone();

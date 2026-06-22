@@ -8,9 +8,7 @@ use std::time::Duration;
 use std::collections::HashSet;
 
 use anyhow::{Context, Result};
-use cap_runner::{
-    ExitKind, KillReason, RunnerHandle, SpawnParams, TurnDecision, TurnEnded,
-};
+use cap_runner::{ExitKind, KillReason, RunnerHandle, SpawnParams, TurnDecision, TurnEnded};
 use host_api::{Extension, RegisterCtx};
 use runner_core::{
     classify_protocol_line, common_env, effective_command, log_ev, scrub_loaded_env,
@@ -73,7 +71,12 @@ fn codex_args(p: &SpawnParams<'_>) -> Vec<OsString> {
         args.push(OsString::from("-c"));
         args.push(OsString::from(format!("model_provider={provider:?}")));
     }
-    if let Some(effort) = p.thinking.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(effort) = p
+        .thinking
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         args.push(OsString::from("-c"));
         args.push(OsString::from(format!("model_reasoning_effort={effort:?}")));
     }
@@ -122,7 +125,14 @@ fn make_thread_start(id: u64, workspace: &str, model: Option<&str>) -> Value {
     })
 }
 
-fn make_turn_start(id: u64, thread_id: &str, workspace: &str, prompt: &str, model: Option<&str>, effort: Option<&str>) -> Value {
+fn make_turn_start(
+    id: u64,
+    thread_id: &str,
+    workspace: &str,
+    prompt: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Value {
     serde_json::json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -206,8 +216,14 @@ async fn spawn_codex(p: SpawnParams<'_>) -> Result<RunnerHandle> {
 
     // Take stdio handles.
     let mut stdin = child.stdin.take().context("no stdin handle after spawn")?;
-    let stdout = child.stdout.take().context("no stdout handle after spawn")?;
-    let stderr = child.stderr.take().context("no stderr handle after spawn")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("no stdout handle after spawn")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("no stderr handle after spawn")?;
 
     // Wire up stderr pump immediately (unchanged behavior).
     spawn_line_pump(
@@ -363,7 +379,17 @@ async fn run_protocol_inner(
     macro_rules! request {
         ($val:expr, $id:expr) => {{
             send!($val);
-            match wait_for_response(&mut lines, $id, issue_id, run_id, &events, &store, &last_event_at).await {
+            match wait_for_response(
+                &mut lines,
+                $id,
+                issue_id,
+                run_id,
+                &events,
+                &store,
+                &last_event_at,
+            )
+            .await
+            {
                 Some(result) => result,
                 None => {
                     term_then_kill(pid, Duration::from_secs(5));
@@ -384,11 +410,18 @@ async fn run_protocol_inner(
     // 3. thread/start
     let thread_id_req = next_id;
     next_id += 1;
-    let thread_result = request!(make_thread_start(thread_id_req, workspace, model), thread_id_req);
+    let thread_result = request!(
+        make_thread_start(thread_id_req, workspace, model),
+        thread_id_req
+    );
     let thread_id = match extract_thread_id(&thread_result) {
         Some(id) => id,
         None => {
-            log_ev(issue_id, "error", &format!("thread/start: no thread.id in result: {thread_result}"));
+            log_ev(
+                issue_id,
+                "error",
+                &format!("thread/start: no thread.id in result: {thread_result}"),
+            );
             term_then_kill(pid, Duration::from_secs(5));
             return ExitKind::Abnormal(None);
         }
@@ -399,7 +432,14 @@ async fn run_protocol_inner(
     // notifications, so we do not block on the request response here.
     let turn_id_req = next_id;
     next_id += 1;
-    send!(make_turn_start(turn_id_req, &thread_id, workspace, prompt, model, effort));
+    send!(make_turn_start(
+        turn_id_req,
+        &thread_id,
+        workspace,
+        prompt,
+        model,
+        effort
+    ));
 
     // 5. Turn loop. We keep ONE in-flight set keyed by (threadId, turnId) across
     // ALL threads (the main thread plus any collab subagent threads). The run is
@@ -478,9 +518,18 @@ async fn run_protocol_inner(
             // Busy: pump notifications until the in-flight set empties.
             let line = lines.next_line().await;
             match handle_pump_line(
-                line, stdin, &mut in_flight, &thread_id,
-                issue_id, run_id, &events, &store, &last_event_at,
-            ).await {
+                line,
+                stdin,
+                &mut in_flight,
+                &thread_id,
+                issue_id,
+                run_id,
+                &events,
+                &store,
+                &last_event_at,
+            )
+            .await
+            {
                 PumpStep::Continue => {}
                 PumpStep::BoundaryReached => {
                     // In-flight set just emptied: report idle and park.
@@ -520,7 +569,11 @@ async fn wait_for_response(
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            log_ev(issue_id, "error", &format!("request {expected_id} timed out after 30s"));
+            log_ev(
+                issue_id,
+                "error",
+                &format!("request {expected_id} timed out after 30s"),
+            );
             return None;
         }
         let line = match tokio::time::timeout(remaining, lines.next_line()).await {
@@ -534,13 +587,25 @@ async fn wait_for_response(
                 return None;
             }
             Err(_) => {
-                log_ev(issue_id, "error", &format!("request {expected_id} timed out after 30s"));
+                log_ev(
+                    issue_id,
+                    "error",
+                    &format!("request {expected_id} timed out after 30s"),
+                );
                 return None;
             }
         };
 
         // Emit to events/store unconditionally.
-        emit_line(issue_id, run_id, &line, "stdout", events, store, last_event_at);
+        emit_line(
+            issue_id,
+            run_id,
+            &line,
+            "stdout",
+            events,
+            store,
+            last_event_at,
+        );
 
         let msg: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
@@ -551,7 +616,11 @@ async fn wait_for_response(
         if let Some(id) = msg.get("id").and_then(|v| v.as_u64()) {
             if id == expected_id {
                 if let Some(err) = msg.get("error") {
-                    log_ev(issue_id, "error", &format!("request {expected_id} failed: {err}"));
+                    log_ev(
+                        issue_id,
+                        "error",
+                        &format!("request {expected_id} failed: {err}"),
+                    );
                     return None;
                 }
                 return Some(msg.get("result").cloned().unwrap_or(Value::Null));
@@ -609,7 +678,15 @@ async fn handle_pump_line(
         }
     };
 
-    emit_line(issue_id, run_id, &line, "stdout", events, store, last_event_at);
+    emit_line(
+        issue_id,
+        run_id,
+        &line,
+        "stdout",
+        events,
+        store,
+        last_event_at,
+    );
 
     let msg: Value = match serde_json::from_str(&line) {
         Ok(v) => v,
@@ -679,7 +756,9 @@ async fn handle_pump_line(
                         log_ev(
                             issue_id,
                             "turn",
-                            &format!("subagent turn/completed status={status:?} thread={thread_id:?}"),
+                            &format!(
+                                "subagent turn/completed status={status:?} thread={thread_id:?}"
+                            ),
                         );
                     }
                 }
@@ -689,7 +768,11 @@ async fn handle_pump_line(
             }
             Some("error") => {
                 let msg_str = msg.get("params").map(|v| v.to_string()).unwrap_or_default();
-                log_ev(issue_id, "error", &format!("server error notification: {msg_str}"));
+                log_ev(
+                    issue_id,
+                    "error",
+                    &format!("server error notification: {msg_str}"),
+                );
                 return PumpStep::ProtocolError;
             }
             _ => {}
@@ -902,15 +985,18 @@ mod tests {
 
         assert_eq!(args[0], "app-server");
         assert!(
-            args.windows(2).any(|w| w[0] == "-c" && w[1].contains("approval_policy")),
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("approval_policy")),
             "approval_policy flag missing: {args:?}"
         );
         assert!(
-            args.windows(2).any(|w| w[0] == "-c" && w[1].contains("sandbox_permissions")),
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("sandbox_permissions")),
             "sandbox_permissions flag missing: {args:?}"
         );
         assert!(
-            args.windows(2).any(|w| w[0] == "-c" && w[1].contains("model=")),
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("model=")),
             "model -c flag missing: {args:?}"
         );
     }
@@ -972,7 +1058,8 @@ mod tests {
         p.thinking = Some("high".to_string());
         let args = arg_strings(codex_args(&p));
         assert!(
-            args.windows(2).any(|w| w[0] == "-c" && w[1].contains("model_reasoning_effort")),
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("model_reasoning_effort")),
             "model_reasoning_effort flag missing: {args:?}"
         );
     }
@@ -986,23 +1073,31 @@ mod tests {
 
         assert_eq!(args[0], "app-server");
         assert!(
-            args.windows(2).any(|w| w[0] == "-c" && w[1].contains("approval_policy")),
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("approval_policy")),
             "approval_policy missing without model: {args:?}"
         );
         assert!(
-            args.windows(2).any(|w| w[0] == "-c" && w[1].contains("sandbox_permissions")),
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("sandbox_permissions")),
             "sandbox_permissions missing without model: {args:?}"
         );
         assert!(
-            !args.windows(2).any(|w| w[0] == "-c" && w[1].starts_with("model=")),
+            !args
+                .windows(2)
+                .any(|w| w[0] == "-c" && w[1].starts_with("model=")),
             "model flag should be absent when unset: {args:?}"
         );
         assert!(
-            !args.windows(2).any(|w| w[0] == "-c" && w[1].contains("model_reasoning_effort")),
+            !args
+                .windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("model_reasoning_effort")),
             "effort flag should be absent when unset: {args:?}"
         );
         assert!(
-            !args.windows(2).any(|w| w[0] == "-c" && w[1].contains("model_provider")),
+            !args
+                .windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("model_provider")),
             "provider flag should be absent when unset: {args:?}"
         );
     }
@@ -1015,7 +1110,8 @@ mod tests {
         p.provider = Some("openai".to_string());
         let args = arg_strings(codex_args(&p));
         assert!(
-            args.windows(2).any(|w| w[0] == "-c" && w[1].contains("model_provider")),
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1].contains("model_provider")),
             "model_provider flag missing: {args:?}"
         );
     }
@@ -1052,7 +1148,14 @@ mod tests {
 
     #[test]
     fn turn_start_request_shape() {
-        let req = make_turn_start(3, "t1", "/ws/ISSUE-1", "do something", Some("o3"), Some("high"));
+        let req = make_turn_start(
+            3,
+            "t1",
+            "/ws/ISSUE-1",
+            "do something",
+            Some("o3"),
+            Some("high"),
+        );
         assert_eq!(req["method"], "turn/start");
         assert_eq!(req["params"]["threadId"], "t1");
         assert_eq!(req["params"]["input"][0]["type"], "text");
@@ -1104,8 +1207,14 @@ mod tests {
 
     #[test]
     fn notification_thread_id_distinguishes_main_from_subagent() {
-        assert_eq!(notification_thread_id(&completed("t1", "u1", "completed")).as_deref(), Some("t1"));
-        assert_eq!(notification_thread_id(&completed("sub", "us", "completed")).as_deref(), Some("sub"));
+        assert_eq!(
+            notification_thread_id(&completed("t1", "u1", "completed")).as_deref(),
+            Some("t1")
+        );
+        assert_eq!(
+            notification_thread_id(&completed("sub", "us", "completed")).as_deref(),
+            Some("sub")
+        );
     }
 
     // --- integration tests with fake app-server (ALG-234 turn loop) ---
@@ -1310,11 +1419,19 @@ exit 0
             .lines()
             .filter(|l| l.contains("\"method\":\"turn/start\""))
             .collect();
-        assert_eq!(starts.len(), 2, "expected two turn/start requests, got: {log}");
+        assert_eq!(
+            starts.len(),
+            2,
+            "expected two turn/start requests, got: {log}"
+        );
         assert!(starts[0].contains("initial prompt"), "first: {}", starts[0]);
         assert!(starts[1].contains("second prompt"), "second: {}", starts[1]);
         // Both turn/start requests target the same main threadId.
-        assert!(starts[1].contains("\"threadId\":\"main\""), "second: {}", starts[1]);
+        assert!(
+            starts[1].contains("\"threadId\":\"main\""),
+            "second: {}",
+            starts[1]
+        );
     }
 
     /// Kill while idle awaiting a decision is honored: Interrupted + child reaped.
@@ -1347,7 +1464,10 @@ exit 0
             if nix::sys::signal::kill(pgid, None).is_err() {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "child {pid} still alive");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child {pid} still alive"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
@@ -1369,7 +1489,8 @@ exit 0
     /// stored (sink.count == 0, store.count == 0).
     #[test]
     fn delta_line_updates_liveness_skips_sink_and_store() {
-        let delta = r#"{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"hello"}}"#;
+        let delta =
+            r#"{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"hello"}}"#;
         assert!(is_delta_notification(delta), "test line must be a delta");
 
         let (sink, store, last_event_at) = make_emit_line_parts();
@@ -1377,12 +1498,24 @@ exit 0
 
         // Tiny sleep so `ts` is strictly after `before`.
         std::thread::sleep(std::time::Duration::from_millis(2));
-        emit_line("ISSUE-1", "run-1", delta, "stdout", &(sink.clone() as Arc<dyn cap_runner::RunnerEventSink>), &(store.clone() as Arc<dyn cap_runner::RunnerEventStore>), &last_event_at);
+        emit_line(
+            "ISSUE-1",
+            "run-1",
+            delta,
+            "stdout",
+            &(sink.clone() as Arc<dyn cap_runner::RunnerEventSink>),
+            &(store.clone() as Arc<dyn cap_runner::RunnerEventStore>),
+            &last_event_at,
+        );
 
         let after = *last_event_at.lock().unwrap();
         assert!(after > before, "last_event_at must advance for delta lines");
         assert_eq!(sink.count(), 0, "delta line must not be pushed to sink");
-        assert_eq!(store.count(), 0, "delta line must not be inserted into store");
+        assert_eq!(
+            store.count(),
+            0,
+            "delta line must not be inserted into store"
+        );
     }
 
     /// (b) Non-delta line with empty row_type: pushed to sink and logged, but
@@ -1391,13 +1524,28 @@ exit 0
     fn empty_row_type_line_is_pushed_but_not_stored() {
         // A JSON-RPC response (id+result, no method) classifies as row_type "".
         let rpc_response = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
-        assert!(!is_delta_notification(rpc_response), "test line must not be delta");
+        assert!(
+            !is_delta_notification(rpc_response),
+            "test line must not be delta"
+        );
 
         let (sink, store, last_event_at) = make_emit_line_parts();
-        emit_line("ISSUE-1", "run-1", rpc_response, "stdout", &(sink.clone() as Arc<dyn cap_runner::RunnerEventSink>), &(store.clone() as Arc<dyn cap_runner::RunnerEventStore>), &last_event_at);
+        emit_line(
+            "ISSUE-1",
+            "run-1",
+            rpc_response,
+            "stdout",
+            &(sink.clone() as Arc<dyn cap_runner::RunnerEventSink>),
+            &(store.clone() as Arc<dyn cap_runner::RunnerEventStore>),
+            &last_event_at,
+        );
 
         assert_eq!(sink.count(), 1, "non-delta line must be pushed to sink");
-        assert_eq!(store.count(), 0, "empty row_type must not be inserted into store");
+        assert_eq!(
+            store.count(),
+            0,
+            "empty row_type must not be inserted into store"
+        );
     }
 
     /// (c) Normal classified line (assistant): fully stored — sink and store both
@@ -1406,12 +1554,27 @@ exit 0
     fn classified_line_is_fully_stored() {
         // item/completed with agentMessage → row_type "assistant"
         let assistant = r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","text":"Hello world"}}}"#;
-        assert!(!is_delta_notification(assistant), "test line must not be delta");
+        assert!(
+            !is_delta_notification(assistant),
+            "test line must not be delta"
+        );
 
         let (sink, store, last_event_at) = make_emit_line_parts();
-        emit_line("ISSUE-1", "run-1", assistant, "stdout", &(sink.clone() as Arc<dyn cap_runner::RunnerEventSink>), &(store.clone() as Arc<dyn cap_runner::RunnerEventStore>), &last_event_at);
+        emit_line(
+            "ISSUE-1",
+            "run-1",
+            assistant,
+            "stdout",
+            &(sink.clone() as Arc<dyn cap_runner::RunnerEventSink>),
+            &(store.clone() as Arc<dyn cap_runner::RunnerEventStore>),
+            &last_event_at,
+        );
 
         assert_eq!(sink.count(), 1, "classified line must be pushed to sink");
-        assert_eq!(store.count(), 1, "classified line must be inserted into store");
+        assert_eq!(
+            store.count(),
+            1,
+            "classified line must be inserted into store"
+        );
     }
 }

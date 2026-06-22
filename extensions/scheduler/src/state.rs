@@ -93,7 +93,9 @@ impl SchedulerState {
     pub fn set_jobs(&self, jobs: Vec<ScheduleJob>) {
         {
             let mut inner = self.lock();
-            inner.runtime.retain(|id, _| jobs.iter().any(|j| &j.id == id));
+            inner
+                .runtime
+                .retain(|id, _| jobs.iter().any(|j| &j.id == id));
             inner.jobs = jobs;
         }
         self.changed.notify_one();
@@ -102,7 +104,11 @@ impl SchedulerState {
     /// Record a job's next computed fire instant (or clear it when disabled).
     pub fn set_next_run(&self, job_id: &str, next_run_at_ms: Option<i64>) {
         let mut inner = self.lock();
-        inner.runtime.entry(job_id.to_string()).or_default().next_run_at_ms = next_run_at_ms;
+        inner
+            .runtime
+            .entry(job_id.to_string())
+            .or_default()
+            .next_run_at_ms = next_run_at_ms;
     }
 
     /// Atomically claim a run for this job: set `running_since_ms` and return

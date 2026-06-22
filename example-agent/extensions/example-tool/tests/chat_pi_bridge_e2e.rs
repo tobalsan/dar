@@ -96,9 +96,7 @@ async fn chat_pi_calls_echo_upper_through_host_bridge() {
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline - tokio::time::Instant::now();
         match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Some(ChatEvent::ToolOutput {
-                text, is_error, ..
-            })) => {
+            Ok(Some(ChatEvent::ToolOutput { text, is_error, .. })) => {
                 if text.contains(&expected) && !is_error {
                     got_tool_output = true;
                 }

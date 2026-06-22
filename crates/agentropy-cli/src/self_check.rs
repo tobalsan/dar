@@ -185,6 +185,9 @@ mod tests {
         write_executable(&exe, "current");
         assert!(prev_binary(&exe).is_none());
         write_executable(&temp.path().join("bin/agentropy.prev"), "prev");
-        assert_eq!(prev_binary(&exe), Some(temp.path().join("bin/agentropy.prev")));
+        assert_eq!(
+            prev_binary(&exe),
+            Some(temp.path().join("bin/agentropy.prev"))
+        );
     }
 }

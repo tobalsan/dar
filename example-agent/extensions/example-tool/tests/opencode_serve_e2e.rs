@@ -88,12 +88,30 @@ async fn opencode_serve_calls_echo_upper_through_host_bridge_and_survives_failur
     std::fs::write(&config_path, &content).unwrap();
 
     let env: Vec<(OsString, OsString)> = vec![
-        (OsString::from("OPENCODE_CONFIG"), config_path.clone().into_os_string()),
-        (OsString::from("OPENCODE_CONFIG_DIR"), config_dir.clone().into_os_string()),
-        (OsString::from("OPENCODE_CONFIG_CONTENT"), OsString::from(content)),
-        (OsString::from("XDG_DATA_HOME"), session_dir.join("data").into_os_string()),
-        (OsString::from("XDG_STATE_HOME"), session_dir.join("state").into_os_string()),
-        (OsString::from("XDG_CACHE_HOME"), session_dir.join("cache").into_os_string()),
+        (
+            OsString::from("OPENCODE_CONFIG"),
+            config_path.clone().into_os_string(),
+        ),
+        (
+            OsString::from("OPENCODE_CONFIG_DIR"),
+            config_dir.clone().into_os_string(),
+        ),
+        (
+            OsString::from("OPENCODE_CONFIG_CONTENT"),
+            OsString::from(content),
+        ),
+        (
+            OsString::from("XDG_DATA_HOME"),
+            session_dir.join("data").into_os_string(),
+        ),
+        (
+            OsString::from("XDG_STATE_HOME"),
+            session_dir.join("state").into_os_string(),
+        ),
+        (
+            OsString::from("XDG_CACHE_HOME"),
+            session_dir.join("cache").into_os_string(),
+        ),
     ];
 
     let args = vec![
@@ -109,7 +127,10 @@ async fn opencode_serve_calls_echo_upper_through_host_bridge_and_survives_failur
         .expect("spawn opencode serve");
     let client = server.client();
     let mut events = client.events().await.expect("open opencode event stream");
-    let session_id = client.create_session("ALG-258-e2e").await.expect("create session");
+    let session_id = client
+        .create_session("ALG-258-e2e")
+        .await
+        .expect("create session");
 
     // ---- Happy path: valid echo_upper call returns in-session over SSE -------
     let expected = format!("HELLO FROM SPIKE{SUFFIX}");
@@ -123,11 +144,16 @@ async fn opencode_serve_calls_echo_upper_through_host_bridge_and_survives_failur
         .await
         .expect("send happy-path prompt");
 
-    let happy = wait_for(&mut events, &session_id, Duration::from_secs(240), |payload| {
-        // The configured in-host result must appear somewhere in the session
-        // stream (tool output part and/or the assistant echo).
-        payload.to_string().contains(&expected)
-    })
+    let happy = wait_for(
+        &mut events,
+        &session_id,
+        Duration::from_secs(240),
+        |payload| {
+            // The configured in-host result must appear somewhere in the session
+            // stream (tool output part and/or the assistant echo).
+            payload.to_string().contains(&expected)
+        },
+    )
     .await;
     assert!(
         happy,
@@ -172,9 +198,12 @@ async fn opencode_serve_calls_echo_upper_through_host_bridge_and_survives_failur
         )
         .await
         .expect("send survival prompt");
-    let survived = wait_for(&mut events, &session_id, Duration::from_secs(240), |payload| {
-        payload.to_string().contains(survive_expected)
-    })
+    let survived = wait_for(
+        &mut events,
+        &session_id,
+        Duration::from_secs(240),
+        |payload| payload.to_string().contains(survive_expected),
+    )
     .await;
     assert!(
         survived,
@@ -254,9 +283,7 @@ fn is_session_idle(payload: &Value, session_id: &str) -> bool {
 
 /// A tool part finalized in the `error` state — the structured-failure signal.
 fn tool_part_errored(payload: &Value) -> bool {
-    let part = payload
-        .get("properties")
-        .and_then(|p| p.get("part"));
+    let part = payload.get("properties").and_then(|p| p.get("part"));
     let is_tool = part.and_then(|p| p.get("type")).and_then(Value::as_str) == Some("tool");
     let status = part
         .and_then(|p| p.get("state"))

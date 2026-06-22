@@ -502,7 +502,10 @@ mod tests {
         assert!(contents.contains("fake"), "auth.json contents should match");
 
         let dst_account = session_dir.path().join("data/opencode/account.json");
-        assert!(!dst_account.exists(), "account.json should not be created when source is absent");
+        assert!(
+            !dst_account.exists(),
+            "account.json should not be created when source is absent"
+        );
     }
 
     #[test]
@@ -832,8 +835,8 @@ PY"#;
         let temp = tempfile::tempdir().unwrap();
         let script = write_script(temp.path(), DISPOSE_FAIL_SERVER);
         let sessions = temp.path().join("data").join("tui").join("sessions");
-        let params = ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions)
-            .build();
+        let params =
+            ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions).build();
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
         let session = OpenCodeChatSession::spawn(&params, tx).await.unwrap();
         let pid = session.server.as_ref().unwrap().pid().unwrap();

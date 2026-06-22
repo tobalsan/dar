@@ -107,13 +107,18 @@ impl DashboardTabs {
             .unwrap_or_else(|_| Arc::new(Self::default()))
     }
 
-    /// Append a tab provider. Last-writer-wins is not a concern: ids are
-    /// expected unique; duplicates simply produce two nav entries.
-    pub fn add(&self, tab: Arc<dyn DashboardTab>) {
-        self.tabs
-            .lock()
-            .expect("dashboard tabs registry poisoned")
-            .push(tab);
+    /// Append a tab provider. Ids must be unique and URL-safe.
+    pub fn add(&self, tab: Arc<dyn DashboardTab>) -> Result<()> {
+        let id = tab.id();
+        if !is_url_safe_id(id) {
+            anyhow::bail!("dashboard tab id {id:?} must contain only [A-Za-z0-9._-]");
+        }
+        let mut tabs = self.tabs.lock().expect("dashboard tabs registry poisoned");
+        if tabs.iter().any(|existing| existing.id() == id) {
+            anyhow::bail!("duplicate dashboard tab id {id:?}");
+        }
+        tabs.push(tab);
+        Ok(())
     }
 
     /// Snapshot of the registered providers, in registration order.
@@ -133,14 +138,13 @@ impl DashboardTabs {
             .find(|t| t.id() == id)
             .cloned()
     }
+}
 
-    /// Whether any tab is registered.
-    pub fn is_empty(&self) -> bool {
-        self.tabs
-            .lock()
-            .expect("dashboard tabs registry poisoned")
-            .is_empty()
-    }
+fn is_url_safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 #[cfg(test)]
@@ -178,7 +182,7 @@ mod tests {
         let mut services = ServiceRegistry::default();
         let a = DashboardTabs::shared(&mut services).expect("first create");
         let b = DashboardTabs::shared(&mut services).expect("reuse existing");
-        a.add(tab("one", "One", "<p>one</p>"));
+        a.add(tab("one", "One", "<p>one</p>")).unwrap();
         // Both handles point at the same registry.
         assert_eq!(b.snapshot().len(), 1);
         assert!(Arc::ptr_eq(&a, &b));
@@ -187,9 +191,13 @@ mod tests {
     #[test]
     fn snapshot_preserves_registration_order_and_find_works() {
         let registry = DashboardTabs::default();
-        registry.add(tab("first", "First", "<p>1</p>"));
-        registry.add(tab("second", "Second", "<p>2</p>"));
-        let ids: Vec<String> = registry.snapshot().iter().map(|t| t.id().to_string()).collect();
+        registry.add(tab("first", "First", "<p>1</p>")).unwrap();
+        registry.add(tab("second", "Second", "<p>2</p>")).unwrap();
+        let ids: Vec<String> = registry
+            .snapshot()
+            .iter()
+            .map(|t| t.id().to_string())
+            .collect();
         assert_eq!(ids, vec!["first", "second"]);
         let found = registry.find("second").expect("present");
         assert_eq!(found.title(), "Second");
@@ -201,6 +209,15 @@ mod tests {
     fn from_services_returns_empty_when_unregistered() {
         let services = ServiceRegistry::default();
         let registry = DashboardTabs::from_services(&services);
-        assert!(registry.is_empty());
+        assert!(registry.snapshot().is_empty());
+    }
+
+    #[test]
+    fn add_rejects_duplicate_and_invalid_ids() {
+        let registry = DashboardTabs::default();
+        registry.add(tab("ok-id.1", "Ok", "")).unwrap();
+        assert!(registry.add(tab("ok-id.1", "Dup", "")).is_err());
+        assert!(registry.add(tab("bad/id", "Bad", "")).is_err());
+        assert!(registry.add(tab("", "Bad", "")).is_err());
     }
 }

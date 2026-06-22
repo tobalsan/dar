@@ -4,8 +4,8 @@
 //! extension [`ToolRegistry`] over the Model Context Protocol and executes tool
 //! calls *in the host runtime* using each extension's config/secrets. Agent
 //! backends (codex `app-server`, etc.) are pointed at this process via their MCP
-//! server config; the agent only ever sees tool names, schemas, and structured
-//! results — never the host's secrets.
+//! server config; the agent only ever sees tool names, schemas, and secret-redacted
+//! structured results — never the host's secrets.
 //!
 //! It is the same `agentropy` binary re-invoked as a hidden subcommand
 //! (`agentropy __mcp-bridge --dir <agent>`). On start it loads the agent's
@@ -56,13 +56,7 @@ pub async fn build_registry(
 /// MCP over stdin/stdout until EOF.
 pub async fn serve(root: &Path, plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
     let (registry, redactor) = build_registry(root, plugins).await?;
-    serve_stdio(
-        registry,
-        redactor,
-        tokio::io::stdin(),
-        tokio::io::stdout(),
-    )
-    .await
+    serve_stdio(registry, redactor, tokio::io::stdin(), tokio::io::stdout()).await
 }
 
 /// Drive the MCP request loop over arbitrary async byte streams (factored out so
@@ -136,9 +130,7 @@ async fn handle_tools_call(
     request: &Value,
 ) -> Value {
     let params = request.get("params");
-    let name = params
-        .and_then(|p| p.get("name"))
-        .and_then(Value::as_str);
+    let name = params.and_then(|p| p.get("name")).and_then(Value::as_str);
     let Some(name) = name else {
         return error(id, -32602, "invalid params: missing tool name");
     };
@@ -153,7 +145,7 @@ async fn handle_tools_call(
     // name, status, duration, and read/write metadata — no raw payload dumps.
     let (outcome, observation) = registry.dispatch_observed(name, args, redactor).await;
     emit_observation(&observation);
-    result(id, outcome.to_mcp_result())
+    result(id, outcome.redacted(redactor).to_mcp_result())
 }
 
 /// Emit a tool-call observation as a runtime log line. stdout is the MCP
@@ -224,14 +216,21 @@ mod tests {
     }
 
     async fn roundtrip(requests: &[Value]) -> Vec<Value> {
-        let registry = registry_with_echo();
+        roundtrip_with(registry_with_echo(), Redactor::default(), requests).await
+    }
+
+    async fn roundtrip_with(
+        registry: Arc<dyn ToolRegistryHandle>,
+        redactor: Redactor,
+        requests: &[Value],
+    ) -> Vec<Value> {
         let mut input = String::new();
         for req in requests {
             input.push_str(&serde_json::to_string(req).unwrap());
             input.push('\n');
         }
         let mut output: Vec<u8> = Vec::new();
-        serve_stdio(registry, Redactor::default(), input.as_bytes(), &mut output)
+        serve_stdio(registry, redactor, input.as_bytes(), &mut output)
             .await
             .unwrap();
         String::from_utf8(output)
@@ -254,7 +253,10 @@ mod tests {
         let tools = out[0]["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "echo_upper");
-        assert_eq!(tools[0]["inputSchema"]["properties"]["text"]["type"], "string");
+        assert_eq!(
+            tools[0]["inputSchema"]["properties"]["text"]["type"],
+            "string"
+        );
     }
 
     #[tokio::test]
@@ -286,6 +288,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("unknown tool"));
+        assert_eq!(
+            out[0]["result"]["structuredContent"]["error"]["code"],
+            "unknown_tool"
+        );
     }
 
     #[tokio::test]
@@ -330,6 +336,29 @@ mod tests {
         }
     }
 
+    struct LeaksCodedSecret(String);
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for LeaksCodedSecret {
+        async fn execute(&self, _args: Value) -> Result<ToolOutcome> {
+            Ok(ToolOutcome::error_code(
+                "leaky_error",
+                format!("failed with {}", self.0),
+                Some(format!("retry without {}", self.0)),
+            ))
+        }
+    }
+
+    fn leaky_registry(name: &str, executor: Arc<dyn ToolExecutor>) -> Arc<dyn ToolRegistryHandle> {
+        let reg = ToolRegistry::new();
+        reg.register_tool(
+            ToolSpec::new(name, "desc", json!({ "type": "object" })).writes(),
+            executor,
+        )
+        .unwrap();
+        Arc::new(reg)
+    }
+
     #[tokio::test]
     async fn observed_dispatch_redacts_secret_in_args_and_result() {
         let secret = "shhh-bridge-secret-value-123".to_string();
@@ -357,6 +386,58 @@ mod tests {
         assert!(line.contains("status=ok"));
         assert!(line.contains("duration_ms="));
         assert!(line.contains("access=write"));
+    }
+
+    #[tokio::test]
+    async fn tools_call_redacts_secret_in_agent_facing_success_result() {
+        let secret = "shhh-agent-result-secret-123".to_string();
+        let registry = leaky_registry("leaky", Arc::new(LeaksSecret(secret.clone())));
+        let out = roundtrip_with(
+            registry,
+            Redactor::from_secret_values([secret.clone()]),
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": { "name": "leaky", "arguments": {} }
+            })],
+        )
+        .await;
+
+        let text = out[0]["result"]["content"][0]["text"].as_str().unwrap();
+        assert_eq!(out[0]["result"]["isError"], false);
+        assert!(!text.contains(&secret));
+        assert!(text.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn tools_call_redacts_secret_in_agent_facing_structured_error() {
+        let secret = "shhh-agent-error-secret-123".to_string();
+        let registry = leaky_registry("leaky_error", Arc::new(LeaksCodedSecret(secret.clone())));
+        let out = roundtrip_with(
+            registry,
+            Redactor::from_secret_values([secret.clone()]),
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "tools/call",
+                "params": { "name": "leaky_error", "arguments": {} }
+            })],
+        )
+        .await;
+
+        let result = &out[0]["result"];
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["error"]["code"], "leaky_error");
+        for value in [
+            &result["content"][0]["text"],
+            &result["structuredContent"]["error"]["message"],
+            &result["structuredContent"]["error"]["hint"],
+        ] {
+            let text = value.as_str().unwrap();
+            assert!(!text.contains(&secret));
+            assert!(text.contains("[REDACTED]"));
+        }
     }
 
     #[tokio::test]

@@ -177,10 +177,7 @@ fn render_job(row: &JobRow) -> String {
         "<div class=\"run-title\"><strong>{}</strong> {enabled} {running}</div>",
         row.name
     ));
-    block.push_str(&format!(
-        "<div class=\"meta\">{}</div>",
-        row.schedule
-    ));
+    block.push_str(&format!("<div class=\"meta\">{}</div>", row.schedule));
     block.push_str(&format!(
         "<div class=\"meta\">Next run: {} &middot; Last run: {} &middot; Last status: <span class=\"pill {}\">{}</span></div>",
         row.next_run, row.last_run, row.status_class, row.status_label
@@ -284,7 +281,10 @@ mod tests {
     #[test]
     fn tab_id_and_title_are_stable() {
         let dir = tempfile::tempdir().unwrap();
-        let tab = tab_with(Arc::new(SchedulerState::new(vec![])), dir.path().to_path_buf());
+        let tab = tab_with(
+            Arc::new(SchedulerState::new(vec![])),
+            dir.path().to_path_buf(),
+        );
         assert_eq!(tab.id(), "cron");
         assert_eq!(tab.title(), "Cron");
     }
@@ -292,7 +292,10 @@ mod tests {
     #[test]
     fn empty_state_renders_empty_fragment() {
         let dir = tempfile::tempdir().unwrap();
-        let tab = tab_with(Arc::new(SchedulerState::new(vec![])), dir.path().to_path_buf());
+        let tab = tab_with(
+            Arc::new(SchedulerState::new(vec![])),
+            dir.path().to_path_buf(),
+        );
         let html = tab.render().unwrap();
         assert!(html.contains("No cron jobs configured"));
         // It is a fragment, not a full page; the dashboard's shared #content
@@ -304,17 +307,34 @@ mod tests {
     #[test]
     fn renders_schedule_enabled_next_last_status_and_running() {
         let dir = tempfile::tempdir().unwrap();
-        let state = Arc::new(SchedulerState::new(vec![job("digest", "Morning digest", true)]));
-        state.set_next_run("digest", Some(Utc.with_ymd_and_hms(2026, 6, 14, 6, 0, 0).unwrap().timestamp_millis()));
+        let state = Arc::new(SchedulerState::new(vec![job(
+            "digest",
+            "Morning digest",
+            true,
+        )]));
+        state.set_next_run(
+            "digest",
+            Some(
+                Utc.with_ymd_and_hms(2026, 6, 14, 6, 0, 0)
+                    .unwrap()
+                    .timestamp_millis(),
+            ),
+        );
         assert!(state.try_claim_running("digest", Utc::now().timestamp_millis()));
         state.mark_finished("digest", LastStatus::Ok, None);
         let tab = tab_with(state, dir.path().to_path_buf());
         let html = tab.render().unwrap();
         assert!(html.contains("Morning digest"), "job name shown: {html}");
-        assert!(html.contains("0 8 * * * Europe/Paris"), "schedule + tz shown");
+        assert!(
+            html.contains("0 8 * * * Europe/Paris"),
+            "schedule + tz shown"
+        );
         assert!(html.contains(">enabled<"), "enabled flag shown");
         assert!(html.contains("2026-06-14 06:00:00 UTC"), "next run shown");
-        assert!(html.contains("Last status: <span class=\"pill completed\">ok"), "ok status shown");
+        assert!(
+            html.contains("Last status: <span class=\"pill completed\">ok"),
+            "ok status shown"
+        );
     }
 
     #[test]
@@ -322,11 +342,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(SchedulerState::new(vec![job("j", "Job", true)]));
         assert!(state.try_claim_running("j", Utc::now().timestamp_millis()));
-        state.mark_finished("j", LastStatus::Error, Some("runner exited abnormally".to_string()));
+        state.mark_finished(
+            "j",
+            LastStatus::Error,
+            Some("runner exited abnormally".to_string()),
+        );
         let tab = tab_with(state, dir.path().to_path_buf());
         let html = tab.render().unwrap();
-        assert!(html.contains("class=\"pill failed\">error"), "error status shown");
-        assert!(html.contains("runner exited abnormally"), "error message shown");
+        assert!(
+            html.contains("class=\"pill failed\">error"),
+            "error status shown"
+        );
+        assert!(
+            html.contains("runner exited abnormally"),
+            "error message shown"
+        );
     }
 
     #[test]
@@ -344,7 +374,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("cron").join("output").join("j");
         std::fs::create_dir_all(&out).unwrap();
-        for ts in ["2026-06-14_06-00-00", "2026-06-14_07-00-00", "2026-06-14_08-00-00"] {
+        for ts in [
+            "2026-06-14_06-00-00",
+            "2026-06-14_07-00-00",
+            "2026-06-14_08-00-00",
+        ] {
             std::fs::write(out.join(format!("{ts}.md")), "x").unwrap();
         }
         // A non-md stray must be ignored.
@@ -361,10 +395,17 @@ mod tests {
     #[test]
     fn html_in_job_name_is_escaped() {
         let dir = tempfile::tempdir().unwrap();
-        let state = Arc::new(SchedulerState::new(vec![job("j", "<script>alert(1)</script>", true)]));
+        let state = Arc::new(SchedulerState::new(vec![job(
+            "j",
+            "<script>alert(1)</script>",
+            true,
+        )]));
         let tab = tab_with(state, dir.path().to_path_buf());
         let html = tab.render().unwrap();
-        assert!(!html.contains("<script>alert"), "raw script not injected: {html}");
+        assert!(
+            !html.contains("<script>alert"),
+            "raw script not injected: {html}"
+        );
         assert!(html.contains("&lt;script&gt;"), "name escaped");
     }
 

@@ -276,7 +276,8 @@ async fn submit_turn(
         match open_session(backend_id, config, ctx, chat_tx.clone()).await {
             Ok(opened) => *session = Some(opened),
             Err(e) => {
-                app.chat.fail_turn(format!("cannot open chat session: {e:#}"));
+                app.chat
+                    .fail_turn(format!("cannot open chat session: {e:#}"));
                 return;
             }
         }
@@ -585,7 +586,10 @@ done"#;
         )
         .await;
         assert!(session.is_some(), "session opens lazily on first submit");
-        assert!(!preamble_pending, "accepted first turn consumes the preamble");
+        assert!(
+            !preamble_pending,
+            "accepted first turn consumes the preamble"
+        );
         assert!(
             temp.path().join("data/tui/sessions").is_dir(),
             "session dir created under data/tui"
@@ -661,7 +665,10 @@ done"#;
         let log = std::fs::read_to_string(temp.path().join("prompts.log")).unwrap();
         let prompts: Vec<&str> = log.lines().collect();
         assert_eq!(prompts.len(), 2, "one prompt line per turn: {log:?}");
-        assert!(prompts[0].contains("[context]"), "turn 1 carries the preamble");
+        assert!(
+            prompts[0].contains("[context]"),
+            "turn 1 carries the preamble"
+        );
         assert!(
             prompts[0].contains("ISSUE-1.md"),
             "issues listing reaches the backend"

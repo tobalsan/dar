@@ -55,13 +55,7 @@ impl OpenCodeServer {
         let port_arg = OsString::from(port.to_string());
         let args = args
             .into_iter()
-            .map(|arg| {
-                if arg == "0" {
-                    port_arg.clone()
-                } else {
-                    arg
-                }
-            })
+            .map(|arg| if arg == "0" { port_arg.clone() } else { arg })
             .collect::<Vec<_>>();
         let mut cmd = Command::new(command.into());
         runner_core::scrub_loaded_env(&mut cmd);

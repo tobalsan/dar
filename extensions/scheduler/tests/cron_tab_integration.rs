@@ -24,7 +24,11 @@ use tower::ServiceExt;
 async fn boot(root: &std::path::Path, config: HashMap<String, serde_json::Value>) -> axum::Router {
     std::fs::create_dir_all(root.join("data")).unwrap();
     // Minimal agent.yaml so the scheduler can resolve its runner config.
-    std::fs::write(root.join("agent.yaml"), "id: demo\nname: Demo\nrunner:\n  use: fake\n").unwrap();
+    std::fs::write(
+        root.join("agent.yaml"),
+        "id: demo\nname: Demo\nrunner:\n  use: fake\n",
+    )
+    .unwrap();
     let paths = HostPaths::new(root).unwrap();
     let (_tx, rx) = tokio::sync::watch::channel(false);
     let shutdown = ShutdownToken::new(rx);
@@ -93,13 +97,19 @@ async fn cron_tab_present_when_scheduler_enabled_and_shows_job() {
     // Tab nav present, linking to the cron fragment; Runs stays the default tab.
     let (status, html) = get(&router, "/").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(html.contains("id=\"dash-tabs\""), "tab nav rendered: {html}");
+    assert!(
+        html.contains("id=\"dash-tabs\""),
+        "tab nav rendered: {html}"
+    );
     assert!(html.contains(">Runs<"), "default Runs tab present");
     assert!(html.contains("/tabs/cron"), "cron tab linked");
     assert!(html.contains(">Cron<"), "cron tab title in nav");
     // Content shell + innerHTML swap preserved (no body swap).
     assert!(html.contains("id=\"content\""), "content shell preserved");
-    assert!(!html.contains("hx-swap=\"outerHTML\""), "no outer/body swap");
+    assert!(
+        !html.contains("hx-swap=\"outerHTML\""),
+        "no outer/body swap"
+    );
 
     // The fragment renders at the dashboard-owned dispatch route and shows the
     // job's schedule + tz and enabled flag. Refresh is the dashboard's shared
@@ -109,13 +119,22 @@ async fn cron_tab_present_when_scheduler_enabled_and_shows_job() {
     assert_eq!(status, StatusCode::OK);
     assert!(!frag.contains("<body"), "fragment is not a full page");
     assert!(frag.contains("Morning digest"), "job name shown: {frag}");
-    assert!(frag.contains("0 8 * * * Europe/Paris"), "schedule + tz shown");
+    assert!(
+        frag.contains("0 8 * * * Europe/Paris"),
+        "schedule + tz shown"
+    );
     assert!(frag.contains(">enabled<"), "enabled flag shown");
 
     // The index shell keeps the #content innerHTML self-poll that drives the
     // active tab's refresh.
-    assert!(html.contains("hx-get=\"/content\""), "shared content poller present");
-    assert!(html.contains("hx-swap=\"innerHTML\""), "innerHTML swap preserved");
+    assert!(
+        html.contains("hx-get=\"/content\""),
+        "shared content poller present"
+    );
+    assert!(
+        html.contains("hx-swap=\"innerHTML\""),
+        "innerHTML swap preserved"
+    );
 }
 
 #[tokio::test]
