@@ -37,6 +37,11 @@ pub struct ScheduleJob {
     pub enabled: bool,
     pub schedule: Schedule,
     pub payload: Payload,
+    /// Per-job timeout override (ms). When set, takes precedence over the
+    /// extension-level `jobTimeoutMs` and the 10-minute default. `null`/absent
+    /// means "inherit the extension/global default".
+    #[serde(rename = "timeoutMs", default)]
+    pub timeout_ms: Option<u64>,
 }
 
 fn default_enabled() -> bool {
@@ -159,7 +164,8 @@ mod tests {
                         "name": "Morning digest",
                         "enabled": true,
                         "schedule": { "cron": "0 8 * * *", "tz": "Europe/Paris", "startAt": "2026-05-19T07:00:00.000Z" },
-                        "payload": { "message": "Summarize overnight events." }
+                        "payload": { "message": "Summarize overnight events." },
+                        "timeoutMs": 120000
                     },
                     {
                         "id": "no-name",
@@ -179,9 +185,12 @@ mod tests {
             Some("2026-05-19T07:00:00.000Z")
         );
         assert_eq!(jobs[0].payload.message, "Summarize overnight events.");
-        // Defaults: missing name → empty, missing enabled → true.
+        assert_eq!(jobs[0].timeout_ms, Some(120000));
+        // Defaults: missing name → empty, missing enabled → true, missing
+        // timeoutMs → None (inherit the extension/global default).
         assert_eq!(jobs[1].name, "");
         assert!(jobs[1].enabled);
+        assert_eq!(jobs[1].timeout_ms, None);
     }
 
     #[test]
