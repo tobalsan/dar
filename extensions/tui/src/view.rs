@@ -64,23 +64,21 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &App) {
         );
         return;
     }
+    let mut wrapped: Vec<Line> = Vec::new();
+    for row in &app.logs.rows {
+        let style = match row {
+            LogRow::Event(_) => Style::new(),
+            LogRow::Skipped(_) => Style::new().add_modifier(Modifier::DIM),
+        };
+        let text = row.text();
+        for chunk in wrap_chunks(&text, (inner.width as usize).max(1)) {
+            wrapped.push(Line::from(Span::styled(chunk, style)));
+        }
+    }
     let height = inner.height as usize;
-    let max_start = app.logs.rows.len().saturating_sub(height);
+    let max_start = wrapped.len().saturating_sub(height);
     let start = max_start.saturating_sub(app.logs.scroll_back);
-    let visible: Vec<Line> = app
-        .logs
-        .rows
-        .iter()
-        .skip(start)
-        .take(height)
-        .map(|row| {
-            let style = match row {
-                LogRow::Event(_) => Style::new(),
-                LogRow::Skipped(_) => Style::new().add_modifier(Modifier::DIM),
-            };
-            Line::from(Span::styled(row.text(), style))
-        })
-        .collect();
+    let visible: Vec<Line> = wrapped.into_iter().skip(start).take(height).collect();
     frame.render_widget(Paragraph::new(visible), inner);
 }
 
