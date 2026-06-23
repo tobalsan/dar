@@ -56,11 +56,11 @@ whatever the issue files say. Run history is restored from SQLite on startup.
 ```
 my-agent/
 ├── agent.yaml          # base config
-├── WORKFLOW.md         # prompt template (minijinja, strict) + frontmatter overrides
-├── issues/             # one Markdown file per issue (local tracker only)
+├── WORKFLOW.md         # required only when orchestrator/tracker/workspace trio is enabled
+├── issues/             # required only for the local files tracker
 │   ├── ISSUE-1.md
 │   └── ISSUE-2.md
-├── workspaces/         # created at runtime, one dir per issue
+├── workspaces/         # created at runtime by the orchestrator loop
 ├── data/
 │   └── store.db        # SQLite: runs, events, claims, heartbeats
 ├── logs/
@@ -156,20 +156,24 @@ start from `extensions/example` (the living reference, kept green in CI).
 
 ### Enabling & configuring extensions
 
-Linked is not the same as enabled. Tracker and runner extensions only
-*register* named services; `agent.yaml` `use:` keys pick which one actually
-runs:
+Linked is not the same as enabled. Runner and tracker extensions only
+*register* named services. `runner.use` is always required and selects the
+agent harness/model backend. `tracker.use` is present only when the optional
+orchestrator trio is enabled:
 
 ```yaml
-tracker:
-  use: files            # files | linear
-
 runner:
   use: pi               # pi | codex | cli | fake
+
+# only for issue-loop agents
+tracker:
+  use: files            # files | linear
 ```
 
 Background extensions in `plugins![]` (orchestrator, dashboard, frontend-log)
-start unconditionally. The foreground extension — the one that owns terminal
+start unconditionally. With no orchestrator/tracker/workspace trio, the
+orchestrator starts in passive mode: no issue loop, no tracker, no WORKFLOW.md
+required. The foreground extension — the one that owns terminal
 output — is selected per agent via the top-level `foreground:` key in
 `agent.yaml` (default `"logs"`, the frontend-log extension; `"tui"` selects the
 [terminal UI](#terminal-ui-foreground-tui)). An unknown id causes a clean boot
@@ -252,10 +256,12 @@ agentropy init-workflow --dir ./my-agent --force                      # overwrit
 agentropy init-workflow --dir ./my-agent --linear-project-slug abc123 # seed Linear frontmatter
 agentropy init-workflow --dir ./my-agent --expose-graphql-tool        # enable linear_graphql tool
 
-# Validate agent.yaml + WORKFLOW.md + tracker. Exit code only.
+# Validate agent.yaml. If the orchestrator trio is configured, also validates
+# WORKFLOW.md + tracker. Exit code only.
 agentropy doctor --dir ./my-agent
 
-# Run the orchestration loop (long-running). Defaults to the current directory.
+# Run the agent host (long-running). With the orchestrator trio configured,
+# this runs the issue loop; otherwise it runs foreground/custom extensions only.
 cd my-agent && agentropy run
 agentropy run --dir ./my-agent          # or point at a folder
 
@@ -272,12 +278,34 @@ open http://127.0.0.1:7878/
 
 ## Configuration (`agent.yaml`)
 
-`agent.yaml` is the base config. Most fields can be overridden per-run in
-`WORKFLOW.md` frontmatter (WORKFLOW.md wins).
+`agent.yaml` is the base config. `runner` is always required: it selects the
+agent harness/model backend. `orchestrator`, `tracker`, and `workspace` form an
+optional trio: omit all three for a passive agent that only runs foreground,
+scheduler, or custom extensions; configure all three to enable the issue loop.
+Most loop fields can be overridden per-run in `WORKFLOW.md` frontmatter
+(WORKFLOW.md wins).
 
 ```yaml
 id: my-agent
 name: "My Agent"
+
+runner:
+  use: pi                     # pi | codex | cli | fake
+  command: pi                 # executable; defaults to runner kind's canonical command
+  # model: gpt-5             # passed to runners that accept --model
+  # provider: anthropic       # passed to runners that accept a provider flag
+  # thinking: high            # reasoning level (alias: effort); see "Thinking / reasoning level"
+  max_run_timeout_ms: 3600000 # 1 h hard cap per attempt (alias: turn_timeout_ms)
+  stall_timeout_ms: 300000    # 5 min silence → stall kill
+
+# Optional issue-loop trio. Either configure all three sections below, or omit
+# all three for a passive agent.
+orchestrator:
+  poll_interval_ms: 10000
+  max_concurrent: 3           # parallel slots
+  max_retries: 3              # backoff retry cap (not counting continuation retries)
+  retry_backoff_ms: 30000     # base delay; doubles each attempt, capped at 30 min
+  # max_active_runs: 3        # park barrier: max consecutive completed runs without leaving active
 
 tracker:
   use: files                  # "files" or "linear"
@@ -293,22 +321,6 @@ tracker:
 
 # Linear filters (project_slug / team / assignee / label) combine with strict AND;
 # at least one must resolve or the daemon refuses to boot.
-
-runner:
-  use: pi                     # pi | codex | cli | fake
-  command: pi                 # executable; defaults to runner kind's canonical command
-  # model: gpt-5             # passed to runners that accept --model
-  # provider: anthropic       # passed to runners that accept a provider flag
-  # thinking: high            # reasoning level (alias: effort); see "Thinking / reasoning level"
-  max_run_timeout_ms: 3600000 # 1 h hard cap per attempt (alias: turn_timeout_ms)
-  stall_timeout_ms: 300000    # 5 min silence → stall kill
-
-orchestrator:
-  poll_interval_ms: 10000
-  max_concurrent: 3           # parallel slots
-  max_retries: 3              # backoff retry cap (not counting continuation retries)
-  retry_backoff_ms: 30000     # base delay; doubles each attempt, capped at 30 min
-  # max_active_runs: 3        # park barrier: max consecutive completed runs without leaving active
 
 workspace:
   root: ./workspaces          # supports $AGENT_HOME and ~ expansion
@@ -329,8 +341,10 @@ hitl:
 
 ## WORKFLOW.md
 
-`WORKFLOW.md` = optional YAML frontmatter + Markdown prompt body.
+`WORKFLOW.md` is required only when the orchestrator/tracker/workspace trio is
+enabled. Passive agents may omit it.
 
+When present, `WORKFLOW.md` = optional YAML frontmatter + Markdown prompt body.
 The **body** is a minijinja template rendered per issue against `{{ issue.* }}`
 variables. Strict mode: an unknown variable fails the dispatch attempt (treated
 as abnormal → backoff retry).

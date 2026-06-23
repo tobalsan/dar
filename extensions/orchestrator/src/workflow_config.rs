@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 use cap_runner::DEFAULT_RUNNER_KIND;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{AgentConfig, StringOrVec};
+use crate::config::{AgentConfig, StringOrVec, TrackerConfig};
 
 const DEFAULT_NEEDS_HUMAN_STATE: &str = "Needs Human";
 
@@ -329,61 +329,68 @@ impl EffectiveLoopConfig {
     /// Build by layering WORKFLOW.md frontmatter over agent.yaml base config.
     /// Every field present in `wf` wins; absent fields fall back to `base`.
     pub fn merge(base: &AgentConfig, wf: &WorkflowFrontmatter) -> Self {
+        // The orchestrator trio may be absent for a passive agent; fall back to
+        // neutral defaults so merge stays total. A real loop always supplies the
+        // trio, so these defaults are never consumed by a running orchestrator.
+        let base_tracker = base.tracker_or_default();
+        let base_orchestrator = base.orchestrator_or_default();
+        let base_workspace = base.workspace_or_default();
+
         // --- Tracker states + kind ---
-        let (active_states, terminal_states, needs_human) = resolve_tracker(base, wf);
+        let (active_states, terminal_states, needs_human) = resolve_tracker(&base_tracker, wf);
         let tracker_kind = wf
             .tracker
             .as_ref()
             .and_then(|t| t.kind.as_deref())
             .map(|s| s.to_string())
-            .unwrap_or_else(|| base.tracker.use_.clone());
+            .unwrap_or_else(|| base_tracker.use_.clone());
         let tracker_project_slug = wf
             .tracker
             .as_ref()
             .and_then(|t| t.project_slug.clone())
-            .or_else(|| base.tracker.project_slug.clone());
+            .or_else(|| base_tracker.project_slug.clone());
         let tracker_endpoint = wf
             .tracker
             .as_ref()
             .and_then(|t| t.endpoint.clone())
-            .or_else(|| base.tracker.endpoint.clone())
+            .or_else(|| base_tracker.endpoint.clone())
             .unwrap_or_else(|| "https://api.linear.app/graphql".to_string());
         let tracker_team = wf
             .tracker
             .as_ref()
             .and_then(|t| t.team.clone())
-            .or_else(|| base.tracker.team.clone());
+            .or_else(|| base_tracker.team.clone());
         let tracker_assignee = wf
             .tracker
             .as_ref()
             .and_then(|t| t.assignee.clone())
-            .or_else(|| base.tracker.assignee.clone());
+            .or_else(|| base_tracker.assignee.clone());
         let tracker_labels = wf
             .tracker
             .as_ref()
             .and_then(|t| t.label.as_ref().map(StringOrVec::to_vec))
-            .unwrap_or_else(|| base.tracker.labels());
+            .unwrap_or_else(|| base_tracker.labels());
 
         // --- Polling ---
         let p = wf.polling.as_ref();
         let poll_interval_ms = p
             .and_then(|p| p.interval_ms)
-            .unwrap_or(base.orchestrator.poll_interval_ms);
+            .unwrap_or(base_orchestrator.poll_interval_ms);
         let poll_jitter_ms = p.and_then(|p| p.jitter_ms).unwrap_or(0);
         let max_concurrent = p
             .and_then(|p| p.max_concurrent)
-            .unwrap_or(base.orchestrator.max_concurrent);
+            .unwrap_or(base_orchestrator.max_concurrent);
         let max_active_runs = wf
             .agent
             .as_ref()
             .and_then(|a| a.max_active_runs)
-            .unwrap_or(base.orchestrator.max_active_runs);
+            .unwrap_or(base_orchestrator.max_active_runs);
         let max_retries = p
             .and_then(|p| p.max_retries)
-            .unwrap_or(base.orchestrator.max_retries);
+            .unwrap_or(base_orchestrator.max_retries);
         let retry_backoff_ms = p
             .and_then(|p| p.retry_backoff_ms)
-            .unwrap_or(base.orchestrator.retry_backoff_ms);
+            .unwrap_or(base_orchestrator.retry_backoff_ms);
         let allow_stale = p.and_then(|p| p.allow_stale).unwrap_or(true);
 
         // --- Workspace ---
@@ -391,7 +398,7 @@ impl EffectiveLoopConfig {
             .workspace
             .as_ref()
             .and_then(|w| w.root.clone())
-            .unwrap_or_else(|| base.workspace.root.clone());
+            .unwrap_or_else(|| base_workspace.root.clone());
         let workspace_reuse = wf.workspace.as_ref().and_then(|w| w.reuse).unwrap_or(true);
         let cleanup_on_terminal = wf
             .workspace
@@ -495,15 +502,14 @@ impl EffectiveLoopConfig {
 /// Resolve tracker state lists from WORKFLOW.md (with flat→nested fallback) or
 /// fall back to agent.yaml values.
 fn resolve_tracker(
-    base: &AgentConfig,
+    base: &TrackerConfig,
     wf: &WorkflowFrontmatter,
 ) -> (Vec<String>, Vec<String>, Option<String>) {
     match &wf.tracker {
         None => (
-            base.tracker.active_states.clone(),
-            base.tracker.terminal_states.clone(),
-            base.tracker
-                .needs_human
+            base.active_states.clone(),
+            base.terminal_states.clone(),
+            base.needs_human
                 .clone()
                 .or_else(|| Some(DEFAULT_NEEDS_HUMAN_STATE.to_string())),
         ),
@@ -513,19 +519,19 @@ fn resolve_tracker(
                 .active_states
                 .clone()
                 .or_else(|| tc.states.as_ref().and_then(|s| s.active.clone()))
-                .unwrap_or_else(|| base.tracker.active_states.clone());
+                .unwrap_or_else(|| base.active_states.clone());
 
             let terminal = tc
                 .terminal_states
                 .clone()
                 .or_else(|| tc.states.as_ref().and_then(|s| s.terminal.clone()))
-                .unwrap_or_else(|| base.tracker.terminal_states.clone());
+                .unwrap_or_else(|| base.terminal_states.clone());
 
             let needs_human = tc
                 .needs_human
                 .clone()
                 .or_else(|| tc.states.as_ref().and_then(|s| s.needs_human.clone()))
-                .or_else(|| base.tracker.needs_human.clone())
+                .or_else(|| base.needs_human.clone())
                 .or_else(|| Some(DEFAULT_NEEDS_HUMAN_STATE.to_string()));
 
             (active, terminal, needs_human)
@@ -550,7 +556,7 @@ mod tests {
         AgentConfig {
             id: "test".into(),
             name: "Test".into(),
-            tracker: TrackerConfig {
+            tracker: Some(TrackerConfig {
                 use_: "files".into(),
                 config: Some(TrackerInner {
                     path: "./issues".into(),
@@ -563,7 +569,7 @@ mod tests {
                 team: None,
                 assignee: None,
                 label: None,
-            },
+            }),
             runner: RunnerConfig {
                 use_: "fake".into(),
                 command: "fake".into(),
@@ -574,17 +580,17 @@ mod tests {
                 stall_timeout_ms: 300_000,
                 max_turns: 20,
             },
-            orchestrator: OrchestratorConfig {
+            orchestrator: Some(OrchestratorConfig {
                 poll_interval_ms: 10_000,
                 max_concurrent: 1,
                 max_active_runs: 3,
                 max_retries: 3,
                 retry_backoff_ms: 10_000,
-            },
+            }),
             hitl: HitlConfig::default(),
-            workspace: WorkspaceConfig {
+            workspace: Some(WorkspaceConfig {
                 root: "./workspaces".into(),
-            },
+            }),
             dashboard: DashboardConfig {
                 bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: 7878,
@@ -1007,9 +1013,10 @@ body"#;
     #[test]
     fn merge_tracker_dimensions_frontmatter_overrides_base() {
         let mut base = base_config();
-        base.tracker.team = Some("BASE".into());
-        base.tracker.assignee = Some("base-user".into());
-        base.tracker.label = Some(StringOrVec::Scalar("base-label".into()));
+        let bt = base.tracker.as_mut().unwrap();
+        bt.team = Some("BASE".into());
+        bt.assignee = Some("base-user".into());
+        bt.label = Some(StringOrVec::Scalar("base-label".into()));
         let raw = "---\ntracker:\n  team: ALG\n  assignee: \"@thinh\"\n  label: [bug, urgent]\n---";
         let snap = parse_workflow_md(raw).unwrap();
         let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
@@ -1030,9 +1037,10 @@ body"#;
     #[test]
     fn merge_tracker_dimensions_fall_back_to_base() {
         let mut base = base_config();
-        base.tracker.team = Some("ALG".into());
-        base.tracker.assignee = Some("base-user".into());
-        base.tracker.label = Some(StringOrVec::List(vec!["bug".into(), "urgent".into()]));
+        let bt = base.tracker.as_mut().unwrap();
+        bt.team = Some("ALG".into());
+        bt.assignee = Some("base-user".into());
+        bt.label = Some(StringOrVec::List(vec!["bug".into(), "urgent".into()]));
         let eff = EffectiveLoopConfig::merge(&base, &WorkflowFrontmatter::default());
         assert_eq!(eff.tracker_team, Some("ALG".into()));
         assert_eq!(eff.tracker_assignee, Some("base-user".into()));

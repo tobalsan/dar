@@ -30,12 +30,20 @@ pub struct AgentConfig {
     pub id: String,
     #[allow(dead_code)]
     pub name: String,
-    pub tracker: TrackerConfig,
+    /// Tracker config. Part of the orchestrator trio (tracker, orchestrator,
+    /// workspace): all three present runs the loop, all three absent boots a
+    /// passive agent (TUI / scheduled jobs / custom extensions only).
+    #[serde(default)]
+    pub tracker: Option<TrackerConfig>,
     pub runner: RunnerConfig,
-    pub orchestrator: OrchestratorConfig,
+    /// Orchestrator loop config. See `tracker` for the trio contract.
+    #[serde(default)]
+    pub orchestrator: Option<OrchestratorConfig>,
     #[serde(default)]
     pub hitl: HitlConfig,
-    pub workspace: WorkspaceConfig,
+    /// Workspace config. See `tracker` for the trio contract.
+    #[serde(default)]
+    pub workspace: Option<WorkspaceConfig>,
     #[serde(default)]
     pub dashboard: DashboardConfig,
     /// Host-level foreground slot selection: the id of the extension that owns
@@ -57,7 +65,7 @@ fn default_foreground() -> String {
     "logs".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
 pub struct TrackerConfig {
     #[serde(rename = "use")]
     pub use_: String,
@@ -157,6 +165,18 @@ pub struct OrchestratorConfig {
     pub retry_backoff_ms: u64,
 }
 
+impl Default for OrchestratorConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_ms: 1000,
+            max_concurrent: default_max_concurrent(),
+            max_active_runs: default_max_active_runs(),
+            max_retries: 3,
+            retry_backoff_ms: default_retry_backoff_ms(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct HitlConfig {
     #[serde(default)]
@@ -213,7 +233,7 @@ fn default_retry_backoff_ms() -> u64 {
     30 * 1000
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
 pub struct WorkspaceConfig {
     pub root: PathBuf,
 }
@@ -277,21 +297,68 @@ impl AgentConfig {
             .collect()
     }
 
+    /// True when the orchestrator trio (`tracker` + `orchestrator` +
+    /// `workspace`) is fully configured, i.e. the loop should run. False for a
+    /// passive agent (all three absent).
+    pub fn loop_enabled(&self) -> bool {
+        self.trio().is_some()
+    }
+
+    /// Tracker config or a neutral default. Used by `EffectiveLoopConfig::merge`
+    /// so it stays total even for a passive agent (whose effective config is
+    /// never consumed by a loop). Real loops always have the trio present.
+    pub fn tracker_or_default(&self) -> TrackerConfig {
+        self.tracker.clone().unwrap_or_default()
+    }
+
+    /// Orchestrator config or a neutral default. See `tracker_or_default`.
+    pub fn orchestrator_or_default(&self) -> OrchestratorConfig {
+        self.orchestrator.clone().unwrap_or_default()
+    }
+
+    /// Workspace config or a neutral default. See `tracker_or_default`.
+    pub fn workspace_or_default(&self) -> WorkspaceConfig {
+        self.workspace.clone().unwrap_or_default()
+    }
+
+    /// Borrow the orchestrator trio when all three are present; `None` for a
+    /// passive agent. Partial configs are rejected by `validate`, so callers
+    /// reaching this after validation see all-or-nothing.
+    pub fn trio(&self) -> Option<(&TrackerConfig, &OrchestratorConfig, &WorkspaceConfig)> {
+        match (&self.tracker, &self.orchestrator, &self.workspace) {
+            (Some(t), Some(o), Some(w)) => Some((t, o, w)),
+            _ => None,
+        }
+    }
+
     /// Validate invariants the loop relies on. Best-effort, called at startup
     /// and by `doctor`.
     pub fn validate(&self) -> Result<()> {
-        if self.tracker.use_.trim().is_empty() {
-            bail!("tracker.use must be non-empty");
+        // The orchestrator trio is all-or-nothing: either all three configure a
+        // running loop, or none do for a passive agent. A partial trio is a
+        // misconfiguration.
+        let present = self.tracker.is_some() as u8
+            + self.orchestrator.is_some() as u8
+            + self.workspace.is_some() as u8;
+        if present != 0 && present != 3 {
+            bail!("tracker, orchestrator, and workspace must be configured together (or all omitted for a passive agent)");
         }
-        if self.tracker.active_states.is_empty() {
-            bail!("tracker.active_states must be non-empty");
+
+        if let Some((tracker, orchestrator, _workspace)) = self.trio() {
+            if tracker.use_.trim().is_empty() {
+                bail!("tracker.use must be non-empty");
+            }
+            if tracker.active_states.is_empty() {
+                bail!("tracker.active_states must be non-empty");
+            }
+            if tracker.terminal_states.is_empty() {
+                bail!("tracker.terminal_states must be non-empty");
+            }
+            if orchestrator.max_concurrent < 1 {
+                bail!("orchestrator.max_concurrent must be >= 1");
+            }
         }
-        if self.tracker.terminal_states.is_empty() {
-            bail!("tracker.terminal_states must be non-empty");
-        }
-        if self.orchestrator.max_concurrent < 1 {
-            bail!("orchestrator.max_concurrent must be >= 1");
-        }
+
         if !matches!(
             self.hitl.notifier.use_.as_str(),
             "none" | "stdout" | "webhook" | "cli"
@@ -377,9 +444,10 @@ mod tests {
     fn tracker_dimensions_parse_with_scalar_label() {
         let raw = "id: a\nname: A\ntracker:\n  use: linear\n  active_states: [todo]\n  terminal_states: [done]\n  team: ALG\n  assignee: \"@thinh\"\n  label: bug\nrunner:\n  use: fake\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
         let cfg: AgentConfig = serde_yaml::from_str(raw).unwrap();
-        assert_eq!(cfg.tracker.team.as_deref(), Some("ALG"));
-        assert_eq!(cfg.tracker.assignee.as_deref(), Some("@thinh"));
-        assert_eq!(cfg.tracker.labels(), vec!["bug"]);
+        let tracker = cfg.tracker.as_ref().unwrap();
+        assert_eq!(tracker.team.as_deref(), Some("ALG"));
+        assert_eq!(tracker.assignee.as_deref(), Some("@thinh"));
+        assert_eq!(tracker.labels(), vec!["bug"]);
     }
 
     #[test]
@@ -415,6 +483,38 @@ mod tests {
     fn tracker_label_parses_as_list() {
         let raw = "id: a\nname: A\ntracker:\n  use: linear\n  active_states: [todo]\n  terminal_states: [done]\n  label: [bug, urgent]\nrunner:\n  use: fake\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
         let cfg: AgentConfig = serde_yaml::from_str(raw).unwrap();
-        assert_eq!(cfg.tracker.labels(), vec!["bug", "urgent"]);
+        assert_eq!(cfg.tracker.unwrap().labels(), vec!["bug", "urgent"]);
+    }
+
+    /// A passive agent (runner only, no trio) loads and validates OK.
+    #[test]
+    fn passive_agent_validates() {
+        let raw = "id: a\nname: A\nrunner:\n  use: fake\n";
+        let cfg: AgentConfig = serde_yaml::from_str(raw).unwrap();
+        assert!(cfg.tracker.is_none());
+        assert!(cfg.orchestrator.is_none());
+        assert!(cfg.workspace.is_none());
+        assert!(!cfg.loop_enabled());
+        cfg.validate().unwrap();
+    }
+
+    /// A partial trio (tracker + orchestrator but no workspace) fails validation.
+    #[test]
+    fn partial_trio_fails_validation() {
+        let raw = "id: a\nname: A\ntracker:\n  use: files\n  config:\n    path: ./issues\n  active_states: [todo]\n  terminal_states: [done]\nrunner:\n  use: fake\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\n";
+        let cfg: AgentConfig = serde_yaml::from_str(raw).unwrap();
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("tracker, orchestrator, and workspace must be configured together"),
+            "{err}"
+        );
+    }
+
+    /// The full trio still validates OK.
+    #[test]
+    fn full_trio_validates() {
+        let cfg: AgentConfig = serde_yaml::from_str(BASE).unwrap();
+        assert!(cfg.loop_enabled());
+        cfg.validate().unwrap();
     }
 }

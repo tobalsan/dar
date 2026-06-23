@@ -10,7 +10,7 @@ pub mod self_update;
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use host_api::{
     ConfigStore, EventBus, Extension, ForegroundRegistry, HostCommand, HostPaths, HttpRegistry,
@@ -99,8 +99,18 @@ fn startup_hitl(root: &std::path::Path) -> Arc<dyn HitlNotify> {
 fn dashboard_addr_for_root(root: &std::path::Path) -> Result<(std::net::IpAddr, u16)> {
     let paths = AgentPaths::new(root.to_path_buf());
     let agent_cfg = config::load(&paths.root)?;
-    let prompt = PromptRenderer::load(&paths.workflow_md())?;
-    let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &prompt.snapshot().frontmatter);
+    agent_cfg.validate().context("invalid agent.yaml")?;
+    let frontmatter = if agent_cfg.loop_enabled() {
+        PromptRenderer::load(&paths.workflow_md())?
+            .snapshot()
+            .frontmatter
+            .clone()
+    } else {
+        PromptRenderer::load(&paths.workflow_md())
+            .map(|prompt| prompt.snapshot().frontmatter.clone())
+            .unwrap_or_default()
+    };
+    let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &frontmatter);
     Ok((effective_cfg.dashboard_bind, effective_cfg.dashboard_port))
 }
 
@@ -460,5 +470,92 @@ mod tests {
             },
             _ => panic!("expected self rebuild command"),
         }
+    }
+
+    fn write_agent_yaml(root: &std::path::Path, loop_enabled: bool) {
+        let trio = if loop_enabled {
+            "\
+tracker:
+  use: files
+  config:
+    path: issues
+  active_states:
+    - todo
+  terminal_states:
+    - done
+orchestrator:
+  poll_interval_ms: 1000
+  max_concurrent: 1
+  max_active_runs: 3
+  max_retries: 3
+  retry_backoff_ms: 1000
+workspace:
+  root: workspaces
+"
+        } else {
+            ""
+        };
+        std::fs::write(
+            root.join("agent.yaml"),
+            format!(
+                "\
+id: test-agent
+name: Test Agent
+runner:
+  use: fake
+{trio}"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn dashboard_addr_tolerates_missing_workflow_for_passive_agent() {
+        let temp = tempfile::tempdir().unwrap();
+        write_agent_yaml(temp.path(), false);
+
+        let (_bind, port) = dashboard_addr_for_root(temp.path()).unwrap();
+
+        assert_eq!(port, 0);
+    }
+
+    #[test]
+    fn dashboard_addr_requires_workflow_for_active_agent() {
+        let temp = tempfile::tempdir().unwrap();
+        write_agent_yaml(temp.path(), true);
+
+        let err = dashboard_addr_for_root(temp.path())
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("WORKFLOW.md"));
+    }
+
+    #[test]
+    fn dashboard_addr_rejects_partial_loop_config() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("agent.yaml"),
+            "\
+id: test-agent
+name: Test Agent
+runner:
+  use: fake
+tracker:
+  use: files
+  active_states:
+    - todo
+  terminal_states:
+    - done
+",
+        )
+        .unwrap();
+
+        let err = format!("{:#}", dashboard_addr_for_root(temp.path()).unwrap_err());
+
+        assert!(
+            err.contains("tracker, orchestrator, and workspace"),
+            "unexpected error: {err}"
+        );
     }
 }

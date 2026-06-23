@@ -79,49 +79,72 @@ pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyho
         }
     }
 
-    // 2. WORKFLOW.md prompt template.
-    let prompt = match PromptRenderer::load(&paths.workflow_md()) {
-        Ok(prompt) => {
-            pass("WORKFLOW.md loads");
-            Some(prompt)
-        }
-        Err(e) => {
-            fail(&format!("WORKFLOW.md: {e:#}"));
-            ok = false;
-            None
+    // Passive agent (no tracker/orchestrator/workspace trio): the loop checks
+    // (WORKFLOW.md, tracker) do not apply. The runner check still runs below.
+    let passive = cfg.as_ref().is_some_and(|c| !c.loop_enabled());
+
+    // 2. WORKFLOW.md prompt template — only when the loop is configured.
+    let prompt = if passive {
+        pass("WORKFLOW.md: n/a — passive agent (no orchestrator loop)");
+        None
+    } else {
+        match PromptRenderer::load(&paths.workflow_md()) {
+            Ok(prompt) => {
+                pass("WORKFLOW.md loads");
+                Some(prompt)
+            }
+            Err(e) => {
+                fail(&format!("WORKFLOW.md: {e:#}"));
+                ok = false;
+                None
+            }
         }
     };
 
-    // 3. Tracker (only if config parsed, since build needs it).
-    if let (Some(cfg), Some(prompt)) = (cfg, prompt) {
-        let effective_cfg = EffectiveLoopConfig::merge(&cfg, &prompt.snapshot().frontmatter);
-        let mut tracker_cfg = cfg.tracker.clone();
-        tracker_cfg.use_ = effective_cfg.tracker_kind.clone();
-        tracker_cfg.active_states = effective_cfg.active_states.clone();
-        tracker_cfg.terminal_states = effective_cfg.terminal_states.clone();
-        tracker_cfg.project_slug = effective_cfg.tracker_project_slug.clone();
-        tracker_cfg.endpoint = Some(effective_cfg.tracker_endpoint.clone());
-        tracker_cfg.needs_human = effective_cfg.needs_human.clone();
-        tracker_cfg.team = effective_cfg.tracker_team.clone();
-        tracker_cfg.assignee = effective_cfg.tracker_assignee.clone();
-        tracker_cfg.label = (!effective_cfg.tracker_labels.is_empty())
-            .then(|| orchestrator::config::StringOrVec::List(effective_cfg.tracker_labels.clone()));
+    // 3. Runner + loop checks (only if config parsed).
+    if let Some(cfg) = cfg {
+        // effective_cfg falls back to config defaults when there is no
+        // WORKFLOW.md (passive agents have none); the runner fields are taken
+        // from agent.yaml `runner` regardless.
+        let effective_cfg = match &prompt {
+            Some(prompt) => EffectiveLoopConfig::merge(&cfg, &prompt.snapshot().frontmatter),
+            None => EffectiveLoopConfig::merge(&cfg, &Default::default()),
+        };
 
-        match tracker::build_configured(&services, &tracker_cfg, paths.root.clone()) {
-            Ok(t) => match t.poll_candidates() {
-                Ok(issues) => pass(&format!(
-                    "tracker '{}' reachable ({} active issue(s))",
-                    tracker_cfg.use_,
-                    issues.len()
-                )),
+        // 3a. Tracker — n/a for a passive agent.
+        if passive {
+            pass("tracker: n/a — passive agent (no orchestrator loop)");
+            pass("orchestrator: n/a — passive agent (no orchestrator loop)");
+        } else {
+            let mut tracker_cfg = cfg.tracker_or_default();
+            tracker_cfg.use_ = effective_cfg.tracker_kind.clone();
+            tracker_cfg.active_states = effective_cfg.active_states.clone();
+            tracker_cfg.terminal_states = effective_cfg.terminal_states.clone();
+            tracker_cfg.project_slug = effective_cfg.tracker_project_slug.clone();
+            tracker_cfg.endpoint = Some(effective_cfg.tracker_endpoint.clone());
+            tracker_cfg.needs_human = effective_cfg.needs_human.clone();
+            tracker_cfg.team = effective_cfg.tracker_team.clone();
+            tracker_cfg.assignee = effective_cfg.tracker_assignee.clone();
+            tracker_cfg.label = (!effective_cfg.tracker_labels.is_empty()).then(|| {
+                orchestrator::config::StringOrVec::List(effective_cfg.tracker_labels.clone())
+            });
+
+            match tracker::build_configured(&services, &tracker_cfg, paths.root.clone()) {
+                Ok(t) => match t.poll_candidates() {
+                    Ok(issues) => pass(&format!(
+                        "tracker '{}' reachable ({} active issue(s))",
+                        tracker_cfg.use_,
+                        issues.len()
+                    )),
+                    Err(e) => {
+                        fail(&format!("tracker poll failed: {e:#}"));
+                        ok = false;
+                    }
+                },
                 Err(e) => {
-                    fail(&format!("tracker poll failed: {e:#}"));
+                    fail(&format!("tracker build failed: {e:#}"));
                     ok = false;
                 }
-            },
-            Err(e) => {
-                fail(&format!("tracker build failed: {e:#}"));
-                ok = false;
             }
         }
 

@@ -107,7 +107,10 @@ struct LocalExtension {
 
 #[derive(Debug, Deserialize)]
 struct AgentSelection {
-    tracker: SelectedUse,
+    /// Absent for a passive agent (no orchestrator trio). `tracker-linear`
+    /// remains baseline-linked; `tracker-files` links only when selected.
+    #[serde(default)]
+    tracker: Option<SelectedUse>,
     runner: SelectedUse,
     #[serde(default = "default_foreground")]
     foreground: String,
@@ -190,8 +193,12 @@ fn selected_stock_extensions(agent: &Path) -> Result<Vec<&'static StockExtension
         "orchestrator",
         "dashboard",
         "tracker-linear",
-        tracker_package(&selection.tracker.use_)?,
     ];
+    // Passive agents omit `tracker`; files tracker links only when selected.
+    // Linear stays baseline-linked for shared Linear CLI/export support.
+    if let Some(tracker) = &selection.tracker {
+        packages.push(tracker_package(&tracker.use_)?);
+    }
     packages.extend_from_slice(ALL_RUNNERS);
     packages.extend(foreground_packages(&selection)?);
     // Opt-in stock extensions: selected only when present in agent.yaml's

@@ -14,9 +14,9 @@ shared bus-payload crates like `orchestrator-api` don't count against that limit
 (the dashboard and `tui` both import it alongside their other deps). It reads
 zero host internals — all integration goes through the contracts in
 `crates/host-api/src/lib.rs`. A crate is *linked* when it's in the `plugins![]`
-list (`dist/src/main.rs`); that is not the same as *enabled* — tracker/runner
-services only run when `agent.yaml` `tracker.use` / `runner.use` selects them,
-and the foreground only runs when `foreground:` selects it.
+list (`dist/src/main.rs`); that is not the same as *enabled* — runner services
+are selected by required `agent.yaml` `runner.use`, tracker services are selected
+only for issue-loop agents that configure the optional orchestrator/tracker/workspace trio, and the foreground only runs when `foreground:` selects it.
 
 ## The three kinds
 

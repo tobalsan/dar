@@ -67,6 +67,21 @@ impl AgentConfigReloader {
         }
     }
 
+    pub fn maybe_reload_loop_enabled(&mut self) -> Result<Option<AgentConfig>> {
+        let Some(cfg) = self.maybe_reload()? else {
+            return Ok(None);
+        };
+        if !cfg.loop_enabled() {
+            crate::logging::ev(
+                "-",
+                "agent_config_reload",
+                "agent.yaml reload omitted tracker/orchestrator/workspace; restart required to switch to passive mode (stale config kept)",
+            );
+            return Ok(None);
+        }
+        Ok(Some(cfg))
+    }
+
     #[cfg(test)]
     pub(crate) fn mark_stale_for_test(&mut self) {
         self.last_mtime = Some(SystemTime::UNIX_EPOCH);
@@ -77,6 +92,20 @@ impl AgentConfigReloader {
 mod tests {
     use super::*;
     use std::time::SystemTime;
+
+    fn write_passive_agent_yaml(root: &Path) {
+        std::fs::write(
+            root.join("agent.yaml"),
+            "\
+id: test-agent
+name: Test Agent
+runner:
+  use: fake
+  command: fake
+",
+        )
+        .unwrap();
+    }
 
     fn write_valid_agent_yaml(root: &Path, poll_interval_ms: u64) {
         std::fs::write(
@@ -134,7 +163,7 @@ workspace:
 
         let cfg = reloader.maybe_reload().unwrap().unwrap();
 
-        assert_eq!(cfg.orchestrator.poll_interval_ms, 250);
+        assert_eq!(cfg.orchestrator.unwrap().poll_interval_ms, 250);
     }
 
     #[test]
@@ -146,6 +175,19 @@ workspace:
         reloader.last_mtime = Some(SystemTime::UNIX_EPOCH);
 
         let cfg = reloader.maybe_reload().unwrap();
+
+        assert!(cfg.is_none());
+    }
+
+    #[test]
+    fn loop_enabled_reload_rejects_passive_config() {
+        let temp = tempfile::tempdir().unwrap();
+        write_valid_agent_yaml(temp.path(), 100);
+        let mut reloader = AgentConfigReloader::new(temp.path());
+        write_passive_agent_yaml(temp.path());
+        reloader.last_mtime = Some(SystemTime::UNIX_EPOCH);
+
+        let cfg = reloader.maybe_reload_loop_enabled().unwrap();
 
         assert!(cfg.is_none());
     }
