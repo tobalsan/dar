@@ -206,18 +206,20 @@ fn selected_stock_extensions(agent: &Path) -> Result<Vec<&'static StockExtension
     if selection.extension_selected("scheduler") {
         packages.push("scheduler");
     }
-    packages.sort_unstable();
-    packages.dedup();
-
     let mut selected = Vec::new();
-    for package in packages {
-        let stock = STOCK_EXTENSIONS
-            .iter()
-            .find(|stock| stock.package == package)
-            .with_context(|| format!("unknown stock extension package {package}"))?;
-        selected.push(stock);
+    for stock in STOCK_EXTENSIONS {
+        if packages.iter().any(|package| package == &stock.package) {
+            selected.push(stock);
+        }
     }
-    selected.sort_by(|a, b| a.package.cmp(b.package));
+    for package in packages {
+        if !STOCK_EXTENSIONS
+            .iter()
+            .any(|stock| stock.package == package)
+        {
+            bail!("unknown stock extension package {package}");
+        }
+    }
     Ok(selected)
 }
 
@@ -1074,6 +1076,16 @@ extensions:
         assert!(manifest.contains("stock-scheduler = [\"dep:scheduler\"]"));
         assert!(main.contains("#[cfg(feature = \"stock-scheduler\")]"));
         assert!(main.contains("scheduler::SchedulerExtension"));
+        let registry_pos = main
+            .find("tool_registry_host::ToolRegistryHostExtension")
+            .expect("tool registry host must be generated");
+        let scheduler_pos = main
+            .find("scheduler::SchedulerExtension::default()")
+            .expect("scheduler must be generated");
+        assert!(
+            registry_pos < scheduler_pos,
+            "tool registry host must register before scheduler tools: {main}"
+        );
     }
 
     #[test]

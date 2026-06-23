@@ -31,6 +31,7 @@ mod service;
 mod state;
 mod store;
 mod tab;
+mod tools;
 
 use std::sync::{Arc, OnceLock};
 
@@ -40,6 +41,7 @@ use host_api::{Extension, RegisterCtx, StartCtx};
 use serde::Deserialize;
 
 use cap_runner::{DEFAULT_MAX_RUN_TIMEOUT_MS, DEFAULT_RUNNER_KIND};
+use tool_registry::{ToolRegistryHandle, TOOL_REGISTRY_SERVICE};
 
 use crate::service::SchedulerConfig;
 use crate::state::SchedulerState;
@@ -161,6 +163,28 @@ impl Extension for SchedulerExtension {
             // the HTTP handlers need the static runner config + typed services.
             let config = build_scheduler_config(&root, &settings);
             let services = ctx.services.clone();
+
+            // Register the model-facing scheduler management tools against the
+            // shared host tool registry, so every tool-capable runner and
+            // cap-chat backend can discover and call them. Resolved leniently:
+            // a stripped composition without the registry still boots the
+            // scheduler (HTTP + dashboard tab) without the tools. Registration
+            // happens only here, on the enabled path, so the tools are
+            // discoverable only when the scheduler extension is enabled.
+            if let Ok(registry) = ctx
+                .services
+                .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
+            {
+                tools::register_into(
+                    registry.as_ref(),
+                    tools::ToolDeps {
+                        state: Arc::clone(&state),
+                        root: root.clone(),
+                        config: config.clone(),
+                        services: services.clone(),
+                    },
+                )?;
+            }
 
             let api_state = http::ApiState {
                 state,

@@ -17,6 +17,7 @@ use host_api::{
 };
 use http_body_util::BodyExt;
 use serde_json::json;
+use tool_registry::{ToolRegistryHandle, TOOL_REGISTRY_SERVICE};
 use tower::ServiceExt;
 
 /// Boot the dashboard + scheduler through register + start against `root`, with
@@ -60,6 +61,50 @@ async fn boot(root: &std::path::Path, config: HashMap<String, serde_json::Value>
         ext.start(ctx).await.unwrap();
     }
     router
+}
+
+/// Run registration through the shared host tool-registry extension and return
+/// the scheduler tool names exposed to runner/chat bridges.
+async fn registered_scheduler_tool_names(
+    root: &std::path::Path,
+    config: HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    std::fs::create_dir_all(root.join("data")).unwrap();
+    std::fs::write(
+        root.join("agent.yaml"),
+        "id: demo\nname: Demo\nrunner:\n  use: fake\n",
+    )
+    .unwrap();
+    let paths = HostPaths::new(root).unwrap();
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let shutdown = ShutdownToken::new(rx);
+    let extensions: Vec<Box<dyn Extension>> = vec![
+        Box::new(tool_registry_host::ToolRegistryHostExtension),
+        scheduler::extension(),
+    ];
+    let mut register_ctx = RegisterCtx {
+        bus: host_api::EventBus::new(),
+        http: HttpRegistry::default(),
+        foreground: host_api::ForegroundRegistry::default(),
+        services: ServiceRegistry::default(),
+        paths,
+        config: ConfigStore::from_values(config),
+        shutdown,
+    };
+    for ext in &extensions {
+        ext.register(&mut register_ctx).await.unwrap();
+    }
+    let registry = register_ctx
+        .services
+        .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
+        .unwrap();
+    let mut names = registry
+        .list()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
+    names.sort();
+    names
 }
 
 async fn get(router: &axum::Router, path: &str) -> (StatusCode, String) {
@@ -174,4 +219,50 @@ async fn cron_tab_absent_when_kill_switched() {
     );
     let (status, _) = get(&router, "/tabs/cron").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn scheduler_tools_enter_host_registry_only_when_enabled() {
+    let enabled = tempfile::tempdir().unwrap();
+    write_one_job(enabled.path());
+    let names = registered_scheduler_tool_names(
+        enabled.path(),
+        HashMap::from([("scheduler".to_string(), json!({}))]),
+    )
+    .await;
+    assert_eq!(
+        names,
+        vec![
+            "scheduler_create_job",
+            "scheduler_delete_job",
+            "scheduler_disable_job",
+            "scheduler_enable_job",
+            "scheduler_get_job",
+            "scheduler_job_status",
+            "scheduler_list_jobs",
+            "scheduler_run_job_now",
+            "scheduler_tail_output",
+            "scheduler_update_job",
+        ]
+    );
+
+    let disabled = tempfile::tempdir().unwrap();
+    write_one_job(disabled.path());
+    let names = registered_scheduler_tool_names(
+        disabled.path(),
+        HashMap::from([("scheduler".to_string(), json!({ "enabled": false }))]),
+    )
+    .await;
+    assert!(
+        names.is_empty(),
+        "kill-switched scheduler registers no tools"
+    );
+
+    let absent = tempfile::tempdir().unwrap();
+    write_one_job(absent.path());
+    let names = registered_scheduler_tool_names(absent.path(), HashMap::new()).await;
+    assert!(
+        names.is_empty(),
+        "absent scheduler section registers no tools"
+    );
 }
