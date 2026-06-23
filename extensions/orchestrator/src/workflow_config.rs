@@ -75,6 +75,8 @@ pub struct WfTrackerConfig {
     pub team: Option<String>,
     /// Linear assignee override (UUID / @displayName / name / email).
     pub assignee: Option<String>,
+    /// Linear delegate/app agent override (UUID / @displayName / name / email).
+    pub delegate: Option<String>,
     /// Linear label override (scalar or list).
     pub label: Option<crate::config::StringOrVec>,
 }
@@ -283,6 +285,8 @@ pub struct EffectiveLoopConfig {
     pub tracker_team: Option<String>,
     /// Linear assignee filter (raw config value; resolved by the tracker at boot).
     pub tracker_assignee: Option<String>,
+    /// Linear delegate/app agent filter (raw config value; resolved by the tracker at boot).
+    pub tracker_delegate: Option<String>,
     /// Linear label filters (OR within; empty = unconstrained).
     pub tracker_labels: Vec<String>,
     // Polling
@@ -365,6 +369,11 @@ impl EffectiveLoopConfig {
             .as_ref()
             .and_then(|t| t.assignee.clone())
             .or_else(|| base_tracker.assignee.clone());
+        let tracker_delegate = wf
+            .tracker
+            .as_ref()
+            .and_then(|t| t.delegate.clone())
+            .or_else(|| base_tracker.delegate.clone());
         let tracker_labels = wf
             .tracker
             .as_ref()
@@ -471,6 +480,7 @@ impl EffectiveLoopConfig {
             tracker_endpoint,
             tracker_team,
             tracker_assignee,
+            tracker_delegate,
             tracker_labels,
             poll_interval_ms,
             poll_jitter_ms,
@@ -568,6 +578,7 @@ mod tests {
                 needs_human: None,
                 team: None,
                 assignee: None,
+                delegate: None,
                 label: None,
             }),
             runner: RunnerConfig {
@@ -1016,12 +1027,14 @@ body"#;
         let bt = base.tracker.as_mut().unwrap();
         bt.team = Some("BASE".into());
         bt.assignee = Some("base-user".into());
+        bt.delegate = Some("base-delegate".into());
         bt.label = Some(StringOrVec::Scalar("base-label".into()));
-        let raw = "---\ntracker:\n  team: ALG\n  assignee: \"@thinh\"\n  label: [bug, urgent]\n---";
+        let raw = "---\ntracker:\n  team: ALG\n  assignee: \"@thinh\"\n  delegate: \"@workeragent\"\n  label: [bug, urgent]\n---";
         let snap = parse_workflow_md(raw).unwrap();
         let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
         assert_eq!(eff.tracker_team, Some("ALG".into()));
         assert_eq!(eff.tracker_assignee, Some("@thinh".into()));
+        assert_eq!(eff.tracker_delegate, Some("@workeragent".into()));
         assert_eq!(eff.tracker_labels, vec!["bug", "urgent"]);
     }
 
@@ -1040,10 +1053,12 @@ body"#;
         let bt = base.tracker.as_mut().unwrap();
         bt.team = Some("ALG".into());
         bt.assignee = Some("base-user".into());
+        bt.delegate = Some("base-delegate".into());
         bt.label = Some(StringOrVec::List(vec!["bug".into(), "urgent".into()]));
         let eff = EffectiveLoopConfig::merge(&base, &WorkflowFrontmatter::default());
         assert_eq!(eff.tracker_team, Some("ALG".into()));
         assert_eq!(eff.tracker_assignee, Some("base-user".into()));
+        assert_eq!(eff.tracker_delegate, Some("base-delegate".into()));
         assert_eq!(eff.tracker_labels, vec!["bug", "urgent"]);
     }
 

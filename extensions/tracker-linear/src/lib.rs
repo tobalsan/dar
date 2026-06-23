@@ -64,6 +64,7 @@ pub struct LinearTrackerConfig {
     pub project_slug: String, // "" = unconstrained
     pub team: Option<String>,
     pub assignee_id: Option<String>, // already-resolved Linear user id
+    pub delegate_id: Option<String>, // already-resolved Linear user id
     pub labels: Vec<String>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
@@ -166,20 +167,22 @@ impl TrackerFactory for LinearTrackerFactory {
         let project_slug = cfg.project_slug.clone().unwrap_or_default();
         let team = cfg.team.clone().filter(|t| !t.is_empty());
         let assignee_raw = cfg.assignee.clone().filter(|a| !a.is_empty());
+        let delegate_raw = cfg.delegate.clone().filter(|d| !d.is_empty());
         let labels = cfg.labels.clone();
 
-        // Empty-filter guard: refuse to poll the whole workspace. The assignee is
-        // not yet resolved here, so a configured-but-unresolved assignee still
-        // counts as a constraining dimension.
+        // Empty-filter guard: refuse to poll the whole workspace. User targets
+        // are not yet resolved here, so configured-but-unresolved values still
+        // count as constraining dimensions.
         let configured = ResolvedDims {
             project_slug: Some(project_slug.clone()).filter(|s| !s.is_empty()),
             team_key: team.clone(),
             assignee_id: assignee_raw.clone(),
+            delegate_id: delegate_raw.clone(),
             labels: labels.clone(),
         };
         if configured.is_empty() {
             bail!(
-                "Linear tracker has no filter configured; set at least one of tracker.project_slug, tracker.team, tracker.assignee, tracker.label"
+                "Linear tracker has no filter configured; set at least one of tracker.project_slug, tracker.team, tracker.assignee, tracker.delegate, tracker.label"
             );
         }
 
@@ -189,20 +192,33 @@ impl TrackerFactory for LinearTrackerFactory {
             project_slug,
             team,
             assignee_id: None,
+            delegate_id: None,
             labels,
             active_states: cfg.active_states,
             terminal_states: cfg.terminal_states,
             needs_human: cfg.needs_human,
         })?;
 
-        // Resolve assignee to a canonical user id once, at boot (fail fast).
+        let users = if assignee_raw.is_some() || delegate_raw.is_some() {
+            Some(
+                tracker
+                    .run_async(tracker.fetch_users_async())
+                    .context("fetching Linear users to resolve tracker user filters")?,
+            )
+        } else {
+            None
+        };
+
+        // Resolve user filters to canonical user ids once, at boot (fail fast).
         if let Some(raw) = &assignee_raw {
-            let users = tracker
-                .run_async(tracker.fetch_users_async())
-                .context("fetching Linear users to resolve tracker.assignee")?;
-            let id = resolve_assignee_id(raw, &users)
+            let id = resolve_user_id(raw, users.as_deref().unwrap_or(&[]), "assignee")
                 .with_context(|| format!("resolving tracker.assignee {raw:?}"))?;
             tracker.assignee_id = Some(id);
+        }
+        if let Some(raw) = &delegate_raw {
+            let id = resolve_user_id(raw, users.as_deref().unwrap_or(&[]), "delegate")
+                .with_context(|| format!("resolving tracker.delegate {raw:?}"))?;
+            tracker.delegate_id = Some(id);
         }
 
         Ok(Arc::new(tracker))
@@ -373,6 +389,7 @@ fn export_linear_project(
         project_slug,
         team: None,
         assignee_id: None,
+        delegate_id: None,
         labels: vec![],
         active_states: tracker_cfg.active_states.clone(),
         terminal_states: tracker_cfg.terminal_states.clone(),
@@ -556,6 +573,7 @@ pub struct LinearTracker {
     project_slug: String,
     team: Option<String>,
     assignee_id: Option<String>,
+    delegate_id: Option<String>,
     labels: Vec<String>,
     active: Vec<String>,
     terminal: Vec<String>,
@@ -581,6 +599,7 @@ impl LinearTracker {
             project_slug: cfg.project_slug,
             team: cfg.team,
             assignee_id: cfg.assignee_id,
+            delegate_id: cfg.delegate_id,
             labels: cfg.labels,
             active: cfg.active_states,
             terminal: cfg.terminal_states,
@@ -597,11 +616,12 @@ impl LinearTracker {
             project_slug: Some(self.project_slug.clone()).filter(|s| !s.is_empty()),
             team_key: self.team.clone(),
             assignee_id: self.assignee_id.clone(),
+            delegate_id: self.delegate_id.clone(),
             labels: self.labels.clone(),
         }
     }
 
-    /// Fetch every Linear user (all pages) to resolve `tracker.assignee`.
+    /// Fetch every Linear user (all pages) to resolve configured user filters.
     async fn fetch_users_async(&self) -> Result<Vec<LinearUser>> {
         let query = r#"
 query AgentropyUsers($after: String, $first: Int!) {
@@ -679,6 +699,7 @@ query AgentropyCandidates($filter: IssueFilter, $after: String, $first: Int!) {
       updatedAt
       state { name type }
       assignee { id displayName }
+      delegate { id displayName name email }
       labels { nodes { name } }
       project { name slugId }
       parent { id identifier }
@@ -980,6 +1001,7 @@ query AgentropyFetchOne($id: String!) {
     updatedAt
     state { name type }
     assignee { id displayName }
+    delegate { id displayName name email }
     labels { nodes { name } }
     parent { id identifier }
     inverseRelations(first: 50) {
@@ -1095,7 +1117,7 @@ fn ensure_success(response: &Value, pointer: &str, label: &str) -> Result<()> {
 }
 
 fn raw_to_issue(r: &RawIssue) -> Issue {
-    Issue::builder(
+    let mut builder = Issue::builder(
         r.id.clone(),
         r.identifier.clone(),
         r.title.clone(),
@@ -1121,8 +1143,21 @@ fn raw_to_issue(r: &RawIssue) -> Issue {
             .collect(),
     )
     .project_name(r.project.as_ref().and_then(|p| p.name.clone()))
-    .project_slug(r.project.as_ref().and_then(|p| p.slug_id.clone()))
-    .build()
+    .project_slug(r.project.as_ref().and_then(|p| p.slug_id.clone()));
+
+    if let Some(delegate) = &r.delegate {
+        builder = builder.metadata_entry(
+            "linear_delegate",
+            json!({
+                "id": delegate.id,
+                "displayName": delegate.display_name,
+                "name": delegate.name,
+                "email": delegate.email,
+            }),
+        );
+    }
+
+    builder.build()
 }
 
 // ---------------------------------------------------------------------------
@@ -1135,6 +1170,7 @@ struct ResolvedDims {
     project_slug: Option<String>,
     team_key: Option<String>,
     assignee_id: Option<String>,
+    delegate_id: Option<String>,
     labels: Vec<String>,
 }
 
@@ -1144,6 +1180,7 @@ impl ResolvedDims {
         self.project_slug.is_none()
             && self.team_key.is_none()
             && self.assignee_id.is_none()
+            && self.delegate_id.is_none()
             && self.labels.is_empty()
     }
 }
@@ -1160,6 +1197,9 @@ fn build_issue_filter(dims: &ResolvedDims, active_states: &[String]) -> Value {
     }
     if let Some(id) = dims.assignee_id.as_deref().filter(|s| !s.is_empty()) {
         and.push(json!({ "assignee": { "id": { "eq": id } } }));
+    }
+    if let Some(id) = dims.delegate_id.as_deref().filter(|s| !s.is_empty()) {
+        and.push(json!({ "delegate": { "id": { "eq": id } } }));
     }
     if !dims.labels.is_empty() {
         and.push(json!({ "labels": { "some": { "name": { "in": dims.labels } } } }));
@@ -1187,7 +1227,7 @@ fn is_blocked(
 }
 
 // ---------------------------------------------------------------------------
-// Assignee resolution
+// User resolution
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1210,11 +1250,11 @@ fn is_uuid(s: &str) -> bool {
         })
 }
 
-/// Resolve a raw assignee config value to a canonical Linear user id.
+/// Resolve a raw user config value to a canonical Linear user id.
 /// UUID passes through. Otherwise matches displayName / name / email
 /// case-insensitively (a leading `@` is stripped). Zero or multiple matches
 /// are errors (fail fast at boot). Pure: no I/O.
-fn resolve_assignee_id(raw: &str, users: &[LinearUser]) -> Result<String> {
+fn resolve_user_id(raw: &str, users: &[LinearUser], field: &str) -> Result<String> {
     let needle = raw.trim().strip_prefix('@').unwrap_or_else(|| raw.trim());
     if is_uuid(needle) {
         return Ok(needle.to_string());
@@ -1229,9 +1269,9 @@ fn resolve_assignee_id(raw: &str, users: &[LinearUser]) -> Result<String> {
         .map(|u| u.id.clone())
         .collect();
     match matches.len() {
-        0 => bail!("assignee {needle:?} matched no Linear user (by displayName, name, or email)"),
+        0 => bail!("{field} {needle:?} matched no Linear user (by displayName, name, or email)"),
         1 => Ok(matches.into_iter().next().unwrap()),
-        n => bail!("assignee {needle:?} is ambiguous: matched {n} Linear users"),
+        n => bail!("{field} {needle:?} is ambiguous: matched {n} Linear users"),
     }
 }
 
@@ -1260,6 +1300,8 @@ struct RawIssue {
     state: RawState,
     #[serde(default)]
     assignee: Option<RawAssignee>,
+    #[serde(default)]
+    delegate: Option<RawDelegate>,
     labels: RawLabelConnection,
     #[serde(default)]
     project: Option<RawProjectRef>,
@@ -1273,6 +1315,17 @@ struct RawAssignee {
     id: String,
     #[serde(rename = "displayName")]
     display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDelegate {
+    id: String,
+    #[serde(default, rename = "displayName")]
+    display_name: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1391,6 +1444,7 @@ mod tests {
             project_slug: "test".to_string(),
             team: None,
             assignee_id: None,
+            delegate_id: None,
             labels: vec![],
             active_states: vec![],
             terminal_states: vec![],
@@ -1518,6 +1572,7 @@ mod tests {
               "updatedAt": "2026-06-11T11:00:00Z",
               "state": { "name": "Todo", "type": "unstarted" },
               "assignee": { "id": "u1", "displayName": "thinh" },
+              "delegate": { "id": "u2", "displayName": "workeragent", "name": "Worker Agent", "email": "workeragent@linear.app" },
               "labels": { "nodes": [{ "name": "backend" }] },
               "project": { "name": "Agentropy", "slugId": "agentropy" },
               "parent": { "id": "parent-1", "identifier": "ALG-0" },
@@ -1539,6 +1594,15 @@ mod tests {
         assert_eq!(mapped.state, "Todo");
         assert_eq!(mapped.priority, Some(2));
         assert_eq!(mapped.assignees, vec!["thinh"]);
+        assert_eq!(
+            mapped.metadata["linear_delegate"],
+            json!({
+                "id": "u2",
+                "displayName": "workeragent",
+                "name": "Worker Agent",
+                "email": "workeragent@linear.app"
+            })
+        );
         assert_eq!(mapped.labels, vec!["backend"]);
         assert_eq!(mapped.parent_id.as_deref(), Some("parent-1"));
         assert_eq!(mapped.project_name.as_deref(), Some("Agentropy"));
@@ -1691,7 +1755,7 @@ mod tests {
     // --- Filter builder ---
 
     use super::{
-        build_issue_filter, is_blocked, is_uuid, resolve_assignee_id, LinearUser, ResolvedDims,
+        build_issue_filter, is_blocked, is_uuid, resolve_user_id, LinearUser, ResolvedDims,
     };
     use serde_json::json;
 
@@ -1742,6 +1806,52 @@ mod tests {
     }
 
     #[test]
+    fn filter_delegate_only() {
+        let dims = ResolvedDims {
+            delegate_id: Some("u2".into()),
+            ..Default::default()
+        };
+        let f = build_issue_filter(&dims, &[]);
+        assert_eq!(
+            f,
+            json!({ "and": [{ "delegate": { "id": { "eq": "u2" } } }] })
+        );
+    }
+
+    #[test]
+    fn filter_delegate_with_active_states() {
+        let dims = ResolvedDims {
+            delegate_id: Some("u2".into()),
+            ..Default::default()
+        };
+        let f = build_issue_filter(&dims, &["Todo".to_string(), "In Progress".to_string()]);
+        assert_eq!(
+            f,
+            json!({ "and": [
+                { "delegate": { "id": { "eq": "u2" } } },
+                { "state": { "name": { "in": ["Todo", "In Progress"] } } }
+            ]})
+        );
+    }
+
+    #[test]
+    fn filter_assignee_and_delegate_combined() {
+        let dims = ResolvedDims {
+            assignee_id: Some("human".into()),
+            delegate_id: Some("agent".into()),
+            ..Default::default()
+        };
+        let f = build_issue_filter(&dims, &[]);
+        assert_eq!(
+            f,
+            json!({ "and": [
+                { "assignee": { "id": { "eq": "human" } } },
+                { "delegate": { "id": { "eq": "agent" } } }
+            ]})
+        );
+    }
+
+    #[test]
     fn filter_label_single() {
         let dims = ResolvedDims {
             labels: vec!["bug".into()],
@@ -1775,6 +1885,7 @@ mod tests {
             project_slug: Some("agentropy".into()),
             team_key: Some("ALG".into()),
             assignee_id: Some("u1".into()),
+            delegate_id: Some("u2".into()),
             labels: vec!["bug".into()],
         };
         let f = build_issue_filter(&dims, &["Todo".to_string()]);
@@ -1784,6 +1895,7 @@ mod tests {
                 { "project": { "slugId": { "eq": "agentropy" } } },
                 { "team": { "key": { "eq": "ALG" } } },
                 { "assignee": { "id": { "eq": "u1" } } },
+                { "delegate": { "id": { "eq": "u2" } } },
                 { "labels": { "some": { "name": { "in": ["bug"] } } } },
                 { "state": { "name": { "in": ["Todo"] } } }
             ]})
@@ -1829,6 +1941,11 @@ mod tests {
         .is_empty());
         assert!(!ResolvedDims {
             assignee_id: Some("u1".into()),
+            ..Default::default()
+        }
+        .is_empty());
+        assert!(!ResolvedDims {
+            delegate_id: Some("u2".into()),
             ..Default::default()
         }
         .is_empty());
@@ -1885,35 +2002,81 @@ mod tests {
     #[test]
     fn resolve_assignee_uuid_passthrough() {
         let id = "3b9d8f2e-1c4a-4d6b-8e2f-7a1b2c3d4e5f";
-        assert_eq!(resolve_assignee_id(id, &users()).unwrap(), id);
+        assert_eq!(resolve_user_id(id, &users(), "assignee").unwrap(), id);
     }
 
     #[test]
     fn resolve_assignee_display_name_with_and_without_at() {
-        assert_eq!(resolve_assignee_id("@thinh", &users()).unwrap(), "u1");
-        assert_eq!(resolve_assignee_id("thinh", &users()).unwrap(), "u1");
+        assert_eq!(
+            resolve_user_id("@thinh", &users(), "assignee").unwrap(),
+            "u1"
+        );
+        assert_eq!(
+            resolve_user_id("thinh", &users(), "assignee").unwrap(),
+            "u1"
+        );
     }
 
     #[test]
     fn resolve_assignee_by_name_is_ambiguous() {
         // "Thinh Dinh" matches two users by name.
-        let err = resolve_assignee_id("Thinh Dinh", &users()).unwrap_err();
+        let err = resolve_user_id("Thinh Dinh", &users(), "assignee").unwrap_err();
         assert!(err.to_string().contains("ambiguous"));
     }
 
     #[test]
     fn resolve_assignee_by_email() {
-        assert_eq!(resolve_assignee_id("alex@x.io", &users()).unwrap(), "u2");
+        assert_eq!(
+            resolve_user_id("alex@x.io", &users(), "assignee").unwrap(),
+            "u2"
+        );
     }
 
     #[test]
     fn resolve_assignee_case_insensitive() {
-        assert_eq!(resolve_assignee_id("ALEX", &users()).unwrap(), "u2");
+        assert_eq!(resolve_user_id("ALEX", &users(), "assignee").unwrap(), "u2");
     }
 
     #[test]
     fn resolve_assignee_no_match_errors() {
-        let err = resolve_assignee_id("nobody", &users()).unwrap_err();
+        let err = resolve_user_id("nobody", &users(), "assignee").unwrap_err();
+        assert!(err.to_string().contains("matched no Linear user"));
+    }
+
+    #[test]
+    fn resolve_delegate_uuid_passthrough() {
+        let id = "3b9d8f2e-1c4a-4d6b-8e2f-7a1b2c3d4e5f";
+        assert_eq!(resolve_user_id(id, &users(), "delegate").unwrap(), id);
+    }
+
+    #[test]
+    fn resolve_delegate_display_name_with_and_without_at() {
+        assert_eq!(
+            resolve_user_id("@alex", &users(), "delegate").unwrap(),
+            "u2"
+        );
+        assert_eq!(resolve_user_id("alex", &users(), "delegate").unwrap(), "u2");
+    }
+
+    #[test]
+    fn resolve_delegate_by_name_is_ambiguous() {
+        let err = resolve_user_id("Thinh Dinh", &users(), "delegate").unwrap_err();
+        assert!(err.to_string().contains("delegate"));
+        assert!(err.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn resolve_delegate_by_email() {
+        assert_eq!(
+            resolve_user_id("alex@x.io", &users(), "delegate").unwrap(),
+            "u2"
+        );
+    }
+
+    #[test]
+    fn resolve_delegate_no_match_errors() {
+        let err = resolve_user_id("nobody", &users(), "delegate").unwrap_err();
+        assert!(err.to_string().contains("delegate"));
         assert!(err.to_string().contains("matched no Linear user"));
     }
 
