@@ -95,6 +95,27 @@ fn warn_restart_required(field: &str) {
     );
 }
 
+/// Compose the spawned runner's prompt: the assembled system context first,
+/// then the rendered `WORKFLOW.md` prompt, in that order.
+///
+/// This is the prompt → [`SpawnParams`] composition point. The system context
+/// is prepended *outside* the `WORKFLOW.md` minijinja render and outside
+/// `WORKFLOW.md` itself, so `PromptRenderer` output stays byte-for-byte
+/// unchanged. An empty/absent [`SystemContext`] returns the rendered prompt
+/// verbatim — no stray leading block.
+fn compose_runner_prompt(system_context: &SystemContext, rendered_prompt: String) -> String {
+    if system_context.is_empty() {
+        return rendered_prompt;
+    }
+    let mut out = String::with_capacity(system_context.text.len() + rendered_prompt.len() + 1);
+    out.push_str(&system_context.text);
+    if !system_context.text.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&rendered_prompt);
+    out
+}
+
 fn revert_runner_fields(new_eff: &mut EffectiveLoopConfig, current: &EffectiveLoopConfig) {
     new_eff.runner_kind.clone_from(&current.runner_kind);
     new_eff.runner_command.clone_from(&current.runner_command);
@@ -186,7 +207,7 @@ impl Extension for OrchestratorExtension {
             let system_context = system_context::resolve_for(&paths.root, &agent_cfg);
             ctx.host
                 .bus
-                .publish(SYSTEM_CONTEXT_TOPIC, system_context)
+                .publish(SYSTEM_CONTEXT_TOPIC, system_context.clone())
                 .context("publishing system context")?;
             let hitl = hitl::BurstHitlNotifier::from_config(&agent_cfg.hitl.notifier)?;
             let prompt = PromptRenderer::load(&paths.workflow_md())?;
@@ -303,6 +324,7 @@ impl Extension for OrchestratorExtension {
                 hitl,
             )
             .with_snapshot_bus(ctx.host.bus.clone())
+            .with_system_context(system_context)
             .with_startup_banner(dashboard_banner(bind, port, ctx.host.http_addr()));
             tokio::spawn(async move {
                 let _guard = log_guard;
@@ -473,6 +495,11 @@ pub struct Orchestrator {
     runner: Arc<dyn cap_runner::Runner>,
     runner_services: host_api::ServiceRegistry,
     prompt: PromptRenderer,
+    /// Assembled cross-surface identity context (`AGENTS.md` + `system_files`).
+    /// Prepended to the rendered `WORKFLOW.md` prompt at spawn time, *outside*
+    /// the minijinja render. Empty by default so absent system files leave the
+    /// runner prompt byte-for-byte identical to today.
+    system_context: SystemContext,
     /// Effective loop config derived from agent_cfg + WORKFLOW.md frontmatter.
     /// Re-derived on every successful WORKFLOW.md reload.
     effective_cfg: EffectiveLoopConfig,
@@ -535,6 +562,7 @@ impl Orchestrator {
             runner,
             runner_services,
             prompt,
+            system_context: SystemContext::default(),
             effective_cfg,
             state,
             control_rx,
@@ -549,6 +577,15 @@ impl Orchestrator {
 
     pub fn with_snapshot_bus(mut self, bus: Arc<host_api::EventBus>) -> Self {
         self.snapshot_bus = Some(bus);
+        self
+    }
+
+    /// Retain the assembled system context. Its `text` is prepended to the
+    /// rendered `WORKFLOW.md` prompt at the `SpawnParams` composition point —
+    /// never inside `PromptRenderer` — preserving `WORKFLOW.md` as the runner
+    /// loop only and system files as separate cross-surface identity.
+    pub fn with_system_context(mut self, system_context: SystemContext) -> Self {
+        self.system_context = system_context;
         self
     }
 
@@ -1667,13 +1704,17 @@ impl Orchestrator {
         let last_event_at = Arc::new(Mutex::new(started_at));
         let runner_events: Arc<dyn cap_runner::RunnerEventSink> = self.state.events.clone();
         let runner_store: Arc<dyn cap_runner::RunnerEventStore> = self.state.store.clone();
+        // Prepend the cross-surface system context to the rendered WORKFLOW.md
+        // prompt at the SpawnParams composition point — outside PromptRenderer
+        // and outside WORKFLOW.md itself. Empty context leaves `prompt` intact.
+        let runner_prompt = compose_runner_prompt(&self.system_context, prompt);
         let params = SpawnParams::builder(
             &self.effective_cfg.runner_command,
             &self.effective_cfg.runner_kind,
             &workspace,
             &ws_root,
             &self.paths.root,
-            prompt,
+            runner_prompt,
             issue.identifier.clone(),
             run_id.clone(),
             self.effective_cfg.max_run_timeout_ms,
@@ -2690,6 +2731,7 @@ mod tests {
     use crate::workflow_config::{EffectiveLoopConfig, WorkflowFrontmatter};
     use anyhow::Result;
     use chrono::TimeZone;
+    use orchestrator_api::SystemContextFile;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
@@ -2717,6 +2759,85 @@ mod tests {
         let msg = super::dashboard_banner(bind, 0, None);
         assert!(msg.contains("agentropy dash"));
         assert!(!msg.contains(":0/"));
+    }
+
+    fn sample_system_context() -> SystemContext {
+        SystemContext {
+            text: "<system-file path=\"AGENTS.md\">\nidentity body\n</system-file>\n"
+                .to_string(),
+            files: vec![SystemContextFile {
+                path: "AGENTS.md".to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn compose_prepends_system_context_then_workflow_prompt() {
+        let ctx = sample_system_context();
+        let rendered = "RUNNER LOOP from WORKFLOW.md".to_string();
+
+        let composed = super::compose_runner_prompt(&ctx, rendered.clone());
+
+        // System context comes first, then the rendered WORKFLOW.md prompt.
+        assert!(composed.starts_with(&ctx.text));
+        assert!(composed.ends_with(&rendered));
+        let ctx_at = composed.find("system-file").unwrap();
+        let workflow_at = composed.find("RUNNER LOOP").unwrap();
+        assert!(ctx_at < workflow_at, "system context must precede WORKFLOW.md");
+        // Exact composition: context text (newline-terminated) then prompt.
+        assert_eq!(composed, format!("{}{}", ctx.text, rendered));
+    }
+
+    #[test]
+    fn compose_empty_context_leaves_prompt_identical() {
+        let ctx = SystemContext::default();
+        let rendered = "RUNNER LOOP from WORKFLOW.md".to_string();
+
+        let composed = super::compose_runner_prompt(&ctx, rendered.clone());
+
+        // No stray leading block: byte-for-byte identical to today.
+        assert_eq!(composed, rendered);
+    }
+
+    #[test]
+    fn compose_inserts_separator_when_context_lacks_trailing_newline() {
+        let ctx = SystemContext {
+            text: "NO TRAILING NEWLINE".to_string(),
+            files: vec![SystemContextFile {
+                path: "AGENTS.md".to_string(),
+            }],
+        };
+        let rendered = "WORKFLOW".to_string();
+
+        let composed = super::compose_runner_prompt(&ctx, rendered);
+
+        assert_eq!(composed, "NO TRAILING NEWLINE\nWORKFLOW");
+    }
+
+    #[test]
+    fn compose_does_not_alter_rendered_workflow_output() {
+        // Separation invariant: composing the runner prompt must not change
+        // the PromptRenderer / WORKFLOW.md render output. We render once,
+        // compose, and assert the rendered prompt is recoverable unchanged as
+        // the tail of the composed prompt.
+        let temp = tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("WORKFLOW.md"),
+            "Attempt {{ attempt }} for {{ issue.identifier }}.",
+        )
+        .unwrap();
+        let renderer = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let issue = crate::domain::Issue::builder("id-1", "ALG-1", "T", "Todo").build();
+        let rendered = renderer.render(&issue, 1, 3).unwrap();
+
+        let ctx = sample_system_context();
+        let composed = super::compose_runner_prompt(&ctx, rendered.clone());
+
+        // The WORKFLOW.md render is preserved verbatim as the prompt tail.
+        assert!(composed.ends_with(&rendered));
+        // And the render itself is independent of the system context.
+        let rendered_again = renderer.render(&issue, 1, 3).unwrap();
+        assert_eq!(rendered, rendered_again);
     }
     use tempfile::tempdir;
     use tempfile::TempDir;
