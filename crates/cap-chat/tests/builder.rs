@@ -14,7 +14,9 @@ fn chat_session_params_builder_round_trips_all_fields() {
         Path::new("/agent/data/tui/sessions"),
     )
     .model(Some("gpt-5".into()))
-    .system_prompt(Some("<system-file path=\"AGENTS.md\">be kind</system-file>".into()))
+    .system_prompt(Some(
+        "<system-file path=\"AGENTS.md\">be kind</system-file>".into(),
+    ))
     .build();
 
     assert_eq!(params.command, "pi-custom");

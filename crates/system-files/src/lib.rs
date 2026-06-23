@@ -153,7 +153,10 @@ impl SystemContext {
 ///
 /// `root` is the agent folder. `entries` is the declared `system_files` list
 /// (`None` ⇒ absent key ⇒ `AGENTS.md` only).
-pub fn resolve(root: &Path, entries: Option<&[SystemFileEntry]>) -> Result<SystemContext, ResolveError> {
+pub fn resolve(
+    root: &Path,
+    entries: Option<&[SystemFileEntry]>,
+) -> Result<SystemContext, ResolveError> {
     let mut files: Vec<ResolvedFile> = Vec::new();
     let mut warnings: Vec<ResolveWarning> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
@@ -265,10 +268,12 @@ fn contain(root: &Path, rel: &str, abs: &Path, display: &str) -> Result<PathBuf,
         let parent = if parent.as_os_str().is_empty() {
             root.clone()
         } else {
-            parent.canonicalize().map_err(|e| ResolveError::Containment {
-                path: display.to_string(),
-                reason: format!("canonicalizing parent: {e}"),
-            })?
+            parent
+                .canonicalize()
+                .map_err(|e| ResolveError::Containment {
+                    path: display.to_string(),
+                    reason: format!("canonicalizing parent: {e}"),
+                })?
         };
         parent.join(abs.file_name().unwrap_or_default())
     };
@@ -427,7 +432,11 @@ mod tests {
         use std::os::unix::fs::symlink;
         let dir = TempDir::new().unwrap();
         write(dir.path(), "real/target.md", "real content");
-        symlink(dir.path().join("real/target.md"), dir.path().join("link.md")).unwrap();
+        symlink(
+            dir.path().join("real/target.md"),
+            dir.path().join("link.md"),
+        )
+        .unwrap();
 
         let ctx = resolve(dir.path(), Some(&[bare("link.md")])).unwrap();
 
@@ -495,10 +504,9 @@ mod tests {
 
     #[test]
     fn bare_and_detailed_round_trip() {
-        let list: Vec<SystemFileEntry> = serde_yaml_from_str(
-            "- foo.md\n- { path: bar.md, required: true }\n",
-        )
-        .expect("parse mixed list");
+        let list: Vec<SystemFileEntry> =
+            serde_yaml_from_str("- foo.md\n- { path: bar.md, required: true }\n")
+                .expect("parse mixed list");
         assert_eq!(
             list,
             vec![
