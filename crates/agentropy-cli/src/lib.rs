@@ -45,6 +45,11 @@ async fn run_inner(plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
     match cli.command {
         Command::Run(args) => {
             let root = args.resolve_root()?;
+            // Load the agent's `.env` before the boot self-check spawns and before
+            // `run_host` (which sets `.without_dotenv()`), so extensions that read
+            // `register()`-time env vars (e.g. telegram's TELEGRAM_BOT_TOKEN) see
+            // them both in the inherited self-check child and at runtime.
+            dotenv::load_agent_env(&root)?;
             self_check::guard_boot(&root)?;
             run_host(root, plugins).await
         }
