@@ -183,6 +183,21 @@ pub fn save_jobs(root: &Path, jobs: &[ScheduleJob]) -> std::io::Result<()> {
     }
 }
 
+/// Generate a unique, filesystem-safe job id not colliding with any existing
+/// one. Shared by the HTTP create handler and the `scheduler_create_job` tool so
+/// both mint ids the same way.
+pub fn generate_job_id(existing: &[ScheduleJob]) -> String {
+    let base = chrono::Utc::now().timestamp_millis();
+    let mut n = base;
+    loop {
+        let candidate = format!("job-{n}");
+        if is_safe_job_id(&candidate) && !existing.iter().any(|j| j.id == candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 /// A job id must be a single, non-empty path component with no separators,
 /// parent-traversal, or leading dot, so it is always contained under
 /// `cron/output/`.

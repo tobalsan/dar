@@ -14,6 +14,8 @@ host-api = { path = "../../crates/host-api" }
 cap-runner = { path = "../../crates/cap-runner" }
 cap-dashboard-tab = { path = "../../crates/cap-dashboard-tab" }
 runner-core = { path = "../../crates/runner-core" }
+tool-registry = { path = "../../crates/tool-registry" }
+async-trait = "0.1"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 chrono-tz = "0.10"
 croner = "3"
@@ -24,10 +26,9 @@ tokio = { version = "1.43", features = ["macros", "rt", "sync", "time"] }
 tracing = "0.1"
 
 [dev-dependencies]
-async-trait = "0.1"
 tempfile = "3"
 dashboard = { path = "../dashboard" }
-tool-registry = { path = "../../crates/tool-registry" }
+tool-registry-host = { path = "../tool-registry-host" }
 axum = "0.8"
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

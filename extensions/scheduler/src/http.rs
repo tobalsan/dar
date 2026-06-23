@@ -28,7 +28,7 @@ use host_api::ServiceRegistry;
 use crate::schedule::compute_next_run_at_ms;
 use crate::service::{run_job_now, RunNowOutcome, SchedulerConfig};
 use crate::state::SchedulerState;
-use crate::store::{is_safe_job_id, save_jobs, Payload, Schedule, ScheduleJob};
+use crate::store::{generate_job_id, save_jobs, Payload, Schedule, ScheduleJob};
 
 /// State shared with every handler.
 #[derive(Clone)]
@@ -368,19 +368,6 @@ fn validate_payload(body: Option<PayloadBody>) -> Result<Payload, String> {
 
 // ---- helpers --------------------------------------------------------------
 
-/// Generate a unique, filesystem-safe job id not colliding with existing ones.
-fn generate_job_id(existing: &[ScheduleJob]) -> String {
-    let base = Utc::now().timestamp_millis();
-    let mut n = base;
-    loop {
-        let candidate = format!("job-{n}");
-        if is_safe_job_id(&candidate) && !existing.iter().any(|j| j.id == candidate) {
-            return candidate;
-        }
-        n += 1;
-    }
-}
-
 /// Merge a job's config with its in-memory runtime state into a JSON object.
 fn job_with_runtime(api: &ApiState, job: &ScheduleJob, now_ms: i64) -> Value {
     let rt = api.state.runtime(&job.id);
@@ -680,7 +667,7 @@ mod tests {
             timeout_ms: None,
         }];
         let id = generate_job_id(&existing);
-        assert!(is_safe_job_id(&id));
+        assert!(crate::store::is_safe_job_id(&id));
         assert_ne!(id, "job-1");
     }
 

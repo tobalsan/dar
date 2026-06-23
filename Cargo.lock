@@ -2481,6 +2481,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tool-registry",
+ "tool-registry-host",
  "tower",
  "tracing",
 ]
