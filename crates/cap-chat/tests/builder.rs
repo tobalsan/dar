@@ -14,12 +14,17 @@ fn chat_session_params_builder_round_trips_all_fields() {
         Path::new("/agent/data/tui/sessions"),
     )
     .model(Some("gpt-5".into()))
+    .system_prompt(Some("<system-file path=\"AGENTS.md\">be kind</system-file>".into()))
     .build();
 
     assert_eq!(params.command, "pi-custom");
     assert_eq!(params.agent_root, Path::new("/agent"));
     assert_eq!(params.session_dir, Path::new("/agent/data/tui/sessions"));
     assert_eq!(params.model.as_deref(), Some("gpt-5"));
+    assert_eq!(
+        params.system_prompt.as_deref(),
+        Some("<system-file path=\"AGENTS.md\">be kind</system-file>")
+    );
 }
 
 #[test]
@@ -33,6 +38,7 @@ fn chat_session_params_builder_defaults_optional_fields() {
 
     assert_eq!(params.command, "");
     assert_eq!(params.model, None);
+    assert_eq!(params.system_prompt, None);
 }
 
 #[test]

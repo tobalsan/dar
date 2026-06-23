@@ -15,7 +15,7 @@ use host_api::{
     ExclusiveTerminal, Foreground, LogEvent, StartCtx, APP_DONE_TOPIC, LOG_EVENTS_TOPIC,
     STARTUP_BANNER_TOPIC,
 };
-use orchestrator_api::{RunSnapshot, RUN_SNAPSHOT_TOPIC};
+use orchestrator_api::{RunSnapshot, SystemContext, RUN_SNAPSHOT_TOPIC, SYSTEM_CONTEXT_TOPIC};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc::Sender;
@@ -321,6 +321,16 @@ async fn open_session(
         .filter(|s| s.version > 0);
     let model = snap.as_ref().and_then(|s| s.agent.model.clone());
     let provider = snap.as_ref().and_then(|s| s.agent.provider.clone());
+    // Retained cross-surface system context (the agent's identity files).
+    // Absent topic or empty assembly -> None, so the session opens exactly as
+    // before with no system turn injected.
+    let system_prompt = ctx
+        .host
+        .bus
+        .read_retained::<SystemContext>(SYSTEM_CONTEXT_TOPIC)
+        .ok()
+        .filter(|sc| !sc.is_empty())
+        .map(|sc| sc.text);
     let params = ChatSessionParams::builder(
         config.command.as_deref().unwrap_or(""),
         ctx.paths.root(),
@@ -328,6 +338,7 @@ async fn open_session(
     )
     .model(model)
     .provider(provider)
+    .system_prompt(system_prompt)
     .host_tool_bridge(host_tool_bridge(ctx))
     .build();
     backend.open(params, tx).await

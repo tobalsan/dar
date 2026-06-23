@@ -55,6 +55,11 @@ pub struct ChatSessionParams {
     pub session_dir: PathBuf,
     pub model: Option<String>,
     pub provider: Option<String>,
+    /// Assembled cross-surface system context (the agent's identity files).
+    /// When set and non-empty, the backend delivers it as the session's
+    /// initial system context to the child; `None`/empty leaves the child's
+    /// own default system prompt untouched (chat opens exactly as before).
+    pub system_prompt: Option<String>,
     /// When set, the chat backend advertises the host MCP bridge to its agent
     /// CLI so the operator's chat session sees the same host-registered
     /// registry tools an issue worker does. Carries the command + args the
@@ -75,6 +80,7 @@ impl ChatSessionParams {
             session_dir: session_dir.to_path_buf(),
             model: None,
             provider: None,
+            system_prompt: None,
             host_tool_bridge: None,
         }
     }
@@ -86,6 +92,7 @@ pub struct ChatSessionParamsBuilder {
     session_dir: PathBuf,
     model: Option<String>,
     provider: Option<String>,
+    system_prompt: Option<String>,
     host_tool_bridge: Option<HostToolBridge>,
 }
 
@@ -97,6 +104,11 @@ impl ChatSessionParamsBuilder {
 
     pub fn provider(mut self, value: Option<String>) -> Self {
         self.provider = value;
+        self
+    }
+
+    pub fn system_prompt(mut self, value: Option<String>) -> Self {
+        self.system_prompt = value;
         self
     }
 
@@ -112,6 +124,7 @@ impl ChatSessionParamsBuilder {
             session_dir: self.session_dir,
             model: self.model,
             provider: self.provider,
+            system_prompt: self.system_prompt,
             host_tool_bridge: self.host_tool_bridge,
         }
     }

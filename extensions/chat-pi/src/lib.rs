@@ -238,6 +238,16 @@ fn pi_args(params: &ChatSessionParams) -> Vec<OsString> {
         args.push(OsString::from("--provider"));
         args.push(OsString::from(provider));
     }
+    // Deliver the assembled cross-surface system context as the session's
+    // initial system context: `--append-system-prompt` keeps pi's default
+    // coding-assistant prompt and appends the agent identity on top. An
+    // absent/empty context adds no flag, so chat opens exactly as before.
+    if let Some(system_prompt) = &params.system_prompt {
+        if !system_prompt.is_empty() {
+            args.push(OsString::from("--append-system-prompt"));
+            args.push(OsString::from(system_prompt));
+        }
+    }
     args
 }
 
@@ -625,6 +635,36 @@ mod tests {
         assert!(args.contains(&OsString::from("--provider")));
         let provider_idx = args.iter().position(|a| a == "--provider").unwrap();
         assert_eq!(args[provider_idx + 1], OsString::from("my-provider"));
+    }
+
+    #[test]
+    fn pi_args_deliver_system_prompt_as_append_system_prompt_when_set() {
+        let root = Path::new("/agent");
+        let sessions = Path::new("/agent/data/tui/sessions");
+        let system = "<system-file path=\"AGENTS.md\">be the agent</system-file>";
+        let params = ChatSessionParams::builder("", root, sessions)
+            .system_prompt(Some(system.into()))
+            .build();
+        let args = pi_args(&params);
+        let idx = args
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .expect("--append-system-prompt must be present when system_prompt is set");
+        assert_eq!(args[idx + 1], OsString::from(system));
+    }
+
+    #[test]
+    fn pi_args_omit_system_prompt_when_absent_or_empty() {
+        let root = Path::new("/agent");
+        let sessions = Path::new("/agent/data/tui/sessions");
+        // Absent: chat opens exactly as today, no system flag injected.
+        let absent = ChatSessionParams::builder("", root, sessions).build();
+        assert!(!pi_args(&absent).contains(&OsString::from("--append-system-prompt")));
+        // Empty string is treated as absent: still no flag.
+        let empty = ChatSessionParams::builder("", root, sessions)
+            .system_prompt(Some(String::new()))
+            .build();
+        assert!(!pi_args(&empty).contains(&OsString::from("--append-system-prompt")));
     }
 
     // -- event mapping --------------------------------------------------------
