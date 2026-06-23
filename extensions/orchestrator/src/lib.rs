@@ -222,7 +222,12 @@ impl Extension for OrchestratorExtension {
             // Boot on runner + foreground + extensions alone; skip WORKFLOW.md,
             // tracker build, runner resolve and the tick loop entirely.
             if !agent_cfg.loop_enabled() {
-                let message = "Orchestration loop disabled".to_string();
+                let dashboard = dashboard_banner(
+                    agent_cfg.dashboard.bind,
+                    agent_cfg.dashboard.port,
+                    ctx.host.http_addr(),
+                );
+                let message = format!("Orchestration loop disabled; {dashboard}");
                 tracing::info!(issue = %"-", event = %"startup", "{message}");
                 ctx.host
                     .bus
