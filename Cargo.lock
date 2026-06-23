@@ -1868,6 +1868,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "system-files",
  "tempfile",
  "tokio",
  "tool-registry",
@@ -2782,6 +2783,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "system-files"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
+ "tempfile",
 ]
 
 [[package]]

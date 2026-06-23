@@ -592,6 +592,7 @@ mod tests {
             },
             foreground: "logs".to_string(),
             extensions: Default::default(),
+            system_files: None,
         }
     }
 
