@@ -13,6 +13,7 @@ members = [
     "crates/orchestrator-api",
     "crates/opencode-client",
     "crates/runner-core",
+    "crates/system-files",
     "crates/tool-shim",
     "extensions/chat-opencode",
     "extensions/chat-pi",

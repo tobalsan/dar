@@ -31,8 +31,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use host_api::Extension;
 use orchestrator_api::{
-    DispatchRequested, RunRequested, RunSnapshot, CONTROL_TOPIC, DISPATCH_REQUESTED_TOPIC,
-    RUN_REQUESTED_TOPIC, RUN_SNAPSHOT_TOPIC,
+    DispatchRequested, RunRequested, RunSnapshot, SystemContext, CONTROL_TOPIC,
+    DISPATCH_REQUESTED_TOPIC, RUN_REQUESTED_TOPIC, RUN_SNAPSHOT_TOPIC, SYSTEM_CONTEXT_TOPIC,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::watch;
@@ -69,6 +69,7 @@ pub mod run_query;
 pub mod runner;
 pub mod state;
 pub mod store;
+pub mod system_context;
 pub mod thinking;
 pub mod tracker;
 pub mod workflow_config;
@@ -150,6 +151,8 @@ impl Extension for OrchestratorExtension {
             ctx.bus
                 .register_retained(RUN_SNAPSHOT_TOPIC, RunSnapshot::empty())?;
             ctx.bus
+                .register_retained(SYSTEM_CONTEXT_TOPIC, SystemContext::default())?;
+            ctx.bus
                 .register_broadcast::<orchestrator_api::ControlMsg>(CONTROL_TOPIC, 64)?;
             ctx.bus
                 .register_broadcast::<RunRequested>(RUN_REQUESTED_TOPIC, 64)?;
@@ -175,6 +178,16 @@ impl Extension for OrchestratorExtension {
             dotenv::load_agent_env(&paths.root)?;
             let agent_cfg = config::load(&paths.root)?;
             agent_cfg.validate().context("invalid agent.yaml")?;
+
+            // Resolve and publish the agent's system-file identity context once,
+            // before the loop and any consumer reads it. The retained topic was
+            // registered in `register`; publishing here replaces the inert
+            // default with the assembled `AGENTS.md` + `system_files` context.
+            let system_context = system_context::resolve_for(&paths.root, &agent_cfg);
+            ctx.host
+                .bus
+                .publish(SYSTEM_CONTEXT_TOPIC, system_context)
+                .context("publishing system context")?;
             let hitl = hitl::BurstHitlNotifier::from_config(&agent_cfg.hitl.notifier)?;
             let prompt = PromptRenderer::load(&paths.workflow_md())?;
             let effective_cfg =
@@ -2975,6 +2988,7 @@ mod tests {
             },
             foreground: "logs".to_string(),
             extensions: Default::default(),
+            system_files: None,
         }
     }
 
@@ -4174,6 +4188,7 @@ dashboard:
             },
             foreground: "logs".to_string(),
             extensions: Default::default(),
+            system_files: None,
         }
     }
 

@@ -46,6 +46,11 @@ pub struct AgentConfig {
     /// matching extension via the host `ConfigStore`. Missing section = empty.
     #[serde(default)]
     pub extensions: HashMap<String, serde_yaml::Value>,
+    /// Optional agent-identity files assembled into the system context at boot,
+    /// after `AGENTS.md`. Each entry is a bare path or `{ path, required? }`.
+    /// Absent key ⇒ `AGENTS.md` only.
+    #[serde(default)]
+    pub system_files: Option<Vec<system_files::SystemFileEntry>>,
 }
 
 fn default_foreground() -> String {
@@ -375,6 +380,35 @@ mod tests {
         assert_eq!(cfg.tracker.team.as_deref(), Some("ALG"));
         assert_eq!(cfg.tracker.assignee.as_deref(), Some("@thinh"));
         assert_eq!(cfg.tracker.labels(), vec!["bug"]);
+    }
+
+    #[test]
+    fn system_files_absent_is_none() {
+        let cfg: AgentConfig = serde_yaml::from_str(BASE).unwrap();
+        assert!(cfg.system_files.is_none());
+    }
+
+    #[test]
+    fn system_files_round_trips_bare_and_detailed_forms() {
+        use system_files::SystemFileEntry;
+        let raw = format!(
+            "{BASE}system_files:\n  - docs/style.md\n  - path: docs/policy.md\n    required: true\n  - path: docs/optional.md\n"
+        );
+        let cfg: AgentConfig = serde_yaml::from_str(&raw).unwrap();
+        assert_eq!(
+            cfg.system_files.unwrap(),
+            vec![
+                SystemFileEntry::Bare("docs/style.md".to_string()),
+                SystemFileEntry::Detailed {
+                    path: "docs/policy.md".to_string(),
+                    required: true,
+                },
+                SystemFileEntry::Detailed {
+                    path: "docs/optional.md".to_string(),
+                    required: false,
+                },
+            ]
+        );
     }
 
     #[test]
