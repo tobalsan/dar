@@ -276,6 +276,7 @@ impl Extension for OrchestratorExtension {
             tracker_cfg.needs_human = effective_cfg.needs_human.clone();
             tracker_cfg.team = effective_cfg.tracker_team.clone();
             tracker_cfg.assignee = effective_cfg.tracker_assignee.clone();
+            tracker_cfg.delegate = effective_cfg.tracker_delegate.clone();
             tracker_cfg.label = (!effective_cfg.tracker_labels.is_empty())
                 .then(|| crate::config::StringOrVec::List(effective_cfg.tracker_labels.clone()));
             let services = ctx.host.services.clone();
@@ -900,6 +901,7 @@ impl Orchestrator {
             || new_eff.tracker_endpoint != self.effective_cfg.tracker_endpoint
             || new_eff.tracker_team != self.effective_cfg.tracker_team
             || new_eff.tracker_assignee != self.effective_cfg.tracker_assignee
+            || new_eff.tracker_delegate != self.effective_cfg.tracker_delegate
             || new_eff.tracker_labels != self.effective_cfg.tracker_labels;
 
         if tracker_changed {
@@ -913,6 +915,7 @@ impl Orchestrator {
             tracker_cfg.needs_human = new_eff.needs_human.clone();
             tracker_cfg.team = new_eff.tracker_team.clone();
             tracker_cfg.assignee = new_eff.tracker_assignee.clone();
+            tracker_cfg.delegate = new_eff.tracker_delegate.clone();
             tracker_cfg.label = (!new_eff.tracker_labels.is_empty())
                 .then(|| crate::config::StringOrVec::List(new_eff.tracker_labels.clone()));
             match tracker::build_configured(
@@ -941,6 +944,7 @@ impl Orchestrator {
                     new_eff.tracker_endpoint = self.effective_cfg.tracker_endpoint.clone();
                     new_eff.tracker_team = self.effective_cfg.tracker_team.clone();
                     new_eff.tracker_assignee = self.effective_cfg.tracker_assignee.clone();
+                    new_eff.tracker_delegate = self.effective_cfg.tracker_delegate.clone();
                     new_eff.tracker_labels = self.effective_cfg.tracker_labels.clone();
                     logging::ev(
                         "-",
@@ -3174,6 +3178,7 @@ mod tests {
                 needs_human: None,
                 team: None,
                 assignee: None,
+                delegate: None,
                 label: None,
             }),
             runner: RunnerConfig {
@@ -4388,6 +4393,7 @@ dashboard:
                 needs_human: None,
                 team: None,
                 assignee: None,
+                delegate: None,
                 label: None,
             }),
             runner: RunnerConfig {

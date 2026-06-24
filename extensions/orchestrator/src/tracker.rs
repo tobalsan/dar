@@ -22,6 +22,7 @@ pub fn build_configured(
         needs_human: cfg.needs_human.clone(),
         team: cfg.team.clone(),
         assignee: cfg.assignee.clone(),
+        delegate: cfg.delegate.clone(),
         labels: cfg.labels(),
     })
 }

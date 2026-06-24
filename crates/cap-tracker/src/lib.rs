@@ -202,6 +202,7 @@ pub struct TrackerBuildConfig {
     pub needs_human: Option<String>,
     pub team: Option<String>,
     pub assignee: Option<String>,
+    pub delegate: Option<String>,
     pub labels: Vec<String>,
 }
 

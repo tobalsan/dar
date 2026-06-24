@@ -89,6 +89,9 @@ pub struct TrackerConfig {
     /// Linear assignee: UUID, displayName (@thinh), name, or email; resolved at boot.
     #[serde(default)]
     pub assignee: Option<String>,
+    /// Linear delegate/app agent: UUID, displayName (@workeragent), name, or email; resolved at boot.
+    #[serde(default)]
+    pub delegate: Option<String>,
     /// Linear label name(s): a single string or a list (OR within labels).
     #[serde(default)]
     pub label: Option<StringOrVec>,
@@ -442,11 +445,12 @@ mod tests {
 
     #[test]
     fn tracker_dimensions_parse_with_scalar_label() {
-        let raw = "id: a\nname: A\ntracker:\n  use: linear\n  active_states: [todo]\n  terminal_states: [done]\n  team: ALG\n  assignee: \"@thinh\"\n  label: bug\nrunner:\n  use: fake\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
+        let raw = "id: a\nname: A\ntracker:\n  use: linear\n  active_states: [todo]\n  terminal_states: [done]\n  team: ALG\n  assignee: \"@thinh\"\n  delegate: \"@workeragent\"\n  label: bug\nrunner:\n  use: fake\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
         let cfg: AgentConfig = serde_yaml::from_str(raw).unwrap();
         let tracker = cfg.tracker.as_ref().unwrap();
         assert_eq!(tracker.team.as_deref(), Some("ALG"));
         assert_eq!(tracker.assignee.as_deref(), Some("@thinh"));
+        assert_eq!(tracker.delegate.as_deref(), Some("@workeragent"));
         assert_eq!(tracker.labels(), vec!["bug"]);
     }
 

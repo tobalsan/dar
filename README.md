@@ -316,10 +316,11 @@ tracker:
   # needs_human: "Needs Human"    # state that stops re-dispatch (default: "Needs Human")
   # project_slug: abc123          # Linear project slugId (use: linear only)
   # team: ALG                     # Linear team key (use: linear only)
-  # assignee: "@thinh"            # UUID / @displayName / name / email (use: linear only)
+  # assignee: "@thinh"            # human/account assignee: UUID / @displayName / name / email
+  # delegate: "@workeragent"      # Linear app/agent delegate: UUID / @displayName / name / email
   # label: [bug, urgent]          # single label or list; OR within labels (use: linear only)
 
-# Linear filters (project_slug / team / assignee / label) combine with strict AND;
+# Linear filters (project_slug / team / assignee / delegate / label) combine with strict AND;
 # at least one must resolve or the daemon refuses to boot.
 
 workspace:
@@ -524,6 +525,12 @@ respects the configured `active_states` / `terminal_states` / `needs_human`
 names. Rate-limit responses are handled with backoff. The tracker is read-only;
 all issue-state writes are done by the child agent.
 
+Linear's app/agent assignment appears as `delegate` in the API while the parent
+human/account remains `assignee`. Use `tracker.assignee` to target the human
+assignee and `tracker.delegate` to target a delegated app/agent such as
+`@workeragent`; both resolve by UUID, display name, name, or email and compose
+with project, team, label, and state filters using AND semantics.
+
 Safety "park" writes (stall, retries exhausted) use the `needs_human` state
 value and are the only orchestrator writes to Linear.
 
@@ -677,6 +684,7 @@ Prerequisites: `cargo`/`rustc` on PATH, plus the `cargo-agentropy` helper
    tracker:
      use: linear            # links tracker-linear
      project_slug: abc123   # Linear project slugId
+     delegate: "@workeragent" # optional: target a Linear app/agent delegate
    runner:
      use: codex             # links runner-codex
    foreground: tui          # links tui + frontend-log + chat-pi, and chat-codex
