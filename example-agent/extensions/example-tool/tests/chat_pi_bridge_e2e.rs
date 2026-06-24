@@ -16,11 +16,11 @@
 //! run guards config parity on the chat path too.
 //!
 //! Gated: skips (passes) unless `pi` is installed (with the MCP adapter that
-//! registers `--mcp-config`) and `AGENTROPY_PI_E2E=1` is set, so CI without a pi
+//! registers `--mcp-config`) and `DAR_PI_E2E=1` is set, so CI without a pi
 //! login is unaffected.
 //!
 //! Run it explicitly with:
-//!   AGENTROPY_PI_E2E=1 cargo test -p example-tool --test chat_pi_bridge_e2e -- --nocapture
+//!   DAR_PI_E2E=1 cargo test -p example-tool --test chat_pi_bridge_e2e -- --nocapture
 
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -29,7 +29,7 @@ use cap_chat::{ChatBackend, ChatEvent, ChatSessionParams, HostToolBridge};
 use chat_pi::PiChatBackend;
 
 fn pi_available() -> bool {
-    std::env::var("AGENTROPY_PI_E2E").as_deref() == Ok("1")
+    std::env::var("DAR_PI_E2E").as_deref() == Ok("1")
         && Command::new("pi")
             .arg("--version")
             .stdout(Stdio::null())
@@ -42,7 +42,7 @@ fn pi_available() -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_pi_calls_echo_upper_through_host_bridge() {
     if !pi_available() {
-        eprintln!("skipping chat-pi e2e: set AGENTROPY_PI_E2E=1 with pi installed + authed");
+        eprintln!("skipping chat-pi e2e: set DAR_PI_E2E=1 with pi installed + authed");
         return;
     }
 
@@ -64,7 +64,7 @@ async fn chat_pi_calls_echo_upper_through_host_bridge() {
     let params = ChatSessionParams::builder("pi", workspace.path(), &session_dir)
         .host_tool_bridge(Some(bridge))
         .build();
-    if let Ok(provider) = std::env::var("AGENTROPY_PI_E2E_PROVIDER") {
+    if let Ok(provider) = std::env::var("DAR_PI_E2E_PROVIDER") {
         // Forward an optional provider override for environments with a specific
         // pi login.
         std::env::set_var("PI_PROVIDER", provider);

@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand};
 
 /// Folder-scoped agent runtime.
 #[derive(Debug, Parser)]
-#[command(name = "agentropy", version, about)]
+#[command(name = "dar", version, about)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -54,7 +54,7 @@ pub struct DashArgs {
     /// Port to bind the aggregator on (default 7878).
     #[arg(long)]
     pub port: Option<u16>,
-    /// Registry directory to read agent presence from (default ~/.agentropy/dashboards).
+    /// Registry directory to read agent presence from (default ~/.dar/dashboards).
     #[arg(long)]
     pub registry_dir: Option<PathBuf>,
 }
@@ -77,7 +77,7 @@ pub struct BuildArgs {
     /// Agent folder to build (defaults to the current directory).
     #[arg(long)]
     pub dir: Option<PathBuf>,
-    /// Vendor dependencies into .agentropy/vendor for offline builds.
+    /// Vendor dependencies into .dar/vendor for offline builds.
     #[arg(long)]
     pub vendor: bool,
     /// Run cargo without network access.
@@ -99,7 +99,7 @@ pub struct InitBuildArgs {
     /// Agent folder to build (defaults to the current directory).
     #[arg(long)]
     pub dir: Option<PathBuf>,
-    /// Vendor dependencies into .agentropy/vendor for offline builds.
+    /// Vendor dependencies into .dar/vendor for offline builds.
     #[arg(long)]
     pub vendor: bool,
     /// Run cargo without network access.

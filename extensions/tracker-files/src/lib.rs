@@ -252,7 +252,7 @@ mod tests {
         let path = dir.path().join("ALG-1.md");
         std::fs::write(
             &path,
-            "---\nid: uuid-1\nidentifier: ALG-1\ntitle: Move it\nstate: Todo\npriority: 2\nassignees: [alice]\nlabels: [backend]\nparent_id: parent-1\nblocked_by: [ALG-0]\nproject_name: Agentropy\nproject_slug: agentropy\n---\nBody text\n",
+            "---\nid: uuid-1\nidentifier: ALG-1\ntitle: Move it\nstate: Todo\npriority: 2\nassignees: [alice]\nlabels: [backend]\nparent_id: parent-1\nblocked_by: [ALG-0]\nproject_name: Dar\nproject_slug: dar\n---\nBody text\n",
         )
         .unwrap();
 
@@ -268,8 +268,8 @@ mod tests {
         assert_eq!(issue.labels, vec!["backend"]);
         assert_eq!(issue.parent_id.as_deref(), Some("parent-1"));
         assert_eq!(issue.blocked_by, vec!["ALG-0"]);
-        assert_eq!(issue.project_name.as_deref(), Some("Agentropy"));
-        assert_eq!(issue.project_slug.as_deref(), Some("agentropy"));
+        assert_eq!(issue.project_name.as_deref(), Some("Dar"));
+        assert_eq!(issue.project_slug.as_deref(), Some("dar"));
     }
 
     #[test]

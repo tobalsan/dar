@@ -3,7 +3,7 @@
 //! unavailable or unreliable (e.g. the pi init race; backend/version drift).
 //!
 //! Per ALG-254 the shim is the *defined reliability floor, not the default*. The
-//! native host MCP bridge ([`agentropy_cli::bridge`]) stays the preferred
+//! native host MCP bridge ([`dar_cli_core::bridge`]) stays the preferred
 //! surface; the shim is the fallback that guarantees parity by exercising the
 //! **same** [`ToolRegistry`] and the **same** structured [`ToolOutcome`]
 //! observability — only the transport differs.
@@ -42,18 +42,18 @@ use tool_registry::{ToolOutcome, ToolRegistryHandle, ToolSpec};
 
 /// Opening fence of the strict tool-call marker. The agent emits a single line
 /// equal to this, then a JSON object line, then [`CALL_END`].
-pub const CALL_BEGIN: &str = "<<<AGENTROPY_TOOL_CALL";
+pub const CALL_BEGIN: &str = "<<<DAR_TOOL_CALL";
 
 /// Closing fence of the strict tool-call marker.
-pub const CALL_END: &str = "AGENTROPY_TOOL_CALL>>>";
+pub const CALL_END: &str = "DAR_TOOL_CALL>>>";
 
 /// Opening fence the host uses when rendering a tool result back into the
 /// continuation prompt. Symmetric with the call marker so a transcript reads
 /// call → result unambiguously.
-pub const RESULT_BEGIN: &str = "<<<AGENTROPY_TOOL_RESULT";
+pub const RESULT_BEGIN: &str = "<<<DAR_TOOL_RESULT";
 
 /// Closing fence of the result marker.
-pub const RESULT_END: &str = "AGENTROPY_TOOL_RESULT>>>";
+pub const RESULT_END: &str = "DAR_TOOL_RESULT>>>";
 
 /// A parsed, well-formed tool call extracted from agent output.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,9 +153,9 @@ pub fn advertise_prompt(tools: &[ToolSpec]) -> String {
 /// Strict grammar (line-oriented):
 ///
 /// ```text
-/// <<<AGENTROPY_TOOL_CALL
+/// <<<DAR_TOOL_CALL
 /// { "call_id": "...", "name": "...", "arguments": { ... } }
-/// AGENTROPY_TOOL_CALL>>>
+/// DAR_TOOL_CALL>>>
 /// ```
 ///
 /// The body is the lines between the fences joined back with newlines, parsed as

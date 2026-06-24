@@ -10,6 +10,7 @@ use serde::Deserialize;
 
 const GENERATED_TOML_HEADER: &str = "# generated - do not hand-edit\n";
 const GENERATED_RUST_HEADER: &str = "// # generated - do not hand-edit\n";
+const STOCK_CRATE_VERSION_REQ: &str = concat!(env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"));
 
 struct StockExtension {
     package: &'static str,
@@ -158,7 +159,7 @@ fn write_composition_crate(agent: &Path) -> Result<(PathBuf, bool)> {
     let agent = agent
         .canonicalize()
         .with_context(|| format!("resolving agent folder {}", agent.display()))?;
-    let crate_dir = agent.join(".agentropy");
+    let crate_dir = agent.join(".dar");
     fs::create_dir_all(crate_dir.join("src"))
         .with_context(|| format!("creating {}", crate_dir.join("src").display()))?;
 
@@ -166,7 +167,7 @@ fn write_composition_crate(agent: &Path) -> Result<(PathBuf, bool)> {
     let locals = discover_extensions(&agent)?;
     let mut changed = write_if_changed(
         &crate_dir.join("Cargo.toml"),
-        &cargo_toml(&crate_dir, &stock, &locals)?,
+        &cargo_toml(&crate_dir, &stock, &locals),
     )?;
     changed |= write_if_changed(&crate_dir.join("src/main.rs"), &main_rs(&stock, &locals))?;
     changed |= write_if_changed(
@@ -307,7 +308,7 @@ pub fn build_with_options(agent: &Path, options: BuildOptions) -> Result<()> {
     fs::create_dir_all(agent.join("bin"))
         .with_context(|| format!("creating {}", agent.join("bin").display()))?;
     let binary = built_binary_path(&crate_dir, target.as_deref());
-    fs::copy(&binary, agent.join("bin").join(binary_name("agentropy")))
+    fs::copy(&binary, agent.join("bin").join(binary_name("dar")))
         .with_context(|| format!("copying {}", binary.display()))?;
     Ok(())
 }
@@ -321,7 +322,7 @@ pub fn build_to_with_options(agent: &Path, dest: &Path, options: BuildOptions) -
     let agent = agent
         .canonicalize()
         .with_context(|| format!("resolving agent folder {}", agent.display()))?;
-    let crate_dir = agent.join(".agentropy");
+    let crate_dir = agent.join(".dar");
     if options.vendor {
         vendor_dependencies(&crate_dir)?;
     }
@@ -354,7 +355,7 @@ pub fn build_to_with_options(agent: &Path, dest: &Path, options: BuildOptions) -
     let binary = built_binary_path(&crate_dir, target.as_deref());
     fs::copy(&binary, dest).with_context(|| {
         format!(
-            "copying built agentropy binary from {} to {}",
+            "copying built dar binary from {} to {}",
             binary.display(),
             dest.display()
         )
@@ -392,7 +393,7 @@ fn build_universal(crate_dir: &Path, agent: &Path, offline: bool) -> Result<()> 
         .with_context(|| format!("creating {}", agent.join("bin").display()))?;
     build_universal_to(
         crate_dir,
-        &agent.join("bin").join(binary_name("agentropy")),
+        &agent.join("bin").join(binary_name("dar")),
         offline,
     )
 }
@@ -476,10 +477,9 @@ fn discover_extensions(agent: &Path) -> Result<Vec<LocalExtension>> {
             .and_then(toml::Value::as_str)
             .context("extension manifest missing [package] name")?
             .to_string();
-        let factory = value
-            .get("package")
-            .and_then(|p| p.get("metadata"))
-            .and_then(|m| m.get("agentropy"))
+        let meta = value.get("package").and_then(|p| p.get("metadata"));
+        let factory = meta
+            .and_then(|m| m.get("dar"))
             .and_then(|a| a.get("factory"))
             .and_then(toml::Value::as_str);
         let Some(factory) = factory else {
@@ -499,18 +499,17 @@ fn cargo_toml(
     _crate_dir: &Path,
     stock: &[&StockExtension],
     locals: &[LocalExtension],
-) -> Result<String> {
-    let source = stock_source()?;
+) -> String {
     let mut out = String::from(GENERATED_TOML_HEADER);
     out.push_str(
         r#"[package]
-name = "agentropy-agent"
+name = "dar-agent"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.83"
 
 [[bin]]
-name = "agentropy"
+name = "dar"
 path = "src/main.rs"
 
 [workspace]
@@ -518,11 +517,11 @@ path = "src/main.rs"
 [dependencies]
 "#,
     );
-    stock_dependency(&mut out, "host-api", &source, false);
-    stock_dependency(&mut out, "agentropy-cli", &source, false);
+    stock_dependency(&mut out, "host-api", STOCK_CRATE_VERSION_REQ, false);
+    stock_dependency(&mut out, "dar-cli-core", STOCK_CRATE_VERSION_REQ, false);
     out.push_str("tokio = { version = \"1.43\", features = [\"rt-multi-thread\", \"macros\", \"signal\"] }\n");
     for stock in stock {
-        stock_dependency(&mut out, stock.package, &source, true);
+        stock_dependency(&mut out, stock.package, STOCK_CRATE_VERSION_REQ, true);
     }
     for local in locals {
         out.push_str(&format!(
@@ -545,14 +544,22 @@ path = "src/main.rs"
             stock.package
         ));
     }
-    Ok(out)
+    out
 }
 
-fn stock_dependency(out: &mut String, package: &str, source: &StockSource, optional: bool) {
+fn stock_package(key: &str) -> String {
+    if key == "dar-cli-core" {
+        "dar-cli-core".into()
+    } else {
+        format!("dar-{key}")
+    }
+}
+
+fn stock_dependency(out: &mut String, key: &str, version: &str, optional: bool) {
+    let pkg = stock_package(key);
     let optional = if optional { ", optional = true" } else { "" };
     out.push_str(&format!(
-        "{package} = {{ git = \"{}\", rev = \"{}\"{optional} }}\n",
-        source.git, source.rev
+        "{key} = {{ package = \"{pkg}\", version = \"{version}\"{optional} }}\n"
     ));
 }
 
@@ -561,7 +568,7 @@ fn main_rs(stock: &[&StockExtension], locals: &[LocalExtension]) -> String {
     out.push_str(
         r#"#[tokio::main(worker_threads = 2)]
 async fn main() {
-    agentropy_cli::run(host_api::plugins![
+    dar_cli_core::run(host_api::plugins![
 "#,
     );
     for stock in stock {
@@ -629,70 +636,6 @@ fn write_if_changed(path: &Path, content: &str) -> Result<bool> {
     Ok(true)
 }
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("agentropy-cli lives under crates/")
-        .to_path_buf()
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-struct StockSource {
-    git: String,
-    rev: String,
-}
-
-fn stock_source() -> Result<StockSource> {
-    let repo = repo_root();
-    let git = git_output(&repo, ["config", "--get", "remote.origin.url"])?;
-    ensure_portable_git_url(&git)?;
-    let rev = git_output(&repo, ["rev-parse", "HEAD"])?;
-    Ok(StockSource { git, rev })
-}
-
-fn ensure_portable_git_url(url: &str) -> Result<()> {
-    if url
-        .split_once(':')
-        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("file"))
-        || url.starts_with('/')
-        || url.starts_with("./")
-        || url.starts_with("../")
-        || has_windows_drive_prefix(url)
-        || Path::new(url).is_absolute()
-    {
-        bail!("remote.origin.url must be a portable git URL, got {url:?}");
-    }
-    let has_scheme = url.contains("://");
-    let is_scp_like_ssh = url
-        .split_once(':')
-        .is_some_and(|(prefix, suffix)| prefix.contains('@') && !suffix.is_empty());
-    if !has_scheme && !is_scp_like_ssh {
-        bail!("remote.origin.url must be a portable git URL, got {url:?}");
-    }
-    Ok(())
-}
-
-fn has_windows_drive_prefix(url: &str) -> bool {
-    let bytes = url.as_bytes();
-    bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'\\' && bytes[0].is_ascii_alphabetic()
-}
-
-fn git_output<const N: usize>(repo: &Path, args: [&str; N]) -> Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .with_context(|| format!("running git in {}", repo.display()))?;
-    if !output.status.success() {
-        bail!("git exited with {}", output.status);
-    }
-    Ok(String::from_utf8(output.stdout)
-        .context("git output was not utf-8")?
-        .trim()
-        .to_string())
-}
-
 fn toml_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -711,8 +654,8 @@ fn built_binary_path(crate_dir: &Path, target: Option<&str>) -> PathBuf {
         Some(target) => target_dir
             .join(target)
             .join("release")
-            .join(binary_name("agentropy")),
-        None => target_dir.join("release").join(binary_name("agentropy")),
+            .join(binary_name("dar")),
+        None => target_dir.join("release").join(binary_name("dar")),
     }
 }
 
@@ -729,14 +672,13 @@ mod tests {
 
         init_build(agent).unwrap();
 
-        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
-        let source = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        let source = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
         manifest.parse::<toml::Value>().unwrap();
         assert!(manifest.starts_with("# generated - do not hand-edit\n"));
         assert!(manifest.contains("\n[workspace]\n"));
-        assert!(manifest.contains("host-api = { git = "));
-        assert!(manifest.contains("rev = "));
-        assert!(!manifest.contains(repo_root().to_string_lossy().as_ref()));
+        assert!(manifest.contains("host-api = { package = \"dar-host-api\", version = "));
+        assert!(manifest.contains("version = \"0."));
         assert!(manifest.contains("my-ext = { path = \"../extensions/my-ext\" }"));
         assert!(source.starts_with("// # generated - do not hand-edit\n"));
         assert!(source.contains("my_ext::extension(),"));
@@ -747,11 +689,11 @@ mod tests {
 
         assert_eq!(
             manifest_before,
-            std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap()
+            std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap()
         );
         assert_eq!(
             source_before,
-            std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap()
+            std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap()
         );
     }
 
@@ -764,7 +706,7 @@ mod tests {
 
         build(agent).unwrap();
 
-        assert!(agent.join("bin").join(binary_name("agentropy")).is_file());
+        assert!(agent.join("bin").join(binary_name("dar")).is_file());
     }
 
     #[test]
@@ -774,13 +716,13 @@ mod tests {
         write_test_agent_yaml(agent);
 
         init_build(agent).unwrap();
-        let original_lock = std::fs::read_to_string(agent.join(".agentropy/Cargo.lock")).unwrap();
+        let original_lock = std::fs::read_to_string(agent.join(".dar/Cargo.lock")).unwrap();
 
         write_test_extension(agent);
         init_build(agent).unwrap();
 
-        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
-        let refreshed_lock = std::fs::read_to_string(agent.join(".agentropy/Cargo.lock")).unwrap();
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        let refreshed_lock = std::fs::read_to_string(agent.join(".dar/Cargo.lock")).unwrap();
         assert!(manifest.contains("my-ext = { path = \"../extensions/my-ext\" }"));
         assert_ne!(original_lock, refreshed_lock);
         assert!(refreshed_lock.contains("name = \"my-ext\""));
@@ -801,14 +743,14 @@ mod tests {
             err.to_string().contains("cargo exited"),
             "unexpected error: {err:#}"
         );
-        let lock = std::fs::read_to_string(agent.join(".agentropy/Cargo.lock")).unwrap();
+        let lock = std::fs::read_to_string(agent.join(".dar/Cargo.lock")).unwrap();
         assert!(!lock.contains("name = \"my-ext\""));
     }
 
     #[test]
     fn target_build_reads_binary_from_target_specific_release_dir() {
         let temp = tempfile::tempdir().unwrap();
-        let crate_dir = temp.path().join(".agentropy");
+        let crate_dir = temp.path().join(".dar");
         let target = "x86_64-unknown-linux-musl";
 
         assert_eq!(
@@ -817,21 +759,21 @@ mod tests {
                 .join("target")
                 .join(target)
                 .join("release")
-                .join(binary_name("agentropy"))
+                .join(binary_name("dar"))
         );
     }
 
     #[test]
     fn host_build_reads_binary_from_default_release_dir() {
         let temp = tempfile::tempdir().unwrap();
-        let crate_dir = temp.path().join(".agentropy");
+        let crate_dir = temp.path().join(".dar");
 
         assert_eq!(
             built_binary_path(&crate_dir, None),
             crate_dir
                 .join("target")
                 .join("release")
-                .join(binary_name("agentropy"))
+                .join(binary_name("dar"))
         );
     }
 
@@ -851,12 +793,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(agent.join(".agentropy/vendor").is_dir());
-        let config = std::fs::read_to_string(agent.join(".agentropy/.cargo/config.toml")).unwrap();
+        assert!(agent.join(".dar/vendor").is_dir());
+        let config = std::fs::read_to_string(agent.join(".dar/.cargo/config.toml")).unwrap();
         assert!(config.contains("vendored-sources"));
         assert!(config.contains("directory = \"vendor\""));
         run_cargo(
-            &agent.join(".agentropy"),
+            &agent.join(".dar"),
             &["build", "--release", "--locked", "--offline"],
         )
         .unwrap();
@@ -873,8 +815,8 @@ mod tests {
 
         lock_refresh(agent).unwrap();
 
-        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
-        let lock = std::fs::read_to_string(agent.join(".agentropy/Cargo.lock")).unwrap();
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        let lock = std::fs::read_to_string(agent.join(".dar/Cargo.lock")).unwrap();
         assert!(manifest.contains("my-ext = { path = \"../extensions/my-ext\" }"));
         assert!(lock.contains("name = \"my-ext\""));
     }
@@ -887,16 +829,16 @@ mod tests {
 
         init_build(agent).unwrap();
 
-        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
-        let source = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
-        assert!(manifest.contains("tracker-files = { git = "));
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        let source = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
+        assert!(manifest.contains("tracker-files = { package = \"dar-tracker-files\", version = "));
         assert!(manifest.contains("optional = true"));
         assert!(manifest.contains("[features]\ndefault = ["));
         assert!(manifest.contains("stock-tracker-files = [\"dep:tracker-files\"]"));
         assert!(manifest.contains("stock-runner-fake = [\"dep:runner-fake\"]"));
         assert!(manifest.contains("stock-orchestrator = [\"dep:orchestrator\"]"));
         assert!(manifest.contains("stock-frontend-log = [\"dep:frontend-log\"]"));
-        assert!(manifest.contains("tracker-linear = { git = "));
+        assert!(manifest.contains("tracker-linear = { package = \"dar-tracker-linear\", version = "));
         assert!(manifest.contains("stock-tracker-linear = [\"dep:tracker-linear\"]"));
         assert!(source.contains("tracker_linear::TrackerLinearExtension"));
         assert!(source.contains("#[cfg(feature = \"stock-tracker-files\")]"));
@@ -911,11 +853,11 @@ mod tests {
 
         init_build(agent).unwrap();
 
-        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
-        let source = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        let source = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
         for package in ["frontend-log", "chat-pi", "tui"] {
             assert!(
-                manifest.contains(&format!("{package} = {{ git = ")),
+                manifest.contains(&format!("{package} = {{ package = ")),
                 "{package} should be linked for foreground: tui"
             );
         }
@@ -932,11 +874,11 @@ mod tests {
 
         init_build(agent).unwrap();
 
-        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
-        let source = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
-        assert!(manifest.contains("chat-codex = { git = "));
-        assert!(manifest.contains("chat-pi = { git = "));
-        assert!(manifest.contains("runner-codex = { git = "));
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        let source = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
+        assert!(manifest.contains("chat-codex = { package = \"dar-chat-codex\", version = "));
+        assert!(manifest.contains("chat-pi = { package = \"dar-chat-pi\", version = "));
+        assert!(manifest.contains("runner-codex = { package = \"dar-runner-codex\", version = "));
         assert!(manifest.contains("stock-chat-codex = [\"dep:chat-codex\"]"));
         assert!(source.contains("chat_codex::ChatCodexExtension"));
         assert!(source.contains("chat_pi::ChatPiExtension"));
@@ -961,11 +903,11 @@ extensions:
 
         init_build(agent).unwrap();
 
-        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
-        let source = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
-        assert!(manifest.contains("chat-opencode = { git = "));
-        assert!(manifest.contains("chat-pi = { git = "));
-        assert!(manifest.contains("runner-fake = { git = "));
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        let source = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
+        assert!(manifest.contains("chat-opencode = { package = \"dar-chat-opencode\", version = "));
+        assert!(manifest.contains("chat-pi = { package = \"dar-chat-pi\", version = "));
+        assert!(manifest.contains("runner-fake = { package = \"dar-runner-fake\", version = "));
         assert!(manifest.contains("stock-chat-opencode = [\"dep:chat-opencode\"]"));
         assert!(source.contains("chat_opencode::ChatOpenCodeExtension"));
         assert!(source.contains("chat_pi::ChatPiExtension"));
@@ -990,10 +932,10 @@ extensions:
 
         init_build(agent).unwrap();
 
-        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
-        assert!(manifest.contains("chat-pi = { git = "));
-        assert!(manifest.contains("chat-codex = { git = "));
-        assert!(manifest.contains("chat-opencode = { git = "));
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        assert!(manifest.contains("chat-pi = { package = \"dar-chat-pi\", version = "));
+        assert!(manifest.contains("chat-codex = { package = \"dar-chat-codex\", version = "));
+        assert!(manifest.contains("chat-opencode = { package = \"dar-chat-opencode\", version = "));
     }
 
     #[test]
@@ -1004,7 +946,7 @@ extensions:
 
         init_build(agent).unwrap();
 
-        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
         for pkg in [
             "runner-pi",
             "runner-codex",
@@ -1013,7 +955,7 @@ extensions:
             "runner-fake",
         ] {
             assert!(
-                manifest.contains(&format!("{pkg} = {{ git = ")),
+                manifest.contains(&format!("{pkg} = {{ package = ")),
                 "{pkg} should always be linked regardless of runner.use"
             );
         }
@@ -1027,12 +969,12 @@ extensions:
 
         init_build(agent).unwrap();
 
-        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
         assert!(
-            manifest.contains("dashboard = { git = "),
+            manifest.contains("dashboard = { package = \"dar-dashboard\", version = "),
             "dashboard is baseline and must always be linked (presence registry)"
         );
-        let main = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
+        let main = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
         assert!(
             main.contains("dashboard::DashboardExtension::default()"),
             "dashboard extension must be in the generated plugins! list"
@@ -1047,10 +989,10 @@ extensions:
 
         compose(agent).unwrap();
 
-        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
-        let main = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        let main = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
         assert!(
-            !manifest.contains("scheduler = { git = "),
+            !manifest.contains("scheduler = { package = "),
             "scheduler must be opt-in: absent agent.yaml section → not linked"
         );
         assert!(!main.contains("scheduler::SchedulerExtension"));
@@ -1070,9 +1012,9 @@ extensions:
 
         compose(agent).unwrap();
 
-        let manifest = std::fs::read_to_string(agent.join(".agentropy/Cargo.toml")).unwrap();
-        let main = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
-        assert!(manifest.contains("scheduler = { git = "));
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        let main = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
+        assert!(manifest.contains("scheduler = { package = \"dar-scheduler\", version = "));
         assert!(manifest.contains("stock-scheduler = [\"dep:scheduler\"]"));
         assert!(main.contains("#[cfg(feature = \"stock-scheduler\")]"));
         assert!(main.contains("scheduler::SchedulerExtension"));
@@ -1104,7 +1046,7 @@ extensions:
 
         // enabled:false is a runtime kill switch, not a build-time exclusion:
         // the extension still links and loads, then stays idle at runtime.
-        let main = std::fs::read_to_string(agent.join(".agentropy/src/main.rs")).unwrap();
+        let main = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
         assert!(main.contains("scheduler::SchedulerExtension"));
     }
 
@@ -1116,40 +1058,22 @@ extensions:
         );
     }
 
-    #[test]
-    fn local_git_remotes_are_rejected_for_generated_stock_deps() {
-        ensure_portable_git_url("https://github.com/tobalsan/dar.git").unwrap();
-        ensure_portable_git_url("ssh://git@github.com/tobalsan/dar.git").unwrap();
-        ensure_portable_git_url("git@github.com:tobalsan/dar.git").unwrap();
-        assert!(ensure_portable_git_url("/Users/me/dar").is_err());
-        assert!(ensure_portable_git_url("C:\\Users\\me\\dar").is_err());
-        assert!(ensure_portable_git_url("file:///Users/me/dar").is_err());
-        assert!(ensure_portable_git_url("FILE:///Users/me/dar").is_err());
-        assert!(ensure_portable_git_url("dar.git").is_err());
-        assert!(ensure_portable_git_url("some/path/dar.git").is_err());
-        assert!(ensure_portable_git_url("../dar").is_err());
-    }
-
     fn write_test_extension(agent: &Path) {
         let extension = agent.join("extensions/my-ext");
         std::fs::create_dir_all(extension.join("src")).unwrap();
-        let source = stock_source().unwrap();
         std::fs::write(
             extension.join("Cargo.toml"),
-            format!(
-                r#"[package]
+            r#"[package]
 name = "my-ext"
 version = "0.1.0"
 edition = "2021"
 
-[package.metadata.agentropy]
+[package.metadata.dar]
 factory = "my_ext::extension"
 
 [dependencies]
-host-api = {{ git = "{}", rev = "{}" }}
+host-api = { version = "0.2" }
 "#,
-                source.git, source.rev
-            ),
         )
         .unwrap();
         std::fs::write(

@@ -1,14 +1,20 @@
 [package]
-name = "runner-cli"
-version = "0.2.0"
-edition = "2021"
+name = "dar-runner-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI runner extension: runs an arbitrary command with the AGENT_* environment contract"
 rust-version = "1.83"
+
+[lib]
+name = "runner_cli"
 
 [dependencies]
 anyhow = "1"
-cap-runner = { path = "../../crates/cap-runner" }
-host-api = { path = "../../crates/host-api" }
-runner-core = { path = "../../crates/runner-core" }
+cap-runner = { package = "dar-cap-runner", path = "../../crates/cap-runner", version = "0.2" }
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.2" }
+runner-core = { package = "dar-runner-core", path = "../../crates/runner-core", version = "0.2" }
 
 [dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }

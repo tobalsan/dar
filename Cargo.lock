@@ -3,82 +3,6 @@
 version = 4
 
 [[package]]
-name = "agentropy"
-version = "0.2.1"
-dependencies = [
- "agentropy-cli",
- "anyhow",
- "chat-codex",
- "chat-opencode",
- "chat-pi",
- "clap",
- "dashboard",
- "frontend-log",
- "host-api",
- "orchestrator",
- "runner-cli",
- "runner-codex",
- "runner-fake",
- "runner-opencode",
- "runner-pi",
- "scheduler",
- "tokio",
- "tool-registry-host",
- "tracker-files",
- "tracker-linear",
- "tui",
-]
-
-[[package]]
-name = "agentropy-cli"
-version = "0.2.2"
-dependencies = [
- "agentropy-host",
- "agentropy-presence",
- "anyhow",
- "async-trait",
- "axum 0.8.9",
- "cap-runner",
- "clap",
- "fs2",
- "host-api",
- "orchestrator",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tokio",
- "toml",
- "tool-registry",
-]
-
-[[package]]
-name = "agentropy-host"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "axum 0.8.9",
- "crossterm",
- "host-api",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "agentropy-presence"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hex",
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -411,45 +335,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
-name = "cap-chat"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "cap-runner",
- "tokio",
-]
-
-[[package]]
-name = "cap-dashboard-tab"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "host-api",
-]
-
-[[package]]
-name = "cap-runner"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "chrono",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "cap-tracker"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "chrono",
- "minijinja",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "cassowary"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -485,49 +370,6 @@ name = "cfg_aliases"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
-
-[[package]]
-name = "chat-codex"
-version = "0.2.1"
-dependencies = [
- "anyhow",
- "cap-chat",
- "host-api",
- "nix",
- "runner-core",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "chat-opencode"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "cap-chat",
- "host-api",
- "nix",
- "opencode-client",
- "runner-core",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "chat-pi"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "cap-chat",
- "host-api",
- "nix",
- "runner-core",
- "serde_json",
- "tempfile",
- "tokio",
-]
 
 [[package]]
 name = "chrono"
@@ -690,6 +532,487 @@ dependencies = [
 ]
 
 [[package]]
+name = "dar-cap-chat"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "dar-cap-runner",
+ "tokio",
+]
+
+[[package]]
+name = "dar-cap-dashboard-tab"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "dar-host-api",
+]
+
+[[package]]
+name = "dar-cap-runner"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "dar-cap-tracker"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "minijinja",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dar-chat-codex"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "dar-cap-chat",
+ "dar-host-api",
+ "dar-runner-core",
+ "nix",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "dar-chat-opencode"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "dar-cap-chat",
+ "dar-host-api",
+ "dar-opencode-client",
+ "dar-runner-core",
+ "nix",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "dar-chat-pi"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "dar-cap-chat",
+ "dar-host-api",
+ "dar-runner-core",
+ "nix",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "dar-cli"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dar-chat-codex",
+ "dar-chat-opencode",
+ "dar-chat-pi",
+ "dar-cli-core",
+ "dar-dashboard",
+ "dar-frontend-log",
+ "dar-host-api",
+ "dar-orchestrator",
+ "dar-runner-cli",
+ "dar-runner-codex",
+ "dar-runner-fake",
+ "dar-runner-opencode",
+ "dar-runner-pi",
+ "dar-scheduler",
+ "dar-tool-registry-host",
+ "dar-tracker-files",
+ "dar-tracker-linear",
+ "dar-tui",
+ "tokio",
+]
+
+[[package]]
+name = "dar-cli-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.9",
+ "clap",
+ "dar-cap-runner",
+ "dar-host",
+ "dar-host-api",
+ "dar-orchestrator",
+ "dar-presence",
+ "dar-tool-registry",
+ "fs2",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "dar-dashboard"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "askama",
+ "axum 0.8.9",
+ "chrono",
+ "dar-cap-dashboard-tab",
+ "dar-cap-tracker",
+ "dar-host-api",
+ "dar-orchestrator-api",
+ "dar-presence",
+ "example",
+ "hex",
+ "hmac",
+ "http-body-util",
+ "mime_guess",
+ "minijinja",
+ "pulldown-cmark",
+ "reqwest",
+ "rusqlite",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "dar-frontend-log"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "dar-host-api",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "dar-host"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.9",
+ "crossterm",
+ "dar-host-api",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "dar-host-api"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.9",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "dar-opencode-client"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "bytes",
+ "dar-runner-core",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "dar-orchestrator"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dar-cap-runner",
+ "dar-cap-tracker",
+ "dar-host-api",
+ "dar-orchestrator-api",
+ "dar-runner-cli",
+ "dar-runner-codex",
+ "dar-runner-core",
+ "dar-runner-fake",
+ "dar-runner-pi",
+ "dar-system-files",
+ "dar-tool-registry",
+ "dar-tracker-files",
+ "dar-tracker-linear",
+ "minijinja",
+ "nix",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "dar-orchestrator-api"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "tokio",
+]
+
+[[package]]
+name = "dar-presence"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "dar-runner-cli"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dar-cap-runner",
+ "dar-host-api",
+ "dar-runner-core",
+]
+
+[[package]]
+name = "dar-runner-codex"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dar-cap-runner",
+ "dar-host-api",
+ "dar-runner-core",
+ "nix",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "dar-runner-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dar-cap-runner",
+ "dar-host-api",
+ "dar-tool-registry",
+ "nix",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dar-runner-fake"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dar-cap-runner",
+ "dar-host-api",
+ "dar-runner-core",
+]
+
+[[package]]
+name = "dar-runner-opencode"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dar-cap-runner",
+ "dar-host-api",
+ "dar-opencode-client",
+ "dar-runner-core",
+ "nix",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "dar-runner-pi"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dar-cap-runner",
+ "dar-host-api",
+ "dar-runner-core",
+ "nix",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "dar-scheduler"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.9",
+ "chrono",
+ "chrono-tz",
+ "croner",
+ "dar-cap-dashboard-tab",
+ "dar-cap-runner",
+ "dar-dashboard",
+ "dar-host-api",
+ "dar-runner-core",
+ "dar-tool-registry",
+ "dar-tool-registry-host",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "dar-system-files"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
+ "tempfile",
+]
+
+[[package]]
+name = "dar-tool-registry"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "dar-tool-registry-host"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "dar-host-api",
+ "dar-tool-registry",
+]
+
+[[package]]
+name = "dar-tool-shim"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dar-cli-core",
+ "dar-tool-registry",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "dar-tracker-files"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dar-cap-tracker",
+ "dar-host-api",
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "dar-tracker-linear"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dar-cap-tracker",
+ "dar-host-api",
+ "dar-tool-registry",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dar-tui"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "crossterm",
+ "dar-cap-chat",
+ "dar-chat-pi",
+ "dar-frontend-log",
+ "dar-host-api",
+ "dar-orchestrator-api",
+ "dar-tool-registry",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -756,42 +1079,6 @@ dependencies = [
  "darling_core 0.23.0",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "dashboard"
-version = "0.2.0"
-dependencies = [
- "agentropy-presence",
- "anyhow",
- "askama",
- "axum 0.8.9",
- "cap-dashboard-tab",
- "cap-tracker",
- "chrono",
- "example",
- "hex",
- "hmac",
- "host-api",
- "http-body-util",
- "mime_guess",
- "minijinja",
- "orchestrator-api",
- "pulldown-cmark",
- "reqwest",
- "rusqlite",
- "rust-embed",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "subtle",
- "tempfile",
- "tokio",
- "tower",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -886,8 +1173,8 @@ name = "example"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "cap-dashboard-tab",
- "host-api",
+ "dar-cap-dashboard-tab",
+ "dar-host-api",
  "serde",
  "serde_json",
  "tempfile",
@@ -901,12 +1188,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "host-api",
+ "dar-host-api",
+ "dar-tool-registry",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "tool-registry",
 ]
 
 [[package]]
@@ -915,16 +1202,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "cap-chat",
- "cap-runner",
- "chat-pi",
- "host-api",
- "opencode-client",
+ "dar-cap-chat",
+ "dar-cap-runner",
+ "dar-chat-pi",
+ "dar-host-api",
+ "dar-opencode-client",
+ "dar-tool-registry",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "tool-registry",
 ]
 
 [[package]]
@@ -991,16 +1278,6 @@ checksum = "e076045bb43dac435333ed5f04caf35c7463631d0dae2deb2638d94dd0a5b872"
 dependencies = [
  "lazy_static",
  "num",
-]
-
-[[package]]
-name = "frontend-log"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "host-api",
- "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -1187,16 +1464,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest",
-]
-
-[[package]]
-name = "host-api"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "axum 0.8.9",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -1830,65 +2097,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "opencode-client"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "axum 0.7.9",
- "bytes",
- "futures-util",
- "reqwest",
- "runner-core",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "orchestrator"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "cap-runner",
- "cap-tracker",
- "chrono",
- "clap",
- "host-api",
- "minijinja",
- "nix",
- "orchestrator-api",
- "reqwest",
- "runner-cli",
- "runner-codex",
- "runner-core",
- "runner-fake",
- "runner-pi",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_yaml",
- "system-files",
- "tempfile",
- "tokio",
- "tool-registry",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "tracker-files",
- "tracker-linear",
-]
-
-[[package]]
-name = "orchestrator-api"
-version = "0.2.0"
-dependencies = [
- "chrono",
- "serde",
- "tokio",
-]
-
-[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2236,91 +2444,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "runner-cli"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "cap-runner",
- "chrono",
- "host-api",
- "runner-core",
-]
-
-[[package]]
-name = "runner-codex"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "cap-runner",
- "chrono",
- "host-api",
- "nix",
- "runner-core",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "runner-core"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "cap-runner",
- "chrono",
- "host-api",
- "nix",
- "serde_json",
- "tempfile",
- "tokio",
- "tool-registry",
- "tracing",
-]
-
-[[package]]
-name = "runner-fake"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "cap-runner",
- "chrono",
- "host-api",
- "runner-core",
-]
-
-[[package]]
-name = "runner-opencode"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "cap-runner",
- "chrono",
- "host-api",
- "nix",
- "opencode-client",
- "runner-core",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "runner-pi"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "cap-runner",
- "chrono",
- "host-api",
- "nix",
- "runner-core",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "rusqlite"
 version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2457,33 +2580,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
-]
-
-[[package]]
-name = "scheduler"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum 0.8.9",
- "cap-dashboard-tab",
- "cap-runner",
- "chrono",
- "chrono-tz",
- "croner",
- "dashboard",
- "host-api",
- "http-body-util",
- "runner-core",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tokio",
- "tool-registry",
- "tool-registry-host",
- "tower",
- "tracing",
 ]
 
 [[package]]
@@ -2787,15 +2883,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "system-files"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_yaml",
- "tempfile",
-]
-
-[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2996,40 +3083,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
-name = "tool-registry"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "jsonschema",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "tool-registry-host"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "host-api",
- "tool-registry",
-]
-
-[[package]]
-name = "tool-shim"
-version = "0.1.0"
-dependencies = [
- "agentropy-cli",
- "anyhow",
- "async-trait",
- "serde",
- "serde_json",
- "tokio",
- "tool-registry",
-]
-
-[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3151,63 +3204,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracker-files"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "cap-tracker",
- "chrono",
- "host-api",
- "serde",
- "serde_yaml",
- "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "tracker-linear"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "cap-tracker",
- "chrono",
- "host-api",
- "reqwest",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tokio",
- "tool-registry",
- "tracing",
-]
-
-[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
-
-[[package]]
-name = "tui"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "cap-chat",
- "chat-pi",
- "chrono",
- "crossterm",
- "frontend-log",
- "host-api",
- "orchestrator-api",
- "ratatui",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tool-registry",
-]
 
 [[package]]
 name = "tungstenite"

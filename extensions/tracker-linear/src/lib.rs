@@ -624,7 +624,7 @@ impl LinearTracker {
     /// Fetch every Linear user (all pages) to resolve configured user filters.
     async fn fetch_users_async(&self) -> Result<Vec<LinearUser>> {
         let query = r#"
-query AgentropyUsers($after: String, $first: Int!) {
+query DarUsers($after: String, $first: Int!) {
   users(first: $first, after: $after) {
     pageInfo { hasNextPage endCursor }
     nodes { id name displayName email }
@@ -685,7 +685,7 @@ query AgentropyUsers($after: String, $first: Int!) {
 
     async fn fetch_page_async(&self, filter: &Value, after: Option<&str>) -> Result<IssuePage> {
         let query = r#"
-query AgentropyCandidates($filter: IssueFilter, $after: String, $first: Int!) {
+query DarCandidates($filter: IssueFilter, $after: String, $first: Int!) {
   issues(filter: $filter, first: $first, after: $after) {
     pageInfo { hasNextPage endCursor }
     nodes {
@@ -964,7 +964,7 @@ query AgentropyCandidates($filter: IssueFilter, $after: String, $first: Int!) {
             })?;
 
         let mutation = r#"
-mutation AgentropyParkIssue($issueId: String!, $stateId: String!, $body: String!) {
+mutation DarParkIssue($issueId: String!, $stateId: String!, $body: String!) {
   issueUpdate(id: $issueId, input: { stateId: $stateId }) {
     success
   }
@@ -989,7 +989,7 @@ mutation AgentropyParkIssue($issueId: String!, $stateId: String!, $body: String!
     /// targeted `issue(id:)` query instead of a full paginated project scan.
     async fn fetch_one_issue_async(&self, id: &str) -> Result<Option<Issue>> {
         let query = r#"
-query AgentropyFetchOne($id: String!) {
+query DarFetchOne($id: String!) {
   issue(id: $id) {
     id
     identifier
@@ -1031,7 +1031,7 @@ query AgentropyFetchOne($id: String!) {
 
     async fn fetch_issue_team_state_id(&self, issue_id: &str, state_name: &str) -> Result<String> {
         let query = r#"
-query AgentropyNeedsHumanState($issueId: String!, $stateName: String!) {
+query DarNeedsHumanState($issueId: String!, $stateName: String!) {
   issue(id: $issueId) {
     team {
       states(filter: { name: { eq: $stateName } }, first: 1) {
@@ -1574,7 +1574,7 @@ mod tests {
               "assignee": { "id": "u1", "displayName": "thinh" },
               "delegate": { "id": "u2", "displayName": "workeragent", "name": "Worker Agent", "email": "workeragent@linear.app" },
               "labels": { "nodes": [{ "name": "backend" }] },
-              "project": { "name": "Agentropy", "slugId": "agentropy" },
+              "project": { "name": "Dar", "slugId": "dar" },
               "parent": { "id": "parent-1", "identifier": "ALG-0" },
               "inverseRelations": { "nodes": [] }
             }"#,
@@ -1605,8 +1605,8 @@ mod tests {
         );
         assert_eq!(mapped.labels, vec!["backend"]);
         assert_eq!(mapped.parent_id.as_deref(), Some("parent-1"));
-        assert_eq!(mapped.project_name.as_deref(), Some("Agentropy"));
-        assert_eq!(mapped.project_slug.as_deref(), Some("agentropy"));
+        assert_eq!(mapped.project_name.as_deref(), Some("Dar"));
+        assert_eq!(mapped.project_slug.as_deref(), Some("dar"));
     }
 
     #[test]
@@ -1689,8 +1689,8 @@ mod tests {
         super::init_workflow_with_options(
             dir.path(),
             false,
-            Some("agentropy"),
-            Some("Agentropy"),
+            Some("dar"),
+            Some("Dar"),
             true,
         )
         .unwrap();
@@ -1698,8 +1698,8 @@ mod tests {
         let body = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
         assert!(body.starts_with("---\n"));
         assert!(body.contains("  kind: linear\n"));
-        assert!(body.contains("  project_slug: agentropy\n"));
-        assert!(body.contains("  project: Agentropy\n"));
+        assert!(body.contains("  project_slug: dar\n"));
+        assert!(body.contains("  project: Dar\n"));
         assert!(body.contains("  exposeGraphqlTool: true\n"));
     }
 
@@ -1761,7 +1761,7 @@ mod tests {
 
     fn dims_project() -> ResolvedDims {
         ResolvedDims {
-            project_slug: Some("agentropy".into()),
+            project_slug: Some("dar".into()),
             ..Default::default()
         }
     }
@@ -1773,7 +1773,7 @@ mod tests {
         assert_eq!(
             f,
             json!({ "and": [
-                { "project": { "slugId": { "eq": "agentropy" } } },
+                { "project": { "slugId": { "eq": "dar" } } },
                 { "state": { "name": { "in": ["Todo"] } } }
             ]})
         );
@@ -1882,7 +1882,7 @@ mod tests {
     #[test]
     fn filter_all_dimensions_combined() {
         let dims = ResolvedDims {
-            project_slug: Some("agentropy".into()),
+            project_slug: Some("dar".into()),
             team_key: Some("ALG".into()),
             assignee_id: Some("u1".into()),
             delegate_id: Some("u2".into()),
@@ -1892,7 +1892,7 @@ mod tests {
         assert_eq!(
             f,
             json!({ "and": [
-                { "project": { "slugId": { "eq": "agentropy" } } },
+                { "project": { "slugId": { "eq": "dar" } } },
                 { "team": { "key": { "eq": "ALG" } } },
                 { "assignee": { "id": { "eq": "u1" } } },
                 { "delegate": { "id": { "eq": "u2" } } },
@@ -1916,7 +1916,7 @@ mod tests {
         let f = build_issue_filter(&dims_project(), &[]);
         assert_eq!(
             f,
-            json!({ "and": [{ "project": { "slugId": { "eq": "agentropy" } } }] })
+            json!({ "and": [{ "project": { "slugId": { "eq": "dar" } } }] })
         );
     }
 

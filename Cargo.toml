@@ -1,9 +1,9 @@
 [workspace]
 members = [
     "dist",
-    "crates/agentropy-cli",
-    "crates/agentropy-host",
-    "crates/agentropy-presence",
+    "crates/dar-cli",
+    "crates/dar-host",
+    "crates/dar-presence",
     "crates/cap-chat",
     "crates/cap-dashboard-tab",
     "crates/cap-tracker",
@@ -36,6 +36,12 @@ members = [
     "example-agent/extensions/example-jobs",
 ]
 resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+license = "MIT"
+edition = "2021"
+repository = "https://github.com/tobalsan/dar"
 
 [profile.release]
 strip = true

@@ -1,8 +1,8 @@
 //! End-to-end coverage for the boot-time crashloop safety net (ALG-244).
 //!
 //! Uses the `self_check_probe` helper binary as a stand-in for a freshly
-//! self-updated `bin/agentropy`. The probe runs the real
-//! `agentropy_cli::self_check::guard_boot`; we control whether its own
+//! self-updated `bin/dar`. The probe runs the real
+//! `dar_cli_core::self_check::guard_boot`; we control whether its own
 //! `--self-check` passes or fails via an env var, and assert on the resulting
 //! boot behaviour.
 
@@ -37,17 +37,17 @@ fn install_prev_marker(prev: &Path, marker: &Path) {
 fn failing_self_check_execs_into_prev() {
     let temp = tempfile::tempdir().unwrap();
     let bin = temp.path().join("bin");
-    let current = bin.join("agentropy");
-    let prev = bin.join("agentropy.prev");
+    let current = bin.join("dar");
+    let prev = bin.join("dar.prev");
     let marker = temp.path().join("rolled-back.txt");
 
     install_current(&current);
     install_prev_marker(&prev, &marker);
 
     // The current binary fails its own --self-check, so guard_boot must execv
-    // into bin/agentropy.prev rather than panic or exit non-zero.
+    // into bin/dar.prev rather than panic or exit non-zero.
     let status = Command::new(&current)
-        .env("AGENTROPY_PROBE_SELF_CHECK_EXIT", "1")
+        .env("DAR_PROBE_SELF_CHECK_EXIT", "1")
         .status()
         .unwrap();
 
@@ -62,12 +62,12 @@ fn failing_self_check_execs_into_prev() {
 #[test]
 fn failing_self_check_without_prev_errors_clearly() {
     let temp = tempfile::tempdir().unwrap();
-    let current = temp.path().join("bin").join("agentropy");
+    let current = temp.path().join("bin").join("dar");
     install_current(&current);
 
     // No .prev present: must fail with an actionable error, not crashloop.
     let output = Command::new(&current)
-        .env("AGENTROPY_PROBE_SELF_CHECK_EXIT", "1")
+        .env("DAR_PROBE_SELF_CHECK_EXIT", "1")
         .output()
         .unwrap();
 
@@ -83,8 +83,8 @@ fn failing_self_check_without_prev_errors_clearly() {
 fn healthy_self_check_boots_without_rollback() {
     let temp = tempfile::tempdir().unwrap();
     let bin = temp.path().join("bin");
-    let current = bin.join("agentropy");
-    let prev = bin.join("agentropy.prev");
+    let current = bin.join("dar");
+    let prev = bin.join("dar.prev");
     let marker = temp.path().join("rolled-back.txt");
 
     install_current(&current);
@@ -92,7 +92,7 @@ fn healthy_self_check_boots_without_rollback() {
 
     // Healthy self-check: boot proceeds, no execv into .prev.
     let output = Command::new(&current)
-        .env("AGENTROPY_PROBE_SELF_CHECK_EXIT", "0")
+        .env("DAR_PROBE_SELF_CHECK_EXIT", "0")
         .output()
         .unwrap();
 

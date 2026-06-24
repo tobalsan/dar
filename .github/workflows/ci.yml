@@ -29,26 +29,26 @@ jobs:
       fail-fast: false
       matrix:
         crate:
-          - agentropy
-          - agentropy-host
-          - host-api
-          - cap-chat
-          - cap-runner
-          - cap-tracker
-          - orchestrator-api
-          - runner-core
-          - chat-pi
-          - dashboard
+          - dar-cli
+          - dar-host
+          - dar-host-api
+          - dar-cap-chat
+          - dar-cap-runner
+          - dar-cap-tracker
+          - dar-orchestrator-api
+          - dar-runner-core
+          - dar-chat-pi
+          - dar-dashboard
           - example
-          - frontend-log
-          - orchestrator
-          - runner-cli
-          - runner-codex
-          - runner-fake
-          - runner-pi
-          - tracker-files
-          - tracker-linear
-          - tui
+          - dar-frontend-log
+          - dar-orchestrator
+          - dar-runner-cli
+          - dar-runner-codex
+          - dar-runner-fake
+          - dar-runner-pi
+          - dar-tracker-files
+          - dar-tracker-linear
+          - dar-tui
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

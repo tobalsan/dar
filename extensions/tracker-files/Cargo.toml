@@ -1,14 +1,20 @@
 [package]
-name = "tracker-files"
-version = "0.2.0"
-edition = "2021"
+name = "dar-tracker-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "File-backed issue tracker extension for dar"
 rust-version = "1.83"
+
+[lib]
+name = "tracker_files"
 
 [dependencies]
 anyhow = "1"
-cap-tracker = { path = "../../crates/cap-tracker" }
+cap-tracker = { package = "dar-cap-tracker", path = "../../crates/cap-tracker", version = "0.2" }
 chrono = { version = "0.4", features = ["serde"] }
-host-api = { path = "../../crates/host-api" }
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.2" }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 tracing = "0.1"

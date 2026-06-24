@@ -1,10 +1,16 @@
 [package]
-name = "tool-registry-host"
-version = "0.1.0"
-edition = "2021"
+name = "dar-tool-registry-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host tool-registry extension: publishes the shared ToolRegistry as a service"
 rust-version = "1.83"
+
+[lib]
+name = "tool_registry_host"
 
 [dependencies]
 anyhow = "1"
-host-api = { path = "../../crates/host-api" }
-tool-registry = { path = "../../crates/tool-registry" }
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.2" }
+tool-registry = { package = "dar-tool-registry", path = "../../crates/tool-registry", version = "0.2" }

@@ -9,7 +9,7 @@
 //!     config and instantiates every extension — then exits `0`/non-zero.
 //!   * At boot, before the long-running `run` loop starts, the binary spawns
 //!     itself with `--self-check`. If that child exits non-zero and a
-//!     `bin/agentropy.prev` sits next to the running binary, `main()` `execv`s
+//!     `bin/dar.prev` sits next to the running binary, `main()` `execv`s
 //!     into `.prev` so a binary that passed the doctor gate but still fails to
 //!     boot rolls back to the last-known-good binary instead of crashlooping.
 //!   * With no `.prev` present, boot fails with a clear, actionable error
@@ -24,10 +24,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use host_api::Extension;
 
-/// Env guard set before `execv`-ing into `bin/agentropy.prev`. The rolled-back
+/// Env guard set before `execv`-ing into `bin/dar.prev`. The rolled-back
 /// binary sees it and skips the boot guard, so a `.prev` that is also broken
 /// fails loudly instead of looping back into itself.
-const FALLBACK_GUARD_ENV: &str = "AGENTROPY_SELF_CHECK_FALLBACK";
+const FALLBACK_GUARD_ENV: &str = "DAR_SELF_CHECK_FALLBACK";
 
 /// Detect the `--self-check` flag in the raw argument list and resolve the agent
 /// root from a sibling `--dir <path>` (defaulting to the current directory).
@@ -88,7 +88,7 @@ async fn check(root: &Path, plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
 }
 
 /// Boot-time crashloop guard. Spawns `current_exe --self-check --dir <root>`;
-/// when that child exits non-zero, `execv`s into `bin/agentropy.prev` if it
+/// when that child exits non-zero, `execv`s into `bin/dar.prev` if it
 /// exists, otherwise returns an actionable error. A healthy self-check returns
 /// `Ok(())` and boot continues with no extra `execv` hop.
 pub fn guard_boot(root: &Path) -> Result<()> {
@@ -115,7 +115,7 @@ pub fn guard_boot(root: &Path) -> Result<()> {
         Some(prev) => exec_prev(&prev),
         None => Err(anyhow::anyhow!(
             "self-check failed (exit {}) and no rollback binary exists at {}; \
-             refusing to crashloop. Rebuild with `agentropy build --dir {}` \
+             refusing to crashloop. Rebuild with `dar build --dir {}` \
              or restore a known-good binary.",
             status
                 .code()
@@ -127,7 +127,7 @@ pub fn guard_boot(root: &Path) -> Result<()> {
     }
 }
 
-/// Path to the rollback binary that sits next to `exe` (`bin/agentropy.prev`).
+/// Path to the rollback binary that sits next to `exe` (`bin/dar.prev`).
 fn prev_path(exe: &Path) -> PathBuf {
     let dir = exe.parent().unwrap_or_else(|| Path::new("."));
     let name = exe
@@ -137,7 +137,7 @@ fn prev_path(exe: &Path) -> PathBuf {
             name.push(".prev");
             name
         })
-        .unwrap_or_else(|| OsString::from("agentropy.prev"));
+        .unwrap_or_else(|| OsString::from("dar.prev"));
     dir.join(name)
 }
 
@@ -174,20 +174,20 @@ mod tests {
 
     #[test]
     fn prev_path_appends_prev_suffix() {
-        let exe = Path::new("/agent/bin/agentropy");
-        assert_eq!(prev_path(exe), Path::new("/agent/bin/agentropy.prev"));
+        let exe = Path::new("/agent/bin/dar");
+        assert_eq!(prev_path(exe), Path::new("/agent/bin/dar.prev"));
     }
 
     #[test]
     fn prev_binary_found_only_when_file_present() {
         let temp = tempfile::tempdir().unwrap();
-        let exe = temp.path().join("bin/agentropy");
+        let exe = temp.path().join("bin/dar");
         write_executable(&exe, "current");
         assert!(prev_binary(&exe).is_none());
-        write_executable(&temp.path().join("bin/agentropy.prev"), "prev");
+        write_executable(&temp.path().join("bin/dar.prev"), "prev");
         assert_eq!(
             prev_binary(&exe),
-            Some(temp.path().join("bin/agentropy.prev"))
+            Some(temp.path().join("bin/dar.prev"))
         );
     }
 }

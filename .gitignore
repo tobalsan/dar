@@ -9,7 +9,7 @@ example-agent/workspaces/*
 !example-agent/workspaces/.gitkeep
 example-agent/logs/*
 !example-agent/logs/.gitkeep
-example-agent/.agentropy/target/
+example-agent/.dar/target/
 example-agent/bin/
 # Runtime-created backing file for the example-jobs demo tools
 example-agent/jobs.json

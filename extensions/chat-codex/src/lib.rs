@@ -300,7 +300,7 @@ fn codex_args(params: &ChatSessionParams) -> Vec<OsString> {
     // Wire the host MCP bridge as a codex MCP server on the same app-server
     // invocation so the chat agent calls the same registry tools an issue
     // worker does; results return inside the same thread/turn. Reuses the
-    // runner's `-c mcp_servers.agentropy.*` writer.
+    // runner's `-c mcp_servers.dar.*` writer.
     if let Some(bridge) = &params.host_tool_bridge {
         args.extend(runner_core::codex_mcp_bridge_args(bridge));
     }

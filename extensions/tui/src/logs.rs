@@ -306,7 +306,7 @@ mod tests {
             Some(event(
                 "INFO",
                 "issue=- event=startup",
-                "agentropy running; dashboard on http://127.0.0.1:7878/",
+                "dar running; dashboard on http://127.0.0.1:7878/",
             )),
         )
         .unwrap();
@@ -315,7 +315,7 @@ mod tests {
         feed.apply(delivery, &mut logs);
         assert_eq!(
             logs.rows.back().unwrap().text(),
-            "INFO issue=- event=startup agentropy running; dashboard on http://127.0.0.1:7878/"
+            "INFO issue=- event=startup dar running; dashboard on http://127.0.0.1:7878/"
         );
         // One-shot: the banner watch is no longer pending, so a re-publish
         // can never print it a second time.

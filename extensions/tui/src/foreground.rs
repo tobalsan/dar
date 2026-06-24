@@ -2,7 +2,7 @@
 //! byte-for-byte `frontend-log` behavior on a non-interactive one.
 //!
 //! The host already enabled raw mode + the alternate screen and installed the
-//! restoring panic hook before `Foreground::run` (see `agentropy-host`); the
+//! restoring panic hook before `Foreground::run` (see `dar-host`); the
 //! [`ExclusiveTerminal`]'s `restore()`/`Drop` undoes it. This extension adds
 //! no terminal lifecycle of its own — it only writes through [`TermWriter`].
 
@@ -449,11 +449,11 @@ mod tests {
                 Some(LogEvent {
                     level: "INFO".to_string(),
                     target: "issue=- event=startup".to_string(),
-                    message: "agentropy running; dashboard on http://127.0.0.1:7878/".to_string(),
+                    message: "dar running; dashboard on http://127.0.0.1:7878/".to_string(),
                 }),
             )
             .unwrap();
-        wait_for(&buf, "agentropy running").await;
+        wait_for(&buf, "dar running").await;
 
         host.bus
             .publish(
@@ -501,7 +501,7 @@ mod tests {
         assert_eq!(tui_output, logs_output);
         assert_eq!(
             tui_output,
-            "INFO issue=- event=startup agentropy running; dashboard on http://127.0.0.1:7878/\n\
+            "INFO issue=- event=startup dar running; dashboard on http://127.0.0.1:7878/\n\
              INFO issue=ISSUE-1 event=dispatched runner started\n\
              WARN issue=ISSUE-1 event=stalled no events for 30s\n"
         );

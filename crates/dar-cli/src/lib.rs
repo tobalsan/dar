@@ -1,4 +1,4 @@
-//! Reusable agentropy CLI boot wiring.
+//! Reusable dar CLI boot wiring.
 
 pub mod bridge;
 mod cli;
@@ -28,7 +28,7 @@ use orchestrator::workflow_config::EffectiveLoopConfig;
 
 pub async fn run(plugins: Vec<Arc<dyn Extension>>) {
     if let Err(e) = run_inner(plugins).await {
-        eprintln!("agentropy: {e:#}");
+        eprintln!("dar: {e:#}");
         std::process::exit(1);
     }
 }
@@ -77,7 +77,7 @@ async fn run_host(root: std::path::PathBuf, plugins: Vec<Arc<dyn Extension>>) ->
     let config = ConfigStore::from_values(agent_config.extension_configs()?);
     let hitl = startup_hitl(&root);
     let hitl_for_hook = Arc::clone(&hitl);
-    let options = agentropy_host::HostOptions::new(root)
+    let options = dar_host::HostOptions::new(root)
         .without_dotenv()
         .http_addr(bind, port)
         .config(config)
@@ -89,7 +89,7 @@ async fn run_host(root: std::path::PathBuf, plugins: Vec<Arc<dyn Extension>>) ->
                 message.to_string(),
             ));
         });
-    let result = agentropy_host::boot(plugins, options).await;
+    let result = dar_host::boot(plugins, options).await;
     hitl.stop();
     result
 }
@@ -313,9 +313,9 @@ mod tests {
 
     #[test]
     fn clap_display_errors_remain_successful_exits() {
-        let err = Cli::try_parse_from(["agentropy", "--help"]).unwrap_err();
+        let err = Cli::try_parse_from(["dar", "--help"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-        let err = Cli::try_parse_from(["agentropy", "run", "--help"]).unwrap_err();
+        let err = Cli::try_parse_from(["dar", "run", "--help"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
     }
 
@@ -323,7 +323,7 @@ mod tests {
     fn run_command_parses_dir() {
         let temp = tempfile::tempdir().unwrap();
         let cli = Cli::try_parse_from([
-            "agentropy".into(),
+            "dar".into(),
             "run".into(),
             "--dir".into(),
             temp.path().as_os_str().to_os_string(),
@@ -345,7 +345,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         for command in ["init-build", "build"] {
             let cli = Cli::try_parse_from([
-                "agentropy".into(),
+                "dar".into(),
                 command.into(),
                 "--dir".into(),
                 temp.path().as_os_str().to_os_string(),
@@ -379,7 +379,7 @@ mod tests {
     fn build_command_parses_portable_binary_flags() {
         let temp = tempfile::tempdir().unwrap();
         let cli = Cli::try_parse_from([
-            "agentropy".into(),
+            "dar".into(),
             "build".into(),
             "--dir".into(),
             temp.path().as_os_str().to_os_string(),
@@ -402,7 +402,7 @@ mod tests {
     fn self_rebuild_command_parses_portable_binary_flags() {
         let temp = tempfile::tempdir().unwrap();
         let cli = Cli::try_parse_from([
-            "agentropy".into(),
+            "dar".into(),
             "self".into(),
             "rebuild".into(),
             "--dir".into(),
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn build_command_parses_universal_flag() {
-        let cli = Cli::try_parse_from(["agentropy", "build", "--universal"]).unwrap();
+        let cli = Cli::try_parse_from(["dar", "build", "--universal"]).unwrap();
         match cli.command {
             Command::Build(args) => assert!(args.universal),
             _ => panic!("expected build command"),
@@ -436,7 +436,7 @@ mod tests {
     fn lock_refresh_command_parses_dir() {
         let temp = tempfile::tempdir().unwrap();
         let cli = Cli::try_parse_from([
-            "agentropy".into(),
+            "dar".into(),
             "lock-refresh".into(),
             "--dir".into(),
             temp.path().as_os_str().to_os_string(),
@@ -457,7 +457,7 @@ mod tests {
     fn self_rebuild_command_parses_dir() {
         let temp = tempfile::tempdir().unwrap();
         let cli = Cli::try_parse_from([
-            "agentropy".into(),
+            "dar".into(),
             "self".into(),
             "rebuild".into(),
             "--dir".into(),

@@ -864,9 +864,9 @@ mod tests {
     }
 
     #[test]
-    fn opencode_config_writes_agentropy_mcp_block_when_bridge_present() {
+    fn opencode_config_writes_dar_mcp_block_when_bridge_present() {
         let bridge = HostToolBridge {
-            command: "/opt/agentropy".to_string(),
+            command: "/opt/dar".to_string(),
             args: vec![
                 "__mcp-bridge".to_string(),
                 "--dir".to_string(),
@@ -874,14 +874,14 @@ mod tests {
             ],
         };
         let config = opencode_config(Some("anthropic/claude-sonnet"), Some(&bridge));
-        let server = &config["mcp"]["agentropy"];
+        let server = &config["mcp"]["dar"];
         assert_eq!(server["type"], "local");
         assert_eq!(server["enabled"], true);
         assert_eq!(
             server["command"],
-            serde_json::json!(["/opt/agentropy", "__mcp-bridge", "--dir", "/tmp/agent"])
+            serde_json::json!(["/opt/dar", "__mcp-bridge", "--dir", "/tmp/agent"])
         );
-        // Host tools surface namespaced `agentropy_<tool>`; the permission map
+        // Host tools surface namespaced `dar_<tool>`; the permission map
         // already allows them via the wildcard.
         assert_eq!(config["permission"]["*"], "allow");
     }
@@ -898,7 +898,7 @@ mod tests {
         let session_dir = session_dir(&p);
         let model = effective_model(p.model.as_deref(), p.provider.as_deref());
         let bridge = HostToolBridge {
-            command: "/opt/agentropy".to_string(),
+            command: "/opt/dar".to_string(),
             args: vec![
                 "__mcp-bridge".to_string(),
                 "--dir".to_string(),
@@ -912,8 +912,8 @@ mod tests {
             .map(|(_, value)| value.to_string_lossy().to_string())
             .expect("OPENCODE_CONFIG_CONTENT missing");
         let config: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(config["mcp"]["agentropy"]["type"], "local");
-        assert_eq!(config["mcp"]["agentropy"]["enabled"], true);
+        assert_eq!(config["mcp"]["dar"]["type"], "local");
+        assert_eq!(config["mcp"]["dar"]["enabled"], true);
     }
 
     #[test]
@@ -921,7 +921,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("config")).unwrap();
         let bridge = HostToolBridge {
-            command: "/opt/agentropy".to_string(),
+            command: "/opt/dar".to_string(),
             args: vec![
                 "__mcp-bridge".to_string(),
                 "--dir".to_string(),
@@ -932,8 +932,8 @@ mod tests {
         let written = std::fs::read_to_string(dir.path().join("config/opencode.json")).unwrap();
         let config: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(
-            config["mcp"]["agentropy"]["command"],
-            serde_json::json!(["/opt/agentropy", "__mcp-bridge", "--dir", "/tmp/agent"])
+            config["mcp"]["dar"]["command"],
+            serde_json::json!(["/opt/dar", "__mcp-bridge", "--dir", "/tmp/agent"])
         );
         assert_eq!(config["permission"]["*"], "allow");
     }

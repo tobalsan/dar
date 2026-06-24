@@ -154,7 +154,7 @@ Each milestone merges green on `cargo build --release && cargo test --release` a
 
 **Scope:** new `extensions/tui` (`src/lib.rs` TuiExtension + TuiConfig; `src/foreground.rs` event loop + `TermWriter`; `src/app.rs` App with `enum Tab` — **Chat only in the tab list for this milestone**, no tab bar rendered with one tab; `src/chat.rs` transcript state `Vec<ChatBlock>` + input editor + in-flight gate + 10-min turn timer; `src/input.rs` OS-thread crossterm reader → mpsc; `src/view.rs` chat render: user/assistant/thinking(dim)/tool(boxed)/error(red) blocks, streaming append, spinner while in flight). Non-interactive path: exact frontend-log line loop. Dist: 2 dep lines, 2 `plugins![]` lines (`chat_pi::ChatPiExtension, tui::TuiExtension`). Session opened lazily on first submit: `paths.data_dir("tui")?` + `create_dir_all`, params from config, backend = config override or `"pi"` (follow logic is M3).
 **Tests:** register test (`select(Some("tui"))` resolves, bad config errors, **no topics registered by tui**); non-interactive run with `ExclusiveTerminal::non_interactive(Vec<u8>)` — publish `LogEvent`, flip `APP_DONE_TOPIC` → returns Ok, output **byte-for-byte** equals frontend-log's `"{level} {target} {message}\n"`; `TestBackend` render tests (blocks, in-flight gate, Esc→abort path); chat-turn integration via stub-script backend.
-**VERIFY:** edit `example-agent/agent.yaml` → `foreground: tui`; `./target/release/agentropy run --dir ./example-agent`; type a message → streamed assistant reply with visible thinking/tool blocks; `Esc` mid-turn aborts gracefully and chat stays usable; `Ctrl+C` exits with terminal fully restored (no raw-mode residue); `agentropy run --dir ./example-agent </dev/null | head` still streams plain log lines. Revert agent.yaml.
+**VERIFY:** edit `example-agent/agent.yaml` → `foreground: tui`; `./target/release/dar run --dir ./example-agent`; type a message → streamed assistant reply with visible thinking/tool blocks; `Esc` mid-turn aborts gracefully and chat stays usable; `Ctrl+C` exits with terminal fully restored (no raw-mode residue); `dar run --dir ./example-agent </dev/null | head` still streams plain log lines. Revert agent.yaml.
 
 ### M3 — context pre-load + `runner.use`-follow + fallback notice
 
@@ -177,7 +177,7 @@ Each milestone merges green on `cargo build --release && cargo test --release` a
 ### M6 — docs + rule amendment
 
 **Scope:** `docs/extensions.md` — amend the dependency rule: "at most one *capability* crate; shared bus-payload crates (`orchestrator-api`) don't count" + note `frontend-log` owns `host.log-events`/`host.app-done` and `tui` consumes them; README + example-agent comments for `foreground: tui` and `extensions.tui.chat`; CLAUDE.md architecture blurb (tui/chat-pi/cap-chat, `q` quits the whole agent).
-**VERIFY:** `cargo build --release && cargo test --release` workspace-green; `./target/release/agentropy doctor --dir ./example-agent` unchanged.
+**VERIFY:** `cargo build --release && cargo test --release` workspace-green; `./target/release/dar doctor --dir ./example-agent` unchanged.
 
 ---
 
@@ -257,16 +257,16 @@ Host already enabled raw mode + alternate screen and installed a restoring panic
 - Reply-channel controls (`Tick/Claim/Release/Interrupt/Kill`) on the Dash tab — Stop/Pause/Resume only, matching the web dashboard.
 - Chat transcript persistence into `data/store.db` / structured chat logging (pi's own session JSONL in `data/tui/sessions` is the post-mortem artifact).
 - In-TUI permission prompts (trusted session per spec), `steer`/`follow_up` mid-turn commands, multi-session / `/new`, detach-TUI-keep-agent-running.
-- Any change to `host-api`, `cap-runner`, `runner-core`, `agentropy-host`, or existing extensions' behavior; `foreground: logs` remains the untouched default.
+- Any change to `host-api`, `cap-runner`, `runner-core`, `dar-host`, or existing extensions' behavior; `foreground: logs` remains the untouched default.
 
 ---
 
 ## Amendment (2026-06-11)
 
-Startup banner restored in M0 (the `agentropy running; dashboard on http://{bind}:{port}/` line was removed accidentally in the dist refactor, 72cac39). Publishing it on `host.log-events` from `start()` does NOT work: that topic is a plain broadcast (no replay), and the host runs every extension's `start()` before the foreground's `run()` subscribes, so the event would be dropped. The restored mechanism is:
+Startup banner restored in M0 (the `dar running; dashboard on http://{bind}:{port}/` line was removed accidentally in the dist refactor, 72cac39). Publishing it on `host.log-events` from `start()` does NOT work: that topic is a plain broadcast (no replay), and the host runs every extension's `start()` before the foreground's `run()` subscribes, so the event would be dropped. The restored mechanism is:
 
 - **Retained topic `host.startup-banner`** (`host_api::STARTUP_BANNER_TOPIC`, `Option<LogEvent>`, initial `None`), registered by `frontend-log` next to the other log topics. Retained = replayed to a foreground that subscribes later, so delivery does not depend on boot ordering.
-- **The orchestrator publishes the banner after its first tick completes** (`Orchestrator::with_startup_banner` → `emit_startup_banner` in `extensions/orchestrator/src/lib.rs`), not at spawn time, so it only announces a loop that is actually running. The host now binds the HTTP listener synchronously in `boot_inner` before any extension starts (`crates/agentropy-host/src/lib.rs`), restoring fail-fast on occupied ports — the banner can no longer announce a dashboard URL that failed to bind.
+- **The orchestrator publishes the banner after its first tick completes** (`Orchestrator::with_startup_banner` → `emit_startup_banner` in `extensions/orchestrator/src/lib.rs`), not at spawn time, so it only announces a loop that is actually running. The host now binds the HTTP listener synchronously in `boot_inner` before any extension starts (`crates/dar-host/src/lib.rs`), restoring fail-fast on occupied ports — the banner can no longer announce a dashboard URL that failed to bind.
 - The `logs` foreground prints the retained banner exactly once (at subscription if already set, else on change), in the same `{level} {target} {message}` line format as `host.log-events` rows.
 
 **TUI impact:** the banner does NOT arrive on `host.log-events`, so the M4 Logs tab must additionally `subscribe_retained::<Option<LogEvent>>(STARTUP_BANNER_TOPIC)` and prepend/print it once, mirroring `frontend-log` (topic row added to §2.3).

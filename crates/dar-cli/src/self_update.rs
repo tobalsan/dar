@@ -30,7 +30,7 @@ pub fn rebuild_with_options(
     ensure_self_rebuild_output_runnable(&options)?;
     with_lock(&agent, || {
         composer::compose(&agent)?;
-        let new_binary = agent.join("bin/agentropy.new");
+        let new_binary = agent.join("bin/dar.new");
         if new_binary.exists() {
             fs::remove_file(&new_binary)
                 .with_context(|| format!("removing stale {}", new_binary.display()))?;
@@ -101,7 +101,7 @@ impl DoctorRunner for ProcessDoctor {
 }
 
 fn doctor_gate(agent: &Path, doctor: &dyn DoctorRunner) -> Result<()> {
-    let new_binary = agent.join("bin/agentropy.new");
+    let new_binary = agent.join("bin/dar.new");
     match doctor.run(&new_binary, agent) {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -112,9 +112,9 @@ fn doctor_gate(agent: &Path, doctor: &dyn DoctorRunner) -> Result<()> {
 }
 
 fn atomic_swap(agent: &Path) -> Result<()> {
-    let bin = agent.join("bin/agentropy");
-    let new = agent.join("bin/agentropy.new");
-    let prev = agent.join("bin/agentropy.prev");
+    let bin = agent.join("bin/dar");
+    let new = agent.join("bin/dar.new");
+    let prev = agent.join("bin/dar.prev");
     fs::rename(&bin, &prev)
         .with_context(|| format!("renaming {} to {}", bin.display(), prev.display()))?;
     if let Err(e) = fs::rename(&new, &bin) {
@@ -193,35 +193,35 @@ mod tests {
     fn doctor_gate_abort_leaves_current_binary_and_removes_new() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path().to_path_buf();
-        write_executable(&agent.join("bin/agentropy"), "old");
-        write_executable(&agent.join("bin/agentropy.new"), "new");
+        write_executable(&agent.join("bin/dar"), "old");
+        write_executable(&agent.join("bin/dar.new"), "new");
 
         let err = doctor_gate(&agent, &FakeDoctor { ok: false }).unwrap_err();
 
         assert!(err.to_string().contains("doctor gate failed"));
         assert_eq!(
-            fs::read_to_string(agent.join("bin/agentropy")).unwrap(),
+            fs::read_to_string(agent.join("bin/dar")).unwrap(),
             "old"
         );
-        assert!(!agent.join("bin/agentropy.new").exists());
-        assert!(!agent.join("bin/agentropy.prev").exists());
+        assert!(!agent.join("bin/dar.new").exists());
+        assert!(!agent.join("bin/dar.prev").exists());
     }
 
     #[test]
     fn atomic_rename_preserves_prev() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path().to_path_buf();
-        write_executable(&agent.join("bin/agentropy"), "old");
-        write_executable(&agent.join("bin/agentropy.new"), "new");
+        write_executable(&agent.join("bin/dar"), "old");
+        write_executable(&agent.join("bin/dar.new"), "new");
 
         atomic_swap(&agent).unwrap();
 
         assert_eq!(
-            fs::read_to_string(agent.join("bin/agentropy")).unwrap(),
+            fs::read_to_string(agent.join("bin/dar")).unwrap(),
             "new"
         );
         assert_eq!(
-            fs::read_to_string(agent.join("bin/agentropy.prev")).unwrap(),
+            fs::read_to_string(agent.join("bin/dar.prev")).unwrap(),
             "old"
         );
     }
@@ -230,14 +230,14 @@ mod tests {
     fn atomic_rename_restores_current_when_new_binary_is_missing() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path().to_path_buf();
-        write_executable(&agent.join("bin/agentropy"), "old");
-        write_executable(&agent.join("bin/agentropy.prev"), "older");
+        write_executable(&agent.join("bin/dar"), "old");
+        write_executable(&agent.join("bin/dar.prev"), "older");
 
         let err = atomic_swap(&agent).unwrap_err();
 
         assert!(err.to_string().contains("renaming"));
         assert_eq!(
-            fs::read_to_string(agent.join("bin/agentropy")).unwrap(),
+            fs::read_to_string(agent.join("bin/dar")).unwrap(),
             "old"
         );
     }

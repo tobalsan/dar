@@ -1,10 +1,16 @@
 [package]
-name = "cap-chat"
-version = "0.2.0"
-edition = "2021"
+name = "dar-cap-chat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Chat capability contract for interactive operator chat sessions"
 rust-version = "1.83"
+
+[lib]
+name = "cap_chat"
 
 [dependencies]
 anyhow = "1"
-cap-runner = { path = "../cap-runner" }
+cap-runner = { package = "dar-cap-runner", path = "../cap-runner", version = "0.2" }
 tokio = { version = "1.43", features = ["sync"] }

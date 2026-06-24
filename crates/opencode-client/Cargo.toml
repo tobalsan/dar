@@ -1,14 +1,20 @@
 [package]
-name = "opencode-client"
-version = "0.2.0"
-edition = "2021"
+name = "dar-opencode-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HTTP client for the OpenCode AI coding agent server"
+
+[lib]
+name = "opencode_client"
 
 [dependencies]
 anyhow = "1"
 bytes = "1"
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
-runner-core = { path = "../runner-core" }
+runner-core = { package = "dar-runner-core", path = "../runner-core", version = "0.2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.43", features = ["io-util", "net", "process", "time"] }

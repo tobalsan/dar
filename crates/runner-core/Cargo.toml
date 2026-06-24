@@ -1,14 +1,20 @@
 [package]
-name = "runner-core"
-version = "0.2.0"
-edition = "2021"
+name = "dar-runner-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared runner utilities: process spawning, protocol parsing, MCP bridge helpers"
 rust-version = "1.83"
+
+[lib]
+name = "runner_core"
 
 [dependencies]
 anyhow = "1"
-cap-runner = { path = "../cap-runner" }
-host-api = { path = "../host-api" }
-tool-registry = { path = "../tool-registry" }
+cap-runner = { package = "dar-cap-runner", path = "../cap-runner", version = "0.2" }
+host-api = { package = "dar-host-api", path = "../host-api", version = "0.2" }
+tool-registry = { package = "dar-tool-registry", path = "../tool-registry", version = "0.2" }
 chrono = { version = "0.4", features = ["serde"] }
 nix = { version = "0.29", features = ["signal", "process"] }
 serde_json = "1"

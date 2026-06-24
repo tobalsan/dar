@@ -7,8 +7,8 @@
 //! server config; the agent only ever sees tool names, schemas, and secret-redacted
 //! structured results — never the host's secrets.
 //!
-//! It is the same `agentropy` binary re-invoked as a hidden subcommand
-//! (`agentropy __mcp-bridge --dir <agent>`). On start it loads the agent's
+//! It is the same `dar` binary re-invoked as a hidden subcommand
+//! (`dar __mcp-bridge --dir <agent>`). On start it loads the agent's
 //! `.env` and runs the extension `register()` pass to populate the registry,
 //! then serves MCP requests on stdin/stdout until EOF.
 //!
@@ -108,7 +108,7 @@ async fn handle_message(
             id,
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
-                "serverInfo": { "name": "agentropy", "version": env!("CARGO_PKG_VERSION") },
+                "serverInfo": { "name": "dar", "version": env!("CARGO_PKG_VERSION") },
                 "capabilities": { "tools": {} },
             }),
         ),
@@ -153,7 +153,7 @@ async fn handle_tools_call(
 /// captures as the MCP server's log stream. The line is already redacted and
 /// truncated by `dispatch_observed`, so no host secret or raw payload appears.
 fn emit_observation(observation: &ToolCallObservation) {
-    eprintln!("[agentropy:tool] {}", observation.log_line());
+    eprintln!("[dar:tool] {}", observation.log_line());
 }
 
 fn result(id: Value, result: Value) -> Value {

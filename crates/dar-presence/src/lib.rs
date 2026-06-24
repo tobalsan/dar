@@ -2,7 +2,7 @@
 //!
 //! A pure read/write module over a registry *directory*. Each live agent
 //! dashboard writes exactly one JSON file describing how to reach it; the
-//! `agentropy dash` aggregator reads the directory, prunes entries whose
+//! `dar dash` aggregator reads the directory, prunes entries whose
 //! process is gone, and presents the survivors.
 //!
 //! The module performs no I/O beyond the registry directory and holds no
@@ -28,15 +28,15 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Default registry directory: `~/.agentropy/dashboards/`.
+/// Default registry directory: `~/.dar/dashboards/`.
 ///
-/// Resolves `~` from `$HOME`. Falls back to a relative `.agentropy/dashboards`
+/// Resolves `~` from `$HOME`. Falls back to a relative `.dar/dashboards`
 /// only when `$HOME` is unset (e.g. odd CI), which keeps the function
 /// infallible for callers that just want a sensible default.
 pub fn default_registry_dir() -> PathBuf {
     match std::env::var_os("HOME") {
-        Some(home) if !home.is_empty() => Path::new(&home).join(".agentropy").join("dashboards"),
-        _ => PathBuf::from(".agentropy").join("dashboards"),
+        Some(home) if !home.is_empty() => Path::new(&home).join(".dar").join("dashboards"),
+        _ => PathBuf::from(".dar").join("dashboards"),
     }
 }
 
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn missing_dir_reads_empty() {
-        let reg = Registry::new("/nonexistent/agentropy/registry/xyz");
+        let reg = Registry::new("/nonexistent/dar/registry/xyz");
         assert!(reg.read_live().is_empty());
     }
 

@@ -2,17 +2,17 @@
 
 This file provides guidance to coding agents when working with code in this repository.
 
-Agentropy v0: a folder-scoped agent runtime. Cargo workspace; the shipped binary is assembled in `dist/` from an explicit plugin list. Spec lives in `PRD.md` (+ `PRD-EXTENSIONS.md`). README has user-facing usage.
+Dar v0: a folder-scoped agent runtime. Cargo workspace; the shipped binary is assembled in `dist/` from an explicit plugin list. Spec lives in `PRD.md` (+ `PRD-EXTENSIONS.md`). README has user-facing usage.
 
 ## Commands
 
 ```bash
-cargo build --release            # -> ./target/release/agentropy (and cargo-agentropy)
+cargo build --release            # -> ./target/release/dar (and cargo-dar)
 cargo test --release             # workspace tests
 cargo test --release backoff_grows_then_caps   # a single test by name
 
-./target/release/agentropy doctor --dir ./example-agent   # config/template/tracker preflight
-./target/release/agentropy run   --dir ./example-agent    # long-running loop + dashboard on :7878
+./target/release/dar doctor --dir ./example-agent   # config/template/tracker preflight
+./target/release/dar run   --dir ./example-agent    # long-running loop + dashboard on :7878
 ```
 
 The runner backend named by `agent.yaml` `runner.use` must be installed and authenticated on the host (not bundled); `example-agent` ships the `fake` runner so it has no host dependency. `example-agent/` is the test fixture; reset between runs by setting `issues/*.md` `state:` back to `todo`, emptying `workspaces/` (keep `.gitkeep`), and deleting `data/store.db` (persisted run history) plus `logs/agent.log`.
@@ -21,13 +21,13 @@ The runner backend named by `agent.yaml` `runner.use` must be installed and auth
 
 ### Extension architecture
 
-Domain-free host (`crates/agentropy-host`) + contract crates (`crates/host-api`, `cap-tracker`, `cap-runner`, `cap-chat`, `orchestrator-api`, `runner-core`); every feature is one crate under `extensions/`. The composition root is `dist/`: the `plugins![]` list in `dist/src/main.rs` is the only place naming the shipped extension mix — adding/removing an extension = one list line + a `dist/Cargo.toml` dependency, then rebuild. Extensions import `host-api` (plus at most one cap/api crate) and read zero host internals. Integration surfaces:
+Domain-free host (`crates/dar-host`) + contract crates (`crates/host-api`, `cap-tracker`, `cap-runner`, `cap-chat`, `orchestrator-api`, `runner-core`); every feature is one crate under `extensions/`. The composition root is `dist/`: the `plugins![]` list in `dist/src/main.rs` is the only place naming the shipped extension mix — adding/removing an extension = one list line + a `dist/Cargo.toml` dependency, then rebuild. Extensions import `host-api` (plus at most one cap/api crate) and read zero host internals. Integration surfaces:
 
 - **Typed service registry** — named services, e.g. runners register `dyn Runner` under `"pi"`/`"codex"`/`"cli"`/`"fake"`, trackers register `dyn TrackerFactory` under `"files"`/`"linear"`, chat backends register `dyn ChatBackend` under `"pi"` (id + Rust type form the key, so it coexists with the runner's `"pi"`). Linked ≠ enabled: `agent.yaml` `tracker.use` / `runner.use` picks which registered service actually runs.
 - **Typed event bus** — broadcast + retained topics. Orchestration payloads live in `crates/orchestrator-api`: `RunSnapshot` (retained), `ControlMsg`, `RunRequested`, `DispatchRequested`. Semantics documented in `crates/host-api/src/lib.rs`.
 - **Foreground slot** — at most one extension owns the terminal; selected per agent via top-level `foreground:` key in `agent.yaml` (default `"logs"`); unknown id → clean boot error, exit 1. Per-extension config: top-level `extensions:` map in `agent.yaml`, keyed by extension id, delivered via `ConfigStore`.
 
-`extensions/example` is the living reference; `cargo agentropy new <name> --kind background|service|foreground` scaffolds a compiling extension.
+`extensions/example` is the living reference; `cargo dar new <name> --kind background|service|foreground` scaffolds a compiling extension.
 
 ### TUI foreground (`extensions/tui` + `extensions/chat-pi` + `crates/cap-chat`)
 
@@ -46,7 +46,7 @@ Ticks every `poll_interval_ms`. Order inside `tick()` is load-bearing: `reconcil
 - **collect_finished** classifies exited children: normal exit + terminal issue → Succeeded; normal exit + still active → 1s **continuation** retry (does NOT count against `max_retries`); abnormal exit → **backoff** retry `min(retry_backoff_ms·2^attempt, 30min)` up to `max_retries`, then Failed + park to `needs_human`. `attempt` is 1-based (first retry = attempt 1).
 - **dispatch** sorts candidates by priority asc (null last) → `created_at` asc → identifier, dispatches up to `max_concurrent`. Due retries dispatch before fresh candidates.
 
-Kill `agentropy` and rerun → it starts cold and trusts whatever the issue files say; only run history is restored from SQLite.
+Kill `dar` and rerun → it starts cold and trusts whatever the issue files say; only run history is restored from SQLite.
 
 ### Single-writer discipline (`extensions/orchestrator/src/state.rs`)
 

@@ -1,20 +1,26 @@
 [package]
-name = "tracker-linear"
-version = "0.2.0"
-edition = "2021"
+name = "dar-tracker-linear"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Linear issue tracker extension for dar"
 rust-version = "1.83"
+
+[lib]
+name = "tracker_linear"
 
 [dependencies]
 anyhow = "1"
-cap-tracker = { path = "../../crates/cap-tracker" }
+cap-tracker = { package = "dar-cap-tracker", path = "../../crates/cap-tracker", version = "0.2" }
 chrono = { version = "0.4", features = ["serde"] }
-host-api = { path = "../../crates/host-api" }
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.2" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 tokio = { version = "1.43", features = ["rt-multi-thread", "time", "macros", "net", "io-util"] }
-tool-registry = { path = "../../crates/tool-registry" }
+tool-registry = { package = "dar-tool-registry", path = "../../crates/tool-registry", version = "0.2" }
 tracing = "0.1"
 async-trait = "0.1"
 

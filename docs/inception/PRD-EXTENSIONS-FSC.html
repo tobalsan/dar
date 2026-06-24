@@ -524,7 +524,7 @@
 
   <!-- ============================================================= HEADER -->
   <header class="page-head">
-    <div class="eyebrow">PRD — Agentropy · Fully Self-Contained Agents (FSC)</div>
+    <div class="eyebrow">PRD — Dar · Fully Self-Contained Agents (FSC)</div>
     <h1>Each robot carries its own recipe</h1>
     <div class="hero-summary">
       <strong>The one-sentence big idea:</strong> today every agent is built from one shared kitchen in the code repo. Tomorrow, each agent folder will carry its own cooking instructions, build its own brain, and reboot itself — with no human help, ever.
@@ -536,8 +536,8 @@
     <div class="toc-label">Contents</div>
     <ol>
       <li><a href="#before-after">Before vs. After — what actually changes</a></li>
-      <li><a href="#layer1">Layer 1 — the shared cookbook (<code>agentropy-cli</code>)</a></li>
-      <li><a href="#layer2">Layer 2 — the per-agent build recipe (<code>.agentropy/</code>)</a></li>
+      <li><a href="#layer1">Layer 1 — the shared cookbook (<code>dar-cli</code>)</a></li>
+      <li><a href="#layer2">Layer 2 — the per-agent build recipe (<code>.dar/</code>)</a></li>
       <li><a href="#layer3">Layer 3 — auto-discovery of custom abilities</a></li>
       <li><a href="#self-update">The self-update loop — the coolest part</a></li>
       <li><a href="#migration">Building it — 6 safe migration steps</a></li>
@@ -579,8 +579,8 @@
         <div class="ba-body">
           <ul>
             <li><span class="icon">📦</span><span>Every agent folder is <strong>fully self-contained</strong>. Move the folder to a new machine, run one command, and it's alive.</span></li>
-            <li><span class="icon">🤖</span><span>Each agent has its own <code>extensions/</code> for custom abilities and its own <code>.agentropy/</code> build recipe — auto-generated, never hand-edited.</span></li>
-            <li><span class="icon">⚙️</span><span>The built binary lives <em>inside</em> the agent folder at <code>bin/agentropy</code>.</span></li>
+            <li><span class="icon">🤖</span><span>Each agent has its own <code>extensions/</code> for custom abilities and its own <code>.dar/</code> build recipe — auto-generated, never hand-edited.</span></li>
+            <li><span class="icon">⚙️</span><span>The built binary lives <em>inside</em> the agent folder at <code>bin/dar</code>.</span></li>
             <li><span class="icon">🔄</span><span>The agent can rebuild and restart <em>itself</em> when its abilities change. Zero humans required after setup.</span></li>
           </ul>
           <div class="folder-tree">
@@ -588,8 +588,8 @@
 ├── agent.yaml
 ├── extensions/       ← <span class="hl">your custom abilities</span>
 ├── bin/
-│   └── <span class="hl">agentropy</span>   ← lives HERE now
-└── .agentropy/       ← <span class="hl">auto-generated recipe</span>
+│   └── <span class="hl">dar</span>         ← lives HERE now
+└── .dar/             ← <span class="hl">auto-generated recipe</span>
     ├── Cargo.toml
     ├── Cargo.lock
     └── src/main.rs
@@ -610,7 +610,7 @@
       <div class="layer-card">
         <div class="layer-header">
           <span class="layer-badge badge-blue">Layer 1</span>
-          <h3><code>agentropy-cli</code> — the shared cookbook</h3>
+          <h3><code>dar-cli</code> — the shared cookbook</h3>
         </div>
         <div class="layer-body">
           <div class="analogy-box">
@@ -625,11 +625,11 @@
           </p>
 
           <p>
-            <strong>What we do:</strong> We lift all of that logic out of <code>dist/src/main.rs</code> and move it into a new reusable library crate (<em>crate = Rust's word for a package or module</em>) called <code>agentropy-cli</code>. Then <em>both</em> the repo's own binary <em>and</em> every agent's binary call the exact same <code>agentropy_cli::run()</code> function. They all read from the same cookbook.
+            <strong>What we do:</strong> We lift all of that logic out of <code>dist/src/main.rs</code> and move it into a new reusable library crate (<em>crate = Rust's word for a package or module</em>) called <code>dar-cli</code>. Then <em>both</em> the repo's own binary <em>and</em> every agent's binary call the exact same <code>dar_cli::run()</code> function. They all read from the same cookbook.
           </p>
 
           <div class="highlight-box blue">
-            <strong>Why this is the unlock:</strong> Once <code>agentropy-cli</code> exists as a library, any agent can depend on it. The self-update logic, the <code>doctor</code> health check, the build command — all of that comes along for free. An agent's own <code>main.rs</code> shrinks down to about 5 lines.
+            <strong>Why this is the unlock:</strong> Once <code>dar-cli</code> exists as a library, any agent can depend on it. The self-update logic, the <code>doctor</code> health check, the build command — all of that comes along for free. An agent's own <code>main.rs</code> shrinks down to about 5 lines.
           </div>
 
           <div class="code-wrap">
@@ -646,7 +646,7 @@
 <pre><span class="cm">// This is the ENTIRE file now. Clean!</span>
 #[tokio::main]
 <span class="kw">async fn</span> <span class="fn">main</span>() {
-    agentropy_cli::<span class="fn">run</span>(plugins![
+    dar_cli::<span class="fn">run</span>(plugins![
         tracker_files::<span class="fn">extension</span>(),
         runner_claude::<span class="fn">extension</span>(),
         <span class="cm">// ... list of abilities</span>
@@ -656,12 +656,12 @@
           </div>
 
           <div class="code-wrap">
-            <div class="file-label">my-agent/.agentropy/src/main.rs — an agent's own main (also just 5 lines)</div>
+            <div class="file-label">my-agent/.dar/src/main.rs — an agent's own main (also just 5 lines)</div>
             <div class="code-dark">
 <pre><span class="cm">// Same shape. Different list of abilities. Same cookbook.</span>
 #[tokio::main]
 <span class="kw">async fn</span> <span class="fn">main</span>() {
-    agentropy_cli::<span class="fn">run</span>(plugins![
+    dar_cli::<span class="fn">run</span>(plugins![
         tracker_files::<span class="fn">extension</span>(),
         runner_claude::<span class="fn">extension</span>(),
         my_custom_ext::<span class="fn">extension</span>(),  <span class="cm">// agent's own ability!</span>
@@ -682,25 +682,25 @@
   <section id="layer2">
     <div class="sec-head"><span class="num">03</span><h2>Layer 2 — The per-agent build recipe</h2></div>
     <p class="sec-intro">
-      Each agent gets its own <code>.agentropy/</code> folder — a small auto-generated bundle that knows exactly how to build that specific agent's brain.
+      Each agent gets its own <code>.dar/</code> folder — a small auto-generated bundle that knows exactly how to build that specific agent's brain.
     </p>
 
     <div class="layers">
       <div class="layer-card">
         <div class="layer-header">
           <span class="layer-badge badge-olive">Layer 2</span>
-          <h3><code>.agentropy/</code> — the agent's personal build recipe</h3>
+          <h3><code>.dar/</code> — the agent's personal build recipe</h3>
         </div>
         <div class="layer-body">
           <div class="analogy-box">
             <span class="icon">🎒</span>
             <p>
-              <strong>Analogy:</strong> Think of <code>.agentropy/</code> as the agent's <em>backpack</em>. Inside is a shopping list (<code>Cargo.toml</code>), a locked receipt with exact prices (<code>Cargo.lock</code>), a note pinning which oven to use (<code>rust-toolchain.toml</code>), and a short cooking script (<code>src/main.rs</code>). Everything needed to rebuild the agent — from scratch, on any machine — is in the backpack.
+              <strong>Analogy:</strong> Think of <code>.dar/</code> as the agent's <em>backpack</em>. Inside is a shopping list (<code>Cargo.toml</code>), a locked receipt with exact prices (<code>Cargo.lock</code>), a note pinning which oven to use (<code>rust-toolchain.toml</code>), and a short cooking script (<code>src/main.rs</code>). Everything needed to rebuild the agent — from scratch, on any machine — is in the backpack.
             </p>
           </div>
 
           <p>
-            The <code>.agentropy/</code> folder is <strong>generated automatically</strong> by running <code>agentropy build --dir .</code>. You never hand-edit it. Here's what it contains:
+            The <code>.dar/</code> folder is <strong>generated automatically</strong> by running <code>dar build --dir .</code>. You never hand-edit it. Here's what it contains:
           </p>
 
           <div class="folder-tree-standalone">
@@ -711,9 +711,9 @@ my-agent/
 │       ├── Cargo.toml
 │       └── src/lib.rs
 ├── bin/
-│   ├── <span class="grn">agentropy</span>              <span class="dim">← the running brain (built binary)</span>
-│   └── <span class="dim">agentropy.prev</span>         <span class="dim">← backup brain, in case things go wrong</span>
-└── <span class="hl">.agentropy/</span>               <span class="dim">← auto-generated, commit this!</span>
+│   ├── <span class="grn">dar</span>                   <span class="dim">← the running brain (built binary)</span>
+│   └── <span class="dim">dar.prev</span>             <span class="dim">← backup brain, in case things go wrong</span>
+└── <span class="hl">.dar/</span>                  <span class="dim">← auto-generated, commit this!</span>
     ├── <span class="hl">Cargo.toml</span>             <span class="dim">← shopping list: which abilities to include</span>
     ├── <span class="hl">Cargo.lock</span>             <span class="dim">← locked receipt: exact versions (reproducible!)</span>
     ├── <span class="hl">rust-toolchain.toml</span>    <span class="dim">← which version of Rust to use</span>
@@ -721,7 +721,7 @@ my-agent/
           </div>
 
           <p>
-            <strong>Key insight — "move folder = move agent":</strong> Because everything is inside the folder, you can zip it up and send it to a friend. They run <code>agentropy build --dir my-agent</code> and get an identical binary. No absolute file paths, no dependency on the original machine.
+            <strong>Key insight — "move folder = move agent":</strong> Because everything is inside the folder, you can zip it up and send it to a friend. They run <code>dar build --dir my-agent</code> and get an identical binary. No absolute file paths, no dependency on the original machine.
           </p>
 
           <div class="highlight-box green">
@@ -729,7 +729,7 @@ my-agent/
           </div>
 
           <div class="highlight-box blue">
-            <strong>Shared build cache:</strong> When 10 agents all need the same standard abilities, they share a single compiled cache at <code>~/.cache/agentropy/target/</code>. The common parts compile once. Changing one agent's custom ability takes only 1–3 seconds to rebuild.
+            <strong>Shared build cache:</strong> When 10 agents all need the same standard abilities, they share a single compiled cache at <code>~/.cache/dar/target/</code>. The common parts compile once. Changing one agent's custom ability takes only 1–3 seconds to rebuild.
           </div>
         </div>
       </div>
@@ -770,16 +770,16 @@ version = <span class="str">"0.1.0"</span>
 
 [workspace]  <span class="cm">← keeps this ability isolated from the main repo</span>
 
-<span class="hl">[package.metadata.agentropy]</span>
+<span class="hl">[package.metadata.dar]</span>
 <span class="hl">factory = "my_ext::extension"</span>  <span class="cm">← THE NAME-TAG: "my factory function is here"</span>
 
 [dependencies]
-host-api = { git = <span class="str">"https://github.com/agentropy/dar"</span>, rev = <span class="str">"abc1234"</span> }</pre>
+host-api = { git = <span class="str">"https://github.com/tobalsan/dar"</span>, rev = <span class="str">"abc1234"</span> }</pre>
             </div>
           </div>
 
           <p>
-            The builder scans <code>extensions/*/Cargo.toml</code>, finds all the <code>[package.metadata.agentropy]</code> sections, and uses them to auto-generate the agent's recipe. The scaffold command (<code>cargo agentropy new my-ext --kind background</code>) writes this name-tag automatically — you never even have to think about it.
+            The builder scans <code>extensions/*/Cargo.toml</code>, finds all the <code>[package.metadata.dar]</code> sections, and uses them to auto-generate the agent's recipe. The scaffold command (<code>cargo dar new my-ext --kind background</code>) writes this name-tag automatically — you never even have to think about it.
           </p>
 
           <div class="highlight-box blue">
@@ -825,7 +825,7 @@ host-api = { git = <span class="str">"https://github.com/agentropy/dar"</span>, 
         </div>
         <div class="flow-body">
           <h4>📋 Regenerate the recipe</h4>
-          <p>Scan <code>extensions/*</code> for name-tags. Rewrite <code>.agentropy/Cargo.toml</code> and <code>.agentropy/src/main.rs</code> to reflect the current set of abilities. If nothing changed, skip the whole build — no wasted work.</p>
+          <p>Scan <code>extensions/*</code> for name-tags. Rewrite <code>.dar/Cargo.toml</code> and <code>.dar/src/main.rs</code> to reflect the current set of abilities. If nothing changed, skip the whole build — no wasted work.</p>
         </div>
       </div>
 
@@ -836,7 +836,7 @@ host-api = { git = <span class="str">"https://github.com/agentropy/dar"</span>, 
         </div>
         <div class="flow-body">
           <h4>🏗️ Build the new brain (in the background)</h4>
-          <p>Run <code>cargo build --release --locked</code> as a separate child process. The output goes to a <em>temp</em> file (<code>bin/agentropy.new</code>) — never over the live binary. The old agent keeps running normally the whole time.</p>
+          <p>Run <code>cargo build --release --locked</code> as a separate child process. The output goes to a <em>temp</em> file (<code>bin/dar.new</code>) — never over the live binary. The old agent keeps running normally the whole time.</p>
           <span class="rail green">old agent keeps running while building</span>
           <p class="abort-note">⚠️ If build fails → log the error, release lock, keep old binary. Done.</p>
         </div>
@@ -849,9 +849,9 @@ host-api = { git = <span class="str">"https://github.com/agentropy/dar"</span>, 
         </div>
         <div class="flow-body">
           <h4>🩺 Doctor health-check (the safety gate)</h4>
-          <p>Spawn the new binary and run <code>agentropy.new doctor --dir ..</code>. The doctor must successfully parse the config, load all abilities, and exit cleanly. This is the critical safety net.</p>
+          <p>Spawn the new binary and run <code>dar.new doctor --dir ..</code>. The doctor must successfully parse the config, load all abilities, and exit cleanly. This is the critical safety net.</p>
           <span class="rail green">new brain passes inspection before swap</span>
-          <p class="abort-note">⚠️ If doctor fails → delete <code>agentropy.new</code>, release lock, keep old binary. Done. The broken brain is thrown away.</p>
+          <p class="abort-note">⚠️ If doctor fails → delete <code>dar.new</code>, release lock, keep old binary. Done. The broken brain is thrown away.</p>
         </div>
       </div>
 
@@ -862,7 +862,7 @@ host-api = { git = <span class="str">"https://github.com/agentropy/dar"</span>, 
         </div>
         <div class="flow-body">
           <h4>🔄 Atomic swap</h4>
-          <p>Rename <code>bin/agentropy</code> → <code>bin/agentropy.prev</code> (the old backup), then rename <code>bin/agentropy.new</code> → <code>bin/agentropy</code>. On Unix, this rename is <em>atomic</em> — it's a single instant flip with no gap where neither binary exists. The running process is completely unaffected because it's already in memory.</p>
+          <p>Rename <code>bin/dar</code> → <code>bin/dar.prev</code> (the old backup), then rename <code>bin/dar.new</code> → <code>bin/dar</code>. On Unix, this rename is <em>atomic</em> — it's a single instant flip with no gap where neither binary exists. The running process is completely unaffected because it's already in memory.</p>
           <span class="rail green">old binary saved as .prev backup</span>
         </div>
       </div>
@@ -885,7 +885,7 @@ host-api = { git = <span class="str">"https://github.com/agentropy/dar"</span>, 
         </div>
         <div class="flow-body">
           <h4>🛡️ Crash safety net (boot-time fallback)</h4>
-          <p>At every boot, the agent runs a quick self-check. If the self-check fails <em>and</em> a <code>bin/agentropy.prev</code> backup exists, it immediately <code>execv</code>s back into the old backup. The agent keeps running no matter what.</p>
+          <p>At every boot, the agent runs a quick self-check. If the self-check fails <em>and</em> a <code>bin/dar.prev</code> backup exists, it immediately <code>execv</code>s back into the old backup. The agent keeps running no matter what.</p>
           <span class="rail amber">fallback to .prev if new binary fails at boot</span>
         </div>
       </div>
@@ -909,17 +909,17 @@ host-api = { git = <span class="str">"https://github.com/agentropy/dar"</span>, 
       <div class="step-card start-here">
         <div class="step-top">
           <div class="step-num">01</div>
-          <div class="step-title">Refactor <code>dist</code> → <code>agentropy-cli</code> library</div>
+          <div class="step-title">Refactor <code>dist</code> → <code>dar-cli</code> library</div>
           <span class="step-badge start">Start here (c)</span>
         </div>
         <div class="step-body">
           <div class="step-col">
             <div class="step-col-label">What we do</div>
-            <p>Move all boot/startup/CLI/doctor logic from <code>dist/src/main.rs</code> into a new library crate <code>crates/agentropy-cli</code>. The <code>dist</code> binary becomes a thin 5-line caller. No features change — just a code relocation.</p>
+            <p>Move all boot/startup/CLI/doctor logic from <code>dist/src/main.rs</code> into a new library crate <code>crates/dar-cli</code>. The <code>dist</code> binary becomes a thin 5-line caller. No features change — just a code relocation.</p>
           </div>
           <div class="step-col">
             <div class="step-col-label">Why it's safe</div>
-            <p>Zero behavior change. Every existing test must still pass. The repo's own binary builds and runs identically — it just routes through <code>agentropy_cli::run()</code> now. This is the unlock for everything else in this plan.</p>
+            <p>Zero behavior change. Every existing test must still pass. The repo's own binary builds and runs identically — it just routes through <code>dar_cli::run()</code> now. This is the unlock for everything else in this plan.</p>
           </div>
         </div>
       </div>
@@ -932,7 +932,7 @@ host-api = { git = <span class="str">"https://github.com/agentropy/dar"</span>, 
         <div class="step-body">
           <div class="step-col">
             <div class="step-col-label">What we do</div>
-            <p>Add <code>[package.metadata.agentropy] factory = "..."</code> to the <code>cargo agentropy new</code> scaffold output. Update <code>extensions/example</code> (the reference example) to carry the marker. Define the <code>pub fn extension()</code> factory convention.</p>
+            <p>Add <code>[package.metadata.dar] factory = "..."</code> to the <code>cargo dar new</code> scaffold output. Update <code>extensions/example</code> (the reference example) to carry the marker. Define the <code>pub fn extension()</code> factory convention.</p>
           </div>
           <div class="step-col">
             <div class="step-col-label">Why it's safe</div>
@@ -949,7 +949,7 @@ host-api = { git = <span class="str">"https://github.com/agentropy/dar"</span>, 
         <div class="step-body">
           <div class="step-col">
             <div class="step-col-label">What we do</div>
-            <p>Implement the ability-scanner + code-generator inside <code>agentropy-cli</code>. Add <code>agentropy init-build --dir</code> (bootstraps the <code>.agentropy/</code> folder) and <code>agentropy build --dir</code> (regenerates + compiles + copies binary to <code>bin/</code>). Validate against the <code>example-agent</code> test fixture.</p>
+            <p>Implement the ability-scanner + code-generator inside <code>dar-cli</code>. Add <code>dar init-build --dir</code> (bootstraps the <code>.dar/</code> folder) and <code>dar build --dir</code> (regenerates + compiles + copies binary to <code>bin/</code>). Validate against the <code>example-agent</code> test fixture.</p>
           </div>
           <div class="step-col">
             <div class="step-col-label">Why it's safe</div>
@@ -966,11 +966,11 @@ host-api = { git = <span class="str">"https://github.com/agentropy/dar"</span>, 
         <div class="step-body">
           <div class="step-col">
             <div class="step-col-label">What we do</div>
-            <p>Make standard abilities (tracker, runner, dashboard, etc.) <em>optional</em> in the generated <code>.agentropy/Cargo.toml</code>. The composer reads <code>agent.yaml</code> to know which ones this agent actually needs, and only includes those. A minimal agent = a smaller binary.</p>
+            <p>Make standard abilities (tracker, runner, dashboard, etc.) <em>optional</em> in the generated <code>.dar/Cargo.toml</code>. The composer reads <code>agent.yaml</code> to know which ones this agent actually needs, and only includes those. A minimal agent = a smaller binary.</p>
           </div>
           <div class="step-col">
             <div class="step-col-label">Why it's safe</div>
-            <p>Only affects the generated file — the live system is unchanged until a new <code>agentropy build</code> is run. The default includes all standard abilities, so existing agents behave identically unless explicitly reconfigured.</p>
+            <p>Only affects the generated file — the live system is unchanged until a new <code>dar build</code> is run. The default includes all standard abilities, so existing agents behave identically unless explicitly reconfigured.</p>
           </div>
         </div>
       </div>
@@ -983,7 +983,7 @@ host-api = { git = <span class="str">"https://github.com/agentropy/dar"</span>, 
         <div class="step-body">
           <div class="step-col">
             <div class="step-col-label">What we do</div>
-            <p>Implement <code>agentropy self rebuild</code> in <code>agentropy-cli</code>. Wire up the lock file, out-of-process build, doctor-gate spawn, atomic <code>fs::rename</code> swap, and <code>execv</code> restart. Add the boot-time self-check + <code>.prev</code> fallback in <code>main()</code>. This is the full self-update loop described in Section 5.</p>
+            <p>Implement <code>dar self rebuild</code> in <code>dar-cli</code>. Wire up the lock file, out-of-process build, doctor-gate spawn, atomic <code>fs::rename</code> swap, and <code>execv</code> restart. Add the boot-time self-check + <code>.prev</code> fallback in <code>main()</code>. This is the full self-update loop described in Section 5.</p>
           </div>
           <div class="step-col">
             <div class="step-col-label">Why it's safe</div>
@@ -1000,7 +1000,7 @@ host-api = { git = <span class="str">"https://github.com/agentropy/dar"</span>, 
         <div class="step-body">
           <div class="step-col">
             <div class="step-col-label">What we do</div>
-            <p>Switch stock dependency references to git-pinned revisions (no absolute paths). Add <code>agentropy lock-refresh</code> for deliberate dependency bumps. Add optional <code>--vendor</code> flag to <code>build</code>/<code>init-build</code> for air-gapped machines with no internet.</p>
+            <p>Switch stock dependency references to git-pinned revisions (no absolute paths). Add <code>dar lock-refresh</code> for deliberate dependency bumps. Add optional <code>--vendor</code> flag to <code>build</code>/<code>init-build</code> for air-gapped machines with no internet.</p>
           </div>
           <div class="step-col">
             <div class="step-col-label">Why it's safe</div>
@@ -1042,13 +1042,13 @@ host-api = { git = <span class="str">"https://github.com/agentropy/dar"</span>, 
       <div class="cost-card">
         <div class="icon">⏱️</div>
         <h4>First build takes a few minutes</h4>
-        <p>The very first build downloads and compiles everything from scratch. After that, the shared cache at <code>~/.cache/agentropy/target/</code> means subsequent builds cost only 1–3 seconds for typical local changes.</p>
+        <p>The very first build downloads and compiles everything from scratch. After that, the shared cache at <code>~/.cache/dar/target/</code> means subsequent builds cost only 1–3 seconds for typical local changes.</p>
       </div>
 
       <div class="cost-card">
         <div class="icon">🌐</div>
         <h4>Needs internet (unless vendored)</h4>
-        <p>By default, <code>cargo build</code> fetches dependencies from GitHub and the registry. For machines with no internet (air-gapped), use <code>agentropy build --vendor</code> to bundle everything locally first.</p>
+        <p>By default, <code>cargo build</code> fetches dependencies from GitHub and the registry. For machines with no internet (air-gapped), use <code>dar build --vendor</code> to bundle everything locally first.</p>
       </div>
 
       <div class="cost-card">
@@ -1076,7 +1076,7 @@ host-api = { git = <span class="str">"https://github.com/agentropy/dar"</span>, 
       </div>
       <div class="glossary-row">
         <div class="glossary-term">binary</div>
-        <div class="glossary-def">The compiled, runnable program file — the thing you actually execute. Like an <code>.exe</code> on Windows. In this doc, the agent's brain lives at <code>bin/agentropy</code>.</div>
+        <div class="glossary-def">The compiled, runnable program file — the thing you actually execute. Like an <code>.exe</code> on Windows. In this doc, the agent's brain lives at <code>bin/dar</code>.</div>
       </div>
       <div class="glossary-row">
         <div class="glossary-term">plugin / extension</div>
@@ -1084,7 +1084,7 @@ host-api = { git = <span class="str">"https://github.com/agentropy/dar"</span>, 
       </div>
       <div class="glossary-row">
         <div class="glossary-term">doctor</div>
-        <div class="glossary-def">A built-in health-check command (<code>agentropy doctor --dir .</code>) that verifies the agent config is valid, all abilities load correctly, and the toolchain is present. Think of it as a pre-flight checklist.</div>
+        <div class="glossary-def">A built-in health-check command (<code>dar doctor --dir .</code>) that verifies the agent config is valid, all abilities load correctly, and the toolchain is present. Think of it as a pre-flight checklist.</div>
       </div>
       <div class="glossary-row">
         <div class="glossary-term">execv</div>

@@ -1,15 +1,21 @@
 [package]
-name = "runner-pi"
-version = "0.2.0"
-edition = "2021"
+name = "dar-runner-pi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pi runner extension: drives pi --mode rpc for agent runs"
 rust-version = "1.83"
+
+[lib]
+name = "runner_pi"
 
 [dependencies]
 anyhow = "1"
-cap-runner = { path = "../../crates/cap-runner" }
+cap-runner = { package = "dar-cap-runner", path = "../../crates/cap-runner", version = "0.2" }
 chrono = { version = "0.4", features = ["serde"] }
-host-api = { path = "../../crates/host-api" }
-runner-core = { path = "../../crates/runner-core" }
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.2" }
+runner-core = { package = "dar-runner-core", path = "../../crates/runner-core", version = "0.2" }
 serde_json = "1"
 tokio = { version = "1.43", features = ["process", "sync", "time", "io-util", "rt", "fs"] }
 

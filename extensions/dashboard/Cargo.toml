@@ -1,22 +1,28 @@
 [package]
-name = "dashboard"
-version = "0.2.0"
-edition = "2021"
+name = "dar-dashboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Web dashboard extension for the dar agent host"
 rust-version = "1.83"
+
+[lib]
+name = "dashboard"
 
 [dependencies]
 anyhow = "1"
 askama = "0.13"
 axum = { version = "0.8", features = ["ws"] }
-agentropy-presence = { path = "../../crates/agentropy-presence" }
-cap-dashboard-tab = { path = "../../crates/cap-dashboard-tab" }
-cap-tracker = { path = "../../crates/cap-tracker" }
+dar-presence = { path = "../../crates/dar-presence", version = "0.2" }
+cap-dashboard-tab = { package = "dar-cap-dashboard-tab", path = "../../crates/cap-dashboard-tab", version = "0.2" }
+cap-tracker = { package = "dar-cap-tracker", path = "../../crates/cap-tracker", version = "0.2" }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 hmac = "0.12"
-host-api = { path = "../../crates/host-api" }
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.2" }
 mime_guess = "2"
-orchestrator-api = { path = "../../crates/orchestrator-api" }
+orchestrator-api = { package = "dar-orchestrator-api", path = "../../crates/orchestrator-api", version = "0.2" }
 minijinja = "2.5"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

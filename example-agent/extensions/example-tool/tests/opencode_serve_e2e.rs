@@ -2,10 +2,10 @@
 //!
 //! Drives a real `opencode serve` child (the exact HTTP/SSE protocol
 //! `runner-opencode` drives) wired to the host-owned `example-mcp-bridge` via an
-//! `mcp.agentropy` block in `OPENCODE_CONFIG_CONTENT` — the same
-//! `{ "mcp": { "agentropy": { "type": "local", "command": [...] } } }` document
+//! `mcp.dar` block in `OPENCODE_CONFIG_CONTENT` — the same
+//! `{ "mcp": { "dar": { "type": "local", "command": [...] } } }` document
 //! the production runner writes. opencode surfaces the host tools namespaced
-//! `agentropy_<tool>` and routes the call back to the bridge over stdio.
+//! `dar_<tool>` and routes the call back to the bridge over stdio.
 //!
 //! Two paths are exercised, both in the SAME session to prove session survival:
 //!   1. Happy path — ask the agent to call `echo_upper` with valid input and
@@ -22,11 +22,11 @@
 //! the config-parity contract on the opencode path too.
 //!
 //! Gated: skips (passes) unless `opencode` is installed and authed and
-//! `AGENTROPY_OPENCODE_E2E=1` is set, so CI without an opencode login is
+//! `DAR_OPENCODE_E2E=1` is set, so CI without an opencode login is
 //! unaffected.
 //!
 //! Run it explicitly with:
-//!   AGENTROPY_OPENCODE_E2E=1 cargo test -p example-tool --test opencode_serve_e2e -- --nocapture
+//!   DAR_OPENCODE_E2E=1 cargo test -p example-tool --test opencode_serve_e2e -- --nocapture
 
 use std::ffi::OsString;
 use std::process::Command;
@@ -36,11 +36,11 @@ use opencode_client::{OpenCodeEvent, OpenCodeServer};
 use serde_json::{json, Value};
 
 /// Matches `runner-opencode`'s `BRIDGE_SERVER_NAME`.
-const BRIDGE_SERVER_NAME: &str = "agentropy";
+const BRIDGE_SERVER_NAME: &str = "dar";
 const SUFFIX: &str = " [via-config]";
 
 fn opencode_available() -> bool {
-    std::env::var("AGENTROPY_OPENCODE_E2E").as_deref() == Ok("1")
+    std::env::var("DAR_OPENCODE_E2E").as_deref() == Ok("1")
         && Command::new("opencode")
             .arg("--version")
             .stdout(std::process::Stdio::null())
@@ -50,9 +50,9 @@ fn opencode_available() -> bool {
             .unwrap_or(false)
 }
 
-/// The exact `mcp.agentropy` block `runner-opencode` writes: advertise the host
+/// The exact `mcp.dar` block `runner-opencode` writes: advertise the host
 /// bridge as a `type: "local"` stdio MCP server whose `command` is the bridge
-/// binary followed by its args. opencode surfaces its tools `agentropy_<tool>`.
+/// binary followed by its args. opencode surfaces its tools `dar_<tool>`.
 fn config_content(bridge: &str) -> String {
     json!({
         "$schema": "https://opencode.ai/config.json",
@@ -72,7 +72,7 @@ fn config_content(bridge: &str) -> String {
 async fn opencode_serve_calls_echo_upper_through_host_bridge_and_survives_failure() {
     if !opencode_available() {
         eprintln!(
-            "skipping opencode e2e: set AGENTROPY_OPENCODE_E2E=1 with opencode installed + authed"
+            "skipping opencode e2e: set DAR_OPENCODE_E2E=1 with opencode installed + authed"
         );
         return;
     }
@@ -137,7 +137,7 @@ async fn opencode_serve_calls_echo_upper_through_host_bridge_and_survives_failur
     client
         .send_prompt(
             &session_id,
-            "Call the agentropy_echo_upper host tool with {\"text\":\"hello from spike\"}. \
+            "Call the dar_echo_upper host tool with {\"text\":\"hello from spike\"}. \
              Then reply with exactly the tool's output text and nothing else.",
             None,
         )
@@ -164,7 +164,7 @@ async fn opencode_serve_calls_echo_upper_through_host_bridge_and_survives_failur
     client
         .send_prompt(
             &session_id,
-            "Call the agentropy_echo_upper host tool with NO arguments at all (an empty \
+            "Call the dar_echo_upper host tool with NO arguments at all (an empty \
              object {}). Report back whether the tool returned an error and the error text.",
             None,
         )
@@ -192,7 +192,7 @@ async fn opencode_serve_calls_echo_upper_through_host_bridge_and_survives_failur
     client
         .send_prompt(
             &session_id,
-            "Now call agentropy_echo_upper with {\"text\":\"still alive\"} and reply with \
+            "Now call dar_echo_upper with {\"text\":\"still alive\"} and reply with \
              exactly the tool's output text and nothing else.",
             None,
         )

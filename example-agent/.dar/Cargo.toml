@@ -1,19 +1,19 @@
 # generated - do not hand-edit
 [package]
-name = "agentropy-agent"
+name = "dar-agent"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.83"
 
 [[bin]]
-name = "agentropy"
+name = "dar"
 path = "src/main.rs"
 
 [workspace]
 
 [dependencies]
 host-api = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740" }
-agentropy-cli = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740" }
+dar-cli-core = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740" }
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal"] }
 chat-pi = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }
 frontend-log = { git = "https://github.com/tobalsan/dar.git", rev = "09b8e3758a61327bc060d9656727b338a5903740", optional = true }

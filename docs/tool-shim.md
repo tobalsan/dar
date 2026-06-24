@@ -3,7 +3,7 @@
 The **shim transport** (`crates/tool-shim`) is the runner-agnostic, portable
 fallback for exposing host-registered extension tools to an agent. It is the
 *defined reliability floor, not the default* (ALG-254): the native host MCP
-bridge (`crates/agentropy-cli/src/bridge.rs`) stays the preferred surface, and
+bridge (`crates/dar-cli/src/bridge.rs`) stays the preferred surface, and
 the shim is used where native MCP is unavailable or unreliable (e.g. the pi
 init race, or backend/version drift that breaks native tool discovery).
 
@@ -36,14 +36,14 @@ and JSON Schema. The agent calls a tool by emitting **exactly** this marker on
 its own lines, then stopping to wait for the host's reply:
 
 ```text
-<<<AGENTROPY_TOOL_CALL
+<<<DAR_TOOL_CALL
 {"call_id": "<your-id>", "name": "<tool-name>", "arguments": { ... }}
-AGENTROPY_TOOL_CALL>>>
+DAR_TOOL_CALL>>>
 ```
 
 Rules:
 
-- Each fence (`<<<AGENTROPY_TOOL_CALL` / `AGENTROPY_TOOL_CALL>>>`) is on its own
+- Each fence (`<<<DAR_TOOL_CALL` / `DAR_TOOL_CALL>>>`) is on its own
   line.
 - The middle is a single JSON object with a non-empty `name` (a registered
   tool) and an `arguments` object matching that tool's schema.
@@ -54,9 +54,9 @@ The host replies as a symmetric result block which the agent reads on its next
 turn:
 
 ```text
-<<<AGENTROPY_TOOL_RESULT
+<<<DAR_TOOL_RESULT
 {"call_id": "<echoed>", "name": "<tool>", "isError": false, "content": "<text>"}
-AGENTROPY_TOOL_RESULT>>>
+DAR_TOOL_RESULT>>>
 ```
 
 `isError: true` is a structured failure (bad arguments, unknown tool, malformed

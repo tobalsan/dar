@@ -1,7 +1,7 @@
 // # generated - do not hand-edit
 #[tokio::main(worker_threads = 2)]
 async fn main() {
-    agentropy_cli::run(host_api::plugins![
+    dar_cli_core::run(host_api::plugins![
         #[cfg(feature = "stock-chat-pi")]
         chat_pi::ChatPiExtension,
         #[cfg(feature = "stock-frontend-log")]

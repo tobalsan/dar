@@ -1,29 +1,30 @@
-use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
+const STOCK_CRATE_VERSION_REQ: &str = concat!(env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"));
+
 fn main() -> Result<()> {
-    CargoAgentropy::parse_from(cargo_subcommand_args()).run()
+    CargoDar::parse_from(cargo_subcommand_args()).run()
 }
 
 fn cargo_subcommand_args() -> Vec<std::ffi::OsString> {
     let mut args: Vec<_> = std::env::args_os().collect();
-    if args.get(1).and_then(|s| s.to_str()) == Some("agentropy") {
+    if args.get(1).and_then(|s| s.to_str()) == Some("dar") {
         args.remove(1);
     }
     args
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "cargo-agentropy", version, about = "agentropy Cargo helpers")]
-struct CargoAgentropy {
+#[command(name = "cargo-dar", version, about = "dar Cargo helpers")]
+struct CargoDar {
     #[command(subcommand)]
     command: Command,
 }
 
-impl CargoAgentropy {
+impl CargoDar {
     fn run(self) -> Result<()> {
         match self.command {
             Command::New(args) => scaffold(args),
@@ -61,7 +62,7 @@ fn scaffold(args: NewArgs) -> Result<()> {
     }
 
     let type_name = extension_type_name(&args.name);
-    let manifest = cargo_toml(&args.name)?;
+    let manifest = cargo_toml(&args.name);
     std::fs::create_dir_all(dir.join("src"))
         .with_context(|| format!("creating {}", dir.join("src").display()))?;
     std::fs::write(dir.join("Cargo.toml"), manifest)
@@ -106,103 +107,35 @@ fn extension_type_name(name: &str) -> String {
     out
 }
 
-fn cargo_toml(name: &str) -> Result<String> {
-    cargo_toml_with_source(name, &stock_source()?)
-}
-
-fn cargo_toml_with_source(name: &str, source: &StockSource) -> Result<String> {
+fn cargo_toml(name: &str) -> String {
     let ident = crate_ident(name);
-    Ok(format!(
+    format!(
         r#"[package]
 name = "{name}"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.83"
 
-[package.metadata.agentropy]
+[package.metadata.dar]
 factory = "{ident}::extension"
 
 [dependencies]
 anyhow = "1"
-host-api = {{ git = "{git}", rev = "{rev}" }}
+host-api = {{ package = "dar-host-api", version = "{version}" }}
 tokio = {{ version = "1.43", features = ["macros", "rt", "sync", "time"] }}
 
 [workspace]
 "#,
-        git = source.git,
-        rev = source.rev
-    ))
+        version = STOCK_CRATE_VERSION_REQ
+    )
 }
 
 fn post_scaffold_guidance(name: &str) -> String {
     format!(
         r#"agent-local extension ready.
-`agentropy build --dir .` auto-discovers extensions/{name}/ from its package metadata.
+`dar build --dir .` auto-discovers extensions/{name}/ from its package metadata.
 "#
     )
-}
-
-#[derive(Debug, Clone, Eq, PartialEq)]
-struct StockSource {
-    git: String,
-    rev: String,
-}
-
-fn stock_source() -> Result<StockSource> {
-    let repo = repo_root();
-    let git = git_output(&repo, ["config", "--get", "remote.origin.url"])?;
-    ensure_portable_git_url(&git)?;
-    let rev = git_output(&repo, ["rev-parse", "HEAD"])?;
-    Ok(StockSource { git, rev })
-}
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("dist lives under the repository root")
-        .to_path_buf()
-}
-
-fn ensure_portable_git_url(url: &str) -> Result<()> {
-    if url
-        .split_once(':')
-        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("file"))
-        || url.starts_with('/')
-        || url.starts_with("./")
-        || url.starts_with("../")
-        || has_windows_drive_prefix(url)
-        || Path::new(url).is_absolute()
-    {
-        bail!("remote.origin.url must be a portable git URL, got {url:?}");
-    }
-    let has_scheme = url.contains("://");
-    let is_scp_like_ssh = url
-        .split_once(':')
-        .is_some_and(|(prefix, suffix)| prefix.contains('@') && !suffix.is_empty());
-    if !has_scheme && !is_scp_like_ssh {
-        bail!("remote.origin.url must be a portable git URL, got {url:?}");
-    }
-    Ok(())
-}
-
-fn has_windows_drive_prefix(url: &str) -> bool {
-    let bytes = url.as_bytes();
-    bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'\\' && bytes[0].is_ascii_alphabetic()
-}
-
-fn git_output<const N: usize>(repo: &Path, args: [&str; N]) -> Result<String> {
-    let output = ProcessCommand::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .with_context(|| format!("running git in {}", repo.display()))?;
-    if !output.status.success() {
-        bail!("git exited with {}", output.status);
-    }
-    Ok(String::from_utf8(output.stdout)
-        .context("git output was not utf-8")?
-        .trim()
-        .to_string())
 }
 
 fn lib_rs(name: &str, type_name: &str, kind: ExtensionKind) -> String {
@@ -356,20 +289,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cargo_toml_includes_agentropy_factory_marker_and_workspace() {
-        let manifest = cargo_toml_with_source(
-            "my-ext",
-            &StockSource {
-                git: "https://github.com/tobalsan/dar.git".to_string(),
-                rev: "abc123".to_string(),
-            },
-        )
-        .unwrap();
+    fn cargo_toml_includes_dar_factory_marker_and_workspace() {
+        let manifest = cargo_toml("my-ext");
 
-        assert!(manifest.contains("[package.metadata.agentropy]\nfactory = \"my_ext::extension\""));
-        assert!(manifest.contains(
-            r#"host-api = { git = "https://github.com/tobalsan/dar.git", rev = "abc123" }"#
-        ));
+        assert!(manifest.contains("[package.metadata.dar]\nfactory = \"my_ext::extension\""));
+        assert!(manifest.contains("host-api = { package = \"dar-host-api\", version = \"0."));
         assert!(!manifest.contains("../../crates/host-api"));
         assert!(manifest.contains("\n[workspace]\n"));
     }
@@ -378,7 +302,7 @@ mod tests {
     fn post_scaffold_guidance_describes_agent_local_discovery() {
         let guidance = post_scaffold_guidance("my-ext");
 
-        assert!(guidance.contains("agentropy build --dir ."));
+        assert!(guidance.contains("dar build --dir ."));
         assert!(guidance.contains("auto-discovers extensions/my-ext"));
         assert!(!guidance.contains("dist/root Cargo.toml"));
     }

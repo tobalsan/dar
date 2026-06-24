@@ -20,7 +20,7 @@ const PREAMBLE_ISSUE_CAP: usize = 20;
 /// lines), and a bounded listing of `<agent_root>/issues/` when present.
 pub fn build_preamble(snapshot: Option<&RunSnapshot>, agent_root: &Path) -> String {
     let mut out = format!(
-        "[context] This is an operator chat session inside the agentropy agent folder at {}. \
+        "[context] This is an operator chat session inside the dar agent folder at {}. \
          Issues live at ./issues (the tracker owns their state: field); per-issue \
          workspaces at ./workspaces. You run trusted with full access to this folder. \
          The operator's message follows this context.\n",

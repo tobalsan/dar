@@ -1,4 +1,4 @@
-# Agentropy
+# Dar
 
 A self-contained, folder-scoped agent runtime. One Rust binary, run from inside
 an agent folder. It polls an issue tracker, dispatches AI coding-agent children
@@ -11,7 +11,7 @@ Markdown files or Linear.
 ## How it works
 
 ```
-                 ┌─────────────── agentropy run ───────────────┐
+                 ┌─────────────── dar run ───────────────┐
    issues/       │  reconcile → collect_finished → dispatch      │   dashboard
   (the truth) ──▶│            (in-memory run state only)        │──▶ :7878 (HTMX + WS)
                  └──────────────────────┬──────────────────────┘
@@ -48,7 +48,7 @@ Exit classification:
 - **Abnormal exit** → exponential backoff `min(retry_backoff_ms · 2^attempt,
   30min)` up to `max_retries`, then `Failed` + park to `needs_human`.
 
-State is in-memory: kill `agentropy` and rerun → it starts cold and trusts
+State is in-memory: kill `dar` and rerun → it starts cold and trusts
 whatever the issue files say. Run history is restored from SQLite on startup.
 
 ## Agent folder layout
@@ -65,8 +65,8 @@ my-agent/
 │   └── store.db        # SQLite: runs, events, claims, heartbeats
 ├── logs/
 │   └── agent.log
-├── bin/agentropy       # agent's own binary (build B only)
-└── .agentropy/         # committed composition crate (build B only)
+├── bin/dar       # agent's own binary (build B only)
+└── .dar/         # committed composition crate (build B only)
 ```
 
 Move the folder, move the agent. Everything it needs lives inside.
@@ -79,14 +79,14 @@ There are two independent build models. Pick based on your goal:
   runtime itself or want a single checkout with all stock extensions. One
   `cargo build` produces one binary.
 - **B — Agent-specific build (self-contained):** each agent folder carries its
-  own composition crate (`.agentropy/`) and binary (`bin/agentropy`), links
+  own composition crate (`.dar/`) and binary (`bin/dar`), links
   only what it uses, supports local extension crates, and can self-update.
   This is the "move folder, move agent" model.
 
 ### A · From-source build (repo dev, monolith)
 
 ```bash
-cargo build --release          # → ./target/release/agentropy
+cargo build --release          # → ./target/release/dar
 ```
 
 One binary, all stock extensions baked in. To add or remove an extension,
@@ -125,8 +125,8 @@ Removing an extension is the reverse: delete its `plugins![]` line and
 ### B · Agent-specific build (self-contained)
 
 ```bash
-agentropy init-build --dir ./my-agent   # one-time: writes .agentropy/ crate
-agentropy build --dir ./my-agent        # → ./my-agent/bin/agentropy
+dar init-build --dir ./my-agent   # one-time: writes .dar/ crate
+dar build --dir ./my-agent        # → ./my-agent/bin/dar
 ```
 
 The agent links only the extensions it uses, supports local extension crates
@@ -137,7 +137,7 @@ extensions, and toolchain prerequisites).
 
 ## Extensions
 
-The codebase is a cargo workspace: a domain-free host (`crates/agentropy-host`)
+The codebase is a cargo workspace: a domain-free host (`crates/dar-host`)
 plus small contract crates (`crates/host-api`, `crates/cap-tracker`,
 `crates/cap-runner`, `crates/cap-chat`, `crates/orchestrator-api`), with
 features living as one crate each under `extensions/`. The binary is assembled
@@ -146,9 +146,9 @@ import `host-api` (and optionally one cap/api crate) and read zero host
 internals.
 
 Editing `dist/` is the **build A** path (see above). In **build B**, each agent
-gets its own composition crate (`.agentropy/`) and can add agent-local
+gets its own composition crate (`.dar/`) and can add agent-local
 extensions under its own `extensions/` folder — scaffold one with
-`cargo agentropy new my-extension --kind background` (or `service` /
+`cargo dar new my-extension --kind background` (or `service` /
 `foreground`). See [Self-contained agents (build B)](#self-contained-agents-build-b--per-agent-binary--self-update).
 
 For writing your own extension, see the [authoring guide](docs/extensions.md);
@@ -235,42 +235,42 @@ See [Configuration](#configuration-agentyaml) for the full `agent.yaml` referenc
 ## CLI
 
 ```bash
-# Bootstrap the per-agent composition crate (.agentropy/) — one-time setup.
-agentropy init-build --dir ./my-agent
-agentropy init-build --dir ./my-agent --vendor   # vendor deps for offline use
+# Bootstrap the per-agent composition crate (.dar/) — one-time setup.
+dar init-build --dir ./my-agent
+dar init-build --dir ./my-agent --vendor   # vendor deps for offline use
 
-# Build the agent's own binary → <folder>/bin/agentropy.
-agentropy build --dir ./my-agent
-agentropy build --dir ./my-agent --vendor --offline   # air-gapped build
+# Build the agent's own binary → <folder>/bin/dar.
+dar build --dir ./my-agent
+dar build --dir ./my-agent --vendor --offline   # air-gapped build
 
 # Refresh the per-agent Cargo.lock (deliberate dep bump; commit result).
-agentropy lock-refresh --dir ./my-agent
+dar lock-refresh --dir ./my-agent
 
 # Self-update: recompose, build, doctor-gate, atomic swap, execv.
-agentropy self rebuild --dir ./my-agent
-agentropy self rebuild --dir ./my-agent --vendor --offline
+dar self rebuild --dir ./my-agent
+dar self rebuild --dir ./my-agent --vendor --offline
 
 # Scaffold the default WORKFLOW.md prompt in an agent folder.
-agentropy init-workflow --dir ./my-agent
-agentropy init-workflow --dir ./my-agent --force                      # overwrite existing
-agentropy init-workflow --dir ./my-agent --linear-project-slug abc123 # seed Linear frontmatter
-agentropy init-workflow --dir ./my-agent --expose-graphql-tool        # enable linear_graphql tool
+dar init-workflow --dir ./my-agent
+dar init-workflow --dir ./my-agent --force                      # overwrite existing
+dar init-workflow --dir ./my-agent --linear-project-slug abc123 # seed Linear frontmatter
+dar init-workflow --dir ./my-agent --expose-graphql-tool        # enable linear_graphql tool
 
 # Validate agent.yaml. If the orchestrator trio is configured, also validates
 # WORKFLOW.md + tracker. Exit code only.
-agentropy doctor --dir ./my-agent
+dar doctor --dir ./my-agent
 
 # Run the agent host (long-running). With the orchestrator trio configured,
 # this runs the issue loop; otherwise it runs foreground/custom extensions only.
-cd my-agent && agentropy run
-agentropy run --dir ./my-agent          # or point at a folder
+cd my-agent && dar run
+dar run --dir ./my-agent          # or point at a folder
 
 # Export the configured Linear project and issues to data/.
-agentropy export --dir ./my-agent
+dar export --dir ./my-agent
 
 # Quick start with the bundled example:
-agentropy doctor --dir ./example-agent
-agentropy run   --dir ./example-agent
+dar doctor --dir ./example-agent
+dar run   --dir ./example-agent
 open http://127.0.0.1:7878/
 ```
 
@@ -412,7 +412,7 @@ You are working on {{ issue.identifier }}: {{ issue.title }}
 Scaffold the canonical default body:
 
 ```bash
-agentropy init-workflow --dir ./my-agent
+dar init-workflow --dir ./my-agent
 ```
 
 The child must eventually leave the issue in a non-active state (or set it to
@@ -460,12 +460,12 @@ runner default applies.
 
 ## Environment variables exported to children
 
-On startup, `agentropy run` and `agentropy doctor` load `<agent-folder>/.env`
+On startup, `dar run` and `dar doctor` load `<agent-folder>/.env`
 when it exists. Values from the real process environment take precedence over
 the file. `.env` entries are for the daemon's own config/secrets lookup and are
 not exported wholesale to runner, hook, or HITL CLI child processes; those
 children receive their inherited environment with file-loaded keys removed plus
-the documented `AGENT_*` variables below. `agentropy init-workflow` ensures
+the documented `AGENT_*` variables below. `dar init-workflow` ensures
 `.env` is listed in the agent folder's `.gitignore`.
 
 Every runner receives the following `AGENT_*` variables. Hook scripts receive
@@ -505,7 +505,7 @@ priority: 1
 created_at: 2026-01-15T10:00:00Z
 ---
 
-Create a file `hello.md` in this workspace with the text "hello from agentropy".
+Create a file `hello.md` in this workspace with the text "hello from dar".
 ```
 
 ## Linear tracker
@@ -618,7 +618,7 @@ only — issue files are never touched).
 
 **Quitting quits the whole agent:** `Ctrl-C` anywhere, or `q` on the
 Logs/Dash tabs (on Chat it types a "q"), exits the foreground — which shuts
-agentropy down and kills running children, exactly like Ctrl-C on
+dar down and kills running children, exactly like Ctrl-C on
 `foreground: logs`.
 
 When stdout is not a terminal (piped/CI), the TUI degrades to the exact
@@ -655,14 +655,14 @@ binary — no shared repo checkout required. Move the folder, move the agent.
 ```bash
 # Requires: Rust toolchain + cargo on the host (or vendor deps for offline use)
 
-agentropy init-build --dir ./my-agent          # writes .agentropy/ — commit it
-agentropy init-build --dir ./my-agent --vendor # also vendor deps for offline/air-gap
+dar init-build --dir ./my-agent          # writes .dar/ — commit it
+dar init-build --dir ./my-agent --vendor # also vendor deps for offline/air-gap
 
-agentropy build --dir ./my-agent               # → ./my-agent/bin/agentropy
-agentropy build --dir ./my-agent --vendor --offline   # air-gapped build
+dar build --dir ./my-agent               # → ./my-agent/bin/dar
+dar build --dir ./my-agent --vendor --offline   # air-gapped build
 ```
 
-`.agentropy/` is the composition crate for this agent. Commit it alongside
+`.dar/` is the composition crate for this agent. Commit it alongside
 `agent.yaml` and `WORKFLOW.md`; it pins which extensions the agent links.
 
 ### Worked example: a `worker` agent
@@ -670,9 +670,9 @@ agentropy build --dir ./my-agent --vendor --offline   # air-gapped build
 A self-contained agent at `~/agents/worker` using the Linear tracker, the
 Codex runner, a chat-enabled TUI, and one agent-local extension.
 
-Prerequisites: `cargo`/`rustc` on PATH, plus the `cargo-agentropy` helper
+Prerequisites: `cargo`/`rustc` on PATH, plus the `cargo-dar` helper
 (built from a repo checkout with `cargo build --release`, then put
-`cargo-agentropy` on PATH).
+`cargo-dar` on PATH).
 
 1. Write `~/agents/worker/agent.yaml` — the `use:` / `foreground:` keys
    decide which stock extensions get linked:
@@ -699,46 +699,46 @@ Prerequisites: `cargo`/`rustc` on PATH, plus the `cargo-agentropy` helper
 
    ```bash
    cd ~/agents/worker
-   agentropy init-workflow --dir .                       # writes WORKFLOW.md
-   cargo agentropy new standup-poster --kind background  # → extensions/standup-poster/
+   dar init-workflow --dir .                       # writes WORKFLOW.md
+   cargo dar new standup-poster --kind background  # → extensions/standup-poster/
    ```
 
    The new crate's `Cargo.toml` carries the discovery marker
-   `[package.metadata.agentropy] factory = "standup_poster::extension"` and a
+   `[package.metadata.dar] factory = "standup_poster::extension"` and a
    `pub fn extension() -> Box<dyn Extension>`. The scaffold pins `host-api`
    to the same `git`/`rev` source the composer uses for stock crates.
 
 3. Bootstrap, build, run:
 
    ```bash
-   agentropy init-build --dir .   # generates .agentropy/ (commit it)
-   agentropy build --dir .        # → ~/agents/worker/bin/agentropy
-   ./bin/agentropy run
+   dar init-build --dir .   # generates .dar/ (commit it)
+   dar build --dir .        # → ~/agents/worker/bin/dar
+   ./bin/dar run
    ```
 
 **Where each extension comes from in the final binary:**
 
 | Extension | Source | How it's linked |
 |---|---|---|
-| `orchestrator`, `tracker-linear`, `runner-codex`, `chat-codex`, `chat-pi`, `tui`, `frontend-log` | the agentropy repo | pinned `git = "…", rev = "…"` dep in `.agentropy/Cargo.toml`, feature-gated — only the subset `agent.yaml` selects is compiled in |
-| `standup-poster` | the agent's own `extensions/standup-poster/` | relative `path = "../extensions/standup-poster"`, auto-discovered via its `[package.metadata.agentropy] factory` marker |
+| `orchestrator`, `tracker-linear`, `runner-codex`, `chat-codex`, `chat-pi`, `tui`, `frontend-log` | the dar repo | pinned `git = "…", rev = "…"` dep in `.dar/Cargo.toml`, feature-gated — only the subset `agent.yaml` selects is compiled in |
+| `standup-poster` | the agent's own `extensions/standup-poster/` | relative `path = "../extensions/standup-poster"`, auto-discovered via its `[package.metadata.dar] factory` marker |
 
 `orchestrator` and `tracker-linear` are always linked; the rest of the stock
 subset follows `tracker.use` / `runner.use` / `foreground`. The composer
 regenerates both the `[dependencies]` and the `plugins![…]` list in
-`.agentropy/` on every `init-build` / `build` — stock entries
+`.dar/` on every `init-build` / `build` — stock entries
 `#[cfg(feature = …)]`-gated, local entries always present, never hand-edited.
 
 ### Local extension crates
 
 Drop an extension crate under the agent's `extensions/` folder. The composer
-auto-discovers crates with agentropy package metadata. Scaffold one:
+auto-discovers crates with dar package metadata. Scaffold one:
 
 ```bash
-cargo agentropy new my-extension --kind background   # or service | foreground
+cargo dar new my-extension --kind background   # or service | foreground
 ```
 
-The agent's `.agentropy/` composition root lists only what this agent needs —
+The agent's `.dar/` composition root lists only what this agent needs —
 unrelated stock extensions are not linked.
 
 ### Self-update loop
@@ -746,31 +746,31 @@ unrelated stock extensions are not linked.
 An agent can rebuild its own binary from inside the folder and hot-swap itself:
 
 ```bash
-agentropy self rebuild --dir ./my-agent
-agentropy self rebuild --dir ./my-agent --vendor --offline   # air-gapped
+dar self rebuild --dir ./my-agent
+dar self rebuild --dir ./my-agent --vendor --offline   # air-gapped
 ```
 
-Sequence: recompose `.agentropy/` → `agentropy build` → `agentropy doctor` gate
+Sequence: recompose `.dar/` → `dar build` → `dar doctor` gate
 → atomic binary swap → `execv` into the new binary. The running process is
 replaced in place; no external orchestration needed.
 
 To bump dependencies deliberately (then commit the updated lock):
 
 ```bash
-agentropy lock-refresh --dir ./my-agent
+dar lock-refresh --dir ./my-agent
 ```
 
 ### Portability
 
-`agentropy build` runs `cargo build --release` against the host's native
+`dar build` runs `cargo build --release` against the host's native
 target — the result is a dynamically-linked binary for that platform/arch.
-`bin/agentropy` can be copied to another host only if that host is
+`bin/dar` can be copied to another host only if that host is
 ABI-compatible (same OS, arch, and libc). It is not a portable static binary.
 
-A Rust toolchain is not needed merely to *run* `bin/agentropy`, but is
-required to rebuild or self-update (`agentropy build` /
-`agentropy self rebuild`).
+A Rust toolchain is not needed merely to *run* `bin/dar`, but is
+required to rebuild or self-update (`dar build` /
+`dar self rebuild`).
 
 For truly air-gapped hosts, run `init-build --vendor` once on a connected
-machine, commit the `vendor/` tree inside `.agentropy/`, then build offline
+machine, commit the `vendor/` tree inside `.dar/`, then build offline
 with `--vendor --offline`.

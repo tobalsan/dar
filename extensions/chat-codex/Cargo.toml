@@ -1,14 +1,20 @@
 [package]
-name = "chat-codex"
-version = "0.2.1"
-edition = "2021"
+name = "dar-chat-codex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Codex chat backend for the dar TUI chat interface"
 rust-version = "1.83"
+
+[lib]
+name = "chat_codex"
 
 [dependencies]
 anyhow = "1"
-cap-chat = { path = "../../crates/cap-chat" }
-host-api = { path = "../../crates/host-api" }
-runner-core = { path = "../../crates/runner-core" }
+cap-chat = { package = "dar-cap-chat", path = "../../crates/cap-chat", version = "0.2" }
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.2" }
+runner-core = { package = "dar-runner-core", path = "../../crates/runner-core", version = "0.2" }
 serde_json = "1"
 tokio = { version = "1.43", features = ["io-util", "process", "rt", "sync", "time"] }
 

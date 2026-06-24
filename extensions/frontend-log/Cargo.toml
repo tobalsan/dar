@@ -1,12 +1,18 @@
 [package]
-name = "frontend-log"
-version = "0.2.0"
-edition = "2021"
+name = "dar-frontend-log"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Frontend log extension: tails host log events to the terminal"
 rust-version = "1.83"
+
+[lib]
+name = "frontend_log"
 
 [dependencies]
 anyhow = "1"
-host-api = { path = "../../crates/host-api" }
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.2" }
 tokio = { version = "1.43", features = ["sync"] }
 
 [dev-dependencies]

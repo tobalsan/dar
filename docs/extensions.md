@@ -1,6 +1,6 @@
 # Authoring extensions
 
-How to build any kind of agentropy extension. Read this top-to-bottom once;
+How to build any kind of dar extension. Read this top-to-bottom once;
 `extensions/example/src/lib.rs` is the living reference. For enabling and
 configuring an already-written extension, see the README "Adding an extension"
 and "Enabling & configuring extensions" sections — this guide is about
@@ -33,7 +33,7 @@ than one.
 ## Quickstart
 
 ```bash
-cargo agentropy new my-extension --kind background   # or service | foreground
+cargo dar new my-extension --kind background   # or service | foreground
 ```
 
 This writes `extensions/my-extension/{Cargo.toml,src/lib.rs}` with a compiling
@@ -67,7 +67,7 @@ pub trait Extension: Send + Sync {
 - `start(StartCtx)` — wiring is frozen; consume what others registered
   (subscribe to topics, `get` services) and spawn your task. `StartCtx` is `Clone`.
 
-Boot lifecycle order (`crates/agentropy-host/src/lib.rs`, `boot_inner`):
+Boot lifecycle order (`crates/dar-host/src/lib.rs`, `boot_inner`):
 **all `register` (list order) → foreground `select` → all `start` (list order) →
 the selected foreground's `run`.** So every topic/service you need to consume in
 `start` must have been registered by *someone* in a `register` pass — never
@@ -513,7 +513,7 @@ Existing extensions use two layers:
   then `start`, then drive the bus and assert. See the `#[tokio::test]` in
   `extensions/example/src/lib.rs` (`smoke_register_start_publish_subscribe_and_shutdown`)
   and `extensions/frontend-log/src/lib.rs` (`registers_logs_foreground_and_topic`).
-- **Boot-level tests** in `crates/agentropy-host/src/lib.rs` that boot a list of
+- **Boot-level tests** in `crates/dar-host/src/lib.rs` that boot a list of
   fake extensions and assert lifecycle ordering and foreground selection.
 
 Capability-contract behavior (the `Runner` / `Tracker` / `ChatBackend` builders

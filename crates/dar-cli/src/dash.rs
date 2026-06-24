@@ -1,4 +1,4 @@
-//! `agentropy dash` — the fleet aggregator.
+//! `dar dash` — the fleet aggregator.
 //!
 //! A small, stateless HTTP server that presents one unified view over every
 //! live agent dashboard on this host. It owns no cross-process state: each
@@ -32,7 +32,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 
-use agentropy_presence::{PresenceEntry, Registry};
+use dar_presence::{PresenceEntry, Registry};
 
 /// Options for the aggregator server.
 pub struct DashOptions {
@@ -46,7 +46,7 @@ impl DashOptions {
         Self {
             bind: bind.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
             port: port.unwrap_or(7878),
-            registry_dir: registry_dir.unwrap_or_else(agentropy_presence::default_registry_dir),
+            registry_dir: registry_dir.unwrap_or_else(dar_presence::default_registry_dir),
         }
     }
 }
@@ -68,11 +68,11 @@ pub async fn serve(opts: DashOptions) -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind((opts.bind, opts.port))
         .await
-        .with_context(|| format!("binding agentropy dash on {}:{}", opts.bind, opts.port))?;
+        .with_context(|| format!("binding dar dash on {}:{}", opts.bind, opts.port))?;
     let local = listener.local_addr().ok();
     if let Some(addr) = local {
         println!(
-            "agentropy dash listening on {} (browse http://{}:{}/) (registry {})",
+            "dar dash listening on {} (browse http://{}:{}/) (registry {})",
             addr,
             display_host(addr.ip()),
             addr.port(),
@@ -84,7 +84,7 @@ pub async fn serve(opts: DashOptions) -> Result<()> {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await
-        .context("agentropy dash server")
+        .context("dar dash server")
 }
 
 fn display_host(ip: IpAddr) -> String {
@@ -211,7 +211,7 @@ fn render_shell(agents: &[PresenceEntry], request_host: Option<&str>) -> Result<
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>agentropy fleet</title>
+<title>dar fleet</title>
 <style>
   :root {{ color-scheme: dark light; }}
   * {{ box-sizing: border-box; }}

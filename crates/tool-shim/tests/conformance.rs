@@ -4,7 +4,7 @@
 //!
 //!   * the **shim transport** ([`tool_shim`]) — the portable reliability floor,
 //!     driven through its advertise/parse/dispatch/continuation API; and
-//!   * a **native surface** — the host MCP bridge ([`agentropy_cli::bridge`])
+//!   * a **native surface** — the host MCP bridge ([`dar_cli_core::bridge`])
 //!     driven in-process over byte pipes as a real JSON-RPC 2.0 stdio server.
 //!
 //! Both surfaces are wired to the *same* [`ToolRegistry`] and observe the
@@ -273,7 +273,7 @@ impl NativeBridgeSurface {
             input.push('\n');
         }
         let mut output: Vec<u8> = Vec::new();
-        agentropy_cli::bridge::serve_stdio(
+        dar_cli_core::bridge::serve_stdio(
             Arc::clone(&self.registry),
             tool_registry::Redactor::default(),
             input.as_bytes(),

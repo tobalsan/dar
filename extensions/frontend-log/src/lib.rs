@@ -174,7 +174,7 @@ mod tests {
                 Some(LogEvent {
                     level: "INFO".to_string(),
                     target: "issue=- event=startup".to_string(),
-                    message: "agentropy running; dashboard on http://127.0.0.1:7878/".to_string(),
+                    message: "dar running; dashboard on http://127.0.0.1:7878/".to_string(),
                 }),
             )
             .unwrap();
@@ -196,7 +196,7 @@ mod tests {
 
         assert_eq!(
             buf.contents(),
-            "INFO issue=- event=startup agentropy running; dashboard on http://127.0.0.1:7878/\n"
+            "INFO issue=- event=startup dar running; dashboard on http://127.0.0.1:7878/\n"
         );
     }
 

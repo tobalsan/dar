@@ -1,8 +1,14 @@
 [package]
-name = "cap-tracker"
-version = "0.2.0"
-edition = "2021"
+name = "dar-cap-tracker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Issue tracker capability contract for dar extensions"
 rust-version = "1.83"
+
+[lib]
+name = "cap_tracker"
 
 [dependencies]
 anyhow = "1"

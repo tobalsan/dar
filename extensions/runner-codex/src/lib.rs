@@ -948,7 +948,7 @@ mod tests {
         let workspace = Path::new("/tmp/agent/workspaces/ISSUE-1");
         let mut p = params(Some("codex-1".to_string()), workspace, workspace_root);
         p.host_tool_bridge = Some(cap_runner::HostToolBridge {
-            command: "/opt/agentropy".to_string(),
+            command: "/opt/dar".to_string(),
             args: vec![
                 "__mcp-bridge".to_string(),
                 "--dir".to_string(),
@@ -961,21 +961,21 @@ mod tests {
         assert_eq!(args[0], "app-server");
         let command_flag = args
             .windows(2)
-            .find(|w| w[0] == "-c" && w[1].starts_with("mcp_servers.agentropy.command="))
+            .find(|w| w[0] == "-c" && w[1].starts_with("mcp_servers.dar.command="))
             .map(|w| w[1].clone())
-            .expect("mcp_servers.agentropy.command flag missing");
+            .expect("mcp_servers.dar.command flag missing");
         assert_eq!(
             command_flag,
-            "mcp_servers.agentropy.command=\"/opt/agentropy\""
+            "mcp_servers.dar.command=\"/opt/dar\""
         );
         let args_flag = args
             .windows(2)
-            .find(|w| w[0] == "-c" && w[1].starts_with("mcp_servers.agentropy.args="))
+            .find(|w| w[0] == "-c" && w[1].starts_with("mcp_servers.dar.args="))
             .map(|w| w[1].clone())
-            .expect("mcp_servers.agentropy.args flag missing");
+            .expect("mcp_servers.dar.args flag missing");
         assert_eq!(
             args_flag,
-            "mcp_servers.agentropy.args=[\"__mcp-bridge\", \"--dir\", \"/tmp/agent\"]"
+            "mcp_servers.dar.args=[\"__mcp-bridge\", \"--dir\", \"/tmp/agent\"]"
         );
     }
 
@@ -1065,7 +1065,7 @@ mod tests {
         assert_eq!(req["jsonrpc"], "2.0");
         assert_eq!(req["id"], 1);
         assert_eq!(req["method"], "initialize");
-        assert_eq!(req["params"]["clientInfo"]["name"], "agentropy");
+        assert_eq!(req["params"]["clientInfo"]["name"], "dar");
         assert_eq!(req["params"]["capabilities"]["experimentalApi"], true);
         assert_eq!(req["params"]["cwd"], "/ws/ISSUE-1");
     }
@@ -1076,7 +1076,7 @@ mod tests {
         assert_eq!(req["method"], "thread/start");
         assert_eq!(req["params"]["approvalPolicy"], "never");
         assert_eq!(req["params"]["sandbox"], "danger-full-access");
-        assert_eq!(req["params"]["serviceName"], "agentropy");
+        assert_eq!(req["params"]["serviceName"], "dar");
         assert_eq!(req["params"]["model"], "o3");
         assert_eq!(req["params"]["cwd"], "/ws/ISSUE-1");
     }

@@ -1,11 +1,11 @@
 ---
-title: "Agentropy v0 — mini PRD"
+title: "Dar v0 — mini PRD"
 status: draft
 scope: prototype
 platform: macOS arm64
 ---
 
-# Agentropy v0
+# Dar v0
 
 A self-contained, folder-scoped agent runtime. Single Rust binary, run from inside an agent folder. Symphony-aligned orchestration loop over a pluggable tracker, with the smallest dashboard that's still useful.
 
@@ -13,7 +13,7 @@ v0 proves the loop, the folder boundary, and the tracker abstraction. Nothing el
 
 ## Goal
 
-`cd my-agent && agentropy run` polls issues, dispatches a Claude Code subagent into a per-issue workspace, watches it finish, and moves on. A local dashboard shows what's happening and lets the operator stop the world if needed.
+`cd my-agent && dar run` polls issues, dispatches a Claude Code subagent into a per-issue workspace, watches it finish, and moves on. A local dashboard shows what's happening and lets the operator stop the world if needed.
 
 ## Terminology
 
@@ -22,9 +22,9 @@ v0 proves the loop, the folder boundary, and the tracker abstraction. Nothing el
 
 ## External dependencies
 
-v0 ships **one Rust binary** (`agentropy`). It requires:
+v0 ships **one Rust binary** (`dar`). It requires:
 
-- **Claude Code CLI** (`claude`) installed and authenticated on the host. Agentropy does not bundle, install, or auth it.
+- **Claude Code CLI** (`claude`) installed and authenticated on the host. Dar does not bundle, install, or auth it.
 
 No other system dependencies.
 
@@ -122,7 +122,7 @@ priority: 2
 created_at: 2026-01-15T10:00:00Z
 ---
 
-Create a file `hello.md` in this workspace with the text "hello from agentropy".
+Create a file `hello.md` in this workspace with the text "hello from dar".
 ```
 
 The tracker reads/writes these files directly. State transitions update the frontmatter `state:` field.
@@ -185,8 +185,8 @@ Pause state is in-memory only.
 ## CLI
 
 ```
-agentropy run [--dir PATH]   # default: cwd; long-running
-agentropy doctor [--dir PATH] # validate agent.yaml + WORKFLOW.md + tracker, exit code only
+dar run [--dir PATH]   # default: cwd; long-running
+dar doctor [--dir PATH] # validate agent.yaml + WORKFLOW.md + tracker, exit code only
 ```
 
 That's it for v0.
@@ -196,7 +196,7 @@ That's it for v0.
 - Single file: `./logs/agent.log`.
 - Structured-ish: `time level issue=ID event=... msg=...`.
 - Child stdout/stderr appended with prefix `child[ISSUE-1]: ...`.
-- Stderr of `agentropy` also prints to terminal.
+- Stderr of `dar` also prints to terminal.
 
 ## Tracker abstraction (in-tree)
 
@@ -253,14 +253,14 @@ Given:
 - A `WORKFLOW.md` whose prompt instructs the agent to edit its issue file's frontmatter `state:` to `done` when the task is complete.
 - Claude Code CLI installed and authenticated on the host.
 
-When the operator runs `agentropy run` in the folder and opens `http://localhost:7878/`, then:
+When the operator runs `dar run` in the folder and opens `http://localhost:7878/`, then:
 
 1. Within one poll tick, ISSUE-1 appears as the active run with a workspace at `./workspaces/ISSUE-1/`.
 2. The Claude child produces its output; lines stream into the dashboard's recent events.
 3. The agent edits `./issues/ISSUE-1.md` to set `state: done` and exits. The next tick observes the terminal state and dispatches ISSUE-2.
 4. Pressing **Stop** during ISSUE-2 terminates the child within the grace window; run state becomes `Cancelled`; the issue file is unchanged. On the next tick, because the issue is still in `todo`/`in_progress`, the orchestrator re-dispatches it (this is expected v0 behavior).
 5. Pressing **Pause** prevents ISSUE-3 from starting; **Resume** lets it proceed.
-6. Killing `agentropy` and rerunning resumes from whatever the issue files say. No in-memory state is required for correctness.
+6. Killing `dar` and rerunning resumes from whatever the issue files say. No in-memory state is required for correctness.
 
 If the above runs without manual intervention beyond the dashboard controls, v0 is done.
 
@@ -280,4 +280,4 @@ If the above runs without manual intervention beyond the dashboard controls, v0 
 
 - Whether to treat "Stop then no operator edit" as automatic re-dispatch (current v0 behavior) or to add an in-memory "do not re-dispatch this issue until restart" set. v0 default: re-dispatch; revisit if it bites.
 - How to detect "agent gave up cleanly" vs "task complete" beyond exit code + issue state. v0: rely on the agent transitioning the issue file. Exit code 0 with the issue still active triggers a continuation retry by design.
-- Claude CLI flags beyond `-p`: model selection, tool permissions, timeout. v0: rely on the user's local Claude Code config; agentropy passes none.
+- Claude CLI flags beyond `-p`: model selection, tool permissions, timeout. v0: rely on the user's local Claude Code config; dar passes none.

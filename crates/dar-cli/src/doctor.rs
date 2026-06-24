@@ -1,4 +1,4 @@
-//! `agentropy doctor` preflight.
+//! `dar doctor` preflight.
 //!
 //! Validates the three things the run loop relies on, printing findings to
 //! stderr and returning a process exit code (0 = all good, 1 = at least one
@@ -233,12 +233,12 @@ fn check_toolchain(root: &Path) -> anyhow::Result<String> {
     let rustc_version = command_version("rustc")?;
     if !tool_version_satisfies_channel(&cargo_version, &pinned) {
         anyhow::bail!(
-            "cargo is `{cargo_version}`, but `.agentropy/rust-toolchain.toml` requires Rust `{pinned}` or newer; install/switch Rust via rustup"
+            "cargo is `{cargo_version}`, but `.dar/rust-toolchain.toml` requires Rust `{pinned}` or newer; install/switch Rust via rustup"
         );
     }
     if !tool_version_satisfies_channel(&rustc_version, &pinned) {
         anyhow::bail!(
-            "rustc is `{rustc_version}`, but `.agentropy/rust-toolchain.toml` requires Rust `{pinned}` or newer; install/switch Rust via rustup"
+            "rustc is `{rustc_version}`, but `.dar/rust-toolchain.toml` requires Rust `{pinned}` or newer; install/switch Rust via rustup"
         );
     }
     Ok(format!(
@@ -321,7 +321,7 @@ fn command_exists(command: &str) -> bool {
 }
 
 fn pinned_toolchain(root: &Path) -> anyhow::Result<String> {
-    let path = root.join(".agentropy/rust-toolchain.toml");
+    let path = root.join(".dar/rust-toolchain.toml");
     let content =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let value = content
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn opencode_check_reports_missing_command() {
-        let err = check_opencode("__missing_opencode_for_agentropy_test__").unwrap_err();
+        let err = check_opencode("__missing_opencode_for_dar_test__").unwrap_err();
         assert!(err.to_string().contains("cannot run"));
     }
 
@@ -427,9 +427,9 @@ mod tests {
     #[test]
     fn toolchain_check_reports_too_old_version() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".agentropy")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".dar")).unwrap();
         std::fs::write(
-            dir.path().join(".agentropy/rust-toolchain.toml"),
+            dir.path().join(".dar/rust-toolchain.toml"),
             "[toolchain]\nchannel = \"999.0\"\n",
         )
         .unwrap();

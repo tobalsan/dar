@@ -3,13 +3,14 @@ name = "example-tool"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.83"
+publish = false
 
 # Discovered as a local extension for `example-agent` only. This is a TEST
 # FIXTURE (the tool-registry analogue of the `fake` runner): it registers a toy
 # `echo_upper` tool to prove the minimal registration surface and power the
 # end-to-end / manual verification. It is deliberately NOT in the shipped `dist`
 # tool set.
-[package.metadata.agentropy]
+[package.metadata.dar]
 factory = "example_tool::extension"
 
 # Standalone host MCP bridge over the toy registry; used by the codex app-server
@@ -21,16 +22,16 @@ path = "src/bin/example-mcp-bridge.rs"
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-host-api = { path = "../../../crates/host-api" }
-tool-registry = { path = "../../../crates/tool-registry" }
+host-api = { package = "dar-host-api", path = "../../../crates/host-api" }
+tool-registry = { package = "dar-tool-registry", path = "../../../crates/tool-registry" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "macros", "io-std", "io-util"] }
 
 [dev-dependencies]
 tempfile = "3"
-opencode-client = { path = "../../../crates/opencode-client" }
-cap-chat = { path = "../../../crates/cap-chat" }
-cap-runner = { path = "../../../crates/cap-runner" }
-chat-pi = { path = "../../../extensions/chat-pi" }
+opencode-client = { package = "dar-opencode-client", path = "../../../crates/opencode-client" }
+cap-chat = { package = "dar-cap-chat", path = "../../../crates/cap-chat" }
+cap-runner = { package = "dar-cap-runner", path = "../../../crates/cap-runner" }
+chat-pi = { package = "dar-chat-pi", path = "../../../extensions/chat-pi" }
 tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }

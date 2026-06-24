@@ -19,7 +19,7 @@ use tool_registry::{ToolRegistryHandle, TOOL_REGISTRY_SERVICE};
 /// Name of the host MCP bridge as advertised to every backend. Stable so pi's
 /// per-session metadata cache, `MCP_DIRECT_TOOLS`, codex `mcp_servers.<name>`,
 /// and opencode `mcp.<name>` all refer to the same server.
-pub const BRIDGE_SERVER_NAME: &str = "agentropy";
+pub const BRIDGE_SERVER_NAME: &str = "dar";
 
 /// Extra backend CLI args plus process env produced when wiring the host MCP
 /// bridge: `(args, env)`.
@@ -110,7 +110,7 @@ fn toml_string(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-/// Build the `-c mcp_servers.agentropy.*` flags advertising the host MCP bridge
+/// Build the `-c mcp_servers.dar.*` flags advertising the host MCP bridge
 /// to `codex app-server`. The agent reaches the bridge by spawning
 /// `command args...` over stdio; tool results return in-session.
 pub fn codex_mcp_bridge_args(bridge: &HostToolBridge) -> Vec<OsString> {
@@ -140,9 +140,9 @@ pub fn codex_mcp_bridge_args(bridge: &HostToolBridge) -> Vec<OsString> {
 // opencode (mcp.<name> block)
 // ---------------------------------------------------------------------------
 
-/// Build the `mcp.agentropy` block pointing at the host MCP bridge. opencode
+/// Build the `mcp.dar` block pointing at the host MCP bridge. opencode
 /// spawns a `type: "local"` server as `command[0] command[1..]` over stdio; the
-/// host-registered tools surface namespaced `agentropy_<tool>` and their results
+/// host-registered tools surface namespaced `dar_<tool>` and their results
 /// return over SSE in the same session.
 pub fn opencode_mcp_block(bridge: &HostToolBridge) -> Value {
     let mut command = Vec::with_capacity(1 + bridge.args.len());
@@ -160,7 +160,7 @@ pub fn opencode_mcp_block(bridge: &HostToolBridge) -> Value {
 /// The full opencode config document shared by the issue-worker runner and the
 /// TUI chat backend, so both spawn a byte-for-byte identical opencode child:
 /// the `$schema`, the ~17-key permission allow-list, the optional `model`, and
-/// the optional `mcp.agentropy` host-bridge block. The per-extension XDG /
+/// the optional `mcp.dar` host-bridge block. The per-extension XDG /
 /// `OPENCODE_CONFIG*` env assembly stays in each extension.
 pub fn opencode_config(model: Option<&str>, bridge: Option<&HostToolBridge>) -> Value {
     let mut config = json!({
@@ -190,7 +190,7 @@ pub fn opencode_config(model: Option<&str>, bridge: Option<&HostToolBridge>) -> 
         config["model"] = Value::String(model.to_string());
     }
     // Wire the host MCP bridge so the opencode agent calls the same registry
-    // tools an issue worker does; tools surface namespaced `agentropy_<tool>`
+    // tools an issue worker does; tools surface namespaced `dar_<tool>`
     // and results return over SSE in the same session.
     if let Some(bridge) = bridge {
         config["mcp"] = opencode_mcp_block(bridge);
@@ -226,7 +226,7 @@ pub fn make_initialize(id: u64, workspace: &str) -> Value {
         "id": id,
         "method": "initialize",
         "params": {
-            "clientInfo": { "name": "agentropy", "version": "0.1.0" },
+            "clientInfo": { "name": "dar", "version": "0.1.0" },
             "capabilities": { "experimentalApi": true },
             "cwd": workspace,
         }
@@ -249,7 +249,7 @@ pub fn make_thread_start(id: u64, workspace: &str, model: Option<&str>) -> Value
             "cwd": workspace,
             "approvalPolicy": "never",
             "sandbox": "danger-full-access",
-            "serviceName": "agentropy",
+            "serviceName": "dar",
         }
     })
 }
@@ -291,7 +291,7 @@ mod tests {
 
     fn bridge() -> HostToolBridge {
         HostToolBridge {
-            command: "/opt/agentropy".to_string(),
+            command: "/opt/dar".to_string(),
             args: vec![
                 "__mcp-bridge".to_string(),
                 "--dir".to_string(),
@@ -311,7 +311,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(
             written["mcpServers"][BRIDGE_SERVER_NAME]["command"],
-            "/opt/agentropy"
+            "/opt/dar"
         );
         assert_eq!(
             written["mcpServers"][BRIDGE_SERVER_NAME]["args"],
@@ -334,12 +334,12 @@ mod tests {
         assert_eq!(rendered[0], "-c");
         assert_eq!(
             rendered[1],
-            "mcp_servers.agentropy.command=\"/opt/agentropy\""
+            "mcp_servers.dar.command=\"/opt/dar\""
         );
         assert_eq!(rendered[2], "-c");
         assert_eq!(
             rendered[3],
-            "mcp_servers.agentropy.args=[\"__mcp-bridge\", \"--dir\", \"/tmp/agent\"]"
+            "mcp_servers.dar.args=[\"__mcp-bridge\", \"--dir\", \"/tmp/agent\"]"
         );
     }
 
@@ -355,9 +355,9 @@ mod tests {
             .collect();
         assert_eq!(
             rendered[1],
-            "mcp_servers.agentropy.command=\"/path/with \\\"quote\\\"\""
+            "mcp_servers.dar.command=\"/path/with \\\"quote\\\"\""
         );
-        assert_eq!(rendered[3], "mcp_servers.agentropy.args=[\"a\\\\b\"]");
+        assert_eq!(rendered[3], "mcp_servers.dar.args=[\"a\\\\b\"]");
     }
 
     #[test]
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(server["enabled"], true);
         assert_eq!(
             server["command"],
-            json!(["/opt/agentropy", "__mcp-bridge", "--dir", "/tmp/agent"])
+            json!(["/opt/dar", "__mcp-bridge", "--dir", "/tmp/agent"])
         );
     }
 
@@ -393,14 +393,14 @@ mod tests {
     }
 
     #[test]
-    fn opencode_config_writes_agentropy_mcp_block_when_bridge_present() {
+    fn opencode_config_writes_dar_mcp_block_when_bridge_present() {
         let config = opencode_config(Some("anthropic/claude-sonnet"), Some(&bridge()));
         let server = &config["mcp"][BRIDGE_SERVER_NAME];
         assert_eq!(server["type"], "local");
         assert_eq!(server["enabled"], true);
         assert_eq!(
             server["command"],
-            json!(["/opt/agentropy", "__mcp-bridge", "--dir", "/tmp/agent"])
+            json!(["/opt/dar", "__mcp-bridge", "--dir", "/tmp/agent"])
         );
         assert_eq!(config["permission"]["*"], "allow");
     }
@@ -415,7 +415,7 @@ mod tests {
         let config: Value = serde_json::from_str(&written).unwrap();
         assert_eq!(
             config["mcp"][BRIDGE_SERVER_NAME]["command"],
-            json!(["/opt/agentropy", "__mcp-bridge", "--dir", "/tmp/agent"])
+            json!(["/opt/dar", "__mcp-bridge", "--dir", "/tmp/agent"])
         );
         assert_eq!(config["permission"]["*"], "allow");
     }
@@ -426,7 +426,7 @@ mod tests {
         assert_eq!(req["jsonrpc"], "2.0");
         assert_eq!(req["id"], 1);
         assert_eq!(req["method"], "initialize");
-        assert_eq!(req["params"]["clientInfo"]["name"], "agentropy");
+        assert_eq!(req["params"]["clientInfo"]["name"], "dar");
         assert_eq!(req["params"]["capabilities"]["experimentalApi"], true);
         assert_eq!(req["params"]["cwd"], "/ws/ISSUE-1");
     }
@@ -444,7 +444,7 @@ mod tests {
         assert_eq!(req["method"], "thread/start");
         assert_eq!(req["params"]["approvalPolicy"], "never");
         assert_eq!(req["params"]["sandbox"], "danger-full-access");
-        assert_eq!(req["params"]["serviceName"], "agentropy");
+        assert_eq!(req["params"]["serviceName"], "dar");
         assert_eq!(req["params"]["model"], "o3");
         assert_eq!(req["params"]["cwd"], "/ws/ISSUE-1");
     }

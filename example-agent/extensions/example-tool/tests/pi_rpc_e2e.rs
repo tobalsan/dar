@@ -2,7 +2,7 @@
 //!
 //! Drives a real `pi --mode rpc` child (the exact protocol `runner-pi` drives)
 //! wired to the host-owned `example-mcp-bridge` via `--mcp-config <file>` — the
-//! same `{ "mcpServers": { agentropy: { command, args } } }` document the
+//! same `{ "mcpServers": { dar: { command, args } } }` document the
 //! production runner writes. It asks the agent to call the toy `echo_upper` tool
 //! and asserts the call routes back to the bridge, executes in-host, and returns
 //! `HELLO FROM SPIKE [via-config]` inside the same `--mode rpc` session on the
@@ -14,11 +14,11 @@
 //! the config-parity contract on the pi path too.
 //!
 //! Gated: skips (passes) unless `pi` is installed (with the MCP adapter that
-//! registers `--mcp-config`) and `AGENTROPY_PI_E2E=1` is set, so CI without a pi
+//! registers `--mcp-config`) and `DAR_PI_E2E=1` is set, so CI without a pi
 //! login is unaffected.
 //!
 //! Run it explicitly with:
-//!   AGENTROPY_PI_E2E=1 cargo test -p example-tool --test pi_rpc_e2e -- --nocapture
+//!   DAR_PI_E2E=1 cargo test -p example-tool --test pi_rpc_e2e -- --nocapture
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -27,10 +27,10 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 /// Matches `runner-pi`'s `BRIDGE_SERVER_NAME`.
-const BRIDGE_SERVER_NAME: &str = "agentropy";
+const BRIDGE_SERVER_NAME: &str = "dar";
 
 fn pi_available() -> bool {
-    std::env::var("AGENTROPY_PI_E2E").as_deref() == Ok("1")
+    std::env::var("DAR_PI_E2E").as_deref() == Ok("1")
         && Command::new("pi")
             .arg("--version")
             .stdout(Stdio::null())
@@ -43,7 +43,7 @@ fn pi_available() -> bool {
 #[test]
 fn pi_rpc_calls_echo_upper_through_host_bridge() {
     if !pi_available() {
-        eprintln!("skipping pi e2e: set AGENTROPY_PI_E2E=1 with pi installed + authed");
+        eprintln!("skipping pi e2e: set DAR_PI_E2E=1 with pi installed + authed");
         return;
     }
 
@@ -89,7 +89,7 @@ fn pi_rpc_calls_echo_upper_through_host_bridge() {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     // Optional provider override for environments with a specific pi login.
-    if let Ok(provider) = std::env::var("AGENTROPY_PI_E2E_PROVIDER") {
+    if let Ok(provider) = std::env::var("DAR_PI_E2E_PROVIDER") {
         cmd.arg("--provider").arg(provider);
     }
 

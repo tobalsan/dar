@@ -243,7 +243,7 @@ pub struct WorkspaceConfig {
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct DashboardConfig {
-    /// Bind address. Defaults to `0.0.0.0` so a single `agentropy dash`
+    /// Bind address. Defaults to `0.0.0.0` so a single `dar dash`
     /// aggregator (and, over a tailnet, a remote browser) can reach the
     /// agent's own dashboard.
     #[serde(default = "default_dashboard_bind")]

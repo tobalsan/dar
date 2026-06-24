@@ -31,7 +31,7 @@ pub fn init(log_file: &Path) -> Result<WorkerGuard> {
     let (non_blocking, guard) = tracing_appender::non_blocking(appender);
 
     let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,agentropy=info"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,dar=info"));
 
     let file_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)

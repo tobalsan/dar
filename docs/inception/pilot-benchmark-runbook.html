@@ -1,10 +1,10 @@
-<!-- Agentropy — Pilot Benchmark Runbook -->
+<!-- Dar — Pilot Benchmark Runbook -->
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agentropy — Pilot Benchmark Runbook</title>
+<title>Dar — Pilot Benchmark Runbook</title>
 <style>
   :root {
     --ivory: #FAF9F5;
@@ -446,7 +446,7 @@
 
   <header>
     <div class="header-top">
-      <h1>Agentropy &mdash; Pilot Benchmark Runbook</h1>
+      <h1>Dar — Pilot Benchmark Runbook</h1>
       <span class="auto-pill">ALG-186</span>
     </div>
     <div class="subtitle">
@@ -576,11 +576,11 @@
         <span class="carry-tag fixed">FIXED</span>
         <div class="carry-body">
           <strong>Env-var prefix mismatch in hooks.</strong> The <code>before_remove</code> kill-path exports
-          <code>AGENTROPY_*</code> variables; all other hook execution paths export <code>AIHUB_*</code>
+          <code>DAR_*</code> variables; all other hook execution paths export <code>AIHUB_*</code>
           (per PRD &sect;5). Hook scripts that reference <code>AIHUB_WORKSPACE</code> on the remove path will
           silently receive an empty value.
           <div class="ref">orchestrator.rs:1651</div>
-          <div class="fix-note">All hook and runner child env vars unified to exactly <code>AGENT_*</code> prefix; <code>AIHUB_*</code> / <code>AGENTROPY_*</code> names retired; <code>$AIHUB_HOME</code> config expansion renamed <code>$AGENT_HOME</code>.</div>
+          <div class="fix-note">All hook and runner child env vars unified to exactly <code>AGENT_*</code> prefix; <code>AIHUB_*</code> / <code>DAR_*</code> names retired; <code>$AIHUB_HOME</code> config expansion renamed <code>$AGENT_HOME</code>.</div>
         </div>
       </div>
       <div class="carry-item">
@@ -669,7 +669,7 @@
           <p>Build the release binary and run the doctor check against the bundled fixture.
           Then reset the fixture so the run starts clean.</p>
 <pre>cargo build --release
-./target/release/agentropy doctor --dir ./example-agent</pre>
+./target/release/dar doctor --dir ./example-agent</pre>
           <p>Reset the fixture (do this before every run to avoid stale state):</p>
 <pre># 1. Reset all issues to todo
 for f in ./example-agent/issues/*.md; do
@@ -686,7 +686,7 @@ rm -f ./example-agent/data/store.db
 truncate -s 0 ./example-agent/logs/agent.log 2>/dev/null || true</pre>
           <p>
             The SQLite database lives at <code>&lt;agent-folder&gt;/data/store.db</code>.
-            The binary is at <code>./target/release/agentropy</code>.
+            The binary is at <code>./target/release/dar</code>.
             Dashboard default port is <strong>7878</strong> (configured via <code>dashboard.port</code>
             in <code>agent.yaml</code>).
           </p>
@@ -712,7 +712,7 @@ cp -r ./example-agent ./scratch-agent
 sed -i '' 's/^  use: .*/  use: fake/' ./scratch-agent/agent.yaml
 
 # Start the orchestrator
-./target/release/agentropy run --dir ./scratch-agent</pre>
+./target/release/dar run --dir ./scratch-agent</pre>
           <p>
             Open the dashboard at <a href="http://127.0.0.1:7878/">http://127.0.0.1:7878/</a> and
             observe dispatch events appearing in real time. The fake runner completes each attempt
@@ -748,7 +748,7 @@ sqlite3 ./scratch-agent/data/store.db \
             and authenticated (<code>claude --version</code>) before proceeding. Use
             <code>example-agent</code> with its default <code>claude-code</code> runner.
           </p>
-<pre>./target/release/agentropy run --dir ./example-agent</pre>
+<pre>./target/release/dar run --dir ./example-agent</pre>
           <p>Verify the following:</p>
           <ul class="highlights">
             <li>The issue file transitions <code>state: todo</code> → <code>state: in_progress</code> →
@@ -774,17 +774,17 @@ sqlite3 ./scratch-agent/data/store.db \
 <pre>export LINEAR_API_KEY=lin_api_XXXXXXXXXXXX
 
 # Scaffold WORKFLOW.md with Linear frontmatter
-./target/release/agentropy init-workflow \
+./target/release/dar init-workflow \
   --dir ./linear-agent \
   --linear-project-slug YOUR_PROJECT_SLUG \
   --linear-project "Your Project Name" \
   --expose-graphql-tool
 
 # Validate the config
-./target/release/agentropy doctor --dir ./linear-agent
+./target/release/dar doctor --dir ./linear-agent
 
 # Run
-./target/release/agentropy run --dir ./linear-agent</pre>
+./target/release/dar run --dir ./linear-agent</pre>
           <p>
             The <code>init-workflow</code> command writes a WORKFLOW.md frontmatter block with
             <code>tracker.kind: linear</code>, <code>tracker.project_slug: &lt;slug&gt;</code>, and
@@ -882,7 +882,7 @@ curl -s http://127.0.0.1:7878/export | jq .</pre>
         <div class="step-body">
           <h3>Single-instance idle baseline</h3>
           <p>
-            Launch one agentropy instance with no Todo issues (so it is polling but never dispatching).
+            Launch one dar instance with no Todo issues (so it is polling but never dispatching).
             Sample resource usage every 30&nbsp;seconds for at least 10&nbsp;minutes and write to a log file.
           </p>
 <pre># Set all example-agent issues to done so the orchestrator idles
@@ -892,12 +892,12 @@ done
 sed -i '' 's/^  use: .*/  use: fake/' ./example-agent/agent.yaml
 
 # Launch in background
-./target/release/agentropy run --dir ./example-agent &gt; ./example-agent/logs/agent.log 2&gt;&amp;1 &
+./target/release/dar run --dir ./example-agent &gt; ./example-agent/logs/agent.log 2&gt;&amp;1 &
 AGENT_PID=$!
 
 # Sample every 30s for 10+ min (20 samples = 10 min)
 for i in $(seq 1 20); do
-  ps -o pid=,rss=,%cpu=,etime= -p "$(pgrep -d, agentropy)" 2&gt;/dev/null \
+  ps -o pid=,rss=,%cpu=,etime= -p "$(pgrep -d, dar)" 2&gt;/dev/null \
     | awk -v ts="$(date +%s)" '{print ts, $0}' | tee -a footprint-b1.log
   sleep 30
 done
@@ -942,22 +942,22 @@ for i in $(seq 1 10); do
   sed -i '' "s/^  port: .*/  port: $PORT/" "$DIR/agent.yaml"
 
   # Launch
-  ./target/release/agentropy run --dir "$DIR" \
+  ./target/release/dar run --dir "$DIR" \
     &gt; "$DIR/logs/agent.log" 2&gt;&amp;1 &
   echo "Launched agent-$i on port $PORT (PID $!)"
 done
 
 # Sample fleet RSS + CPU every 60s for 60+ min (61 samples)
 for i in $(seq 1 61); do
-  PIDS=$(pgrep -d, agentropy 2&gt;/dev/null)
-  [ -z "$PIDS" ] &amp;&amp; echo "No agentropy processes found" &amp;&amp; break
+  PIDS=$(pgrep -d, dar 2&gt;/dev/null)
+  [ -z "$PIDS" ] &amp;&amp; echo "No dar processes found" &amp;&amp; break
   ps -o pid=,rss=,%cpu=,etime= -p "$PIDS" 2&gt;/dev/null \
     | awk -v ts="$(date +%s)" '{print ts, $0}' | tee -a footprint-b2.log
   sleep 60
 done
 
 # Shut down fleet
-pkill agentropy 2&gt;/dev/null || true</pre>
+pkill dar 2&gt;/dev/null || true</pre>
           <p>
             <strong>Pass criteria:</strong> Total RSS across all 10 processes leaves comfortable
             headroom on an 8&nbsp;GB machine; per-process idle RSS is in the tens of MB; %CPU ≈ 0
@@ -986,14 +986,14 @@ done &amp;
 FEEDER_PID=$!
 
 # Record RSS at start
-T0_RSS=$(ps -o rss= -p "$(pgrep -d, agentropy)" 2&gt;/dev/null | awk '{s+=$1} END {print s}')
+T0_RSS=$(ps -o rss= -p "$(pgrep -d, dar)" 2&gt;/dev/null | awk '{s+=$1} END {print s}')
 echo "t0 total RSS: ${T0_RSS} kB" | tee churn.log
 
 # Wait 1 hour
 sleep 3600
 
 # Record RSS at end
-T1_RSS=$(ps -o rss= -p "$(pgrep -d, agentropy)" 2&gt;/dev/null | awk '{s+=$1} END {print s}')
+T1_RSS=$(ps -o rss= -p "$(pgrep -d, dar)" 2&gt;/dev/null | awk '{s+=$1} END {print s}')
 echo "t+1h total RSS: ${T1_RSS} kB" | tee -a churn.log
 
 kill $FEEDER_PID 2&gt;/dev/null

@@ -1,10 +1,10 @@
-<!-- Agentropy — Extension Design, Visual Explainer -->
+<!-- Dar — Extension Design, Visual Explainer -->
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agentropy — How Extensions Work</title>
+<title>Dar — How Extensions Work</title>
 <style>
   :root {
     --ivory:#FAF9F5; --slate:#141413; --clay:#D97757; --oat:#E3DACC;
@@ -106,7 +106,7 @@
 <div class="page">
 
   <header class="hero">
-    <div class="kicker">Agentropy · extension architecture</div>
+    <div class="kicker">Dar · extension architecture</div>
     <h1>How extensions work,<br>drawn out.</h1>
     <p>The core is a tiny host that knows nothing about your domain. The orchestrator, the scheduler, channels &mdash; all sit on top as extensions, each in its own repo. Here's the whole idea in boxes and arrows, with plain-English for the words that tripped you up.</p>
   </header>
@@ -146,11 +146,11 @@
         </div>
         <div class="arr v"><svg width="14" height="28" viewBox="0 0 14 28" fill="none" stroke="var(--gray-500)" stroke-width="1.6"><path d="M7 28V6M1 12l6-6 6 6"/></svg></div>
         <div class="box host">
-          <div class="bt">agentropy host (the core)</div>
+          <div class="bt">dar host (the core)</div>
           <div class="bsub">lifecycle · config · event bus · http mount · terminal · secrets · async runtime</div>
         </div>
       </div>
-      <figcaption><strong>Everything sits on the host.</strong> The host offers services (bottom); extensions consume them (top). Remove every extension and the host still runs &mdash; it just does nothing, because it knows nothing.</figcaption>
+      <figcaption><strong>Everything sits on the host.</strong> The host offers services (bottom); extensions consume them (top). Remove every extension and the host still runs — it just does nothing, because it knows nothing.</figcaption>
     </figure>
   </section>
 
@@ -289,11 +289,11 @@
         </div>
         <div class="arr v"><svg width="14" height="26" viewBox="0 0 14 26" fill="none" stroke="var(--olive)" stroke-width="1.5"><path d="M7 0v18M1 12l6 6 6-6"/></svg></div>
         <div class="box host" style="max-width:520px; margin:0 auto;">
-          <div class="bt">agentropy-host-api</div>
+          <div class="bt">dar-host-api</div>
           <div class="bsub">lifecycle · config · event bus · http mount · the base everyone needs</div>
         </div>
       </div>
-      <figcaption><strong>Two layers of contract.</strong> Everyone depends on <code>host-api</code>. Capability extensions also depend on their one <code>cap-*</code> crate &mdash; the scheduler depends on <code>host-api</code> only, never imports Issue. Nothing depends on a sibling extension.</figcaption>
+      <figcaption><strong>Two layers of contract.</strong> Everyone depends on <code>host-api</code>. Capability extensions also depend on their one <code>cap-*</code> crate — the scheduler depends on <code>host-api</code> only, never imports Issue. Nothing depends on a sibling extension.</figcaption>
     </figure>
 
     <div class="legend">
@@ -318,7 +318,7 @@
     <figure>
       <div class="canvas">
         <div class="flow">
-          <div class="box dist" style="flex:1.2;"><div class="bt">agentropy-dist</div><div class="bsub">lists host + chosen exts</div></div>
+          <div class="box dist" style="flex:1.2;"><div class="bt">dar-dist</div><div class="bsub">lists host + chosen exts</div></div>
           <div class="arr"><span class="lbl">cargo build</span><svg width="22" height="14" viewBox="0 0 22 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M1 7h19M14 1l6 6-6 6"/></svg></div>
           <div class="box bin" style="flex:1;"><div class="bt">one static binary</div><div class="bsub">~8–15 MB · only what you picked</div></div>
         </div>
@@ -347,7 +347,7 @@
   </section>
 
   <footer>
-    Agentropy · visual explainer · pairs with extension-architecture.html
+    Dar · visual explainer · pairs with extension-architecture.html
   </footer>
 
 </div>

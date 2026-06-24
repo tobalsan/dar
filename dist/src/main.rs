@@ -1,6 +1,6 @@
 #[tokio::main(worker_threads = 2)]
 async fn main() {
-    agentropy_cli::run(host_api::plugins![
+    dar_cli_core::run(host_api::plugins![
         tool_registry_host::ToolRegistryHostExtension,
         frontend_log::FrontendLogExtension,
         tracker_files::TrackerFilesExtension,
@@ -24,13 +24,13 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn dist_delegates_to_agentropy_cli_run() {
+    fn dist_delegates_to_dar_cli_core_run() {
         let source = include_str!("main.rs");
         let non_test_source = source
             .split("#[cfg(test)]")
             .next()
             .expect("main source before tests");
-        assert!(non_test_source.contains("agentropy_cli::run("));
+        assert!(non_test_source.contains("dar_cli_core::run("));
     }
 
     #[test]

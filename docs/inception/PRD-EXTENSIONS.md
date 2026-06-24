@@ -7,7 +7,7 @@
 
 ## Problem Statement
 
-Agentropy today is one Rust binary. Every capability — the Linear/file trackers, the claude/codex/pi/cli runners, the orchestrator tick loop, the dashboard, the terminal log stream — lives in `src/` and compiles together. That blocks the next phase:
+Dar today is one Rust binary. Every capability — the Linear/file trackers, the claude/codex/pi/cli runners, the orchestrator tick loop, the dashboard, the terminal log stream — lives in `src/` and compiles together. That blocks the next phase:
 
 - I cannot develop a new runner, tracker, or a brand-new feature (scheduler, Discord channel, TUI) **in its own crate/repo** without touching core.
 - Adding a backend means editing core dispatch (`tracker::build`, `RunnerKind::parse`) — a `match` arm per backend. Core knows every concrete backend by name.
@@ -28,9 +28,9 @@ A **cargo workspace** (monorepo for now) in three layers.
 - `orchestrator-api` — the orchestrator's *public* contract: `RunSnapshot`, `RunStatus`, `ControlMsg`, `RunRequested`/`DispatchRequested`, normalized log rows. Lets dashboard/TUI name run state without importing the orchestrator impl.
 - `runner-core` — shared (non-contract) helper crate: process-group supervision, line pump, `term_then_kill`, protocol-line classification. Backends call it; not part of the public contract.
 
-**No `cap-channel` in this PRD.** No `agentropy-events` mega-crate — event payloads live in the API crate that *owns* them (`orchestrator-api` owns run/dispatch events; `cap-runner` owns runner output events; a future `chat-api` will own chat events).
+**No `cap-channel` in this PRD.** No `dar-events` mega-crate — event payloads live in the API crate that *owns* them (`orchestrator-api` owns run/dispatch events; `cap-runner` owns runner output events; a future `chat-api` will own chat events).
 
-### Layer 2 — The host (`agentropy-host`)
+### Layer 2 — The host (`dar-host`)
 Minimal binary plumbing implementing the `host-api` services. Two-phase boot:
 1. construct registered extensions;
 2. `register()` on all (they contribute services, bus subscriptions, HTTP routes, foreground candidates);
@@ -47,7 +47,7 @@ One crate per feature. Current features become: `tracker-linear`, `tracker-files
 ### Assembly — `dist/`
 The composition root. An **explicit plugin list** names the mix:
 ```rust
-agentropy_host::run(plugins![
+dar_host::run(plugins![
     tracker_linear::extension(),
     tracker_files::extension(),
     runner_claude::extension(),
@@ -67,7 +67,7 @@ Changing the mix = edit this list + `dist/Cargo.toml`, rebuild. That recompile s
 
 ### Extension authoring (the core driver)
 1. As an extension author, I want to create a new extension by touching only its own crate plus the `dist` plugin list, importing `host-api` (and optionally one cap/api crate), so that I read zero host internals.
-2. As an extension author, I want a `cargo agentropy new <name> --kind background|service|foreground` scaffold that compiles immediately, so that the cost to start is near zero.
+2. As an extension author, I want a `cargo dar new <name> --kind background|service|foreground` scaffold that compiles immediately, so that the cost to start is near zero.
 3. As an extension author, I want a living `extensions/example` (config validation, `register()`, `start()`, typed publish/subscribe, graceful shutdown, data dir) kept green in CI, so that I copy a working reference, not folklore.
 4. As an extension author, I want to register a tracker/runner as a typed service (`registrar.service::<dyn Tracker>("linear", …)`) with no `match` arm anywhere in shared code, so that core has zero per-backend knowledge.
 5. As an extension author, I want the contract crates (`host-api`, `cap-*`, `orchestrator-api`) small, `0.x`, and additive (`#[non_exhaustive]`, defaulted trait methods), so that my extension rarely breaks on a bump.
@@ -149,9 +149,9 @@ Changing the mix = edit this list + `dist/Cargo.toml`, rebuild. That recompile s
 ### Workspace layout (monorepo)
 - Workspace members:
   - `crates/host-api`, `crates/cap-tracker`, `crates/cap-runner`, `crates/orchestrator-api`, `crates/runner-core`.
-  - `crates/agentropy-host` (the host lib + `run()`).
+  - `crates/dar-host` (the host lib + `run()`).
   - `extensions/{tracker-linear,tracker-files,runner-claude,runner-codex,runner-pi,runner-cli,runner-fake,orchestrator,dashboard,frontend-log,example}`.
-  - `dist/` — bin crate (`name = "agentropy"`), the composition root.
+  - `dist/` — bin crate (`name = "dar"`), the composition root.
 - The dependency graph equals the eventual multi-repo split, so extracting any crate to its own repo later is a `Cargo.toml` path change.
 
 ### host-api surface (domain-free)
@@ -188,7 +188,7 @@ Changing the mix = edit this list + `dist/Cargo.toml`, rebuild. That recompile s
 - `frontend-log` extension = default foreground, renders the current log stream. TUI = a future `frontend-tui` foreground provider. Host routes logs to a tracing layer / log-event stream the active foreground consumes; host does not print to the terminal post-handoff. Panic hook + shutdown restore terminal state.
 
 ### CLI
-- `agentropy run --dir` boots the host. `doctor --dir` validates enabled/selected extensions via their config hooks + asserts id resolution. `init-workflow`/`export` (Linear-adjacent) register as host subcommands from the Linear tracker (or a small CLI extension).
+- `dar run --dir` boots the host. `doctor --dir` validates enabled/selected extensions via their config hooks + asserts id resolution. `init-workflow`/`export` (Linear-adjacent) register as host subcommands from the Linear tracker (or a small CLI extension).
 
 ### Channels — explicitly deferred
 - No `cap-channel`, no host channel registry in this PRD. First channels ship as plain extensions over typed `ChatInbound`/`ChatOutbound` events; a `chat-api` contract is extracted only after one or two real bridges prove the shape.
@@ -241,12 +241,12 @@ Out of test scope: askama rendering (compile-time checked), bus transport intern
 
 - **The single most important change** (both council rounds agreed): make today's terminal log stream the `frontend-log` extension occupying a `foreground` slot. If the current log stream can't be expressed as an extension, the seam isn't real and the TUI will never be clean.
 - **Linchpin:** keep `host-api`, `cap-*`, and `orchestrator-api` tiny and additive. They are depended on by everyone; churn forces rebuilds and breakage. Treat their surface as semver-significant from `0.x` — `#[non_exhaustive]` + builders + defaulted methods so they can grow without breaking. **Do not call anything "frozen"**; stabilize only after scheduler/channels/TUI have been built against the architecture and proven the shapes.
-- **Biggest risk to "creating an extension is simple"** is the bus becoming undocumented, stringly-typed integration folklore — authors guessing topic names and payload shapes by reading orchestrator source. Mitigations, cheapest-first: (1) typed events in owning API crates, not raw strings; (2) documented delivery semantics; (3) `extensions/example` green in CI; (4) the `cargo agentropy new` scaffold.
+- **Biggest risk to "creating an extension is simple"** is the bus becoming undocumented, stringly-typed integration folklore — authors guessing topic names and payload shapes by reading orchestrator source. Mitigations, cheapest-first: (1) typed events in owning API crates, not raw strings; (2) documented delivery semantics; (3) `extensions/example` green in CI; (4) the `cargo dar new` scaffold.
 - **Two-state invariant is the thing most likely to be silently broken** by a careless split. `Tracker` stays read-only for issue state; run state stays orchestrator-owned with the orchestrator as sole mutator; control flows as `ControlMsg` requests, never direct mutation. Call this out in review of every extracted crate.
 - **Footprint:** hold the ALG-186 gate. Static composition adds negligible runtime cost; re-run the pilot benchmark runbook after the split. Footprint is dominated by the LLM child, not the runtime.
 - **Migration order (each step keeps `cargo test --release` green):**
   1. Extract `cap-tracker`, `cap-runner`, `runner-core` with no behavior change; monolith depends on them.
-  2. Introduce `host-api` (services, bus, lifecycle, paths) + `agentropy-host`; leave a thin `dist` bin.
+  2. Introduce `host-api` (services, bus, lifecycle, paths) + `dar-host`; leave a thin `dist` bin.
   3. Add the typed service registry + explicit `plugins![]`; delete `tracker::build` / `RunnerKind::parse`.
   4. Move trackers, then runners, into `extensions/`.
   5. Add the `foreground` slot; extract `frontend-log`; stop host-direct terminal writes; add panic/shutdown terminal restore.

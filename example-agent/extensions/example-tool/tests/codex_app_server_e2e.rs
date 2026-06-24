@@ -1,17 +1,17 @@
 //! End-to-end integration test for the codex `app-server` + host MCP bridge path.
 //!
 //! Drives a real `codex app-server` (JSON-RPC 2.0 over stdio) wired to the
-//! host-owned `example-mcp-bridge` via `-c mcp_servers.agentropy.command=...` —
+//! host-owned `example-mcp-bridge` via `-c mcp_servers.dar.command=...` —
 //! the exact transport `runner-codex` uses (NOT `codex exec`). It asks the agent
 //! to call the toy `echo_upper` tool and asserts the tool call routes back to
 //! the bridge, executes in-host, and returns `HELLO FROM SPIKE` inside the same
 //! thread/turn.
 //!
 //! Gated: skips (passes) unless `codex` is installed and authed and
-//! `AGENTROPY_CODEX_E2E=1` is set, so CI without a codex login is unaffected.
+//! `DAR_CODEX_E2E=1` is set, so CI without a codex login is unaffected.
 //!
 //! Run it explicitly with:
-//!   AGENTROPY_CODEX_E2E=1 cargo test -p example-tool --test codex_app_server_e2e -- --nocapture
+//!   DAR_CODEX_E2E=1 cargo test -p example-tool --test codex_app_server_e2e -- --nocapture
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 fn codex_available() -> bool {
-    std::env::var("AGENTROPY_CODEX_E2E").as_deref() == Ok("1")
+    std::env::var("DAR_CODEX_E2E").as_deref() == Ok("1")
         && Command::new("codex")
             .arg("--version")
             .stdout(Stdio::null())
@@ -33,7 +33,7 @@ fn codex_available() -> bool {
 #[test]
 fn codex_app_server_calls_echo_upper_through_host_bridge() {
     if !codex_available() {
-        eprintln!("skipping codex e2e: set AGENTROPY_CODEX_E2E=1 with codex installed + authed");
+        eprintln!("skipping codex e2e: set DAR_CODEX_E2E=1 with codex installed + authed");
         return;
     }
 
@@ -51,10 +51,10 @@ fn codex_app_server_calls_echo_upper_through_host_bridge() {
         .arg("app-server")
         .args(["-c", "approval_policy=\"never\""])
         .args(["-c", "sandbox_permissions=[\"disk-full-read-access\"]"])
-        .args(["-c", &format!("mcp_servers.agentropy.command={bridge:?}")])
+        .args(["-c", &format!("mcp_servers.dar.command={bridge:?}")])
         .args([
             "-c",
-            &format!("mcp_servers.agentropy.args={:?}", ["--suffix", SUFFIX]),
+            &format!("mcp_servers.dar.args={:?}", ["--suffix", SUFFIX]),
         ])
         .current_dir(workspace.path())
         .stdin(Stdio::piped())
@@ -75,7 +75,7 @@ fn codex_app_server_calls_echo_upper_through_host_bridge() {
     send(json!({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {
-            "clientInfo": { "name": "agentropy-test", "version": "0.1.0" },
+            "clientInfo": { "name": "dar-test", "version": "0.1.0" },
             "capabilities": { "experimentalApi": true },
             "cwd": workspace.path(),
         }

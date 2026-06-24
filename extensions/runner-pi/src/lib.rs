@@ -708,7 +708,7 @@ mod tests {
 
     fn bridge() -> cap_runner::HostToolBridge {
         cap_runner::HostToolBridge {
-            command: "/opt/agentropy".to_string(),
+            command: "/opt/dar".to_string(),
             args: vec![
                 "__mcp-bridge".to_string(),
                 "--dir".to_string(),
@@ -737,8 +737,8 @@ mod tests {
         let written: Value =
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(
-            written["mcpServers"]["agentropy"]["command"],
-            "/opt/agentropy"
+            written["mcpServers"]["dar"]["command"],
+            "/opt/dar"
         );
 
         // Direct-tool promotion scoped to our server. We must NOT override
@@ -746,7 +746,7 @@ mod tests {
         // `--mcp-config`).
         assert!(env.contains(&(
             OsString::from("MCP_DIRECT_TOOLS"),
-            OsString::from("agentropy")
+            OsString::from("dar")
         )));
         assert!(
             !env.iter().any(|(k, _)| k == "PI_CODING_AGENT_DIR"),

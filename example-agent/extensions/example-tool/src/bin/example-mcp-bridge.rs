@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
                 "jsonrpc": "2.0", "id": id,
                 "result": {
                     "protocolVersion": "2024-11-05",
-                    "serverInfo": { "name": "agentropy-example", "version": "0.1.0" },
+                    "serverInfo": { "name": "dar-example", "version": "0.1.0" },
                     "capabilities": { "tools": {} }
                 }
             }),

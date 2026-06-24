@@ -96,7 +96,7 @@ impl host_api::Extension for DashboardExtension {
                 .tabs
                 .set(DashboardTabs::from_services(&ctx.host.services));
             // Presence: announce this dashboard into the registry so a single
-            // `agentropy dash` aggregator can discover and link to it. The host
+            // `dar dash` aggregator can discover and link to it. The host
             // surfaces the *actual* bound addr, which is what makes the
             // OS-assigned (`:0`) ephemeral port usable. Failure to register is
             // non-fatal: the agent's own dashboard still works standalone.
@@ -153,20 +153,20 @@ fn registry_dir(ctx: &host_api::StartCtx) -> std::path::PathBuf {
         .and_then(|v| v.get("registry_dir"))
         .and_then(|v| v.as_str())
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(agentropy_presence::default_registry_dir)
+        .unwrap_or_else(dar_presence::default_registry_dir)
 }
 
 fn register_presence(
     ctx: &host_api::StartCtx,
     addr: std::net::SocketAddr,
 ) -> anyhow::Result<(
-    agentropy_presence::Registry,
-    agentropy_presence::PresenceEntry,
+    dar_presence::Registry,
+    dar_presence::PresenceEntry,
 )> {
     let root = ctx.paths.root();
     let id = read_agent_id(root)?;
     let folder = root.to_string_lossy().to_string();
-    let entry = agentropy_presence::PresenceEntry {
+    let entry = dar_presence::PresenceEntry {
         id,
         folder,
         addr: advertised_addr(addr),
@@ -176,14 +176,14 @@ fn register_presence(
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0),
     };
-    let registry = agentropy_presence::Registry::new(registry_dir(ctx));
+    let registry = dar_presence::Registry::new(registry_dir(ctx));
     registry.write(&entry)?;
     Ok((registry, entry))
 }
 
 struct PresenceGuard {
-    registry: agentropy_presence::Registry,
-    entry: agentropy_presence::PresenceEntry,
+    registry: dar_presence::Registry,
+    entry: dar_presence::PresenceEntry,
 }
 
 impl PresenceGuard {

@@ -1,8 +1,14 @@
 [package]
-name = "system-files"
-version = "0.1.0"
-edition = "2021"
+name = "dar-system-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "System-file resolver: assembles an agent identity context from AGENTS.md and system_files"
 rust-version = "1.83"
+
+[lib]
+name = "system_files"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

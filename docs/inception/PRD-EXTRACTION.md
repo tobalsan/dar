@@ -1,5 +1,5 @@
 ---
-title: "Agentropy — Orchestrator Extraction PRD"
+title: "Dar — Orchestrator Extraction PRD"
 status: draft
 scope: extraction / feature-parity
 source: AIHub orchestrator extension
@@ -34,13 +34,13 @@ self-contained runner. Every design and implementation decision must defend the
 footprint; feature parity must never come at the cost of bloating the runtime.
 
 **Hard requirement (acceptance gate):** a single average retail computer with
-**8 GB RAM** must comfortably run **10+ Agentropy instances at once** (one per agent
+**8 GB RAM** must comfortably run **10+ Dar instances at once** (one per agent
 folder/project), all idle-polling and able to dispatch, without exhausting memory or
 saturating the CPU. The runner's own overhead — excluding the AI child processes it
 spawns — must be small enough that 10+ copies leave ample headroom for those
 children and the OS.
 
-Concretely, the **idle/steady-state resident footprint of one Agentropy process**
+Concretely, the **idle/steady-state resident footprint of one Dar process**
 (the orchestrator + dashboard + SQLite, with no active child) must be a small
 fraction of a single instance's fair share of 8 GB across 10+ instances — target
 tens of MB, not hundreds. Implications the implementer must honor:
@@ -571,7 +571,7 @@ standalone process (e.g. webhook/CLI/stdout). Keep the burst-buffer policy exact
 - **CLI commands:** an `init-workflow` (scaffold a `WORKFLOW.md` for the orchestrator
   loop in an existing agent folder — it does not scaffold `agent.yaml`, which is the
   separate agent definition); optionally bootstrap a Linear project for this folder. *(Map to this
-  repo's `agentropy` CLI; v0 has `run` + `doctor`. AIHub's `init-project` — which
+  repo's `dar` CLI; v0 has `run` + `doctor`. AIHub's `init-project` — which
   registered a new folder into the multi-project list — is not needed; the launch
   folder is the project.)*
 - **Worker Linear tool:** optionally expose `linear_graphql` to workers. Gated by
@@ -661,7 +661,7 @@ Standalone parity = all of:
   tracker matches Linear's native GraphQL return order (no extra sort).
 - **Env var prefix:** AIHub uses `AIHUB_*` for hook/CLI runner env and
   `$AIHUB_HOME` for workspace roots. Decide whether to keep `AIHUB_*` (drop-in
-  compatibility for existing hooks/workflows) or rename to an agentropy prefix
+  compatibility for existing hooks/workflows) or rename to an dar prefix
   (cleaner, but breaks existing `WORKFLOW.md` hook scripts). **Recommendation:**
   keep `AIHUB_*` for now to preserve 100% functional parity of existing workflows.
 - **Profiles dropped (§13/§15):** make `WORKFLOW.md agent.*` the single source of

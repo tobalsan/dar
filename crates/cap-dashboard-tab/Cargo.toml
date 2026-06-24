@@ -1,9 +1,15 @@
 [package]
-name = "cap-dashboard-tab"
-version = "0.1.0"
-edition = "2021"
+name = "dar-cap-dashboard-tab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Dashboard tab plug-point contract for dar extensions"
 rust-version = "1.83"
+
+[lib]
+name = "cap_dashboard_tab"
 
 [dependencies]
 anyhow = "1"
-host-api = { path = "../host-api" }
+host-api = { package = "dar-host-api", path = "../host-api", version = "0.2" }

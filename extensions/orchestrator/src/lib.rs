@@ -140,22 +140,22 @@ pub struct OrchestratorExtension {
 /// With an explicit fixed port we announce the URL directly. With the default
 /// OS-assigned port (`0`) the configured value is meaningless, so we report the
 /// *actual* bound port from the host when known, and otherwise point the
-/// operator at the unified `agentropy dash` aggregator.
+/// operator at the unified `dar dash` aggregator.
 fn dashboard_banner(
     bind: std::net::IpAddr,
     port: u16,
     bound: Option<std::net::SocketAddr>,
 ) -> String {
     if port != 0 {
-        return format!("agentropy running; dashboard on http://{bind}:{port}/");
+        return format!("dar running; dashboard on http://{bind}:{port}/");
     }
     match bound {
         Some(addr) => format!(
-            "agentropy running; dashboard on http://{}:{}/ (run `agentropy dash` for the fleet view)",
+            "dar running; dashboard on http://{}:{}/ (run `dar dash` for the fleet view)",
             if bind.is_unspecified() { std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) } else { bind },
             addr.port()
         ),
-        None => "agentropy running; run `agentropy dash` for the dashboard".to_string(),
+        None => "dar running; run `dar dash` for the dashboard".to_string(),
     }
 }
 
@@ -2802,7 +2802,7 @@ mod tests {
         let msg = super::dashboard_banner(bind, 7878, None);
         assert_eq!(
             msg,
-            "agentropy running; dashboard on http://127.0.0.1:7878/"
+            "dar running; dashboard on http://127.0.0.1:7878/"
         );
     }
 
@@ -2812,14 +2812,14 @@ mod tests {
         let bound = Some(SocketAddr::from(([0, 0, 0, 0], 53124)));
         let msg = super::dashboard_banner(bind, 0, bound);
         assert!(msg.contains("http://127.0.0.1:53124/"));
-        assert!(msg.contains("agentropy dash"));
+        assert!(msg.contains("dar dash"));
     }
 
     #[test]
     fn banner_falls_back_when_port_unknown() {
         let bind = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
         let msg = super::dashboard_banner(bind, 0, None);
-        assert!(msg.contains("agentropy dash"));
+        assert!(msg.contains("dar dash"));
         assert!(!msg.contains(":0/"));
     }
 
@@ -4662,7 +4662,7 @@ dashboard:
             control_rx,
         )
         .with_snapshot_bus(Arc::clone(&bus))
-        .with_startup_banner("agentropy running; dashboard on http://127.0.0.1:7878/".to_string());
+        .with_startup_banner("dar running; dashboard on http://127.0.0.1:7878/".to_string());
 
         assert!(banner.borrow().is_none(), "no banner before run started");
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -4674,7 +4674,7 @@ dashboard:
         assert_eq!(event.target, "issue=- event=startup");
         assert_eq!(
             event.message,
-            "agentropy running; dashboard on http://127.0.0.1:7878/"
+            "dar running; dashboard on http://127.0.0.1:7878/"
         );
 
         shutdown_tx.send(true).unwrap();
@@ -4686,21 +4686,21 @@ dashboard:
         let temp = TempDir::new().unwrap();
         std::fs::write(
             temp.path().join(".env"),
-            "AGENTROPY_TEST_BEFORE_REMOVE_SECRET=file\n",
+            "DAR_TEST_BEFORE_REMOVE_SECRET=file\n",
         )
         .unwrap();
-        std::env::remove_var("AGENTROPY_TEST_BEFORE_REMOVE_SECRET");
+        std::env::remove_var("DAR_TEST_BEFORE_REMOVE_SECRET");
         crate::dotenv::load_agent_env(temp.path()).unwrap();
 
         run_before_remove(
-            "test -z \"${AGENTROPY_TEST_BEFORE_REMOVE_SECRET:-}\"",
+            "test -z \"${DAR_TEST_BEFORE_REMOVE_SECRET:-}\"",
             temp.path().to_str().unwrap(),
             "ISSUE-1",
             "run-1",
         )
         .unwrap();
 
-        std::env::remove_var("AGENTROPY_TEST_BEFORE_REMOVE_SECRET");
+        std::env::remove_var("DAR_TEST_BEFORE_REMOVE_SECRET");
     }
 
     // ---------------------------------------------------------------------------

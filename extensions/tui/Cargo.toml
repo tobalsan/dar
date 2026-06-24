@@ -1,26 +1,32 @@
 [package]
-name = "tui"
-version = "0.2.0"
-edition = "2021"
+name = "dar-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Ratatui TUI foreground: interactive operator chat with Logs and Dash tabs"
 rust-version = "1.83"
+
+[lib]
+name = "tui"
 
 [dependencies]
 anyhow = "1"
-cap-chat = { path = "../../crates/cap-chat" }
-tool-registry = { path = "../../crates/tool-registry" }
+cap-chat = { package = "dar-cap-chat", path = "../../crates/cap-chat", version = "0.2" }
+tool-registry = { package = "dar-tool-registry", path = "../../crates/tool-registry", version = "0.2" }
 chrono = { version = "0.4", features = ["serde"] }
-# crossterm pinned to the workspace lock (agentropy-host has 0.28.x) and
+# crossterm pinned to the workspace lock (dar-host has 0.28.x) and
 # ratatui 0.29's own crossterm backend matches 0.28 — one copy in tree.
 crossterm = "0.28"
-host-api = { path = "../../crates/host-api" }
-orchestrator-api = { path = "../../crates/orchestrator-api" }
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.2" }
+orchestrator-api = { package = "dar-orchestrator-api", path = "../../crates/orchestrator-api", version = "0.2" }
 ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.43", features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
-chat-pi = { path = "../chat-pi" }
-frontend-log = { path = "../frontend-log" }
+chat-pi = { package = "dar-chat-pi", path = "../chat-pi" }
+frontend-log = { package = "dar-frontend-log", path = "../frontend-log" }
 tempfile = "3"
 tokio = { version = "1.43", features = ["macros", "rt-multi-thread"] }
