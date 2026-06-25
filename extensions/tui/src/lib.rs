@@ -27,6 +27,7 @@ mod app;
 mod backend;
 mod chat;
 mod dash;
+mod editor;
 mod foreground;
 mod input;
 mod logs;

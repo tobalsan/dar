@@ -8,6 +8,15 @@ use std::time::{Duration, Instant};
 use cap_chat::{ChatEvent, ChatRole};
 use orchestrator_api::RunSnapshot;
 
+use crate::editor::TextArea;
+
+/// Last reported context usage for the status line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextUsage {
+    pub tokens_used: u64,
+    pub context_window: Option<u64>,
+}
+
 /// Max lines shown per snapshot section (active/queue/history), keeping the
 /// whole snapshot summary within the spec'd ~30-line cap (1 + 3·(1+8)).
 const PREAMBLE_SECTION_CAP: usize = 8;
@@ -187,7 +196,10 @@ pub enum ChatBlock {
 #[derive(Default)]
 pub struct ChatState {
     pub blocks: Vec<ChatBlock>,
-    pub input: String,
+    pub input: TextArea,
+    /// Most recent context-usage reading from the backend; `None` until the
+    /// runner reports one (or never, when it doesn't surface usage).
+    pub usage: Option<ContextUsage>,
     pub in_flight: bool,
     pub pending_turns: usize,
     pub turn_started_at: Option<Instant>,
@@ -212,7 +224,7 @@ impl ChatState {
         if self.disabled || self.stale_finishes > 0 {
             return None;
         }
-        let prompt = self.input.trim().to_string();
+        let prompt = self.input.text().trim().to_string();
         if prompt.is_empty() {
             return None;
         }
@@ -270,7 +282,7 @@ impl ChatState {
     }
 
     pub fn scroll_up(&mut self, lines: usize) {
-        self.scroll_back += lines;
+        self.scroll_back = self.scroll_back.saturating_add(lines);
     }
 
     pub fn scroll_down(&mut self, lines: usize) {
@@ -299,6 +311,15 @@ impl ChatState {
                 done,
             } => self.set_tool_output(&id, text, is_error, done),
             ChatEvent::Error(message) => self.blocks.push(ChatBlock::Error(message)),
+            ChatEvent::ContextUsage {
+                tokens_used,
+                context_window,
+            } => {
+                self.usage = Some(ContextUsage {
+                    tokens_used,
+                    context_window,
+                });
+            }
             ChatEvent::TurnFinished { ok, error } => {
                 if self.stale_finishes > 0 {
                     // The finish of a turn the TUI already timed out and
@@ -400,6 +421,13 @@ mod tests {
 
     use super::*;
 
+    /// Build an input buffer from a string for the state tests.
+    fn ta(text: &str) -> TextArea {
+        let mut area = TextArea::default();
+        area.insert_str(text);
+        area
+    }
+
     fn busy_snapshot() -> RunSnapshot {
         let mut snapshot = RunSnapshot::empty();
         snapshot.version = 9;
@@ -493,6 +521,34 @@ mod tests {
         assert!(preamble.contains("- ... and 5 more"));
     }
 
+    #[test]
+    fn context_usage_event_updates_state_and_is_last_writer_wins() {
+        let mut chat = ChatState::default();
+        assert!(chat.usage.is_none());
+        chat.apply_event(ChatEvent::ContextUsage {
+            tokens_used: 10_928,
+            context_window: Some(200_000),
+        });
+        assert_eq!(
+            chat.usage,
+            Some(ContextUsage {
+                tokens_used: 10_928,
+                context_window: Some(200_000),
+            })
+        );
+        chat.apply_event(ChatEvent::ContextUsage {
+            tokens_used: 12_000,
+            context_window: None,
+        });
+        assert_eq!(
+            chat.usage,
+            Some(ContextUsage {
+                tokens_used: 12_000,
+                context_window: None,
+            })
+        );
+    }
+
     fn delta(role: ChatRole, text: &str) -> ChatEvent {
         ChatEvent::Delta {
             role,
@@ -503,7 +559,7 @@ mod tests {
     #[test]
     fn submit_takes_input_and_arms_the_gate() {
         let mut chat = ChatState {
-            input: "  hello there  ".to_string(),
+            input: ta("  hello there  "),
             ..Default::default()
         };
         assert_eq!(chat.submit().as_deref(), Some("hello there"));
@@ -519,11 +575,11 @@ mod tests {
     #[test]
     fn submit_accepts_steering_while_in_flight_and_acknowledges_it() {
         let mut chat = ChatState {
-            input: "first".to_string(),
+            input: ta("first"),
             ..Default::default()
         };
         chat.submit().unwrap();
-        chat.input = "second".to_string();
+        chat.input = ta("second");
         assert_eq!(chat.submit().as_deref(), Some("second"));
         assert!(chat.input.is_empty());
         assert_eq!(
@@ -547,7 +603,7 @@ mod tests {
         assert!(!chat.in_flight);
 
         let mut chat = ChatState {
-            input: "   ".to_string(),
+            input: ta("   "),
             ..Default::default()
         };
         assert!(chat.submit().is_none());
@@ -607,7 +663,7 @@ mod tests {
     #[test]
     fn turn_finished_clears_gate_and_reports_failures() {
         let mut chat = ChatState {
-            input: "go".to_string(),
+            input: ta("go"),
             ..Default::default()
         };
         chat.submit().unwrap();
@@ -619,7 +675,7 @@ mod tests {
         assert!(chat.turn_started_at.is_none());
         assert_eq!(chat.blocks.len(), 1); // only the user block
 
-        chat.input = "again".to_string();
+        chat.input = ta("again");
         chat.submit().unwrap();
         chat.apply_event(ChatEvent::TurnFinished {
             ok: false,
@@ -635,7 +691,7 @@ mod tests {
     #[test]
     fn late_turn_finished_after_timeout_is_swallowed_and_gates_submit_until_then() {
         let mut chat = ChatState {
-            input: "slow".to_string(),
+            input: ta("slow"),
             ..Default::default()
         };
         chat.submit().unwrap();
@@ -644,9 +700,9 @@ mod tests {
 
         // Turn A's TurnFinished is still outstanding: submitting turn B now
         // would let A's finish release B's gate, so it must stay blocked.
-        chat.input = "next".to_string();
+        chat.input = ta("next");
         assert!(chat.submit().is_none());
-        assert_eq!(chat.input, "next");
+        assert_eq!(chat.input.text(), "next");
 
         let blocks = chat.blocks.clone();
         chat.apply_event(ChatEvent::TurnFinished {
@@ -673,11 +729,11 @@ mod tests {
     #[test]
     fn failed_finishes_for_queued_turns_do_not_reopen_submit_until_all_are_seen() {
         let mut chat = ChatState {
-            input: "first".to_string(),
+            input: ta("first"),
             ..Default::default()
         };
         chat.submit().unwrap();
-        chat.input = "second".to_string();
+        chat.input = ta("second");
         chat.submit().unwrap();
 
         chat.apply_event(ChatEvent::TurnFinished {
@@ -685,9 +741,9 @@ mod tests {
             error: Some("aborted".to_string()),
         });
         assert!(!chat.in_flight);
-        chat.input = "too early".to_string();
+        chat.input = ta("too early");
         assert!(chat.submit().is_none());
-        assert_eq!(chat.input, "too early");
+        assert_eq!(chat.input.text(), "too early");
 
         chat.apply_event(ChatEvent::TurnFinished {
             ok: false,
@@ -700,15 +756,15 @@ mod tests {
     #[test]
     fn timeout_with_queued_turns_gates_submit_until_all_stale_finishes_arrive() {
         let mut chat = ChatState {
-            input: "first".to_string(),
+            input: ta("first"),
             ..Default::default()
         };
         chat.submit().unwrap();
-        chat.input = "second".to_string();
+        chat.input = ta("second");
         chat.submit().unwrap();
 
         chat.abandon_turn("turn timed out".to_string());
-        chat.input = "next".to_string();
+        chat.input = ta("next");
         chat.apply_event(ChatEvent::TurnFinished {
             ok: false,
             error: Some("aborted".to_string()),
@@ -725,7 +781,7 @@ mod tests {
     #[test]
     fn session_closed_clears_outstanding_stale_finishes() {
         let mut chat = ChatState {
-            input: "slow".to_string(),
+            input: ta("slow"),
             ..Default::default()
         };
         chat.submit().unwrap();
@@ -735,7 +791,7 @@ mod tests {
 
         // The dead session can never deliver the stale finish; a new submit
         // (which reopens a fresh session) must not be blocked forever.
-        chat.input = "retry".to_string();
+        chat.input = ta("retry");
         assert!(chat.submit().is_some());
     }
 
@@ -743,7 +799,7 @@ mod tests {
     fn turn_timer_only_fires_in_flight_and_past_the_deadline() {
         let mut chat = ChatState::default();
         assert!(!chat.turn_timed_out(Duration::ZERO));
-        chat.input = "go".to_string();
+        chat.input = ta("go");
         chat.submit().unwrap();
         assert!(!chat.turn_timed_out(Duration::from_secs(600)));
         chat.turn_started_at = Some(Instant::now() - Duration::from_secs(601));
@@ -753,7 +809,7 @@ mod tests {
     #[test]
     fn session_closed_clears_gate_and_surfaces_the_error() {
         let mut chat = ChatState {
-            input: "go".to_string(),
+            input: ta("go"),
             ..Default::default()
         };
         chat.submit().unwrap();

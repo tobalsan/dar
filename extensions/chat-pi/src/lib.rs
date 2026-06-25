@@ -123,7 +123,14 @@ impl PiChatSession {
         let stdout = child.stdout.take().context("chat child stdout not piped")?;
         let stderr = child.stderr.take().context("chat child stderr not piped")?;
         let queue = Arc::new(Mutex::new(TurnQueue::default()));
-        spawn_stdout_pump(stdout, tx.clone(), Arc::clone(&stdin), Arc::clone(&queue));
+        let context_window = params.model.as_deref().and_then(context_window_for_model);
+        spawn_stdout_pump(
+            stdout,
+            tx.clone(),
+            Arc::clone(&stdin),
+            Arc::clone(&queue),
+            context_window,
+        );
         spawn_stderr_pump(stderr, tx.clone());
 
         let closing = Arc::new(AtomicBool::new(false));
@@ -279,7 +286,7 @@ enum Mapped {
     Ignore,
 }
 
-fn map_stdout_line(line: &str) -> Mapped {
+fn map_stdout_line(line: &str, context_window: Option<u64>) -> Mapped {
     if line.trim().is_empty() {
         return Mapped::Ignore;
     }
@@ -288,6 +295,10 @@ fn map_stdout_line(line: &str) -> Mapped {
     };
     match value.get("type").and_then(Value::as_str) {
         Some("message_update") => map_message_update(&value),
+        // `message_end`/`turn_end` carry the assistant message's token usage;
+        // surface it as a best-effort context-usage report (ignored when the
+        // payload has no usable usage block).
+        Some("message_end") | Some("turn_end") => map_usage(&value, context_window),
         Some("tool_execution_update") => Mapped::Emit(ChatEvent::ToolOutput {
             id: tool_call_id(&value),
             // partialResult is ACCUMULATED output: each update replaces the
@@ -329,6 +340,52 @@ fn map_stdout_line(line: &str) -> Mapped {
         // queue_update, compaction_*, auto_retry_*, anything unknown: ignore.
         _ => Mapped::Ignore,
     }
+}
+
+/// Map a `message_end`/`turn_end` payload to a [`ChatEvent::ContextUsage`]
+/// from `message.usage`. The occupied context is the prompt that was sent
+/// (`input + cacheRead + cacheWrite`) plus the response (`output`); a zero
+/// total (or a missing usage block) yields `Ignore` so the status line keeps
+/// its last good reading instead of flashing 0.
+fn map_usage(value: &Value, context_window: Option<u64>) -> Mapped {
+    let Some(usage) = value.get("message").and_then(|m| m.get("usage")) else {
+        return Mapped::Ignore;
+    };
+    let field = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let tokens_used = field("input") + field("cacheRead") + field("cacheWrite") + field("output");
+    if tokens_used == 0 {
+        return Mapped::Ignore;
+    }
+    Mapped::Emit(ChatEvent::ContextUsage {
+        tokens_used,
+        context_window,
+    })
+}
+
+/// Best-effort context-window size for a pi model id/pattern. Matches on
+/// substrings of the model name so `provider/model:thinking` forms still
+/// resolve. Unknown models return `None` — accuracy over presence, the status
+/// line then shows the raw token count with no percentage.
+fn context_window_for_model(model: &str) -> Option<u64> {
+    let m = model.to_lowercase();
+    // Order matters: check the most specific tokens first.
+    if m.contains("claude") {
+        // Sonnet/Opus/Haiku families are 200k (1M tiers are opt-in betas).
+        return Some(200_000);
+    }
+    if m.contains("gpt-4.1") || m.contains("gpt-5") {
+        return Some(1_000_000);
+    }
+    if m.contains("o1") || m.contains("o3") || m.contains("o4") {
+        return Some(200_000);
+    }
+    if m.contains("gpt-4o") || m.contains("gpt-4-turbo") {
+        return Some(128_000);
+    }
+    if m.contains("gemini-2") || m.contains("gemini-1.5") {
+        return Some(1_000_000);
+    }
+    None
 }
 
 fn map_message_update(value: &Value) -> Mapped {
@@ -460,12 +517,13 @@ fn spawn_stdout_pump(
     tx: Sender<ChatEvent>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     queue: Arc<Mutex<TurnQueue>>,
+    context_window: Option<u64>,
 ) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let clean = strip_ansi(line.trim_end_matches('\r'));
-            match map_stdout_line(&clean) {
+            match map_stdout_line(&clean, context_window) {
                 Mapped::Emit(event) => {
                     let turn_finished = match &event {
                         ChatEvent::TurnFinished { ok, .. } => Some(*ok),
@@ -670,7 +728,7 @@ mod tests {
     // -- event mapping --------------------------------------------------------
 
     fn mapped_event(line: &str) -> ChatEvent {
-        match map_stdout_line(line) {
+        match map_stdout_line(line, None) {
             Mapped::Emit(event) => event,
             Mapped::AutoRespond { .. } => panic!("expected Emit, got AutoRespond for {line}"),
             Mapped::Ignore => panic!("expected Emit, got Ignore for {line}"),
@@ -679,7 +737,7 @@ mod tests {
 
     fn assert_ignored(line: &str) {
         assert!(
-            matches!(map_stdout_line(line), Mapped::Ignore),
+            matches!(map_stdout_line(line, None), Mapped::Ignore),
             "expected Ignore for {line}"
         );
     }
@@ -788,6 +846,70 @@ mod tests {
         }
     }
 
+    /// Like `mapped_event` but lets the caller pick the known context window.
+    fn mapped_event_with_window(line: &str, window: Option<u64>) -> ChatEvent {
+        match map_stdout_line(line, window) {
+            Mapped::Emit(event) => event,
+            Mapped::AutoRespond { .. } => panic!("expected Emit, got AutoRespond for {line}"),
+            Mapped::Ignore => panic!("expected Emit, got Ignore for {line}"),
+        }
+    }
+
+    #[test]
+    fn message_end_usage_maps_to_context_usage_with_window() {
+        let line = r#"{"type":"message_end","message":{"model":"claude-opus-4-8","usage":{"input":221,"output":13,"cacheRead":10694,"cacheWrite":0,"totalTokens":10928}}}"#;
+        match mapped_event_with_window(line, Some(200_000)) {
+            ChatEvent::ContextUsage {
+                tokens_used,
+                context_window,
+            } => {
+                // input + cacheRead + cacheWrite + output = 221+10694+0+13.
+                assert_eq!(tokens_used, 10_928);
+                assert_eq!(context_window, Some(200_000));
+            }
+            other => panic!("expected ContextUsage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn turn_end_without_window_still_reports_token_count() {
+        let line = r#"{"type":"turn_end","message":{"usage":{"input":100,"output":5}}}"#;
+        match mapped_event_with_window(line, None) {
+            ChatEvent::ContextUsage {
+                tokens_used,
+                context_window,
+            } => {
+                assert_eq!(tokens_used, 105);
+                assert!(context_window.is_none());
+            }
+            other => panic!("expected ContextUsage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zero_or_missing_usage_is_ignored() {
+        // A zero-total usage block (the streaming message_start) must not flash
+        // the status line to 0.
+        assert_ignored(
+            r#"{"type":"message_end","message":{"usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0}}}"#,
+        );
+        // No usage block at all.
+        assert_ignored(r#"{"type":"message_end","message":{"role":"user"}}"#);
+    }
+
+    #[test]
+    fn context_window_lookup_matches_families_and_unknowns_are_none() {
+        assert_eq!(context_window_for_model("claude-opus-4-8"), Some(200_000));
+        assert_eq!(
+            context_window_for_model("anthropic/claude-sonnet-4:high"),
+            Some(200_000)
+        );
+        assert_eq!(context_window_for_model("gpt-5.5"), Some(1_000_000));
+        assert_eq!(context_window_for_model("gpt-4o-mini"), Some(128_000));
+        assert_eq!(context_window_for_model("gemini-2.0-flash"), Some(1_000_000));
+        assert_eq!(context_window_for_model("some-future-model"), None);
+    }
+
     #[test]
     fn aborted_assistant_error_maps_to_aborted_turn() {
         let line = r#"{"type":"message_update","message":{},"assistantMessageEvent":{"type":"error","reason":"aborted"}}"#;
@@ -846,7 +968,7 @@ mod tests {
             ),
         ];
         for (line, expected_value) in cases {
-            match map_stdout_line(line) {
+            match map_stdout_line(line, None) {
                 Mapped::AutoRespond { reply, notice } => {
                     assert!(reply.ends_with('\n'));
                     let value: Value = serde_json::from_str(reply.trim_end()).unwrap();

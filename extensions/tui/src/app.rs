@@ -2,7 +2,9 @@
 //! Side effects (session opens, turns, aborts) stay in the event loop —
 //! `handle_event` only mutates state and names the side effect to perform.
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 
 use crate::chat::ChatState;
 use crate::dash::{Control, DashState};
@@ -10,6 +12,8 @@ use crate::logs::LogsState;
 
 /// PageUp/PageDown transcript scroll step, in lines.
 const SCROLL_PAGE: usize = 10;
+/// Mouse-wheel transcript scroll step, in lines.
+const SCROLL_WHEEL: usize = 3;
 
 /// One pane. The live tab list is `App::tabs`: Dash joins it only when the
 /// orchestrator's snapshot topic was subscribable at startup.
@@ -90,8 +94,36 @@ impl App {
     pub fn handle_event(&mut self, event: Event) -> Action {
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Paste(text) if self.tab == Tab::Chat => {
+                // Bracketed paste: insert verbatim (embedded newlines and all)
+                // at the cursor, never submitting.
+                self.chat.input.insert_str(&text);
+                Action::None
+            }
             _ => Action::None, // resize etc. — the loop redraws regardless
         }
+    }
+
+    /// Mouse wheel scrolls the active transcript; everything else (clicks,
+    /// drags) is left to the terminal so Shift-drag selection still works.
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> Action {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => match self.tab {
+                Tab::Chat => self.chat.scroll_up(SCROLL_WHEEL),
+                Tab::Logs => self.logs.scroll_up(SCROLL_WHEEL),
+                Tab::Dash => {}
+            },
+            MouseEventKind::ScrollDown => match self.tab {
+                Tab::Chat => self.chat.scroll_down(SCROLL_WHEEL),
+                Tab::Logs => self.logs.scroll_down(SCROLL_WHEEL),
+                Tab::Dash => {}
+            },
+            // Down/Up/Drag with no modifier would be a click — ignored so the
+            // terminal's own selection (with Shift held) is unaffected.
+            _ => return Action::None,
+        }
+        Action::None
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Action {
@@ -119,13 +151,25 @@ impl App {
 
     /// Chat input is always focused on the Chat tab; there is no focus toggle.
     /// `q` deliberately types a "q" here (it only quits on Logs/Dash tabs).
+    /// Enter submits; Shift/Alt+Enter inserts a newline (compose multi-line).
+    /// Full cursor navigation/editing runs against the multi-line buffer.
     fn handle_chat_key(&mut self, key: KeyEvent) -> Action {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let input = &mut self.chat.input;
         match key.code {
+            // Shift+Enter / Alt+Enter compose a newline instead of sending.
+            KeyCode::Enter if shift || alt => {
+                input.insert_newline();
+                Action::None
+            }
             KeyCode::Enter => match self.chat.submit() {
                 Some(prompt) => Action::Submit(prompt),
                 None => Action::None,
             },
             KeyCode::Esc if self.chat.in_flight => Action::AbortTurn,
+            // -- transcript scroll (kept on the same keys as before) --------
             KeyCode::PageUp => {
                 self.chat.scroll_up(SCROLL_PAGE);
                 Action::None
@@ -134,16 +178,70 @@ impl App {
                 self.chat.scroll_down(SCROLL_PAGE);
                 Action::None
             }
-            KeyCode::End => {
+            KeyCode::Home if ctrl => {
+                self.chat.scroll_up(usize::MAX);
+                Action::None
+            }
+            KeyCode::End if ctrl => {
                 self.chat.follow_tail();
                 Action::None
             }
-            KeyCode::Backspace => {
-                self.chat.input.pop();
+            // -- cursor navigation -----------------------------------------
+            KeyCode::Left if alt => {
+                input.move_word_left();
                 Action::None
             }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.chat.input.push(c);
+            KeyCode::Right if alt => {
+                input.move_word_right();
+                Action::None
+            }
+            KeyCode::Left => {
+                input.move_left();
+                Action::None
+            }
+            KeyCode::Right => {
+                input.move_right();
+                Action::None
+            }
+            KeyCode::Up => {
+                input.move_up();
+                Action::None
+            }
+            KeyCode::Down => {
+                input.move_down();
+                Action::None
+            }
+            KeyCode::Home => {
+                input.move_line_start();
+                Action::None
+            }
+            KeyCode::End => {
+                input.move_line_end();
+                Action::None
+            }
+            KeyCode::Char('a') if ctrl => {
+                input.move_line_start();
+                Action::None
+            }
+            KeyCode::Char('e') if ctrl => {
+                input.move_line_end();
+                Action::None
+            }
+            // -- editing ----------------------------------------------------
+            KeyCode::Char('k') if ctrl => {
+                input.kill_to_line_end();
+                Action::None
+            }
+            KeyCode::Backspace => {
+                input.backspace();
+                Action::None
+            }
+            KeyCode::Delete => {
+                input.delete_forward();
+                Action::None
+            }
+            KeyCode::Char(c) if !ctrl => {
+                input.insert_char(c);
                 Action::None
             }
             _ => Action::None,
@@ -201,15 +299,21 @@ mod tests {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
+    /// Type a string into the chat input one char at a time, as the terminal
+    /// would deliver it.
+    fn type_str(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.handle_event(key(KeyCode::Char(c)));
+        }
+    }
+
     #[test]
     fn typing_appends_and_enter_submits() {
         let mut app = App::new();
-        for c in ['h', 'i', 'q'] {
-            // 'q' types into chat input — it must NOT quit on the Chat tab.
-            assert_eq!(app.handle_event(key(KeyCode::Char(c))), Action::None);
-        }
+        // 'q' types into chat input — it must NOT quit on the Chat tab.
+        type_str(&mut app, "hiq");
         assert_eq!(app.handle_event(key(KeyCode::Backspace)), Action::None);
-        assert_eq!(app.chat.input, "hi");
+        assert_eq!(app.chat.input.text(), "hi");
         assert_eq!(
             app.handle_event(key(KeyCode::Enter)),
             Action::Submit("hi".to_string())
@@ -218,11 +322,85 @@ mod tests {
     }
 
     #[test]
+    fn shift_or_alt_enter_inserts_a_newline_instead_of_sending() {
+        for modifier in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
+            let mut app = App::new();
+            type_str(&mut app, "line1");
+            assert_eq!(
+                app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, modifier))),
+                Action::None
+            );
+            type_str(&mut app, "line2");
+            assert_eq!(app.chat.input.text(), "line1\nline2");
+            assert!(!app.chat.in_flight, "newline must not submit");
+            // Plain Enter sends the whole multi-line buffer.
+            assert_eq!(
+                app.handle_event(key(KeyCode::Enter)),
+                Action::Submit("line1\nline2".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn bracketed_paste_inserts_multiline_text_without_submitting() {
+        let mut app = App::new();
+        assert_eq!(
+            app.handle_event(Event::Paste("a\nb\nc".to_string())),
+            Action::None
+        );
+        assert_eq!(app.chat.input.text(), "a\nb\nc");
+        assert!(!app.chat.in_flight);
+    }
+
+    #[test]
+    fn cursor_navigation_and_word_jumps_insert_at_cursor() {
+        let mut app = App::new();
+        type_str(&mut app, "foo bar");
+        // Word-jump left to the start of "bar", then insert.
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)));
+        type_str(&mut app, "X");
+        assert_eq!(app.chat.input.text(), "foo Xbar");
+        // ctrl+a to line start, insert.
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+        )));
+        type_str(&mut app, ">");
+        assert_eq!(app.chat.input.text(), ">foo Xbar");
+        // ctrl+e to line end, ctrl+k kills nothing, delete-forward at end is
+        // inert; backspace removes the last char.
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(key(KeyCode::Backspace));
+        assert_eq!(app.chat.input.text(), ">foo Xba");
+    }
+
+    #[test]
+    fn ctrl_k_kills_to_line_end() {
+        let mut app = App::new();
+        type_str(&mut app, "keep this");
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+        )));
+        for _ in 0..4 {
+            app.handle_event(key(KeyCode::Right)); // after "keep"
+        }
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.chat.input.text(), "keep");
+    }
+
+    #[test]
     fn enter_accepts_steering_while_in_flight() {
         let mut app = App::new();
-        app.chat.input = "first".to_string();
+        type_str(&mut app, "first");
         app.handle_event(key(KeyCode::Enter));
-        app.chat.input = "second".to_string();
+        type_str(&mut app, "second");
         assert_eq!(
             app.handle_event(key(KeyCode::Enter)),
             Action::Submit("second".to_string())
@@ -234,7 +412,7 @@ mod tests {
     fn esc_aborts_only_while_in_flight() {
         let mut app = App::new();
         assert_eq!(app.handle_event(key(KeyCode::Esc)), Action::None);
-        app.chat.input = "go".to_string();
+        type_str(&mut app, "go");
         app.handle_event(key(KeyCode::Enter));
         assert_eq!(app.handle_event(key(KeyCode::Esc)), Action::AbortTurn);
     }
@@ -247,14 +425,45 @@ mod tests {
     }
 
     #[test]
-    fn scroll_keys_move_the_window_and_end_refollows() {
+    fn scroll_keys_move_the_window_and_ctrl_end_refollows() {
         let mut app = App::new();
         app.handle_event(key(KeyCode::PageUp));
         app.handle_event(key(KeyCode::PageUp));
         assert_eq!(app.chat.scroll_back, 20);
         app.handle_event(key(KeyCode::PageDown));
         assert_eq!(app.chat.scroll_back, 10);
+        // Plain End is cursor-to-line-end now; Ctrl+End re-follows the tail.
         app.handle_event(key(KeyCode::End));
+        assert_eq!(app.chat.scroll_back, 10);
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL)));
+        assert_eq!(app.chat.scroll_back, 0);
+        // Ctrl+Home pins to the oldest line.
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Home,
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.chat.scroll_back, usize::MAX);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_the_active_transcript() {
+        let mut app = App::new();
+        let wheel = |kind| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        app.handle_event(wheel(MouseEventKind::ScrollUp));
+        assert_eq!(app.chat.scroll_back, SCROLL_WHEEL);
+        app.handle_event(wheel(MouseEventKind::ScrollDown));
+        assert_eq!(app.chat.scroll_back, 0);
+        // On the Logs tab the wheel drives the logs window, not the chat one.
+        app.handle_event(key(KeyCode::Tab));
+        app.handle_event(wheel(MouseEventKind::ScrollUp));
+        assert_eq!(app.logs.scroll_back, SCROLL_WHEEL);
         assert_eq!(app.chat.scroll_back, 0);
     }
 

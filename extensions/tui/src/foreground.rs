@@ -11,6 +11,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use cap_chat::{ChatBackend, ChatEvent, ChatSession, ChatSessionParams};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
+use crossterm::execute;
 use host_api::{
     ExclusiveTerminal, Foreground, LogEvent, StartCtx, APP_DONE_TOPIC, LOG_EVENTS_TOPIC,
     STARTUP_BANNER_TOPIC,
@@ -37,6 +41,30 @@ pub struct TuiForeground {
 impl TuiForeground {
     pub fn new(config: TuiConfig) -> Self {
         Self { config }
+    }
+}
+
+/// RAII guard that turns OFF the additive terminal modes (mouse capture,
+/// bracketed paste) the Chat tab turns on. Its `Drop` runs on every exit
+/// path — normal return, an early `?`, or a panic unwind — so the user's
+/// shell is never left with mouse reporting on (which would emit escape
+/// garbage and break native selection). The host's own restore handles raw
+/// mode + the alternate screen; this only undoes what this extension added.
+/// It writes to the real stdout (the same fd the host's alt screen lives on),
+/// matching how `dar-host`'s `restore_terminal` reaches the terminal.
+struct TerminalModeGuard;
+
+impl TerminalModeGuard {
+    /// Enable the modes and hand back the guard that disables them on drop.
+    fn enable() -> Self {
+        let _ = execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+        Self
+    }
+}
+
+impl Drop for TerminalModeGuard {
+    fn drop(&mut self) {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     }
 }
 
@@ -134,6 +162,10 @@ async fn run_interactive(
     let mut shutdown = ctx.shutdown.clone();
     let mut app_done = ctx.host.bus.subscribe_retained::<bool>(APP_DONE_TOPIC)?;
     let mut term = Terminal::new(CrosstermBackend::new(TermWriter(terminal)))?;
+    // Enable mouse-wheel scroll + bracketed paste for the Chat tab. The guard's
+    // Drop turns them back off on EVERY exit path (normal return, an early `?`,
+    // or a panic unwind) so the shell is never left with mouse reporting on.
+    let _mode_guard = TerminalModeGuard::enable();
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
     crate::input::spawn_reader(input_tx);
     // The chat event channel outlives the lazily opened session; `chat_tx`
@@ -252,8 +284,9 @@ async fn run_interactive(
     if let Some(session) = session.take() {
         let _ = session.close().await;
     }
-    // Dropping `term` drops TermWriter and the ExclusiveTerminal inside it,
-    // whose Drop restores the terminal the host prepared.
+    // `_mode_guard` drops here (and on any early `?`/panic above), disabling
+    // mouse capture + bracketed paste before `term`'s drop lets the host
+    // restore raw mode + the alternate screen.
     Ok(())
 }
 
@@ -649,7 +682,8 @@ done"#;
         let mut preamble_pending = true;
 
         for prompt_text in ["first question", "second question"] {
-            app.chat.input = prompt_text.to_string();
+            app.chat.input.clear();
+            app.chat.input.insert_str(prompt_text);
             let prompt = app.chat.submit().unwrap();
             submit_turn(
                 "pi",
@@ -703,7 +737,7 @@ done"#;
         let (chat_tx, _chat_rx) = tokio::sync::mpsc::channel::<ChatEvent>(64);
         let mut session: Option<Box<dyn ChatSession>> = None;
         let mut app = App::new();
-        app.chat.input = "hello".to_string();
+        app.chat.input.insert_str("hello");
         let prompt = app.chat.submit().unwrap();
 
         let mut preamble_pending = true;
