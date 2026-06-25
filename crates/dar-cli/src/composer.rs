@@ -104,6 +104,7 @@ struct LocalExtension {
     package: String,
     factory: String,
     path: PathBuf,
+    requires_stock: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,11 +164,12 @@ fn write_composition_crate(agent: &Path) -> Result<(PathBuf, bool)> {
     fs::create_dir_all(crate_dir.join("src"))
         .with_context(|| format!("creating {}", crate_dir.join("src").display()))?;
 
-    let stock = selected_stock_extensions(&agent)?;
     let locals = discover_extensions(&agent)?;
+    let stock = selected_stock_extensions(&agent, &locals)?;
+    let source_root = dar_source_root()?;
     let mut changed = write_if_changed(
         &crate_dir.join("Cargo.toml"),
-        &cargo_toml(&crate_dir, &stock, &locals),
+        &cargo_toml(&crate_dir, &stock, &locals, &source_root),
     )?;
     changed |= write_if_changed(&crate_dir.join("src/main.rs"), &main_rs(&stock, &locals))?;
     changed |= write_if_changed(
@@ -185,7 +187,10 @@ const ALL_RUNNERS: &[&str] = &[
     "runner-fake",
 ];
 
-fn selected_stock_extensions(agent: &Path) -> Result<Vec<&'static StockExtension>> {
+fn selected_stock_extensions(
+    agent: &Path,
+    locals: &[LocalExtension],
+) -> Result<Vec<&'static StockExtension>> {
     let selection = agent_selection(agent)?;
     // Validate runner.use early so a typo fails at build time.
     let _ = runner_package(&selection.runner.use_)?;
@@ -207,6 +212,12 @@ fn selected_stock_extensions(agent: &Path) -> Result<Vec<&'static StockExtension
     if selection.extension_selected("scheduler") {
         packages.push("scheduler");
     }
+    // Stock extensions required by local extensions.
+    for local in locals {
+        for package in &local.requires_stock {
+            packages.push(package.as_str());
+        }
+    }
     let mut selected = Vec::new();
     for stock in STOCK_EXTENSIONS {
         if packages.iter().any(|package| package == &stock.package) {
@@ -222,6 +233,38 @@ fn selected_stock_extensions(agent: &Path) -> Result<Vec<&'static StockExtension
         }
     }
     Ok(selected)
+}
+
+/// Locate the dar source checkout that supplies the `publish = false` stock
+/// extension crates. Honors `DAR_SRC`; otherwise walks up from the running
+/// binary to the checkout root. Resolved fresh each compose (never baked at
+/// compile time) so a relocated `dar` binary still emits correct paths.
+fn dar_source_root() -> Result<PathBuf> {
+    let is_root = |d: &Path| {
+        d.join("crates/host-api/Cargo.toml").exists()
+            && d.join("extensions/orchestrator/Cargo.toml").exists()
+    };
+    if let Some(src) = std::env::var_os("DAR_SRC") {
+        let root = PathBuf::from(&src)
+            .canonicalize()
+            .with_context(|| format!("resolving DAR_SRC {}", Path::new(&src).display()))?;
+        if !is_root(&root) {
+            bail!(
+                "DAR_SRC {} is not a dar checkout root (missing crates/host-api or extensions/orchestrator)",
+                root.display()
+            );
+        }
+        return Ok(root);
+    }
+    let exe = std::env::current_exe().context("resolving current executable path")?;
+    for ancestor in exe.ancestors() {
+        if is_root(ancestor) {
+            return ancestor
+                .canonicalize()
+                .with_context(|| format!("canonicalizing dar source root {}", ancestor.display()));
+        }
+    }
+    bail!("could not locate dar source tree; set DAR_SRC to the dar checkout root")
 }
 
 fn agent_selection(agent: &Path) -> Result<AgentSelection> {
@@ -485,10 +528,27 @@ fn discover_extensions(agent: &Path) -> Result<Vec<LocalExtension>> {
         let Some(factory) = factory else {
             continue;
         };
+        let requires_stock = meta
+            .and_then(|m| m.get("dar"))
+            .and_then(|a| a.get("requires_stock"))
+            .and_then(toml::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| {
+                        item.as_str()
+                            .map(str::to_string)
+                            .context("package.metadata.dar.requires_stock entries must be strings")
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
         extensions.push(LocalExtension {
             package,
             factory: factory.to_string(),
             path: PathBuf::from("../extensions").join(entry.file_name()),
+            requires_stock,
         });
     }
     extensions.sort_by(|a, b| a.package.cmp(&b.package));
@@ -499,6 +559,7 @@ fn cargo_toml(
     _crate_dir: &Path,
     stock: &[&StockExtension],
     locals: &[LocalExtension],
+    source_root: &Path,
 ) -> String {
     let mut out = String::from(GENERATED_TOML_HEADER);
     out.push_str(
@@ -517,11 +578,32 @@ path = "src/main.rs"
 [dependencies]
 "#,
     );
-    stock_dependency(&mut out, "host-api", STOCK_CRATE_VERSION_REQ, false);
-    stock_dependency(&mut out, "dar-cli-core", STOCK_CRATE_VERSION_REQ, false);
+    stock_dependency(
+        &mut out,
+        "host-api",
+        "crates/host-api",
+        STOCK_CRATE_VERSION_REQ,
+        false,
+        source_root,
+    );
+    stock_dependency(
+        &mut out,
+        "dar-cli-core",
+        "crates/dar-cli",
+        STOCK_CRATE_VERSION_REQ,
+        false,
+        source_root,
+    );
     out.push_str("tokio = { version = \"1.43\", features = [\"rt-multi-thread\", \"macros\", \"signal\"] }\n");
     for stock in stock {
-        stock_dependency(&mut out, stock.package, STOCK_CRATE_VERSION_REQ, true);
+        stock_dependency(
+            &mut out,
+            stock.package,
+            &format!("extensions/{}", stock.package),
+            STOCK_CRATE_VERSION_REQ,
+            true,
+            source_root,
+        );
     }
     for local in locals {
         out.push_str(&format!(
@@ -555,11 +637,21 @@ fn stock_package(key: &str) -> String {
     }
 }
 
-fn stock_dependency(out: &mut String, key: &str, version: &str, optional: bool) {
+fn stock_dependency(
+    out: &mut String,
+    key: &str,
+    rel_path: &str,
+    version: &str,
+    optional: bool,
+    source_root: &Path,
+) {
     let pkg = stock_package(key);
+    let abs = source_root.join(rel_path);
+    let abs = abs.canonicalize().unwrap_or(abs);
+    let abs = toml_path(&abs);
     let optional = if optional { ", optional = true" } else { "" };
     out.push_str(&format!(
-        "{key} = {{ package = \"{pkg}\", version = \"{version}\"{optional} }}\n"
+        "{key} = {{ package = \"{pkg}\", version = \"{version}\", path = \"{abs}\"{optional} }}\n"
     ));
 }
 
@@ -1059,21 +1151,35 @@ extensions:
     }
 
     fn write_test_extension(agent: &Path) {
+        write_test_extension_with_metadata(
+            agent,
+            r#"[package.metadata.dar]
+factory = "my_ext::extension"
+"#,
+        );
+    }
+
+    fn write_test_extension_with_metadata(agent: &Path, metadata: &str) {
+        // Stock crates are `publish = false`, so the local extension's
+        // host-api dep must resolve by path into the dar source checkout
+        // (the same mechanism the composer emits for stock deps).
+        let host_api = toml_path(&dar_source_root().unwrap().join("crates/host-api"));
         let extension = agent.join("extensions/my-ext");
         std::fs::create_dir_all(extension.join("src")).unwrap();
         std::fs::write(
             extension.join("Cargo.toml"),
-            r#"[package]
+            format!(
+                r#"[package]
 name = "my-ext"
 version = "0.1.0"
 edition = "2021"
 
-[package.metadata.dar]
-factory = "my_ext::extension"
+{metadata}
 
 [dependencies]
-host-api = { version = "0.2" }
-"#,
+host-api = {{ package = "dar-host-api", version = "0.2", path = "{host_api}" }}
+"#
+            ),
         )
         .unwrap();
         std::fs::write(
@@ -1094,6 +1200,27 @@ impl Extension for MyExt {
 "#,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn local_extension_can_require_chat_pi_under_logs_foreground() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(agent, "files", "fake", "logs", "");
+        write_test_extension_with_metadata(
+            agent,
+            r#"[package.metadata.dar]
+factory = "my_ext::extension"
+requires_stock = ["chat-pi"]
+"#,
+        );
+
+        compose(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        let source = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
+        assert!(manifest.contains("chat-pi = { package = \"dar-chat-pi\", version = "));
+        assert!(source.contains("chat_pi::ChatPiExtension"));
     }
 
     fn write_test_agent_yaml(agent: &Path) {
