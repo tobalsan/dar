@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Runner-agnostic shim transport for exposing host tools when native MCP is unavailable"
 rust-version = "1.83"
+publish = false
 
 # Runner-agnostic shim transport: the portable reliability floor that advertises
 # the host `ToolRegistry` to an agent via a strict prompt convention + tool-call

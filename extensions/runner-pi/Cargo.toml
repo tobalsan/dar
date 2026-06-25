@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Pi runner extension: drives pi --mode rpc for agent runs"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "runner_pi"

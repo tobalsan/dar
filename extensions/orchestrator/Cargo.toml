@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Orchestration loop extension: drives agent runs from tracker issues"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "orchestrator"
@@ -20,6 +21,7 @@ host-api = { package = "dar-host-api", path = "../../crates/host-api", version =
 tool-registry = { package = "dar-tool-registry", path = "../../crates/tool-registry", version = "0.2" }
 orchestrator-api = { package = "dar-orchestrator-api", path = "../../crates/orchestrator-api", version = "0.2" }
 runner-core = { package = "dar-runner-core", path = "../../crates/runner-core", version = "0.2" }
+extension-sdk = { package = "dar-extension-sdk", path = "../../crates/extension-sdk", version = "0.2" }
 system-files = { package = "dar-system-files", path = "../../crates/system-files", version = "0.2" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

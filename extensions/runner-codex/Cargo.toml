@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Codex runner extension: drives the codex app-server via JSON-RPC"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "runner_codex"

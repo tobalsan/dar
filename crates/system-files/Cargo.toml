@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "System-file resolver: assembles an agent identity context from AGENTS.md and system_files"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "system_files"

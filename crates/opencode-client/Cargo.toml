@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "HTTP client for the OpenCode AI coding agent server"
+publish = false
 
 [lib]
 name = "opencode_client"

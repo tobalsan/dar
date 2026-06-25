@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Issue tracker capability contract for dar extensions"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "cap_tracker"

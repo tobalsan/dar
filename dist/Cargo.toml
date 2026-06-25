@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "dar agent host CLI"
 rust-version = "1.83"
+publish = false
 
 [[bin]]
 name = "dar"

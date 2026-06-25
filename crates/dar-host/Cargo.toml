@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Agent extension host: boots extensions, manages terminal, HTTP registry"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "dar_host"

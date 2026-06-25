@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Host tool-registry extension: publishes the shared ToolRegistry as a service"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "tool_registry_host"

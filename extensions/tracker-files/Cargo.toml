@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "File-backed issue tracker extension for dar"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "tracker_files"

@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Shared runner utilities: process spawning, protocol parsing, MCP bridge helpers"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "runner_core"

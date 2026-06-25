@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Fake runner extension for testing: echoes the agent prompt"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "runner_fake"

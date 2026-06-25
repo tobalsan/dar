@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "CLI runner extension: runs an arbitrary command with the AGENT_* environment contract"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "runner_cli"

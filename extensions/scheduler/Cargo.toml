@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Scheduler extension: fires agent runs on cron schedules from jobs.json"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "scheduler"

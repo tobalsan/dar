@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "OpenCode runner extension: drives opencode serve for agent runs"
+publish = false
 
 [lib]
 name = "runner_opencode"

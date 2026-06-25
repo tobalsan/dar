@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Frontend log extension: tails host log events to the terminal"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "frontend_log"

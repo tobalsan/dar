@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Ratatui TUI foreground: interactive operator chat with Logs and Dash tabs"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "tui"

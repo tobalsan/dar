@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Reusable CLI boot wiring for the dar agent host"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "dar_cli_core"

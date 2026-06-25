@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Web dashboard extension for the dar agent host"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "dashboard"

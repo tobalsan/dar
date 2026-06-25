@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "OpenCode chat backend for the dar TUI chat interface"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "chat_opencode"

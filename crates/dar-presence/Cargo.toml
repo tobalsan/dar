@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 description = "Presence registry for agent dashboard discovery"
 rust-version = "1.83"
+publish = false
 
 [lib]
 name = "dar_presence"
