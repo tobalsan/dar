@@ -28,6 +28,9 @@ pub type BridgeInvocation = (Vec<OsString>, Vec<(OsString, OsString)>);
 /// Resolve the hidden host MCP bridge command for a runner/chat spawn. Returns
 /// `None` when no tool registry is present or it has no tools, preserving the
 /// cheap no-tools path for agents that do not use runtime tools.
+///
+/// Keep this in sync with `dar_extension_sdk::tools::host_tool_bridge`; both
+/// helpers intentionally emit the same `__mcp-bridge --dir <agent-root>` shape.
 pub fn host_tool_bridge(services: &ServiceRegistry, agent_root: &Path) -> Option<HostToolBridge> {
     let registry = services
         .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)

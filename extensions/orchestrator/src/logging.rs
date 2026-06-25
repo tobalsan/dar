@@ -44,12 +44,14 @@ pub fn init(log_file: &Path) -> Result<WorkerGuard> {
         .init();
 
     runner_core::set_log_hook(ev);
+    extension_sdk::log::set_event_hook(ev);
     Ok(guard)
 }
 
 pub fn set_event_bus(bus: Arc<EventBus>) {
     *EVENT_BUS.lock().expect("event bus mutex poisoned") = Some(bus);
     runner_core::set_log_hook(ev);
+    extension_sdk::log::set_event_hook(ev);
 }
 
 /// Emit one structured lifecycle/runner event. `issue` is the issue identifier

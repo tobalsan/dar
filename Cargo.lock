@@ -700,6 +700,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dar-extension-sdk"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "dar-cap-chat",
+ "dar-host-api",
+ "dar-orchestrator-api",
+ "dar-tool-registry",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dar-frontend-log"
 version = "0.2.0"
 dependencies = [
@@ -757,6 +770,7 @@ dependencies = [
  "clap",
  "dar-cap-runner",
  "dar-cap-tracker",
+ "dar-extension-sdk",
  "dar-host-api",
  "dar-orchestrator-api",
  "dar-runner-cli",
