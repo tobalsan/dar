@@ -1177,7 +1177,7 @@ edition = "2021"
 {metadata}
 
 [dependencies]
-host-api = {{ package = "dar-host-api", version = "0.2", path = "{host_api}" }}
+host-api = {{ package = "dar-host-api", version = "{STOCK_CRATE_VERSION_REQ}", path = "{host_api}" }}
 "#
             ),
         )

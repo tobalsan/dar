@@ -15,15 +15,15 @@ name = "dashboard"
 anyhow = "1"
 askama = "0.13"
 axum = { version = "0.8", features = ["ws"] }
-dar-presence = { path = "../../crates/dar-presence", version = "0.2" }
-cap-dashboard-tab = { package = "dar-cap-dashboard-tab", path = "../../crates/cap-dashboard-tab", version = "0.2" }
-cap-tracker = { package = "dar-cap-tracker", path = "../../crates/cap-tracker", version = "0.2" }
+dar-presence = { path = "../../crates/dar-presence", version = "0.3" }
+cap-dashboard-tab = { package = "dar-cap-dashboard-tab", path = "../../crates/cap-dashboard-tab", version = "0.3" }
+cap-tracker = { package = "dar-cap-tracker", path = "../../crates/cap-tracker", version = "0.3" }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 hmac = "0.12"
-host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.2" }
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.3" }
 mime_guess = "2"
-orchestrator-api = { package = "dar-orchestrator-api", path = "../../crates/orchestrator-api", version = "0.2" }
+orchestrator-api = { package = "dar-orchestrator-api", path = "../../crates/orchestrator-api", version = "0.3" }
 minijinja = "2.5"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

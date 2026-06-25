@@ -13,5 +13,5 @@ name = "tool_registry_host"
 
 [dependencies]
 anyhow = "1"
-host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.2" }
-tool-registry = { package = "dar-tool-registry", path = "../../crates/tool-registry", version = "0.2" }
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.3" }
+tool-registry = { package = "dar-tool-registry", path = "../../crates/tool-registry", version = "0.3" }

@@ -13,9 +13,9 @@ name = "tracker_files"
 
 [dependencies]
 anyhow = "1"
-cap-tracker = { package = "dar-cap-tracker", path = "../../crates/cap-tracker", version = "0.2" }
+cap-tracker = { package = "dar-cap-tracker", path = "../../crates/cap-tracker", version = "0.3" }
 chrono = { version = "0.4", features = ["serde"] }
-host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.2" }
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.3" }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 tracing = "0.1"

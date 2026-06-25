@@ -14,7 +14,7 @@ name = "dar_host"
 [dependencies]
 anyhow = "1"
 axum = "0.8"
-host-api = { package = "dar-host-api", path = "../host-api", version = "0.2" }
+host-api = { package = "dar-host-api", path = "../host-api", version = "0.3" }
 tokio = { version = "1.43", features = ["macros", "rt-multi-thread", "signal", "sync"] }
 crossterm = "0.28"
 

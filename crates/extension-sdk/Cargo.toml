@@ -12,10 +12,10 @@ name = "dar_extension_sdk"
 
 [dependencies]
 anyhow = "1"
-cap-chat = { package = "dar-cap-chat", path = "../cap-chat", version = "0.2" }
-host-api = { package = "dar-host-api", path = "../host-api", version = "0.2" }
-orchestrator-api = { package = "dar-orchestrator-api", path = "../orchestrator-api", version = "0.2" }
-tool-registry = { package = "dar-tool-registry", path = "../tool-registry", version = "0.2" }
+cap-chat = { package = "dar-cap-chat", path = "../cap-chat", version = "0.3" }
+host-api = { package = "dar-host-api", path = "../host-api", version = "0.3" }
+orchestrator-api = { package = "dar-orchestrator-api", path = "../orchestrator-api", version = "0.3" }
+tool-registry = { package = "dar-tool-registry", path = "../tool-registry", version = "0.3" }
 tracing = "0.1"
 
 [dev-dependencies]

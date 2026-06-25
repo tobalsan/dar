@@ -12,5 +12,5 @@ name = "cap_chat"
 
 [dependencies]
 anyhow = "1"
-cap-runner = { package = "dar-cap-runner", path = "../cap-runner", version = "0.2" }
+cap-runner = { package = "dar-cap-runner", path = "../cap-runner", version = "0.3" }
 tokio = { version = "1.43", features = ["sync"] }
