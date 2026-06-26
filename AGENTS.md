@@ -4,6 +4,8 @@ This file provides guidance to coding agents when working with code in this repo
 
 Dar v0: a folder-scoped agent runtime. Cargo workspace; the shipped binary is assembled in `dist/` from an explicit plugin list. Spec lives in `PRD.md` (+ `PRD-EXTENSIONS.md`). README has user-facing usage.
 
+**Three pillars.** (1) a small domain-free **core** (`crates/dar-host` + the contract crates) that knows nothing about trackers, runners, or chat; (2) a stable **SDK** (`crates/extension-sdk`, published as `dar-extension-sdk`) — the one crate a third-party extension author depends on; (3) an **ecosystem of extensions** under `extensions/`, each adding one capability. Everything below is an instance of one of these three.
+
 ## Commands
 
 ```bash
@@ -21,13 +23,18 @@ The runner backend named by `agent.yaml` `runner.use` must be installed and auth
 
 ### Extension architecture
 
-Domain-free host (`crates/dar-host`) + contract crates (`crates/host-api`, `cap-tracker`, `cap-runner`, `cap-chat`, `orchestrator-api`, `runner-core`); every feature is one crate under `extensions/`. The composition root is `dist/`: the `plugins![]` list in `dist/src/main.rs` is the only place naming the shipped extension mix — adding/removing an extension = one list line + a `dist/Cargo.toml` dependency, then rebuild. Extensions import `host-api` (plus at most one cap/api crate) and read zero host internals. Integration surfaces:
+Domain-free host (`crates/dar-host`) + contract crates (`crates/host-api`, `cap-tracker`, `cap-runner`, `cap-chat`, `cap-dashboard-tab`, `tool-registry`, `orchestrator-api`, `runner-core`); every feature is one crate under `extensions/`. The composition root is `dist/`: the `plugins![]` list in `dist/src/main.rs` is the only place naming the shipped extension mix — adding/removing an extension = one list line + a `dist/Cargo.toml` dependency, then rebuild. List order matters: substrate extensions (e.g. `tool-registry-host`, `frontend-log`) must precede their consumers.
 
-- **Typed service registry** — named services, e.g. runners register `dyn Runner` under `"pi"`/`"codex"`/`"cli"`/`"fake"`, trackers register `dyn TrackerFactory` under `"files"`/`"linear"`, chat backends register `dyn ChatBackend` under `"pi"` (id + Rust type form the key, so it coexists with the runner's `"pi"`). Linked ≠ enabled: `agent.yaml` `tracker.use` / `runner.use` picks which registered service actually runs.
-- **Typed event bus** — broadcast + retained topics. Orchestration payloads live in `crates/orchestrator-api`: `RunSnapshot` (retained), `ControlMsg`, `RunRequested`, `DispatchRequested`. Semantics documented in `crates/host-api/src/lib.rs`.
-- **Foreground slot** — at most one extension owns the terminal; selected per agent via top-level `foreground:` key in `agent.yaml` (default `"logs"`); unknown id → clean boot error, exit 1. Per-extension config: top-level `extensions:` map in `agent.yaml`, keyed by extension id, delivered via `ConfigStore`.
+**Authoring surface (the SDK pillar).** New extensions depend on **`dar-extension-sdk`** (`crates/extension-sdk`), the stable re-export of `host-api` + the caps an author needs (`chat`, `orchestrator`, tool registry, a structured `log` hook) — *not* on individual workspace crates. Extensions read zero host internals. `extensions/example` is the living reference; `cargo dar new <name> --kind background|service|foreground` scaffolds a compiling extension.
 
-`extensions/example` is the living reference; `cargo dar new <name> --kind background|service|foreground` scaffolds a compiling extension.
+Integration surfaces (all typed, all opt-in — linked ≠ enabled):
+
+- **Service registry** — named `dyn Trait` services keyed by id + Rust type. Runners register `dyn Runner` under `"pi"`/`"codex"`/`"opencode"`/`"cli"`/`"fake"`; trackers register `dyn TrackerFactory` under `"files"`/`"linear"`; chat backends register `dyn ChatBackend` under `"pi"`/`"codex"`/`"opencode"` (coexists with the same-id runner). `agent.yaml` `tracker.use` / `runner.use` picks which actually runs.
+- **Event bus** — broadcast + retained topics. Orchestration payloads in `crates/orchestrator-api`: `RunSnapshot` (retained), `ControlMsg`, `RunRequested`, `DispatchRequested`. Semantics in `crates/host-api/src/lib.rs`.
+- **Host tool registry** (`crates/tool-registry` + `extensions/tool-registry-host`) — extensions expose runtime tools to agents: register a `ToolSpec` (name + JSON schema) + async executor against the one shared `ToolRegistry` (published as a service by `tool-registry-host`, early in the list). Duplicate names are a hard boot/doctor error. The host **MCP bridge** serves the registry to runners natively; `crates/tool-shim` is the runner-agnostic turn-loop fallback (same registry, same `ToolOutcome` observability — only the transport differs).
+- **Dashboard-tab contract** (`crates/cap-dashboard-tab`) — any extension contributes a dashboard tab by adding an `Arc<dyn DashboardTab>` to the shared `DashboardTabs` service; the tab returns an HTML **fragment** and the dashboard splices it into its htmx `#content` shell (no `<body>` swap). Dashboard stays ignorant of the extension.
+- **Foreground slot** — at most one extension owns the terminal; top-level `foreground:` in `agent.yaml` (default `"logs"`, `frontend-log`); unknown id → clean boot error, exit 1.
+- **Config** — top-level `extensions:` map in `agent.yaml`, keyed by extension id, delivered via `ConfigStore`.
 
 ### TUI foreground (`extensions/tui` + `extensions/chat-pi` + `crates/cap-chat`)
 
@@ -62,3 +69,9 @@ The dashboard self-polls `GET /content` into the `<div id="content">` wrapper (i
 ### Path containment
 
 Two layers: `host-api` exposes `HostPaths::assert_contained` for extensions, and `extensions/orchestrator/src/paths.rs` (`issue_workspace` / `assert_contained`) enforces that a child cwd cannot escape `workspace.root` (canonicalized, rejects `..`/symlinks).
+
+### Other ecosystem extensions
+
+- **Scheduler** (`extensions/scheduler`) — loads `cron/jobs.json`, arms a timer per enabled job (cron + IANA tz + optional `startAt`), and at fire time spawns the agent's `runner.use` with the job's `payload.message`, writing the response to `cron/output/<job_id>/<ts>.md`. Hot-reloads the jobs file (per-job `enabled` live; the `extensions.scheduler.enabled` kill switch is read once at boot). Exposes HTTP job CRUD + run-now/tail and a read-only Cron dashboard tab.
+- **System context** (`crates/system-files`) — resolves the agent's identity files into one path-tagged string: `AGENTS.md` first (position 0 if present), then declared `system_files` entries in order (`{ path, required? }`, deduped, root-contained). The orchestrator prepends this to every runner prompt.
+- **Fleet / presence** (`crates/dar-presence` + `dar dash`) — each live agent dashboard writes one JSON presence file to a registry dir (`~/.dar/dashboards`); `dar dash` reads the dir, prunes dead pids, and serves a unified host-wide view that iframes each agent's own dashboard.
