@@ -13,6 +13,7 @@
 //! Session persistence: pi stores/resumes sessions under `--session-dir`, so a
 //! per-issue session dir means an abnormal-exit cold respawn resumes context.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -39,6 +40,7 @@ use tokio::sync::oneshot;
 const EVENT_KIND: &str = "runner.pi";
 /// SIGTERM-to-SIGKILL grace passed to `term_then_kill` on shutdown/kill.
 const KILL_GRACE: Duration = Duration::from_secs(5);
+const SUBAGENT_TAIL_POLL: Duration = Duration::from_millis(500);
 
 pub struct RunnerPiExtension;
 
@@ -233,6 +235,8 @@ async fn spawn_pi(p: SpawnParams<'_>) -> Result<RunnerHandle> {
         events: Arc::clone(&p.events),
         store: Arc::clone(&p.store),
         last_event_at: Arc::clone(&p.last_event_at),
+        session_dir: session_dir.clone(),
+        subagent_tailers: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let io = TurnIo {
@@ -268,6 +272,8 @@ struct TurnLoopCtx {
     events: Arc<dyn RunnerEventSink>,
     store: Arc<dyn RunnerEventStore>,
     last_event_at: Arc<Mutex<DateTime<Utc>>>,
+    session_dir: PathBuf,
+    subagent_tailers: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
 }
 
 /// The owned child + stdio + turn channels the supervising loop drives.
@@ -318,11 +324,13 @@ async fn run_turn_loop(ctx: &TurnLoopCtx, io: TurnIo, timeout: Duration) -> Exit
             outcome = pump_one_turn(ctx, &mut lines, &mut stdin) => outcome,
             _ = tokio::time::sleep_until(deadline) => {
                 log_ev(&ctx.issue_id, "timeout", "max_run_timeout_ms exceeded; killing");
+                stop_all_subagent_tailers(ctx);
                 term_then_kill(ctx.pid, KILL_GRACE);
                 let _ = child.wait().await;
                 return ExitKind::Interrupted { reason: "turn_timeout" };
             }
             reason = &mut kill_rx => {
+                stop_all_subagent_tailers(ctx);
                 return kill_exit(&ctx.issue_id, ctx.pid, &mut child, reason).await;
             }
         };
@@ -330,13 +338,17 @@ async fn run_turn_loop(ctx: &TurnLoopCtx, io: TurnIo, timeout: Duration) -> Exit
         match outcome {
             // stdout closed: the child is exiting. `child.wait()` gives the
             // authoritative exit code (the pump only saw EOF).
-            TurnOutcome::Exited => return reap_exit(ctx, &mut child).await,
+            TurnOutcome::Exited => {
+                stop_all_subagent_tailers(ctx);
+                return reap_exit(ctx, &mut child).await;
+            }
             TurnOutcome::Ended => {}
         }
 
         // --- turn boundary: report idle and park for a decision ---
         if ended_tx.send(TurnEnded).is_err() {
             // Orchestrator dropped the handle: shut down gracefully.
+            stop_all_subagent_tailers(ctx);
             return finish(&ctx.issue_id, ctx.pid, &mut child, &mut stdin).await;
         }
 
@@ -344,11 +356,13 @@ async fn run_turn_loop(ctx: &TurnLoopCtx, io: TurnIo, timeout: Duration) -> Exit
             decision = decision_rx.recv() => decision,
             _ = tokio::time::sleep_until(deadline) => {
                 log_ev(&ctx.issue_id, "timeout", "max_run_timeout_ms exceeded awaiting decision; killing");
+                stop_all_subagent_tailers(ctx);
                 term_then_kill(ctx.pid, KILL_GRACE);
                 let _ = child.wait().await;
                 return ExitKind::Interrupted { reason: "turn_timeout" };
             }
             reason = &mut kill_rx => {
+                stop_all_subagent_tailers(ctx);
                 return kill_exit(&ctx.issue_id, ctx.pid, &mut child, reason).await;
             }
         };
@@ -357,6 +371,7 @@ async fn run_turn_loop(ctx: &TurnLoopCtx, io: TurnIo, timeout: Duration) -> Exit
             Some(TurnDecision::Continue { prompt }) => {
                 if let Err(e) = write_prompt(&mut stdin, &mut turn, &prompt).await {
                     log_ev(&ctx.issue_id, "error", &format!("stdin write failed: {e}"));
+                    stop_all_subagent_tailers(ctx);
                     term_then_kill(ctx.pid, KILL_GRACE);
                     return ExitKind::Abnormal(None);
                 }
@@ -364,6 +379,7 @@ async fn run_turn_loop(ctx: &TurnLoopCtx, io: TurnIo, timeout: Duration) -> Exit
             }
             // Finish, or the decision channel closed (handle dropped).
             Some(TurnDecision::Finish) | None => {
+                stop_all_subagent_tailers(ctx);
                 return finish(&ctx.issue_id, ctx.pid, &mut child, &mut stdin).await;
             }
         }
@@ -571,6 +587,7 @@ fn emit_line(ctx: &TurnLoopCtx, clean: &str) {
         *t = ts;
     }
     log_ev(&ctx.issue_id, "stdout", clean);
+    handle_subagent_lifecycle(ctx, clean);
 
     // Skip the store for empty `row_type` (turn boundary, queue / compaction
     // / retry noise, unrecognized pi events) — they'd render as blank cards.
@@ -618,6 +635,278 @@ fn persist_event(
     value: serde_json::Value,
 ) {
     store.insert_event(run_id, issue_id, EVENT_KIND, &value.to_string(), Utc::now());
+}
+
+fn handle_subagent_lifecycle(ctx: &TurnLoopCtx, clean: &str) {
+    let Ok(value) = serde_json::from_str::<Value>(clean) else {
+        return;
+    };
+    match value.get("type").and_then(Value::as_str) {
+        Some("tool_execution_start")
+            if value.get("toolName").and_then(Value::as_str) == Some("subagent") =>
+        {
+            if let Some(call_id) = value.get("toolCallId").and_then(Value::as_str) {
+                start_subagent_tail(ctx, call_id.to_string(), subagent_agent_name(&value));
+            }
+        }
+        Some("tool_execution_end")
+            if value.get("toolName").and_then(Value::as_str) == Some("subagent") =>
+        {
+            if let Some(call_id) = value.get("toolCallId").and_then(Value::as_str) {
+                stop_subagent_tail(ctx, call_id);
+                persist_subagent_output(ctx, call_id, subagent_agent_name(&value));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn subagent_agent_name(value: &Value) -> Option<String> {
+    for path in [
+        &["arguments", "agent"][..],
+        &["arguments", "name"][..],
+        &["input", "agent"][..],
+        &["result", "agent"][..],
+    ] {
+        let mut cur = value;
+        let mut found = true;
+        for key in path {
+            let Some(next) = cur.get(*key) else {
+                found = false;
+                break;
+            };
+            cur = next;
+        }
+        if !found {
+            continue;
+        }
+        if let Some(s) = cur.as_str().filter(|s| !s.trim().is_empty()) {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+fn start_subagent_tail(ctx: &TurnLoopCtx, call_id: String, agent: Option<String>) {
+    let (stop_tx, stop_rx) = oneshot::channel();
+    {
+        let mut tailers = ctx.subagent_tailers.lock().unwrap();
+        if tailers.contains_key(&call_id) {
+            return;
+        }
+        tailers.insert(call_id.clone(), stop_tx);
+    }
+
+    let tail_ctx = SubagentTailCtx {
+        issue_id: ctx.issue_id.clone(),
+        run_id: ctx.run_id.clone(),
+        session_dir: ctx.session_dir.clone(),
+        events: Arc::clone(&ctx.events),
+        store: Arc::clone(&ctx.store),
+        last_event_at: Arc::clone(&ctx.last_event_at),
+        call_id,
+        agent,
+    };
+    tokio::spawn(async move {
+        tail_subagent_session(tail_ctx, stop_rx).await;
+    });
+}
+
+fn stop_subagent_tail(ctx: &TurnLoopCtx, call_id: &str) {
+    if let Some(stop) = ctx.subagent_tailers.lock().unwrap().remove(call_id) {
+        let _ = stop.send(());
+    }
+}
+
+fn stop_all_subagent_tailers(ctx: &TurnLoopCtx) {
+    let tailers = std::mem::take(&mut *ctx.subagent_tailers.lock().unwrap());
+    for (_, stop) in tailers {
+        let _ = stop.send(());
+    }
+}
+
+struct SubagentTailCtx {
+    issue_id: String,
+    run_id: String,
+    session_dir: PathBuf,
+    events: Arc<dyn RunnerEventSink>,
+    store: Arc<dyn RunnerEventStore>,
+    last_event_at: Arc<Mutex<DateTime<Utc>>>,
+    call_id: String,
+    agent: Option<String>,
+}
+
+async fn tail_subagent_session(ctx: SubagentTailCtx, mut stop_rx: oneshot::Receiver<()>) {
+    let mut path: Option<PathBuf> = None;
+    let mut offset: usize = 0;
+    let mut pending = Vec::new();
+    loop {
+        drain_subagent_session(&ctx, &mut path, &mut offset, &mut pending, false).await;
+        tokio::select! {
+            _ = &mut stop_rx => {
+                drain_subagent_session(&ctx, &mut path, &mut offset, &mut pending, true).await;
+                break;
+            }
+            _ = tokio::time::sleep(SUBAGENT_TAIL_POLL) => {}
+        }
+    }
+}
+
+async fn drain_subagent_session(
+    ctx: &SubagentTailCtx,
+    path: &mut Option<PathBuf>,
+    offset: &mut usize,
+    pending: &mut Vec<u8>,
+    final_drain: bool,
+) {
+    if path.is_none() {
+        *path = resolve_subagent_session(&ctx.session_dir, &ctx.call_id);
+    }
+    let Some(session_path) = path.as_ref() else {
+        return;
+    };
+    match tokio::fs::read(session_path).await {
+        Ok(bytes) => {
+            if bytes.len() < *offset {
+                *offset = 0;
+                pending.clear();
+            }
+            if bytes.len() > *offset {
+                let new_bytes = &bytes[*offset..];
+                *offset = bytes.len();
+                pending.extend_from_slice(new_bytes);
+            }
+            drain_complete_subagent_lines(ctx, pending, final_drain);
+        }
+        Err(_) => {
+            *path = None;
+            *offset = 0;
+            pending.clear();
+        }
+    }
+}
+
+fn drain_complete_subagent_lines(ctx: &SubagentTailCtx, pending: &mut Vec<u8>, final_drain: bool) {
+    while let Some(newline) = pending.iter().position(|b| *b == b'\n') {
+        let mut line = pending.drain(..=newline).collect::<Vec<u8>>();
+        if line.ends_with(b"\n") {
+            line.pop();
+        }
+        let line = String::from_utf8_lossy(&line);
+        let clean = strip_ansi(line.trim_end_matches('\r'));
+        ingest_subagent_line(ctx, &clean);
+    }
+
+    if final_drain && pending.iter().any(|b| !b.is_ascii_whitespace()) {
+        let Ok(line) = std::str::from_utf8(pending) else {
+            pending.clear();
+            return;
+        };
+        let clean = strip_ansi(line.trim_end_matches('\r'));
+        if serde_json::from_str::<Value>(&clean).is_ok() {
+            ingest_subagent_line(ctx, &clean);
+        }
+        pending.clear();
+    }
+}
+
+fn resolve_subagent_session(session_dir: &Path, call_id: &str) -> Option<PathBuf> {
+    let parents = std::fs::read_dir(session_dir).ok()?;
+    for parent in parents.flatten() {
+        let call_dir = parent.path().join(call_id);
+        let runs = std::fs::read_dir(call_dir).ok();
+        let Some(runs) = runs else { continue };
+        for run in runs.flatten() {
+            let path = run.path().join("session.jsonl");
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn ingest_subagent_line(ctx: &SubagentTailCtx, clean: &str) {
+    let ts = Utc::now();
+    if clean.trim().is_empty() {
+        return;
+    }
+    if is_pi_delta(clean) {
+        if let Ok(mut t) = ctx.last_event_at.lock() {
+            *t = ts;
+        }
+        return;
+    }
+
+    let pl = classify_protocol_line("subagent", clean);
+    ctx.events.push(format!(
+        "subagent[{}:{}]: {clean}",
+        ctx.issue_id, ctx.call_id
+    ));
+    if let Ok(mut t) = ctx.last_event_at.lock() {
+        *t = ts;
+    }
+    log_ev(&ctx.issue_id, "subagent", clean);
+    if pl.row_type.is_empty() {
+        return;
+    }
+
+    let payload = serde_json::json!({
+        "type": "protocol_event",
+        "stream": "subagent",
+        "subagent": true,
+        "callId": ctx.call_id,
+        "agent": ctx.agent,
+        "log_row": pl.row_type,
+        "text": pl.text,
+        "detail": pl.detail,
+    })
+    .to_string();
+    ctx.store
+        .insert_event(Some(&ctx.run_id), &ctx.issue_id, EVENT_KIND, &payload, ts);
+}
+
+fn persist_subagent_output(ctx: &TurnLoopCtx, call_id: &str, agent: Option<String>) {
+    let Some(path) = resolve_subagent_output(&ctx.session_dir, call_id) else {
+        return;
+    };
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let payload = serde_json::json!({
+        "type": "protocol_event",
+        "stream": "subagent",
+        "subagent": true,
+        "callId": call_id,
+        "agent": agent,
+        "log_row": "subagent_output",
+        "text": "subagent final transcript",
+        "detail": {
+            "path": path.display().to_string(),
+            "content": content,
+        },
+    })
+    .to_string();
+    ctx.store.insert_event(
+        Some(&ctx.run_id),
+        &ctx.issue_id,
+        EVENT_KIND,
+        &payload,
+        Utc::now(),
+    );
+}
+
+fn resolve_subagent_output(session_dir: &Path, call_id: &str) -> Option<PathBuf> {
+    let dir = session_dir.join("subagent-artifacts");
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with(&format!("{call_id}_")) && name.ends_with("_output.md") {
+            return Some(path);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -736,18 +1025,12 @@ mod tests {
         assert!(config_path.exists(), "config file must be written");
         let written: Value =
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-        assert_eq!(
-            written["mcpServers"]["dar"]["command"],
-            "/opt/dar"
-        );
+        assert_eq!(written["mcpServers"]["dar"]["command"], "/opt/dar");
 
         // Direct-tool promotion scoped to our server. We must NOT override
         // PI_CODING_AGENT_DIR (that would drop the adapter that registers
         // `--mcp-config`).
-        assert!(env.contains(&(
-            OsString::from("MCP_DIRECT_TOOLS"),
-            OsString::from("dar")
-        )));
+        assert!(env.contains(&(OsString::from("MCP_DIRECT_TOOLS"), OsString::from("dar"))));
         assert!(
             !env.iter().any(|(k, _)| k == "PI_CODING_AGENT_DIR"),
             "must not repoint PI_CODING_AGENT_DIR; the mcp adapter lives there"
@@ -1127,6 +1410,8 @@ done"#;
             events,
             store,
             last_event_at,
+            session_dir: PathBuf::from("/tmp/pi-sessions/ALG-1"),
+            subagent_tailers: Arc::new(Mutex::new(HashMap::new())),
         };
         (ctx, recorder, store_recorder)
     }
@@ -1260,5 +1545,220 @@ done"#;
         // itself so the contract above stays honest.
         let raw = "\u{1b}[31mtool_call: bash\u{1b}[0m";
         assert_eq!(strip_ansi(raw), "tool_call: bash");
+    }
+
+    #[test]
+    fn resolve_subagent_session_finds_call_id_run_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir
+            .path()
+            .join("parent-session")
+            .join("call-1")
+            .join("run-0");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("session.jsonl"), "{}\n").unwrap();
+
+        assert_eq!(
+            resolve_subagent_session(dir.path(), "call-1"),
+            Some(session.join("session.jsonl"))
+        );
+    }
+
+    #[test]
+    fn ingest_subagent_delta_is_liveness_only() {
+        let (base, sink, store) = emit_ctx();
+        let before = Utc::now() - chrono::Duration::seconds(60);
+        *base.last_event_at.lock().unwrap() = before;
+        let tail_ctx = SubagentTailCtx {
+            issue_id: base.issue_id.clone(),
+            run_id: base.run_id.clone(),
+            session_dir: base.session_dir.clone(),
+            events: Arc::clone(&base.events),
+            store: Arc::clone(&base.store),
+            last_event_at: Arc::clone(&base.last_event_at),
+            call_id: "call-1".to_string(),
+            agent: Some("reviewer".to_string()),
+        };
+
+        ingest_subagent_line(
+            &tail_ctx,
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"x"}}"#,
+        );
+
+        assert!(*base.last_event_at.lock().unwrap() > before);
+        assert_eq!(sink.count(), 0);
+        assert_eq!(store.count(), 0);
+    }
+
+    #[test]
+    fn ingest_subagent_message_stores_attributed_event() {
+        let (base, sink, store) = emit_ctx();
+        let tail_ctx = SubagentTailCtx {
+            issue_id: base.issue_id.clone(),
+            run_id: base.run_id.clone(),
+            session_dir: base.session_dir.clone(),
+            events: Arc::clone(&base.events),
+            store: Arc::clone(&base.store),
+            last_event_at: Arc::clone(&base.last_event_at),
+            call_id: "call-1".to_string(),
+            agent: Some("reviewer".to_string()),
+        };
+
+        ingest_subagent_line(
+            &tail_ctx,
+            r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Review done."}]}}"#,
+        );
+
+        assert_eq!(sink.count(), 1);
+        assert_eq!(store.count(), 1);
+        let payload = store.payload(0);
+        assert!(
+            payload.contains("\"stream\":\"subagent\""),
+            "payload={payload}"
+        );
+        assert!(payload.contains("\"subagent\":true"), "payload={payload}");
+        assert!(
+            payload.contains("\"callId\":\"call-1\""),
+            "payload={payload}"
+        );
+        assert!(
+            payload.contains("\"agent\":\"reviewer\""),
+            "payload={payload}"
+        );
+        assert!(payload.contains("Review done."), "payload={payload}");
+    }
+
+    #[test]
+    fn persist_subagent_output_stores_final_transcript() {
+        let (mut ctx, _sink, store) = emit_ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let artifacts = dir.path().join("subagent-artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let output = artifacts.join("call-1_reviewer_0_output.md");
+        std::fs::write(&output, "clean transcript").unwrap();
+        ctx.session_dir = dir.path().to_path_buf();
+
+        persist_subagent_output(&ctx, "call-1", Some("reviewer".to_string()));
+
+        assert_eq!(store.count(), 1);
+        let payload = store.payload(0);
+        assert!(
+            payload.contains("\"log_row\":\"subagent_output\""),
+            "payload={payload}"
+        );
+        assert!(payload.contains("clean transcript"), "payload={payload}");
+        assert!(
+            payload.contains(output.to_str().unwrap()),
+            "payload={payload}"
+        );
+    }
+
+    #[test]
+    fn drain_complete_subagent_lines_buffers_partial_jsonl() {
+        let (base, sink, store) = emit_ctx();
+        let tail_ctx = SubagentTailCtx {
+            issue_id: base.issue_id.clone(),
+            run_id: base.run_id.clone(),
+            session_dir: base.session_dir.clone(),
+            events: Arc::clone(&base.events),
+            store: Arc::clone(&base.store),
+            last_event_at: Arc::clone(&base.last_event_at),
+            call_id: "call-1".to_string(),
+            agent: Some("reviewer".to_string()),
+        };
+        let mut pending =
+            r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Done"#.as_bytes().to_vec();
+
+        drain_complete_subagent_lines(&tail_ctx, &mut pending, false);
+
+        assert_eq!(sink.count(), 0);
+        assert_eq!(store.count(), 0);
+        pending.extend_from_slice(r#"."}]}}"#.as_bytes());
+        pending.push(b'\n');
+
+        drain_complete_subagent_lines(&tail_ctx, &mut pending, false);
+
+        assert_eq!(sink.count(), 1);
+        assert_eq!(store.count(), 1);
+        assert!(store.payload(0).contains("Done."), "{}", store.payload(0));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn drain_complete_subagent_lines_final_drain_flushes_last_line() {
+        let (base, _sink, store) = emit_ctx();
+        let tail_ctx = SubagentTailCtx {
+            issue_id: base.issue_id.clone(),
+            run_id: base.run_id.clone(),
+            session_dir: base.session_dir.clone(),
+            events: Arc::clone(&base.events),
+            store: Arc::clone(&base.store),
+            last_event_at: Arc::clone(&base.last_event_at),
+            call_id: "call-1".to_string(),
+            agent: Some("reviewer".to_string()),
+        };
+        let mut pending = r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"fast"}]}}"#.as_bytes().to_vec();
+
+        drain_complete_subagent_lines(&tail_ctx, &mut pending, true);
+
+        assert_eq!(store.count(), 1);
+        assert!(store.payload(0).contains("fast"), "{}", store.payload(0));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn drain_complete_subagent_lines_preserves_split_utf8() {
+        let (base, _sink, store) = emit_ctx();
+        let tail_ctx = SubagentTailCtx {
+            issue_id: base.issue_id.clone(),
+            run_id: base.run_id.clone(),
+            session_dir: base.session_dir.clone(),
+            events: Arc::clone(&base.events),
+            store: Arc::clone(&base.store),
+            last_event_at: Arc::clone(&base.last_event_at),
+            call_id: "call-1".to_string(),
+            agent: Some("reviewer".to_string()),
+        };
+        let full = serde_json::json!({
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "café" }],
+            },
+        })
+        .to_string();
+        let split_at = full.find('é').unwrap() + 1;
+        let bytes = full.as_bytes();
+        let mut pending = bytes[..split_at].to_vec();
+
+        drain_complete_subagent_lines(&tail_ctx, &mut pending, false);
+        pending.extend_from_slice(&bytes[split_at..]);
+        pending.push(b'\n');
+        drain_complete_subagent_lines(&tail_ctx, &mut pending, false);
+
+        assert_eq!(store.count(), 1);
+        assert!(store.payload(0).contains("café"), "{}", store.payload(0));
+    }
+
+    #[test]
+    fn drain_complete_subagent_lines_final_drain_ignores_invalid_partial() {
+        let (base, sink, store) = emit_ctx();
+        let tail_ctx = SubagentTailCtx {
+            issue_id: base.issue_id.clone(),
+            run_id: base.run_id.clone(),
+            session_dir: base.session_dir.clone(),
+            events: Arc::clone(&base.events),
+            store: Arc::clone(&base.store),
+            last_event_at: Arc::clone(&base.last_event_at),
+            call_id: "call-1".to_string(),
+            agent: Some("reviewer".to_string()),
+        };
+        let mut pending = br#"{"type":"message_end","message":{"role":"#.to_vec();
+
+        drain_complete_subagent_lines(&tail_ctx, &mut pending, true);
+
+        assert_eq!(sink.count(), 0);
+        assert_eq!(store.count(), 0);
+        assert!(pending.is_empty());
     }
 }
