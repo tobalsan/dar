@@ -39,6 +39,15 @@ pub enum ChatEvent {
     },
     /// Backend-side error line (stderr, protocol error).
     Error(String),
+    /// Best-effort context-usage report for the status line. `tokens_used`
+    /// is the prompt+response tokens the last turn occupied; `context_window`
+    /// is the model's window when the backend can resolve it, else `None`
+    /// (the UI then shows the raw token count without a percentage). Backends
+    /// that cannot report usage simply never emit this.
+    ContextUsage {
+        tokens_used: u64,
+        context_window: Option<u64>,
+    },
     /// Exactly one per turn. aborted turns: ok=false, error=Some("aborted").
     TurnFinished { ok: bool, error: Option<String> },
     /// Backend process died outside a clean close; session is unusable.

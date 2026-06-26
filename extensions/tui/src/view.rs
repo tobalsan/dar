@@ -20,6 +20,8 @@ use crate::dash;
 use crate::logs::LogRow;
 
 const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
+/// Max visual rows the input box grows to before it scrolls internally.
+const INPUT_MAX_ROWS: usize = 8;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let [tabs_area, content_area] =
@@ -41,10 +43,25 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_chat(frame: &mut Frame, area: Rect, app: &App) {
-    let [transcript_area, input_area] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).areas(area);
+    // The input box grows with the buffer (1..=INPUT_MAX_ROWS visual rows,
+    // plus a 2-row border); a single status line sits below it.
+    let inner_width = (area.width as usize).saturating_sub(2).max(1);
+    let input_rows = app
+        .chat
+        .input
+        .layout(inner_width, INPUT_MAX_ROWS)
+        .total_rows
+        .clamp(1, INPUT_MAX_ROWS);
+    let input_height = input_rows as u16 + 2; // + top/bottom border
+    let [transcript_area, input_area, status_area] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(input_height),
+        Constraint::Length(1),
+    ])
+    .areas(area);
     render_transcript(frame, transcript_area, app);
     render_input(frame, input_area, app);
+    render_status(frame, status_area, app);
 }
 
 fn render_logs(frame: &mut Frame, area: Rect, app: &App) {
@@ -110,13 +127,7 @@ fn render_dash(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_transcript(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::bordered().title(" chat ");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-    let mut lines = transcript_lines(&app.chat, inner.width as usize);
+    let mut lines = transcript_lines(&app.chat, (area.width as usize).saturating_sub(2).max(1));
     if app.chat.in_flight {
         lines.push(Line::from(Span::styled(
             format!(
@@ -126,29 +137,100 @@ fn render_transcript(frame: &mut Frame, area: Rect, app: &App) {
             Style::new().add_modifier(Modifier::DIM),
         )));
     }
-    let height = inner.height as usize;
+    let height = (area.height as usize).saturating_sub(2);
     let max_start = lines.len().saturating_sub(height);
-    let start = max_start.saturating_sub(app.chat.scroll_back);
-    let visible: Vec<Line> = lines.into_iter().skip(start).take(height).collect();
-    frame.render_widget(Paragraph::new(visible), inner);
-}
-
-fn render_input(frame: &mut Frame, area: Rect, app: &App) {
-    let title = " message (Enter sends, Ctrl+C quits) ";
+    // Clamp scroll_back so usize::MAX (Ctrl+Home "oldest") lands at the top.
+    let scroll_back = app.chat.scroll_back.min(max_start);
+    let start = max_start - scroll_back;
+    // Title shows a scroll cue while not following the tail.
+    let title = if scroll_back > 0 {
+        let shown_end = (start + height).min(lines.len());
+        format!(" chat  [↑ {}/{} | End: follow] ", shown_end, lines.len())
+    } else {
+        " chat ".to_string()
+    };
     let block = Block::bordered().title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    // Single-line input: show the tail that fits, keep the cursor visible.
-    let width = inner.width as usize;
-    let chars: Vec<char> = app.chat.input.chars().collect();
-    let start = chars.len().saturating_sub(width.saturating_sub(1));
-    let visible: String = chars[start..].iter().collect();
-    let cursor_x = inner.x + visible.chars().count() as u16;
+    let visible: Vec<Line> = lines.into_iter().skip(start).take(height).collect();
     frame.render_widget(Paragraph::new(visible), inner);
-    frame.set_cursor_position(Position::new(cursor_x, inner.y));
+}
+
+fn render_input(frame: &mut Frame, area: Rect, app: &App) {
+    let title = " message (Enter sends, Shift+Enter newline, Ctrl+C quits) ";
+    let block = Block::bordered().title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    // Multi-line input: ask the buffer for the wrapped viewport slice and the
+    // cursor position within it so what is drawn and where the caret sits
+    // always agree (no more always-tail / pinned-at-end behavior).
+    let width = inner.width as usize;
+    let height = inner.height as usize;
+    let layout = app.chat.input.layout(width, height);
+    let lines: Vec<Line> = layout
+        .rows
+        .iter()
+        .map(|row| Line::from(row.clone()))
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+    let cursor_x = inner.x + layout.cursor_x.min(width.saturating_sub(1)) as u16;
+    let cursor_y = inner.y + layout.cursor_y.min(height.saturating_sub(1)) as u16;
+    frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+}
+
+/// Status line under the input (Chat tab): agent name, provider+model, and a
+/// best-effort context-usage readout. Fields the snapshot/runner don't supply
+/// are omitted rather than shown wrong.
+fn render_status(frame: &mut Frame, area: Rect, app: &App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let agent = &app.dash.snapshot.agent;
+    if app.dash.snapshot.version > 0 && !agent.id.is_empty() {
+        parts.push(agent.id.clone());
+    }
+    match (&agent.provider, &agent.model) {
+        (Some(provider), Some(model)) => parts.push(format!("{provider}/{model}")),
+        (None, Some(model)) => parts.push(model.clone()),
+        (Some(provider), None) => parts.push(provider.clone()),
+        (None, None) => {}
+    }
+    if let Some(usage) = &app.chat.usage {
+        parts.push(format_usage(usage));
+    }
+    let text = if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" {} ", parts.join("  ·  "))
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            text,
+            Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        )),
+        area,
+    );
+}
+
+/// `<used>k/<window>k (<pct>%)` when the window is known, else just `<used>k`
+/// (accuracy over presence: never invent a percentage).
+fn format_usage(usage: &crate::chat::ContextUsage) -> String {
+    let used_k = (usage.tokens_used as f64 / 1000.0).round() as u64;
+    match usage.context_window {
+        Some(window) if window > 0 => {
+            let window_k = (window as f64 / 1000.0).round() as u64;
+            let pct = (usage.tokens_used as f64 / window as f64 * 100.0).round() as u64;
+            format!("{used_k}k/{window_k}k ({pct}%)")
+        }
+        _ => format!("{used_k}k"),
+    }
 }
 
 fn transcript_lines(chat: &ChatState, width: usize) -> Vec<Line<'static>> {
@@ -296,7 +378,7 @@ mod tests {
         assert!(screen.contains("2 passed"));
         assert!(screen.contains("nothing is failing"));
         assert!(screen.contains("! backend hiccup"));
-        assert!(screen.contains("message (Enter sends, Ctrl+C quits)"));
+        assert!(screen.contains("message (Enter sends"));
     }
 
     #[test]
@@ -312,7 +394,7 @@ mod tests {
     #[test]
     fn in_flight_turn_shows_spinner_without_gating_the_input() {
         let mut app = App::new();
-        app.chat.input = "hello".to_string();
+        app.chat.input.insert_str("hello");
         assert_eq!(
             app.handle_event(key(KeyCode::Enter)),
             Action::Submit("hello".to_string())
@@ -323,7 +405,7 @@ mod tests {
         assert!(!screen.contains("Enter disabled"));
 
         // Steering: Enter while in flight accepts and renders the user input.
-        app.chat.input = "queued".to_string();
+        app.chat.input.insert_str("queued");
         assert_eq!(
             app.handle_event(key(KeyCode::Enter)),
             Action::Submit("queued".to_string())
@@ -334,7 +416,7 @@ mod tests {
     #[test]
     fn esc_abort_path_clears_spinner_and_reports_the_abort() {
         let mut app = App::new();
-        app.chat.input = "long job".to_string();
+        app.chat.input.insert_str("long job");
         app.handle_event(key(KeyCode::Enter));
         assert_eq!(app.handle_event(key(KeyCode::Esc)), Action::AbortTurn);
         // Backend confirms the abort with an aborted TurnFinished.
@@ -345,7 +427,7 @@ mod tests {
         let screen = rendered(&app);
         assert!(!screen.contains("waiting for reply"));
         assert!(screen.contains("! turn aborted"));
-        assert!(screen.contains("message (Enter sends, Ctrl+C quits)"));
+        assert!(screen.contains("message (Enter sends"));
     }
 
     fn log_event(message: &str) -> host_api::LogEvent {
@@ -591,5 +673,68 @@ mod tests {
 
         app.chat.follow_tail();
         assert!(rendered(&app).contains("line-39"));
+    }
+
+    #[test]
+    fn status_line_shows_agent_provider_model_and_omits_unknown_usage() {
+        let mut app = App::new();
+        app.dash.snapshot.version = 1;
+        app.dash.snapshot.agent.id = "demo".to_string();
+        app.dash.snapshot.agent.provider = Some("vibeproxy".to_string());
+        app.dash.snapshot.agent.model = Some("claude-opus-4-8".to_string());
+        let screen = rendered(&app);
+        assert!(screen.contains("demo"));
+        assert!(screen.contains("vibeproxy/claude-opus-4-8"));
+        // No usage reported yet: no token readout on the status line.
+        assert!(!screen.contains("k/"));
+        assert!(!screen.contains("%"));
+    }
+
+    #[test]
+    fn status_line_renders_context_usage_when_window_is_known() {
+        let mut app = App::new();
+        app.dash.snapshot.version = 1;
+        app.dash.snapshot.agent.id = "demo".to_string();
+        app.chat.usage = Some(crate::chat::ContextUsage {
+            tokens_used: 10_928,
+            context_window: Some(200_000),
+        });
+        let screen = rendered(&app);
+        // 10928 -> 11k, 200000 -> 200k, 5%.
+        assert!(screen.contains("11k/200k (5%)"), "got: {screen}");
+    }
+
+    #[test]
+    fn status_line_degrades_to_raw_tokens_without_a_window() {
+        let mut app = App::new();
+        app.chat.usage = Some(crate::chat::ContextUsage {
+            tokens_used: 12_400,
+            context_window: None,
+        });
+        let screen = rendered(&app);
+        assert!(screen.contains("12k"));
+        assert!(!screen.contains("%"));
+    }
+
+    #[test]
+    fn scroll_indicator_appears_only_when_scrolled_back() {
+        let mut app = App::new();
+        app.chat.blocks = (0..40)
+            .map(|i| ChatBlock::Assistant(format!("line-{i}")))
+            .collect();
+        // Following the tail: plain " chat " title, no cue.
+        assert!(rendered(&app).contains(" chat "));
+        app.chat.scroll_up(5);
+        let screen = rendered(&app);
+        assert!(screen.contains("End: follow"), "got: {screen}");
+    }
+
+    #[test]
+    fn multiline_input_renders_each_line_and_grows_the_box() {
+        let mut app = App::new();
+        app.chat.input.insert_str("first line\nsecond line");
+        let screen = rendered(&app);
+        assert!(screen.contains("first line"));
+        assert!(screen.contains("second line"));
     }
 }
