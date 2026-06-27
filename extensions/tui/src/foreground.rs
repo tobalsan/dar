@@ -421,20 +421,15 @@ async fn open_session(
     backend.open(params, tx).await
 }
 
-/// Resolve the sessions dir: the configured override (relative paths anchored
-/// at the agent root) or the default `data/tui/sessions`.
+/// Resolve the sessions dir from the chat config via the shared resolver, so
+/// the foreground and the `session_list` tool read the same corpus.
 fn sessions_dir(config: &ChatConfig, ctx: &StartCtx) -> Result<std::path::PathBuf> {
-    match config.sessions_dir.as_deref().filter(|s| !s.is_empty()) {
-        Some(dir) => {
-            let path = std::path::Path::new(dir);
-            Ok(if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                ctx.paths.root().join(path)
-            })
-        }
-        None => Ok(ctx.paths.data_dir("tui")?.join("sessions")),
-    }
+    crate::sessions_dir(
+        &crate::TuiConfig {
+            chat: config.clone(),
+        },
+        &ctx.paths,
+    )
 }
 
 /// Build the host MCP bridge descriptor for the chat backend, or `None` when no
