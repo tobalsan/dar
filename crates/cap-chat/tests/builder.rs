@@ -17,6 +17,7 @@ fn chat_session_params_builder_round_trips_all_fields() {
     .system_prompt(Some(
         "<system-file path=\"AGENTS.md\">be kind</system-file>".into(),
     ))
+    .resume_session_id(Some("2024-01-02T03:04:05Z_abc".into()))
     .build();
 
     assert_eq!(params.command, "pi-custom");
@@ -26,6 +27,10 @@ fn chat_session_params_builder_round_trips_all_fields() {
     assert_eq!(
         params.system_prompt.as_deref(),
         Some("<system-file path=\"AGENTS.md\">be kind</system-file>")
+    );
+    assert_eq!(
+        params.resume_session_id.as_deref(),
+        Some("2024-01-02T03:04:05Z_abc")
     );
 }
 
@@ -41,6 +46,7 @@ fn chat_session_params_builder_defaults_optional_fields() {
     assert_eq!(params.command, "");
     assert_eq!(params.model, None);
     assert_eq!(params.system_prompt, None);
+    assert_eq!(params.resume_session_id, None);
 }
 
 #[test]

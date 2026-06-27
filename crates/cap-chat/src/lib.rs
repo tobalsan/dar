@@ -75,6 +75,12 @@ pub struct ChatSessionParams {
     /// backend spawns to reach the bridge (the host binary's
     /// `__mcp-bridge --dir <agent>` invocation).
     pub host_tool_bridge: Option<HostToolBridge>,
+    /// When set, the backend resumes this prior session id instead of opening
+    /// a fresh one (e.g. `pi --resume <id>`). `None` opens fresh exactly as
+    /// before. The caller resolves the id (newest archived session) and is
+    /// responsible for honoring the fall-back-to-fresh contract when no prior
+    /// session is resolvable.
+    pub resume_session_id: Option<String>,
 }
 
 impl ChatSessionParams {
@@ -91,6 +97,7 @@ impl ChatSessionParams {
             provider: None,
             system_prompt: None,
             host_tool_bridge: None,
+            resume_session_id: None,
         }
     }
 }
@@ -103,6 +110,7 @@ pub struct ChatSessionParamsBuilder {
     provider: Option<String>,
     system_prompt: Option<String>,
     host_tool_bridge: Option<HostToolBridge>,
+    resume_session_id: Option<String>,
 }
 
 impl ChatSessionParamsBuilder {
@@ -126,6 +134,11 @@ impl ChatSessionParamsBuilder {
         self
     }
 
+    pub fn resume_session_id(mut self, value: Option<String>) -> Self {
+        self.resume_session_id = value;
+        self
+    }
+
     pub fn build(self) -> ChatSessionParams {
         ChatSessionParams {
             command: self.command,
@@ -135,6 +148,7 @@ impl ChatSessionParamsBuilder {
             provider: self.provider,
             system_prompt: self.system_prompt,
             host_tool_bridge: self.host_tool_bridge,
+            resume_session_id: self.resume_session_id,
         }
     }
 }

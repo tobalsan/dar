@@ -237,6 +237,12 @@ fn pi_args(params: &ChatSessionParams) -> Vec<OsString> {
         OsString::from("--session-dir"),
         params.session_dir.as_os_str().to_os_string(),
     ];
+    // Resume a prior session when the foreground resolved one. Absent id opens
+    // a fresh session exactly as before.
+    if let Some(resume_id) = &params.resume_session_id {
+        args.push(OsString::from("--resume"));
+        args.push(OsString::from(resume_id));
+    }
     if let Some(model) = &params.model {
         args.push(OsString::from("--model"));
         args.push(OsString::from(model));
@@ -681,6 +687,29 @@ mod tests {
     }
 
     #[test]
+    fn pi_args_emits_resume_when_session_id_is_set() {
+        let root = Path::new("/agent");
+        let sessions = Path::new("/agent/data/tui/sessions");
+        let params = ChatSessionParams::builder("", root, sessions)
+            .resume_session_id(Some("2024-01-02T03:04:05Z_abc".into()))
+            .build();
+        let args = pi_args(&params);
+        let idx = args
+            .iter()
+            .position(|a| a == "--resume")
+            .expect("--resume must be present when resume_session_id is set");
+        assert_eq!(args[idx + 1], OsString::from("2024-01-02T03:04:05Z_abc"));
+    }
+
+    #[test]
+    fn pi_args_omit_resume_when_session_id_is_absent() {
+        let root = Path::new("/agent");
+        let sessions = Path::new("/agent/data/tui/sessions");
+        let params = ChatSessionParams::builder("", root, sessions).build();
+        assert!(!pi_args(&params).contains(&OsString::from("--resume")));
+    }
+
+    #[test]
     fn pi_args_appends_provider_when_set() {
         let root = Path::new("/agent");
         let sessions = Path::new("/agent/data/tui/sessions");
@@ -906,7 +935,10 @@ mod tests {
         );
         assert_eq!(context_window_for_model("gpt-5.5"), Some(1_000_000));
         assert_eq!(context_window_for_model("gpt-4o-mini"), Some(128_000));
-        assert_eq!(context_window_for_model("gemini-2.0-flash"), Some(1_000_000));
+        assert_eq!(
+            context_window_for_model("gemini-2.0-flash"),
+            Some(1_000_000)
+        );
         assert_eq!(context_window_for_model("some-future-model"), None);
     }
 
