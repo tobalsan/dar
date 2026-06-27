@@ -181,6 +181,9 @@ async fn run_interactive(
     let mut backend_id: Option<String> = None;
     // The first-turn context preamble is still owed to the backend.
     let mut preamble_pending = true;
+    // Set by `/new`: the next session open skips resume so `pi` forks a
+    // brand-new file instead of continuing the conversation just closed.
+    let mut suppress_resume = false;
     let mut app = App::new();
     // Logs tab feed: the log broadcast + retained startup banner (a failed
     // subscription leaves the pane on its "unavailable" placeholder).
@@ -222,10 +225,27 @@ async fn run_interactive(
                         if let Some(id) = backend_id.as_deref() {
                             submit_turn(
                                 id, &config, &ctx, &chat_tx,
-                                &mut session, &mut app, &mut preamble_pending, prompt,
+                                &mut session, &mut app, &mut preamble_pending,
+                                &mut suppress_resume, prompt,
                             )
                             .await;
                         }
+                    }
+                    Action::NewSession => {
+                        // Close the live session, suppress resume for the next
+                        // open (so the next `pi` spawn forks a fresh file),
+                        // re-arm the preamble, and mark the boundary. Because
+                        // resume is newest-wins (ALG-302) the freshly forked
+                        // file becomes the next restart's resume target, so
+                        // "start fresh" is sticky across restarts.
+                        if let Some(session) = session.take() {
+                            let _ = session.close().await;
+                        }
+                        suppress_resume = true;
+                        preamble_pending = true;
+                        app.chat.push_notice(
+                            "— started a fresh session —".to_string(),
+                        );
                     }
                     Action::AbortTurn => {
                         if let Some(session) = session.as_mut() {
@@ -307,11 +327,17 @@ async fn submit_turn(
     session: &mut Option<Box<dyn ChatSession>>,
     app: &mut App,
     preamble_pending: &mut bool,
+    suppress_resume: &mut bool,
     prompt: String,
 ) {
     if session.is_none() {
-        match open_session(backend_id, config, ctx, chat_tx.clone()).await {
-            Ok(opened) => *session = Some(opened),
+        match open_session(backend_id, config, ctx, chat_tx.clone(), *suppress_resume).await {
+            Ok(opened) => {
+                *session = Some(opened);
+                // The fork happened: a fresh file is open, so resume is no
+                // longer suppressed for any later re-open this launch.
+                *suppress_resume = false;
+            }
             Err(e) => {
                 app.chat
                     .fail_turn(format!("cannot open chat session: {e:#}"));
@@ -344,6 +370,7 @@ async fn open_session(
     config: &ChatConfig,
     ctx: &StartCtx,
     tx: Sender<ChatEvent>,
+    suppress_resume: bool,
 ) -> Result<Box<dyn ChatSession>> {
     let backend = ctx.host.services.get_named::<dyn ChatBackend>(backend_id)?;
     // data_dir containment-checks against an existing data/ parent.
@@ -355,7 +382,13 @@ async fn open_session(
     // a malformed newest file yields `None`, opening a fresh session — never an
     // error surfaced to the human. Backends that don't understand resume (only
     // `chat-pi` does today) simply ignore the id and open fresh.
-    let resume_session_id = crate::archive::newest_session_id(&session_dir);
+    //
+    // `/new` sets `suppress_resume`, forcing a brand-new file even though an
+    // archive exists: the newest session is the one we just closed, and the
+    // human asked to leave it behind.
+    let resume_session_id = (!suppress_resume)
+        .then(|| crate::archive::newest_session_id(&session_dir))
+        .flatten();
     let snap = ctx
         .host
         .bus
@@ -646,6 +679,7 @@ done"#;
             panic!("Enter did not submit");
         };
         let mut preamble_pending = true;
+        let mut suppress_resume = false;
         submit_turn(
             "pi",
             &config,
@@ -654,6 +688,7 @@ done"#;
             &mut session,
             &mut app,
             &mut preamble_pending,
+            &mut suppress_resume,
             prompt,
         )
         .await;
@@ -709,6 +744,7 @@ done"#;
         let mut session: Option<Box<dyn ChatSession>> = None;
         let mut app = App::new();
         let mut preamble_pending = true;
+        let mut suppress_resume = false;
 
         for prompt_text in ["first question", "second question"] {
             app.chat.input.clear();
@@ -722,6 +758,7 @@ done"#;
                 &mut session,
                 &mut app,
                 &mut preamble_pending,
+                &mut suppress_resume,
                 prompt,
             )
             .await;
@@ -771,6 +808,7 @@ done"#;
         let prompt = app.chat.submit().unwrap();
 
         let mut preamble_pending = true;
+        let mut suppress_resume = false;
         submit_turn(
             "fake", // resolved id without a registered backend
             &config,
@@ -779,6 +817,7 @@ done"#;
             &mut session,
             &mut app,
             &mut preamble_pending,
+            &mut suppress_resume,
             prompt,
         )
         .await;
@@ -813,6 +852,16 @@ done"#;
     /// Drive one turn through `submit_turn` against the argv-recording stub and
     /// return the argv the backend was spawned with.
     async fn argv_after_one_turn(root: &Path, script: &Path) -> Vec<String> {
+        argv_after_one_turn_with(root, script, false).await
+    }
+
+    /// As [`argv_after_one_turn`], but lets the caller pre-arm `suppress_resume`
+    /// so a `/new`-style open (resume forced off) can be exercised directly.
+    async fn argv_after_one_turn_with(
+        root: &Path,
+        script: &Path,
+        suppress_resume_init: bool,
+    ) -> Vec<String> {
         let (ctx, _shutdown_tx) = start_ctx_with_pi_backend(root);
         let config = ChatConfig {
             backend: None,
@@ -825,6 +874,7 @@ done"#;
         app.chat.input.insert_str("ping");
         let prompt = app.chat.submit().unwrap();
         let mut preamble_pending = true;
+        let mut suppress_resume = suppress_resume_init;
         submit_turn(
             "pi",
             &config,
@@ -833,6 +883,7 @@ done"#;
             &mut session,
             &mut app,
             &mut preamble_pending,
+            &mut suppress_resume,
             prompt,
         )
         .await;
@@ -890,6 +941,88 @@ done"#;
         assert!(
             !argv.iter().any(|a| a == "--resume"),
             "fresh launch must not emit --resume: {argv:?}"
+        );
+    }
+
+    /// `/new` (suppress_resume) must open a brand-new file: even though a prior
+    /// session is archived (and would otherwise be resumed), the open omits
+    /// `--resume` so `pi` forks a fresh session.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn slash_new_open_omits_resume_despite_a_prior_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_stub(temp.path());
+        // Seed a prior session that would be the resume target on a normal open.
+        let sessions = temp.path().join("data/tui/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("2024-06-15T12:30:00Z_prev.jsonl"),
+            "{\"type\":\"session\",\"id\":\"prev-id\"}\n",
+        )
+        .unwrap();
+
+        let argv = argv_after_one_turn_with(temp.path(), &script, true).await;
+        assert!(
+            !argv.iter().any(|a| a == "--resume"),
+            "/new must fork a fresh file (no --resume) even with a prior session: {argv:?}"
+        );
+    }
+
+    /// Stub that, on launch, writes a session file whose name sorts newest and
+    /// whose header carries `fresh-id` — standing in for the file `pi` forks on
+    /// a `/new` open. It then answers prompts so the turn finishes.
+    const FRESH_FILE_STUB: &str = r#"#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a" >> argv.log; done
+printf '%s\n' '{"type":"session","id":"fresh-id"}' \
+  > data/tui/sessions/2099-01-01T00:00:00Z_fresh.jsonl
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"prompt"'*)
+      printf '%s\n' '{"type":"agent_end"}'
+      ;;
+  esac
+done"#;
+
+    /// End-to-end newest-wins: after a `/new` open forks a fresh file, that
+    /// file is newest, so the *next* (ordinary) open resumes it — "start fresh"
+    /// is sticky across restarts.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_file_from_slash_new_becomes_the_next_resume_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("stub-pi.sh");
+        std::fs::write(&script, FRESH_FILE_STUB).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sessions = temp.path().join("data/tui/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        // A prior session that `/new` deliberately leaves behind.
+        std::fs::write(
+            sessions.join("2024-06-15T12:30:00Z_prev.jsonl"),
+            "{\"type\":\"session\",\"id\":\"prev-id\"}\n",
+        )
+        .unwrap();
+
+        // First open under `/new`: forks the fresh file, no --resume.
+        let first = argv_after_one_turn_with(temp.path(), &script, true).await;
+        assert!(
+            !first.iter().any(|a| a == "--resume"),
+            "the /new open must be fresh: {first:?}"
+        );
+        assert!(
+            sessions.join("2099-01-01T00:00:00Z_fresh.jsonl").exists(),
+            "the fork wrote the fresh session file"
+        );
+
+        // Next ordinary open (e.g. after a restart): newest-wins resolves the
+        // freshly forked file, so it — not the abandoned prior session — is the
+        // resume target.
+        let second = argv_after_one_turn(temp.path(), &script).await;
+        let idx = second
+            .iter()
+            .position(|a| a == "--resume")
+            .expect("the next open resumes the newest (freshly forked) session");
+        assert_eq!(
+            second[idx + 1],
+            "fresh-id",
+            "resume target is the fresh file, not the abandoned prior session"
         );
     }
 }
