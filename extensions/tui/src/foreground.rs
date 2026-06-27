@@ -922,26 +922,28 @@ done"#;
         let argv = argv_after_one_turn(temp.path(), &script).await;
         let idx = argv
             .iter()
-            .position(|a| a == "--resume")
-            .expect("--resume must be emitted when a prior session exists");
+            .position(|a| a == "--session")
+            .expect("--session must be emitted when a prior session exists");
         assert_eq!(argv[idx + 1], "newest-id");
+        // Never the interactive picker flags, which hang the RPC TUI.
+        assert!(!argv.iter().any(|a| a == "--resume" || a == "--continue"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn open_omits_resume_when_no_prior_session_exists() {
         let temp = tempfile::tempdir().unwrap();
         let script = write_stub(temp.path());
-        // No sessions seeded: fresh session, no --resume.
+        // No sessions seeded: fresh session, no --session.
         let argv = argv_after_one_turn(temp.path(), &script).await;
         assert!(
-            !argv.iter().any(|a| a == "--resume"),
-            "fresh launch must not emit --resume: {argv:?}"
+            !argv.iter().any(|a| a == "--session"),
+            "fresh launch must not emit --session: {argv:?}"
         );
     }
 
     /// `/new` (suppress_resume) must open a brand-new file: even though a prior
     /// session is archived (and would otherwise be resumed), the open omits
-    /// `--resume` so `pi` forks a fresh session.
+    /// `--session` so `pi` forks a fresh session.
     #[tokio::test(flavor = "multi_thread")]
     async fn slash_new_open_omits_resume_despite_a_prior_session() {
         let temp = tempfile::tempdir().unwrap();
@@ -957,8 +959,8 @@ done"#;
 
         let argv = argv_after_one_turn_with(temp.path(), &script, true).await;
         assert!(
-            !argv.iter().any(|a| a == "--resume"),
-            "/new must fork a fresh file (no --resume) even with a prior session: {argv:?}"
+            !argv.iter().any(|a| a == "--session"),
+            "/new must fork a fresh file (no --session) even with a prior session: {argv:?}"
         );
     }
 
@@ -995,10 +997,10 @@ done"#;
         )
         .unwrap();
 
-        // First open under `/new`: forks the fresh file, no --resume.
+        // First open under `/new`: forks the fresh file, no --session.
         let first = argv_after_one_turn_with(temp.path(), &script, true).await;
         assert!(
-            !first.iter().any(|a| a == "--resume"),
+            !first.iter().any(|a| a == "--session"),
             "the /new open must be fresh: {first:?}"
         );
         assert!(
@@ -1012,7 +1014,7 @@ done"#;
         let second = argv_after_one_turn(temp.path(), &script).await;
         let idx = second
             .iter()
-            .position(|a| a == "--resume")
+            .position(|a| a == "--session")
             .expect("the next open resumes the newest (freshly forked) session");
         assert_eq!(
             second[idx + 1],

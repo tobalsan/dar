@@ -237,10 +237,14 @@ fn pi_args(params: &ChatSessionParams) -> Vec<OsString> {
         OsString::from("--session-dir"),
         params.session_dir.as_os_str().to_os_string(),
     ];
-    // Resume a prior session when the foreground resolved one. Absent id opens
-    // a fresh session exactly as before.
+    // Resume a prior session when the foreground resolved one. We pass the
+    // explicit id via `--session <id>` (looked up in `--session-dir`), never
+    // `--resume`/`--continue`: those open pi's interactive session picker, which
+    // hangs the RPC TUI (it has no TTY to drive the menu). `--session` resumes
+    // the exact session non-interactively. Absent id opens a fresh session
+    // exactly as before.
     if let Some(resume_id) = &params.resume_session_id {
-        args.push(OsString::from("--resume"));
+        args.push(OsString::from("--session"));
         args.push(OsString::from(resume_id));
     }
     if let Some(model) = &params.model {
@@ -687,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn pi_args_emits_resume_when_session_id_is_set() {
+    fn pi_args_emits_session_when_session_id_is_set() {
         let root = Path::new("/agent");
         let sessions = Path::new("/agent/data/tui/sessions");
         let params = ChatSessionParams::builder("", root, sessions)
@@ -696,16 +700,20 @@ mod tests {
         let args = pi_args(&params);
         let idx = args
             .iter()
-            .position(|a| a == "--resume")
-            .expect("--resume must be present when resume_session_id is set");
+            .position(|a| a == "--session")
+            .expect("--session must be present when resume_session_id is set");
         assert_eq!(args[idx + 1], OsString::from("2024-01-02T03:04:05Z_abc"));
+        // Never the interactive picker flags, which hang the RPC TUI.
+        assert!(!args.contains(&OsString::from("--resume")));
+        assert!(!args.contains(&OsString::from("--continue")));
     }
 
     #[test]
-    fn pi_args_omit_resume_when_session_id_is_absent() {
+    fn pi_args_omit_session_when_session_id_is_absent() {
         let root = Path::new("/agent");
         let sessions = Path::new("/agent/data/tui/sessions");
         let params = ChatSessionParams::builder("", root, sessions).build();
+        assert!(!pi_args(&params).contains(&OsString::from("--session")));
         assert!(!pi_args(&params).contains(&OsString::from("--resume")));
     }
 
