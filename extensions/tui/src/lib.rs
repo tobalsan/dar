@@ -152,7 +152,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registers_session_list_when_registry_service_present() {
+    async fn registers_recall_tools_when_registry_service_present() {
         let mut ctx = register_ctx(host_api::ConfigStore::default());
         let registry: Arc<dyn ToolRegistryHandle> = Arc::new(tool_registry::ToolRegistry::new());
         ctx.services
@@ -162,10 +162,12 @@ mod tests {
         TuiExtension.register(&mut ctx).await.unwrap();
 
         let names: Vec<String> = registry.list().into_iter().map(|s| s.name).collect();
-        assert!(
-            names.contains(&"session_list".to_string()),
-            "session_list must be registered when the registry is present: {names:?}"
-        );
+        for tool in ["session_list", "session_search", "session_read"] {
+            assert!(
+                names.contains(&tool.to_string()),
+                "{tool} must be registered when the registry is present: {names:?}"
+            );
+        }
     }
 
     #[tokio::test]
