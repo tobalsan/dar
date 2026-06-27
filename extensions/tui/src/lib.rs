@@ -32,12 +32,15 @@ mod editor;
 mod foreground;
 mod input;
 mod logs;
+mod tools;
 mod view;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use host_api::{Extension, RegisterCtx};
+use tool_registry::{ToolRegistryHandle, TOOL_REGISTRY_SERVICE};
 
 /// `extensions.tui` section of agent.yaml.
 #[derive(Clone, Debug, Default, serde::Deserialize)]
@@ -61,6 +64,34 @@ pub struct ChatConfig {
     pub sessions_dir: Option<String>,
 }
 
+/// Resolve the TUI sessions dir from the chat config: the configured override
+/// (relative paths anchored at the agent root) or the default
+/// `data/tui/sessions`. Shared by the foreground (session open/resume) and the
+/// `session_list` recall tool so both read the exact same corpus.
+///
+/// The default path is host-controlled (`<root>/data/tui/sessions`), so it is
+/// composed directly rather than via the data-dir containment check, which
+/// canonicalizes the `data/` parent — that parent need not exist yet at register
+/// time (the foreground creates it lazily on first session open).
+fn sessions_dir(config: &TuiConfig, paths: &host_api::HostPaths) -> Result<PathBuf> {
+    match config
+        .chat
+        .sessions_dir
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        Some(dir) => {
+            let path = std::path::Path::new(dir);
+            Ok(if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                paths.root().join(path)
+            })
+        }
+        None => Ok(paths.root().join("data").join("tui").join("sessions")),
+    }
+}
+
 pub struct TuiExtension;
 
 impl Extension for TuiExtension {
@@ -77,6 +108,19 @@ impl Extension for TuiExtension {
                     .context("invalid extensions.tui config")?,
                 None => TuiConfig::default(),
             };
+            // Register recall tools (`session_list`) against the shared tool
+            // registry, but only when the registry service is present — the
+            // same conditional wiring as the foreground's `host_tool_bridge`.
+            // The tools reach the agent through the existing host MCP bridge;
+            // this adds no new transport. With no registry service the tools
+            // simply aren't registered and the agent never sees them.
+            if let Ok(registry) = ctx
+                .services
+                .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
+            {
+                let sessions_dir = sessions_dir(&config, &ctx.paths)?;
+                tools::register_into(registry.as_ref(), sessions_dir)?;
+            }
             ctx.foreground.foreground_raw_mode(
                 "tui",
                 Arc::new(move || Box::new(foreground::TuiForeground::new(config.clone()))),
@@ -105,6 +149,36 @@ mod tests {
             config,
             shutdown: host_api::ShutdownToken::new(rx),
         }
+    }
+
+    #[tokio::test]
+    async fn registers_session_list_when_registry_service_present() {
+        let mut ctx = register_ctx(host_api::ConfigStore::default());
+        let registry: Arc<dyn ToolRegistryHandle> = Arc::new(tool_registry::ToolRegistry::new());
+        ctx.services
+            .service::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE, registry.clone())
+            .unwrap();
+
+        TuiExtension.register(&mut ctx).await.unwrap();
+
+        let names: Vec<String> = registry.list().into_iter().map(|s| s.name).collect();
+        assert!(
+            names.contains(&"session_list".to_string()),
+            "session_list must be registered when the registry is present: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn registers_nothing_extra_when_registry_service_absent() {
+        // No registry service registered: register() must still succeed and the
+        // foreground stays available; the tool simply isn't registered.
+        let mut ctx = register_ctx(host_api::ConfigStore::default());
+        TuiExtension.register(&mut ctx).await.unwrap();
+        assert!(ctx
+            .services
+            .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
+            .is_err());
+        assert!(ctx.foreground.select(Some("tui")).unwrap().is_some());
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@ name = "tui"
 
 [dependencies]
 anyhow = "1"
+async-trait = "0.1"
 cap-chat = { package = "dar-cap-chat", path = "../../crates/cap-chat", version = "0.3" }
 tool-registry = { package = "dar-tool-registry", path = "../../crates/tool-registry", version = "0.3" }
 chrono = { version = "0.4", features = ["serde"] }
