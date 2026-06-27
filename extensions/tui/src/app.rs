@@ -40,6 +40,8 @@ pub enum Action {
     None,
     Quit,
     Submit(String),
+    /// The `/new` slash command: close the live session and fork a fresh one.
+    NewSession,
     AbortTurn,
     /// Publish this control on `orchestrator.control` (fire-and-forget).
     Control(Control),
@@ -157,6 +159,17 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        // `/new` (exact, trimmed) is the one slash command the TUI parses:
+        // intercept it before `submit()` so it never reaches the backend as a
+        // turn. Any other text — including input that merely begins with `/` —
+        // falls through to a normal submit. Checked here, before the `input`
+        // mutable borrow below, and only on a plain Enter (no Shift/Alt, which
+        // compose a newline).
+        if key.code == KeyCode::Enter && !(shift || alt) && self.chat.input.text().trim() == "/new"
+        {
+            self.chat.input.clear();
+            return Action::NewSession;
+        }
         let input = &mut self.chat.input;
         match key.code {
             // Shift+Enter / Alt+Enter compose a newline instead of sending.
@@ -319,6 +332,44 @@ mod tests {
             Action::Submit("hi".to_string())
         );
         assert!(app.chat.in_flight);
+    }
+
+    #[test]
+    fn exact_slash_new_is_intercepted_as_a_new_session() {
+        let mut app = App::new();
+        type_str(&mut app, "  /new  "); // surrounding whitespace is trimmed
+        assert_eq!(app.handle_event(key(KeyCode::Enter)), Action::NewSession);
+        // It is consumed, never queued as a turn: input cleared, no user block.
+        assert!(app.chat.input.is_empty());
+        assert!(!app.chat.in_flight);
+        assert!(app.chat.blocks.is_empty());
+    }
+
+    #[test]
+    fn ordinary_input_beginning_with_slash_is_a_normal_turn() {
+        // Only an exact `/new` is special; other slash text submits verbatim.
+        for text in ["/news", "/new now", "please /new", "/help"] {
+            let mut app = App::new();
+            type_str(&mut app, text);
+            assert_eq!(
+                app.handle_event(key(KeyCode::Enter)),
+                Action::Submit(text.trim().to_string()),
+                "{text:?} must submit as a normal turn"
+            );
+        }
+    }
+
+    #[test]
+    fn shift_or_alt_enter_with_slash_new_composes_a_newline_not_a_new_session() {
+        for modifier in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
+            let mut app = App::new();
+            type_str(&mut app, "/new");
+            assert_eq!(
+                app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, modifier))),
+                Action::None
+            );
+            assert_eq!(app.chat.input.text(), "/new\n");
+        }
     }
 
     #[test]
