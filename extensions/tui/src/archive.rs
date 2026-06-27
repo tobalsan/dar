@@ -317,17 +317,24 @@ fn snippet_for(text: &str, needle: &str) -> Option<String> {
     if chars.len() <= SNIPPET_MAX {
         return Some(text.to_string());
     }
-    let pad = SNIPPET_MAX.saturating_sub(needle_chars.len()) / 2;
+    // Reserve room for the leading/trailing ellipsis markers inside the cap so
+    // the *final returned* snippet — markers included — never exceeds
+    // SNIPPET_MAX chars. Worst case both markers are present, so the body
+    // window is SNIPPET_MAX minus two marker chars.
+    let window = SNIPPET_MAX.saturating_sub(2);
+    let pad = window.saturating_sub(needle_chars.len()) / 2;
     let start = match_char.saturating_sub(pad);
-    let end = (start + SNIPPET_MAX).min(chars.len());
-    let start = end.saturating_sub(SNIPPET_MAX);
-    let mut snippet: String = chars[start..end].iter().collect();
+    let end = (start + window).min(chars.len());
+    let start = end.saturating_sub(window);
+    let mut snippet = String::new();
     if start > 0 {
-        snippet.insert(0, '…');
+        snippet.push('…');
     }
+    snippet.extend(chars[start..end].iter());
     if end < chars.len() {
         snippet.push('…');
     }
+    debug_assert!(snippet.chars().count() <= SNIPPET_MAX);
     Some(snippet)
 }
 
@@ -738,10 +745,10 @@ mod tests {
         );
         let hits = search(temp.path(), "needle");
         assert_eq!(hits.len(), 1);
-        // Snippet (minus any ellipsis markers) never exceeds the cap, and is far
-        // shorter than the ~1000-char body.
-        let body_len = hits[0].snippet.chars().filter(|c| *c != '…').count();
-        assert!(body_len <= SNIPPET_MAX, "snippet len {body_len}");
+        // The full returned snippet field — ellipsis markers included — never
+        // exceeds the cap, and is far shorter than the ~1000-char body.
+        let len = hits[0].snippet.chars().count();
+        assert!(len <= SNIPPET_MAX, "snippet len {len}");
         assert!(hits[0].snippet.to_lowercase().contains("needle"));
     }
 
@@ -775,6 +782,28 @@ mod tests {
     }
 
     #[test]
+    fn search_snippet_with_match_in_middle_stays_within_cap_including_markers() {
+        // Match centered in a long body produces both leading and trailing
+        // ellipsis markers; the full returned field must still be <= SNIPPET_MAX.
+        let temp = tempfile::tempdir().unwrap();
+        let long = format!("{}NEEDLE{}", "x".repeat(500), "y".repeat(500));
+        write(
+            temp.path(),
+            "2024-06-15T12:30:00Z_a.jsonl",
+            &session_with_messages("sess-a", &[("assistant", &long)]),
+        );
+        let hits = search(temp.path(), "needle");
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.starts_with('…'));
+        assert!(hits[0].snippet.ends_with('…'));
+        assert!(
+            hits[0].snippet.chars().count() <= SNIPPET_MAX,
+            "snippet len {}",
+            hits[0].snippet.chars().count()
+        );
+    }
+
+    #[test]
     fn search_snippet_handles_case_folding_that_changes_byte_length() {
         // `İ` (U+0130) lowercases to two chars; a long message made of it before
         // the match must neither panic nor mis-slice — it must still locate the
@@ -790,7 +819,7 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].message_index, 0);
         assert!(hits[0].snippet.to_lowercase().contains("needle"));
-        let len = hits[0].snippet.chars().filter(|c| *c != '…').count();
+        let len = hits[0].snippet.chars().count();
         assert!(len <= SNIPPET_MAX, "snippet len {len}");
     }
 
