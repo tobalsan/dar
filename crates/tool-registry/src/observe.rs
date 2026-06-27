@@ -167,7 +167,25 @@ fn split_keeping_delims(input: &str) -> Vec<&str> {
 
 /// Heuristic: does this token look like a credential? Conservative on length so
 /// ordinary words/ids are not masked.
+/// Canonical UUID shape (8-4-4-4-12 hex). These are resource identifiers
+/// (Linear issue/state/project IDs, etc.), not secrets — the agent needs them
+/// to make mutations, so they must never be redacted by the token-shape pass.
+fn is_uuid_shaped(token: &str) -> bool {
+    let b = token.as_bytes();
+    if b.len() != 36 {
+        return false;
+    }
+    b.iter().enumerate().all(|(i, &c)| match i {
+        8 | 13 | 18 | 23 => c == b'-',
+        _ => c.is_ascii_hexdigit(),
+    })
+}
+
 fn is_secret_shaped(token: &str) -> bool {
+    // UUIDs are identifiers, not secrets — exempt them before the long-run check.
+    if is_uuid_shaped(token) {
+        return false;
+    }
     let lower = token.to_ascii_lowercase();
     if (lower.starts_with("sk-")
         || lower.starts_with("pk-")
@@ -304,6 +322,19 @@ mod tests {
         let masked = r.redact("key=sk-ABCDEF0123456789 and AKIAIOSFODNN7EXAMPLE");
         assert!(!masked.contains("sk-ABCDEF0123456789"));
         assert!(!masked.contains("AKIAIOSFODNN7EXAMPLE"));
+    }
+
+    #[test]
+    fn uuids_are_not_redacted_as_secrets() {
+        let r = Redactor::token_shapes_only();
+        let uuid = "a1b2c3d4-5e6f-7890-abcd-ef1234567890";
+        let masked = r.redact(&format!("stateId={uuid} done"));
+        // Linear resource IDs must survive so the agent can use them in mutations.
+        assert!(masked.contains(uuid), "UUID should not be redacted: {masked}");
+        assert!(!masked.contains(REDACTED));
+        // But real opaque credentials of similar length still get masked.
+        let secret = "AbCd1234EfGh5678IjKl9012MnOp3456Qr";
+        assert!(r.redact(secret).contains(REDACTED));
     }
 
     #[test]
