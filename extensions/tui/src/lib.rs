@@ -24,6 +24,7 @@
 //! working byte-for-byte.
 
 mod app;
+mod archive;
 mod backend;
 mod chat;
 mod dash;
@@ -54,6 +55,10 @@ pub struct ChatConfig {
     pub backend: Option<String>,
     /// Backend binary override; empty/absent uses the backend default.
     pub command: Option<String>,
+    /// Sessions dir override (relative to the agent root unless absolute);
+    /// absent uses the default `data/tui/sessions`. No `agent.yaml` change is
+    /// required to get the default behavior.
+    pub sessions_dir: Option<String>,
 }
 
 pub struct TuiExtension;

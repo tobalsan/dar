@@ -64,7 +64,11 @@ impl TerminalModeGuard {
 
 impl Drop for TerminalModeGuard {
     fn drop(&mut self) {
-        let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
+        let _ = execute!(
+            std::io::stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
     }
 }
 
@@ -344,8 +348,14 @@ async fn open_session(
     let backend = ctx.host.services.get_named::<dyn ChatBackend>(backend_id)?;
     // data_dir containment-checks against an existing data/ parent.
     std::fs::create_dir_all(ctx.paths.root().join("data"))?;
-    let session_dir = ctx.paths.data_dir("tui")?.join("sessions");
+    let session_dir = sessions_dir(config, ctx)?;
     std::fs::create_dir_all(&session_dir)?;
+    // Resume the newest archived session so restarting `dar` drops the human
+    // back into the conversation they left. Best-effort: a missing/empty dir or
+    // a malformed newest file yields `None`, opening a fresh session — never an
+    // error surfaced to the human. Backends that don't understand resume (only
+    // `chat-pi` does today) simply ignore the id and open fresh.
+    let resume_session_id = crate::archive::newest_session_id(&session_dir);
     let snap = ctx
         .host
         .bus
@@ -373,8 +383,25 @@ async fn open_session(
     .provider(provider)
     .system_prompt(system_prompt)
     .host_tool_bridge(host_tool_bridge(ctx))
+    .resume_session_id(resume_session_id)
     .build();
     backend.open(params, tx).await
+}
+
+/// Resolve the sessions dir: the configured override (relative paths anchored
+/// at the agent root) or the default `data/tui/sessions`.
+fn sessions_dir(config: &ChatConfig, ctx: &StartCtx) -> Result<std::path::PathBuf> {
+    match config.sessions_dir.as_deref().filter(|s| !s.is_empty()) {
+        Some(dir) => {
+            let path = std::path::Path::new(dir);
+            Ok(if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                ctx.paths.root().join(path)
+            })
+        }
+        None => Ok(ctx.paths.data_dir("tui")?.join("sessions")),
+    }
 }
 
 /// Build the host MCP bridge descriptor for the chat backend, or `None` when no
@@ -599,6 +626,7 @@ done"#;
         let config = ChatConfig {
             backend: None, // exercises the "pi" fallback
             command: Some(script.to_str().unwrap().to_string()),
+            sessions_dir: None,
         };
         let (chat_tx, mut chat_rx) = tokio::sync::mpsc::channel::<ChatEvent>(64);
         let mut session: Option<Box<dyn ChatSession>> = None;
@@ -675,6 +703,7 @@ done"#;
         let config = ChatConfig {
             backend: None,
             command: Some(script.to_str().unwrap().to_string()),
+            sessions_dir: None,
         };
         let (chat_tx, mut chat_rx) = tokio::sync::mpsc::channel::<ChatEvent>(64);
         let mut session: Option<Box<dyn ChatSession>> = None;
@@ -733,6 +762,7 @@ done"#;
         let config = ChatConfig {
             backend: None,
             command: None,
+            sessions_dir: None,
         };
         let (chat_tx, _chat_rx) = tokio::sync::mpsc::channel::<ChatEvent>(64);
         let mut session: Option<Box<dyn ChatSession>> = None;
@@ -764,5 +794,102 @@ done"#;
             }
             other => panic!("expected an error block, got {other:?}"),
         }
+    }
+
+    // -- resume wiring --------------------------------------------------------
+
+    /// Stub that records the argv it was launched with to `argv.log` (one arg
+    /// per line) then answers each prompt like ECHO_STUB so the turn finishes.
+    const ARGV_STUB: &str = r#"#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a" >> argv.log; done
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"prompt"'*)
+      printf '%s\n' '{"type":"agent_end"}'
+      ;;
+  esac
+done"#;
+
+    /// Drive one turn through `submit_turn` against the argv-recording stub and
+    /// return the argv the backend was spawned with.
+    async fn argv_after_one_turn(root: &Path, script: &Path) -> Vec<String> {
+        let (ctx, _shutdown_tx) = start_ctx_with_pi_backend(root);
+        let config = ChatConfig {
+            backend: None,
+            command: Some(script.to_str().unwrap().to_string()),
+            sessions_dir: None,
+        };
+        let (chat_tx, mut chat_rx) = tokio::sync::mpsc::channel::<ChatEvent>(64);
+        let mut session: Option<Box<dyn ChatSession>> = None;
+        let mut app = App::new();
+        app.chat.input.insert_str("ping");
+        let prompt = app.chat.submit().unwrap();
+        let mut preamble_pending = true;
+        submit_turn(
+            "pi",
+            &config,
+            &ctx,
+            &chat_tx,
+            &mut session,
+            &mut app,
+            &mut preamble_pending,
+            prompt,
+        )
+        .await;
+        while app.chat.in_flight {
+            let event = tokio::time::timeout(Duration::from_secs(5), chat_rx.recv())
+                .await
+                .expect("timed out waiting for chat event")
+                .expect("chat event channel closed");
+            app.chat.apply_event(event);
+        }
+        session.take().unwrap().close().await.unwrap();
+        let log = std::fs::read_to_string(root.join("argv.log")).unwrap();
+        log.lines().map(str::to_string).collect()
+    }
+
+    fn write_stub(root: &Path) -> std::path::PathBuf {
+        let script = root.join("stub-pi.sh");
+        std::fs::write(&script, ARGV_STUB).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn open_emits_resume_with_id_of_newest_prior_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_stub(temp.path());
+        // Seed a prior session archive under the default sessions dir.
+        let sessions = temp.path().join("data/tui/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("2024-01-01T00:00:00Z_old.jsonl"),
+            "{\"type\":\"session\",\"id\":\"old-id\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sessions.join("2024-06-15T12:30:00Z_new.jsonl"),
+            "{\"type\":\"session\",\"id\":\"newest-id\"}\n",
+        )
+        .unwrap();
+
+        let argv = argv_after_one_turn(temp.path(), &script).await;
+        let idx = argv
+            .iter()
+            .position(|a| a == "--resume")
+            .expect("--resume must be emitted when a prior session exists");
+        assert_eq!(argv[idx + 1], "newest-id");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn open_omits_resume_when_no_prior_session_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_stub(temp.path());
+        // No sessions seeded: fresh session, no --resume.
+        let argv = argv_after_one_turn(temp.path(), &script).await;
+        assert!(
+            !argv.iter().any(|a| a == "--resume"),
+            "fresh launch must not emit --resume: {argv:?}"
+        );
     }
 }
