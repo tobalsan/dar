@@ -12,6 +12,7 @@
 //! malformed newest file yields `None`, and the caller falls back to opening a
 //! fresh session rather than blocking the human from chatting.
 
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -206,18 +207,53 @@ pub fn read(sessions_dir: &Path, session_id: &str, start: usize, count: usize) -
 /// `truncated` flag set when older messages were dropped to honor the cap — the
 /// caller renders an "earlier messages" marker in that case. A missing/
 /// unreadable file or unknown `session_id` yields an empty slice and
-/// `truncated == false`. Reuses the same bounded reader as [`read`], so a very
-/// long prior session can never render unbounded.
+/// `truncated == false`. The read itself is bounded: it streams the session
+/// file keeping only the newest [`READ_MAX`] messages in a ring buffer, so even
+/// a very long prior session never loads its whole history into memory.
 pub fn read_recent(sessions_dir: &Path, session_id: &str) -> (Vec<Message>, bool) {
     let Some(path) = session_file_by_id(sessions_dir, session_id) else {
         return (Vec::new(), false);
     };
-    let mut all = read_messages(&path);
-    if all.len() <= READ_MAX {
-        return (all, false);
+    read_recent_messages(&path)
+}
+
+/// Stream a session file's recognized user/assistant messages, retaining only
+/// the newest [`READ_MAX`] in a bounded ring buffer (older ones are dropped as
+/// newer ones arrive, so memory stays bounded regardless of file length). Each
+/// retained message keeps its stable file-order `index`. Returns the tail in
+/// file order plus `truncated`, set when the session held more than [`READ_MAX`]
+/// messages so the caller can mark the dropped history. A missing/unreadable
+/// file yields an empty tail and `truncated == false`.
+fn read_recent_messages(path: &Path) -> (Vec<Message>, bool) {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return (Vec::new(), false),
+    };
+    let reader = BufReader::new(file);
+    let mut tail: VecDeque<Message> = VecDeque::with_capacity(READ_MAX);
+    let mut total = 0usize;
+    for line in reader.lines() {
+        let Ok(line) = line else { continue }; // skip an unreadable line, not the rest.
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            continue; // malformed/partial line — tolerate, skip.
+        };
+        if let Some((role, text)) = message_role_text(&value) {
+            if tail.len() == READ_MAX {
+                tail.pop_front();
+            }
+            tail.push_back(Message {
+                index: total,
+                role,
+                text,
+            });
+            total += 1;
+        }
     }
-    let tail = all.split_off(all.len() - READ_MAX);
-    (tail, true)
+    (tail.into_iter().collect(), total > READ_MAX)
 }
 
 /// Find the session file whose header `id` equals `session_id`. Scans the dir's
@@ -1021,6 +1057,13 @@ mod tests {
         // The tail: the newest READ_MAX messages, in file order.
         assert_eq!(messages.first().unwrap().text, "m7");
         assert_eq!(messages.last().unwrap().text, format!("m{}", total - 1));
+        // Streaming the tail preserves each message's stable file-order index:
+        // the kept window is indices 7..total-1, contiguous and in order.
+        assert_eq!(messages.first().unwrap().index, 7);
+        assert_eq!(messages.last().unwrap().index, total - 1);
+        let indices: Vec<usize> = messages.iter().map(|m| m.index).collect();
+        let expected: Vec<usize> = (7..total).collect();
+        assert_eq!(indices, expected);
     }
 
     #[test]
