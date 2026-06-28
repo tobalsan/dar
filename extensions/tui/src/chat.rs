@@ -23,25 +23,37 @@ const PREAMBLE_SECTION_CAP: usize = 8;
 /// Max `issues/` entries listed in the preamble.
 const PREAMBLE_ISSUE_CAP: usize = 20;
 
-/// Build the one-shot context preamble prepended to the first outbound
-/// prompt: an orientation paragraph, a best-effort orchestrator snapshot
-/// summary (agent id/folder + active/queue/recent-history, capped ~30
-/// lines), and a bounded listing of `<agent_root>/issues/` when present.
+/// Build the one-shot context preamble prepended to the first outbound prompt.
+/// Loop-enabled agents get coding/tracker orientation plus best-effort
+/// snapshot and issue summaries. Passive agents get only identity-neutral
+/// folder orientation so the agent's system prompt remains primary.
 pub fn build_preamble(snapshot: Option<&RunSnapshot>, agent_root: &Path) -> String {
-    let mut out = format!(
-        "[context] This is an operator chat session inside the dar agent folder at {}. \
-         Issues live at ./issues (the tracker owns their state: field); per-issue \
-         workspaces at ./workspaces. You run trusted with full access to this folder. \
-         The operator's message follows this context.\n",
-        agent_root.display()
-    );
-    if let Some(snapshot) = snapshot.filter(|s| s.version > 0) {
-        out.push('\n');
-        out.push_str(&snapshot_summary(snapshot));
-    }
-    if let Some(listing) = issues_listing(&agent_root.join("issues")) {
-        out.push('\n');
-        out.push_str(&listing);
+    let loop_enabled = snapshot.is_some();
+    let mut out = if loop_enabled {
+        format!(
+            "[context] This is an operator chat session inside the dar agent folder at {}. \
+             Issues live at ./issues (the tracker owns their state: field); per-issue \
+             workspaces at ./workspaces. You run trusted with full access to this folder. \
+             The operator's message follows this context.\n",
+            agent_root.display()
+        )
+    } else {
+        format!(
+            "[context] This is an operator chat session inside the dar agent folder at {}. \
+             You run trusted with full access to this folder. The operator's message follows \
+             this context.\n",
+            agent_root.display()
+        )
+    };
+    if loop_enabled {
+        if let Some(snapshot) = snapshot.filter(|s| s.version > 0) {
+            out.push('\n');
+            out.push_str(&snapshot_summary(snapshot));
+        }
+        if let Some(listing) = issues_listing(&agent_root.join("issues")) {
+            out.push('\n');
+            out.push_str(&listing);
+        }
     }
     out
 }
@@ -465,20 +477,25 @@ mod tests {
     }
 
     #[test]
-    fn preamble_is_orientation_only_without_snapshot_or_issues() {
+    fn passive_preamble_is_identity_neutral_without_snapshot_or_issues() {
         let temp = tempfile::tempdir().unwrap();
         let preamble = build_preamble(None, temp.path());
         assert!(preamble.contains("[context]"));
         assert!(preamble.contains(&temp.path().display().to_string()));
+        assert!(!preamble.contains("Issues live at ./issues"));
+        assert!(!preamble.contains("per-issue workspaces"));
+        assert!(!preamble.contains("software"));
         assert!(!preamble.contains("Orchestrator snapshot"));
         assert!(!preamble.contains("Issue files"));
     }
 
     #[test]
-    fn version_zero_snapshot_is_left_out_of_the_preamble() {
+    fn coding_preamble_keeps_issue_framing_with_version_zero_snapshot() {
         let temp = tempfile::tempdir().unwrap();
         // No tick has published yet: the empty snapshot says nothing useful.
         let preamble = build_preamble(Some(&RunSnapshot::empty()), temp.path());
+        assert!(preamble.contains("Issues live at ./issues"));
+        assert!(preamble.contains("per-issue workspaces"));
         assert!(!preamble.contains("Orchestrator snapshot"));
     }
 
@@ -509,7 +526,7 @@ mod tests {
             )
             .unwrap();
         }
-        let preamble = build_preamble(None, temp.path());
+        let preamble = build_preamble(Some(&RunSnapshot::empty()), temp.path());
         assert!(preamble.contains("Issue files in ./issues (25):"));
         assert!(preamble.contains("- ISSUE-01.md [state: todo] Fix thing 1"));
         let entries = preamble

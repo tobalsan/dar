@@ -617,6 +617,13 @@ while IFS= read -r line; do
 done"#;
 
     fn start_ctx_with_pi_backend(root: &Path) -> (StartCtx, tokio::sync::watch::Sender<bool>) {
+        start_ctx_with_pi_backend_and_snapshot(root, None)
+    }
+
+    fn start_ctx_with_pi_backend_and_snapshot(
+        root: &Path,
+        snapshot: Option<RunSnapshot>,
+    ) -> (StartCtx, tokio::sync::watch::Sender<bool>) {
         let paths = host_api::HostPaths::new(root).unwrap();
         let (_register_tx, register_rx) = tokio::sync::watch::channel(false);
         let mut ctx = host_api::RegisterCtx {
@@ -631,6 +638,11 @@ done"#;
         ctx.services
             .register::<dyn ChatBackend>("pi", Arc::new(chat_pi::PiChatBackend))
             .unwrap();
+        if let Some(snapshot) = snapshot {
+            ctx.bus
+                .register_retained::<RunSnapshot>(RUN_SNAPSHOT_TOPIC, snapshot)
+                .unwrap();
+        }
         let config = ctx.config.clone();
         let host = ctx.into_start_services().unwrap();
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -729,7 +741,8 @@ done"#;
         )
         .unwrap();
 
-        let (ctx, _shutdown_tx) = start_ctx_with_pi_backend(temp.path());
+        let (ctx, _shutdown_tx) =
+            start_ctx_with_pi_backend_and_snapshot(temp.path(), Some(RunSnapshot::empty()));
         let config = ChatConfig {
             backend: None,
             command: Some(script.to_str().unwrap().to_string()),
