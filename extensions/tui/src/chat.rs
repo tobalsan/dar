@@ -28,7 +28,14 @@ const PREAMBLE_ISSUE_CAP: usize = 20;
 /// snapshot and issue summaries. Passive agents get only identity-neutral
 /// folder orientation so the agent's system prompt remains primary.
 pub fn build_preamble(snapshot: Option<&RunSnapshot>, agent_root: &Path) -> String {
-    let loop_enabled = snapshot.is_some();
+    // Snapshot presence alone is not the loop-enabled signal: passive agents
+    // publish a retained snapshot (version > 0) with an empty tracker. Treat a
+    // published snapshot with no tracker as passive. A pre-tick coding agent
+    // (version 0, tracker not yet populated) stays loop-enabled.
+    let loop_enabled = match snapshot {
+        Some(s) => !(s.version > 0 && s.agent.tracker.is_empty()),
+        None => false,
+    };
     let mut out = if loop_enabled {
         format!(
             "[context] This is an operator chat session inside the dar agent folder at {}. \
@@ -485,6 +492,39 @@ mod tests {
         assert!(!preamble.contains("Issues live at ./issues"));
         assert!(!preamble.contains("per-issue workspaces"));
         assert!(!preamble.contains("software"));
+        assert!(!preamble.contains("Orchestrator snapshot"));
+        assert!(!preamble.contains("Issue files"));
+    }
+
+    /// Mirror `orchestrator::passive_snapshot`: a retained snapshot with
+    /// `version > 0` and an empty tracker. This is the real passive runtime
+    /// shape PR #78 did not cover.
+    fn passive_snapshot() -> RunSnapshot {
+        let mut snapshot = RunSnapshot::empty();
+        snapshot.version = 1;
+        snapshot.agent.id = "kalel".to_string();
+        snapshot.agent.folder = "/tmp/kalel".to_string();
+        snapshot.agent.tracker = String::new();
+        snapshot.agent.runner = "pi".to_string();
+        snapshot
+    }
+
+    #[test]
+    fn passive_preamble_is_identity_neutral_with_real_passive_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        // Issues dir present: a passive agent must still not get coding framing.
+        let issues = temp.path().join("issues");
+        std::fs::create_dir(&issues).unwrap();
+        std::fs::write(
+            issues.join("ISSUE-01.md"),
+            "---\nstate: todo\ntitle: Fix thing\n---\nbody\n",
+        )
+        .unwrap();
+        let preamble = build_preamble(Some(&passive_snapshot()), temp.path());
+        assert!(preamble.contains("[context]"));
+        assert!(preamble.contains(&temp.path().display().to_string()));
+        assert!(!preamble.contains("Issues live at ./issues"));
+        assert!(!preamble.contains("per-issue workspaces"));
         assert!(!preamble.contains("Orchestrator snapshot"));
         assert!(!preamble.contains("Issue files"));
     }
