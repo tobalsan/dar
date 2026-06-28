@@ -292,6 +292,32 @@ impl ChatState {
         self.blocks.push(ChatBlock::Notice(message));
     }
 
+    /// Replay prior session messages into the transcript on launch so a resumed
+    /// conversation is visible before the human's first new turn. Display-only:
+    /// these blocks are never sent to the backend and don't touch the turn
+    /// counters (`pi` already holds them in the resumed session). When the
+    /// session was display-truncated, a leading "earlier messages" notice marks
+    /// that older turns are reachable only via the recall tools. A no-op when
+    /// there are no messages, so a fresh / post-`/new` launch stays empty.
+    pub fn hydrate(&mut self, messages: &[crate::archive::Message], truncated: bool) {
+        if messages.is_empty() {
+            return;
+        }
+        if truncated {
+            self.blocks.push(ChatBlock::Notice(
+                "— earlier messages hidden; use the recall tools to reach the full history —"
+                    .to_string(),
+            ));
+        }
+        for msg in messages {
+            let block = match msg.role.as_str() {
+                "assistant" => ChatBlock::Assistant(msg.text.clone()),
+                _ => ChatBlock::User(msg.text.clone()),
+            };
+            self.blocks.push(block);
+        }
+    }
+
     pub fn push_error(&mut self, message: String) {
         self.blocks.push(ChatBlock::Error(message));
     }
@@ -879,6 +905,66 @@ mod tests {
             Some(&ChatBlock::Error(
                 "chat session closed: pi exited unexpectedly: signal".to_string()
             ))
+        );
+    }
+
+    fn msg(role: &str, text: &str) -> crate::archive::Message {
+        crate::archive::Message {
+            index: 0,
+            role: role.to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn hydrate_replays_prior_messages_without_counting_a_turn() {
+        let mut chat = ChatState::default();
+        let prior = vec![
+            msg("user", "hello"),
+            msg("assistant", "hi there"),
+            msg("user", "continue"),
+        ];
+        chat.hydrate(&prior, false);
+        assert_eq!(
+            chat.blocks,
+            vec![
+                ChatBlock::User("hello".to_string()),
+                ChatBlock::Assistant("hi there".to_string()),
+                ChatBlock::User("continue".to_string()),
+            ]
+        );
+        // Display-only: no turn counted, no in-flight state, input untouched.
+        assert!(!chat.in_flight);
+        assert_eq!(chat.pending_turns, 0);
+        assert!(chat.turn_started_at.is_none());
+    }
+
+    #[test]
+    fn hydrate_empty_leaves_transcript_empty() {
+        let mut chat = ChatState::default();
+        chat.hydrate(&[], false);
+        assert!(chat.blocks.is_empty());
+    }
+
+    #[test]
+    fn hydrate_truncated_prepends_earlier_messages_marker() {
+        let mut chat = ChatState::default();
+        let prior = vec![
+            msg("user", "recent question"),
+            msg("assistant", "recent answer"),
+        ];
+        chat.hydrate(&prior, true);
+        assert!(
+            matches!(chat.blocks.first(), Some(ChatBlock::Notice(n)) if n.contains("earlier messages"))
+        );
+        assert_eq!(chat.blocks.len(), 3);
+        assert_eq!(
+            chat.blocks[1],
+            ChatBlock::User("recent question".to_string())
+        );
+        assert_eq!(
+            chat.blocks[2],
+            ChatBlock::Assistant("recent answer".to_string())
         );
     }
 }
