@@ -1,26 +1,53 @@
-//! Bridge between the pure `system-files` resolver and the orchestrator.
+//! Bridge between the pure `system-files` resolver and the on-bus payload.
 //!
-//! Resolves the agent's `AGENTS.md` + `system_files` into the on-bus
-//! [`orchestrator_api::SystemContext`] payload, logging non-fatal warnings and
-//! degrading gracefully: a resolution error (missing `required` file or a
-//! containment violation) is logged and yields an empty context rather than
-//! aborting boot — `doctor`/`self-check` are the gates that *fail* on those.
+//! Loads the agent's declared `system_files` from `agent.yaml`, resolves
+//! `AGENTS.md` + those entries, appends any workspace `skills/` block, and
+//! projects the result into the retained [`system_files::bus::SystemContext`]
+//! payload. Non-fatal warnings are logged; a hard resolution error (missing
+//! `required` file or containment violation) is logged and collapses to an
+//! empty context so boot continues — preflight/`doctor` are the gates that fail.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use orchestrator_api::{SystemContext, SystemContextFile};
 use serde::Deserialize;
+use system_files::bus::SystemContext;
 use system_files::{ResolveError, SystemFileEntry};
 
-use crate::config::AgentConfig;
+/// Minimal view of `agent.yaml`: only the `system_files` key this extension
+/// needs. Decoupled from the orchestrator's full config tree so the substrate
+/// stays independent of the loop. Unknown keys are ignored.
+#[derive(Debug, Default, Deserialize)]
+struct SystemFilesConfig {
+    #[serde(default)]
+    system_files: Option<Vec<SystemFileEntry>>,
+}
+
+fn load_entries(root: &Path) -> Option<Vec<SystemFileEntry>> {
+    let path = root.join("agent.yaml");
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            tracing::warn!("reading {} for system files: {e}", path.display());
+            return None;
+        }
+    };
+    match serde_yaml::from_str::<SystemFilesConfig>(&raw) {
+        Ok(cfg) => cfg.system_files,
+        Err(e) => {
+            tracing::error!("parsing {} for system files: {e}", path.display());
+            None
+        }
+    }
+}
 
 /// Resolve the agent's system context into the retained-topic payload.
 ///
 /// Warnings are logged; a hard error is logged and collapses to an empty
 /// context (boot continues — preflight is the gate that rejects bad config).
-pub fn resolve_for(root: &Path, cfg: &AgentConfig) -> SystemContext {
-    match resolve(root, cfg.system_files.as_deref()) {
+pub fn resolve_for(root: &Path) -> SystemContext {
+    let entries = load_entries(root);
+    match resolve(root, entries.as_deref()) {
         Ok(ctx) => ctx,
         Err(e) => {
             tracing::error!("resolving system context: {e}");
@@ -39,19 +66,9 @@ pub fn resolve(
         tracing::warn!("system file: {warning}");
     }
 
-    let mut text = resolved.text;
-    append_workspace_skills(root, &mut text);
-
-    Ok(SystemContext {
-        text,
-        files: resolved
-            .files
-            .into_iter()
-            .map(|f| SystemContextFile {
-                path: f.display_path,
-            })
-            .collect(),
-    })
+    let mut payload: SystemContext = resolved.into();
+    append_workspace_skills(root, &mut payload.text);
+    Ok(payload)
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,6 +182,14 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    fn write(dir: &Path, rel: &str, contents: &str) {
+        let path = dir.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, contents).unwrap();
+    }
+
     #[test]
     fn resolves_agents_md_into_payload() {
         let dir = TempDir::new().unwrap();
@@ -237,21 +262,79 @@ mod tests {
     }
 
     #[test]
-    fn resolve_for_degrades_to_empty_on_error() {
+    fn resolve_for_degrades_to_empty_on_required_missing() {
         let dir = TempDir::new().unwrap();
-        let mut cfg = sample_cfg();
-        cfg.system_files = Some(vec![SystemFileEntry::Detailed {
-            path: "nope.md".to_string(),
-            required: true,
-        }]);
-        let ctx = resolve_for(dir.path(), &cfg);
+        write(
+            dir.path(),
+            "agent.yaml",
+            "id: a\nname: A\nrunner:\n  use: fake\nsystem_files:\n  - path: nope.md\n    required: true\n",
+        );
+        let ctx = resolve_for(dir.path());
         assert!(ctx.is_empty());
     }
 
-    fn sample_cfg() -> AgentConfig {
-        serde_yaml::from_str(
-            "id: a\nname: A\ntracker:\n  use: files\n  config:\n    path: ./issues\n  active_states: [todo]\n  terminal_states: [done]\nrunner:\n  use: fake\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\n",
-        )
-        .unwrap()
+    #[test]
+    fn resolve_for_reads_system_files_from_agent_yaml() {
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), "AGENTS.md", "identity");
+        write(dir.path(), "SOUL.md", "soul body");
+        write(
+            dir.path(),
+            "agent.yaml",
+            "id: a\nname: A\nrunner:\n  use: fake\nsystem_files:\n  - SOUL.md\n",
+        );
+
+        let ctx = resolve_for(dir.path());
+
+        let order: Vec<_> = ctx.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(order, vec!["AGENTS.md", "SOUL.md"]);
+        assert!(ctx.text.contains("identity"));
+        assert!(ctx.text.contains("soul body"));
+    }
+
+    #[test]
+    fn resolve_for_passive_config_without_loop_publishes_context() {
+        // Passive agent: no tracker/orchestrator/workspace trio. The substrate
+        // must still resolve AGENTS.md + configured system_files.
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), "AGENTS.md", "i am passive");
+        write(dir.path(), "SOUL.md", "my soul");
+        write(
+            dir.path(),
+            "agent.yaml",
+            "id: passive\nname: Passive\nrunner:\n  use: pi\nsystem_files:\n  - SOUL.md\n",
+        );
+
+        let ctx = resolve_for(dir.path());
+
+        assert!(!ctx.is_empty());
+        let order: Vec<_> = ctx.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(order, vec!["AGENTS.md", "SOUL.md"]);
+        assert!(ctx.text.contains("i am passive"));
+        assert!(ctx.text.contains("my soul"));
+    }
+
+    #[test]
+    fn resolve_for_missing_agent_yaml_is_empty() {
+        let dir = TempDir::new().unwrap();
+        let ctx = resolve_for(dir.path());
+        assert!(ctx.is_empty());
+    }
+
+    #[test]
+    fn resolve_for_agent_yaml_without_system_files_resolves_agents_md_only() {
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), "AGENTS.md", "identity");
+        write(dir.path(), "ignored.md", "not referenced");
+        write(
+            dir.path(),
+            "agent.yaml",
+            "id: a\nname: A\nrunner:\n  use: fake\n",
+        );
+
+        let ctx = resolve_for(dir.path());
+
+        assert_eq!(ctx.files.len(), 1);
+        assert_eq!(ctx.files[0].path, "AGENTS.md");
     }
 }

@@ -633,6 +633,7 @@ dependencies = [
  "dar-runner-opencode",
  "dar-runner-pi",
  "dar-scheduler",
+ "dar-system-context",
  "dar-tool-registry-host",
  "dar-tracker-files",
  "dar-tracker-linear",
@@ -653,6 +654,7 @@ dependencies = [
  "dar-host-api",
  "dar-orchestrator",
  "dar-presence",
+ "dar-system-context",
  "dar-tool-registry",
  "fs2",
  "serde",
@@ -931,6 +933,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dar-system-context"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "dar-host-api",
+ "dar-system-files",
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "dar-system-files"
 version = "0.3.0"
 dependencies = [
@@ -1019,6 +1034,7 @@ dependencies = [
  "dar-frontend-log",
  "dar-host-api",
  "dar-orchestrator-api",
+ "dar-system-files",
  "dar-tool-registry",
  "ratatui",
  "serde",

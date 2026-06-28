@@ -27,6 +27,8 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub mod bus;
+
 /// The conventional agent-identity file resolved first, when present.
 pub const AGENTS_MD: &str = "AGENTS.md";
 

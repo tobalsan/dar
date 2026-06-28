@@ -67,7 +67,7 @@ pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyho
 
     // 1b. System files: required entries present + containment.
     if let Some(cfg) = cfg.as_ref() {
-        match orchestrator::system_context::resolve(&paths.root, cfg.system_files.as_deref()) {
+        match system_context::resolve(&paths.root, cfg.system_files.as_deref()) {
             Ok(ctx) => pass(&format!(
                 "system files resolve ({} file(s))",
                 ctx.files.len()
