@@ -70,6 +70,10 @@ const STOCK_EXTENSIONS: &[StockExtension] = &[
         factory: "frontend_log::FrontendLogExtension",
     },
     StockExtension {
+        package: "system-context",
+        factory: "system_context::SystemContextExtension",
+    },
+    StockExtension {
         package: "tracker-files",
         factory: "tracker_files::TrackerFilesExtension",
     },
@@ -225,6 +229,8 @@ fn selected_stock_extensions(
     let _ = runner_package(&selection.runner.use_)?;
     let mut packages = vec![
         "tool-registry-host",
+        "frontend-log",
+        "system-context",
         "orchestrator",
         "dashboard",
         "tracker-linear",
@@ -1033,9 +1039,12 @@ mod tests {
         assert!(manifest.contains("stock-tracker-files = [\"dep:tracker-files\"]"));
         assert!(manifest.contains("stock-runner-fake = [\"dep:runner-fake\"]"));
         assert!(manifest.contains("stock-orchestrator = [\"dep:orchestrator\"]"));
+        assert!(manifest.contains("system-context = { package = \"dar-system-context\", version = "));
+        assert!(manifest.contains("stock-system-context = [\"dep:system-context\"]"));
         assert!(manifest.contains("stock-frontend-log = [\"dep:frontend-log\"]"));
         assert!(manifest.contains("tracker-linear = { package = \"dar-tracker-linear\", version = "));
         assert!(manifest.contains("stock-tracker-linear = [\"dep:tracker-linear\"]"));
+        assert!(source.contains("system_context::SystemContextExtension"));
         assert!(source.contains("tracker_linear::TrackerLinearExtension"));
         assert!(source.contains("#[cfg(feature = \"stock-tracker-files\")]"));
         assert!(source.contains("tracker_files::TrackerFilesExtension"));
