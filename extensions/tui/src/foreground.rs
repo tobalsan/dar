@@ -260,6 +260,9 @@ async fn run_interactive(
                         }
                         suppress_resume = true;
                         preamble_pending = true;
+                        // Drop any hydrated/prior transcript so the fresh
+                        // session opens empty, matching a cold launch.
+                        app.chat.clear_transcript();
                         app.chat.push_notice(
                             "— started a fresh session —".to_string(),
                         );

@@ -292,6 +292,15 @@ impl ChatState {
         self.blocks.push(ChatBlock::Notice(message));
     }
 
+    /// Drop the visible transcript so the pane opens empty, mirroring a fresh
+    /// launch. Used by `/new`: the prior (possibly hydrated) conversation
+    /// belongs to the closed session, so clearing the view matches the
+    /// brand-new file `pi` forks next. Display-only; touches no turn counters.
+    pub fn clear_transcript(&mut self) {
+        self.blocks.clear();
+        self.scroll_back = 0;
+    }
+
     /// Replay prior session messages into the transcript on launch so a resumed
     /// conversation is visible before the human's first new turn. Display-only:
     /// these blocks are never sent to the backend and don't touch the turn
@@ -944,6 +953,27 @@ mod tests {
         let mut chat = ChatState::default();
         chat.hydrate(&[], false);
         assert!(chat.blocks.is_empty());
+    }
+
+    #[test]
+    fn clear_transcript_empties_hydrated_blocks() {
+        // Simulates `/new` after a resumed launch hydrated prior turns: the
+        // transcript must open empty, like a cold launch.
+        let mut chat = ChatState::default();
+        chat.hydrate(&[msg("user", "hello"), msg("assistant", "hi")], true);
+        assert!(!chat.blocks.is_empty());
+        chat.scroll_back = 5;
+
+        chat.clear_transcript();
+        assert!(chat.blocks.is_empty());
+        assert_eq!(chat.scroll_back, 0);
+
+        // The post-`/new` notice lands on an otherwise empty pane.
+        chat.push_notice("— started a fresh session —".to_string());
+        assert_eq!(
+            chat.blocks,
+            vec![ChatBlock::Notice("— started a fresh session —".to_string())]
+        );
     }
 
     #[test]
