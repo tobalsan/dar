@@ -12,6 +12,7 @@
 //! malformed newest file yields `None`, and the caller falls back to opening a
 //! fresh session rather than blocking the human from chatting.
 
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -198,6 +199,61 @@ pub fn read(sessions_dir: &Path, session_id: &str, start: usize, count: usize) -
         .skip(start)
         .take(capped)
         .collect()
+}
+
+/// The most-recent user/assistant messages of a session, bounded to
+/// [`READ_MAX`], for hydrating the Chat transcript on launch. Returns the tail
+/// of the conversation (the [`READ_MAX`] newest messages, in file order) plus a
+/// `truncated` flag set when older messages were dropped to honor the cap — the
+/// caller renders an "earlier messages" marker in that case. A missing/
+/// unreadable file or unknown `session_id` yields an empty slice and
+/// `truncated == false`. The read itself is bounded: it streams the session
+/// file keeping only the newest [`READ_MAX`] messages in a ring buffer, so even
+/// a very long prior session never loads its whole history into memory.
+pub fn read_recent(sessions_dir: &Path, session_id: &str) -> (Vec<Message>, bool) {
+    let Some(path) = session_file_by_id(sessions_dir, session_id) else {
+        return (Vec::new(), false);
+    };
+    read_recent_messages(&path)
+}
+
+/// Stream a session file's recognized user/assistant messages, retaining only
+/// the newest [`READ_MAX`] in a bounded ring buffer (older ones are dropped as
+/// newer ones arrive, so memory stays bounded regardless of file length). Each
+/// retained message keeps its stable file-order `index`. Returns the tail in
+/// file order plus `truncated`, set when the session held more than [`READ_MAX`]
+/// messages so the caller can mark the dropped history. A missing/unreadable
+/// file yields an empty tail and `truncated == false`.
+fn read_recent_messages(path: &Path) -> (Vec<Message>, bool) {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return (Vec::new(), false),
+    };
+    let reader = BufReader::new(file);
+    let mut tail: VecDeque<Message> = VecDeque::with_capacity(READ_MAX);
+    let mut total = 0usize;
+    for line in reader.lines() {
+        let Ok(line) = line else { continue }; // skip an unreadable line, not the rest.
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            continue; // malformed/partial line — tolerate, skip.
+        };
+        if let Some((role, text)) = message_role_text(&value) {
+            if tail.len() == READ_MAX {
+                tail.pop_front();
+            }
+            tail.push_back(Message {
+                index: total,
+                role,
+                text,
+            });
+            total += 1;
+        }
+    }
+    (tail.into_iter().collect(), total > READ_MAX)
 }
 
 /// Find the session file whose header `id` equals `session_id`. Scans the dir's
@@ -959,6 +1015,68 @@ mod tests {
         assert_eq!(slice.len(), 1);
         assert_eq!(slice[0].text, "real");
         assert_eq!(slice[0].index, 0);
+    }
+
+    #[test]
+    fn read_recent_returns_all_when_under_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "2024-06-15T12:30:00Z_a.jsonl",
+            &session_with_messages(
+                "sess-a",
+                &[("user", "hi"), ("assistant", "hello"), ("user", "bye")],
+            ),
+        );
+        let (messages, truncated) = read_recent(temp.path(), "sess-a");
+        assert!(!truncated);
+        let pairs: Vec<(&str, &str)> = messages
+            .iter()
+            .map(|m| (m.role.as_str(), m.text.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![("user", "hi"), ("assistant", "hello"), ("user", "bye")]
+        );
+    }
+
+    #[test]
+    fn read_recent_truncates_oversized_session_to_the_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let total = READ_MAX + 7;
+        let msgs: Vec<(&str, String)> = (0..total).map(|i| ("user", format!("m{i}"))).collect();
+        let refs: Vec<(&str, &str)> = msgs.iter().map(|(r, t)| (*r, t.as_str())).collect();
+        write(
+            temp.path(),
+            "2024-06-15T12:30:00Z_a.jsonl",
+            &session_with_messages("sess-a", &refs),
+        );
+        let (messages, truncated) = read_recent(temp.path(), "sess-a");
+        assert!(truncated);
+        assert_eq!(messages.len(), READ_MAX);
+        // The tail: the newest READ_MAX messages, in file order.
+        assert_eq!(messages.first().unwrap().text, "m7");
+        assert_eq!(messages.last().unwrap().text, format!("m{}", total - 1));
+        // Streaming the tail preserves each message's stable file-order index:
+        // the kept window is indices 7..total-1, contiguous and in order.
+        assert_eq!(messages.first().unwrap().index, 7);
+        assert_eq!(messages.last().unwrap().index, total - 1);
+        let indices: Vec<usize> = messages.iter().map(|m| m.index).collect();
+        let expected: Vec<usize> = (7..total).collect();
+        assert_eq!(indices, expected);
+    }
+
+    #[test]
+    fn read_recent_unknown_session_is_empty_and_not_truncated() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "2024-06-15T12:30:00Z_a.jsonl",
+            &session_with_messages("sess-a", &[("user", "only")]),
+        );
+        let (messages, truncated) = read_recent(temp.path(), "missing-id");
+        assert!(messages.is_empty());
+        assert!(!truncated);
     }
 
     #[test]

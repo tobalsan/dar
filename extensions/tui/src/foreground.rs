@@ -186,6 +186,22 @@ async fn run_interactive(
     // brand-new file instead of continuing the conversation just closed.
     let mut suppress_resume = false;
     let mut app = App::new();
+    // Hydrate the Chat transcript from the session that will be resumed on the
+    // first turn, so a restarted `dar` shows the prior conversation instead of
+    // an empty pane. Display-only: these blocks are replayed into the view, not
+    // re-sent to the backend (`pi` already holds them in the resumed session),
+    // so the preamble stays owed and no turn is counted. Resolved from the same
+    // newest-wins archive `open_session` resumes from, and only at launch; a
+    // fresh start (empty dir / no resumable session) leaves the pane empty.
+    // After a later `/new` forks a fresh (empty) file, that file is the next
+    // restart's resume target, so the following launch hydrates nothing.
+    // Best-effort: any read failure simply yields no hydration.
+    if let Ok(session_dir) = sessions_dir(&config, &ctx) {
+        if let Some(id) = crate::archive::newest_session_id(&session_dir) {
+            let (messages, truncated) = crate::archive::read_recent(&session_dir, &id);
+            app.chat.hydrate(&messages, truncated);
+        }
+    }
     // Logs tab feed: the log broadcast + retained startup banner (a failed
     // subscription leaves the pane on its "unavailable" placeholder).
     let mut feed = logs::LogFeed::subscribe(&ctx.host.bus, &mut app.logs);
@@ -244,6 +260,9 @@ async fn run_interactive(
                         }
                         suppress_resume = true;
                         preamble_pending = true;
+                        // Drop any hydrated/prior transcript so the fresh
+                        // session opens empty, matching a cold launch.
+                        app.chat.clear_transcript();
                         app.chat.push_notice(
                             "— started a fresh session —".to_string(),
                         );
