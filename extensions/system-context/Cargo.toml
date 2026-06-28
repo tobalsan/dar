@@ -1,0 +1,23 @@
+[package]
+name = "dar-system-context"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Substrate extension: resolves and publishes an agent's AGENTS.md + system_files identity context"
+rust-version = "1.83"
+publish = false
+
+[lib]
+name = "system_context"
+
+[dependencies]
+anyhow = "1"
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.3" }
+system-files = { package = "dar-system-files", path = "../../crates/system-files", version = "0.3" }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

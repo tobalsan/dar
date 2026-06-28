@@ -29,6 +29,7 @@ members = [
     "extensions/runner-opencode",
     "extensions/runner-pi",
     "extensions/scheduler",
+    "extensions/system-context",
     "extensions/tool-registry-host",
     "extensions/tracker-files",
     "extensions/tracker-linear",

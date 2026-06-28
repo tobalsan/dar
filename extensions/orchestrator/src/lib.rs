@@ -31,9 +31,10 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use host_api::Extension;
 use orchestrator_api::{
-    DispatchRequested, RunRequested, RunSnapshot, SystemContext, CONTROL_TOPIC,
-    DISPATCH_REQUESTED_TOPIC, RUN_REQUESTED_TOPIC, RUN_SNAPSHOT_TOPIC, SYSTEM_CONTEXT_TOPIC,
+    DispatchRequested, RunRequested, RunSnapshot, CONTROL_TOPIC, DISPATCH_REQUESTED_TOPIC,
+    RUN_REQUESTED_TOPIC, RUN_SNAPSHOT_TOPIC,
 };
+use system_files::bus::{SystemContext, SYSTEM_CONTEXT_TOPIC};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::watch;
 
@@ -69,7 +70,6 @@ pub mod run_query;
 pub mod runner;
 pub mod state;
 pub mod store;
-pub mod system_context;
 pub mod thinking;
 pub mod tracker;
 pub mod workflow_config;
@@ -172,8 +172,6 @@ impl Extension for OrchestratorExtension {
             ctx.bus
                 .register_retained(RUN_SNAPSHOT_TOPIC, RunSnapshot::empty())?;
             ctx.bus
-                .register_retained(SYSTEM_CONTEXT_TOPIC, SystemContext::default())?;
-            ctx.bus
                 .register_broadcast::<orchestrator_api::ControlMsg>(CONTROL_TOPIC, 64)?;
             ctx.bus
                 .register_broadcast::<RunRequested>(RUN_REQUESTED_TOPIC, 64)?;
@@ -200,15 +198,15 @@ impl Extension for OrchestratorExtension {
             let agent_cfg = config::load(&paths.root)?;
             agent_cfg.validate().context("invalid agent.yaml")?;
 
-            // Resolve and publish the agent's system-file identity context once,
-            // before the loop and any consumer reads it. The retained topic was
-            // registered in `register`; publishing here replaces the inert
-            // default with the assembled `AGENTS.md` + `system_files` context.
-            let system_context = system_context::resolve_for(&paths.root, &agent_cfg);
-            ctx.host
+            // Read the agent's system-file identity context from the retained
+            // topic published by the `system-context` substrate extension, which
+            // starts before the orchestrator. Absent topic / empty assembly
+            // leaves the runner prompt byte-for-byte unchanged.
+            let system_context = ctx
+                .host
                 .bus
-                .publish(SYSTEM_CONTEXT_TOPIC, system_context.clone())
-                .context("publishing system context")?;
+                .read_retained::<SystemContext>(SYSTEM_CONTEXT_TOPIC)
+                .unwrap_or_default();
 
             let store = Arc::new(
                 Store::open(&paths.store_db()).context("opening SQLite persistence store")?,
@@ -2793,7 +2791,7 @@ mod tests {
     use crate::workflow_config::{EffectiveLoopConfig, WorkflowFrontmatter};
     use anyhow::Result;
     use chrono::TimeZone;
-    use orchestrator_api::SystemContextFile;
+    use system_files::bus::SystemContextFile;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]

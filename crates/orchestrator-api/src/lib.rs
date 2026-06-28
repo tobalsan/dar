@@ -11,10 +11,6 @@ use tokio::sync::oneshot;
 pub type ControlReplyTx = std::sync::Arc<std::sync::Mutex<Option<oneshot::Sender<ControlReply>>>>;
 
 pub const RUN_SNAPSHOT_TOPIC: &str = "orchestrator.run-snapshot";
-/// Retained topic carrying the agent's assembled system-file identity context.
-/// Published once at boot, before extensions start, so every surface reads the
-/// same `AGENTS.md` + `system_files` assembly.
-pub const SYSTEM_CONTEXT_TOPIC: &str = "system.context";
 pub const CONTROL_TOPIC: &str = "orchestrator.control";
 pub const RUN_REQUESTED_TOPIC: &str = "orchestrator.run-requested";
 pub const DISPATCH_REQUESTED_TOPIC: &str = "orchestrator.dispatch-requested";
@@ -257,30 +253,6 @@ impl ControlReply {
             ok: false,
             message: message.into(),
         }
-    }
-}
-
-/// One file that contributed to the assembled [`SystemContext`], in order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SystemContextFile {
-    /// Root-relative, forward-slash path shown in the tagged block.
-    pub path: String,
-}
-
-/// Retained bus payload: the agent's assembled, path-tagged system context.
-///
-/// `text` is the full assembly (`AGENTS.md` first, then `system_files`); `files`
-/// lists the contributing paths in assembly order. Defaults to empty so the
-/// retained topic can be registered with an inert initial value.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SystemContext {
-    pub text: String,
-    pub files: Vec<SystemContextFile>,
-}
-
-impl SystemContext {
-    pub fn is_empty(&self) -> bool {
-        self.files.is_empty()
     }
 }
 

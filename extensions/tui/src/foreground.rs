@@ -19,7 +19,8 @@ use host_api::{
     ExclusiveTerminal, Foreground, LogEvent, StartCtx, APP_DONE_TOPIC, LOG_EVENTS_TOPIC,
     STARTUP_BANNER_TOPIC,
 };
-use orchestrator_api::{RunSnapshot, SystemContext, RUN_SNAPSHOT_TOPIC, SYSTEM_CONTEXT_TOPIC};
+use orchestrator_api::{RunSnapshot, RUN_SNAPSHOT_TOPIC};
+use system_files::bus::{SystemContext, SYSTEM_CONTEXT_TOPIC};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc::Sender;
