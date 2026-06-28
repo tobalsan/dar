@@ -8,6 +8,34 @@ use std::process::{Command, Stdio};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
+/// Standard `.gitignore` block for an agent folder. Lines are grouped under
+/// comment headers; blank lines separate groups. This is the single source of
+/// truth for the entries `dar init-build` guarantees in every agent folder.
+const STANDARD_GITIGNORE: &str = "\
+# secret
+.env
+
+# built binary (rebuilt from .dar crate)
+/bin/
+
+# per-agent crate build output
+/.dar/target/
+
+# run history + tui runtime
+/data/
+
+# logs
+/logs/
+
+# per-issue repo checkouts
+/workspaces/
+
+# runner session state
+/claude-sessions/
+/opencode-sessions/
+/pi-sessions/
+";
+
 const GENERATED_TOML_HEADER: &str = "# generated - do not hand-edit\n";
 const GENERATED_RUST_HEADER: &str = "// # generated - do not hand-edit\n";
 const STOCK_CRATE_VERSION_REQ: &str = concat!(env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"));
@@ -176,6 +204,7 @@ fn write_composition_crate(agent: &Path) -> Result<(PathBuf, bool)> {
         &crate_dir.join("rust-toolchain.toml"),
         "[toolchain]\nchannel = \"1.83\"\n",
     )?;
+    changed |= ensure_agent_gitignore(&agent)?;
     Ok((crate_dir, changed))
 }
 
@@ -720,6 +749,81 @@ where
     Ok(())
 }
 
+/// Ensure the agent folder's `.gitignore` contains every standard entry.
+///
+/// - Creates the file with the full standard block when it is absent.
+/// - Otherwise appends only the standard entries that are missing, preserving
+///   all pre-existing lines (including user-added ones) verbatim. Appended
+///   entries keep their comment headers, but a header is only emitted when at
+///   least one entry under it is actually being added.
+/// - Idempotent: re-running adds nothing once all entries are present.
+///
+/// Membership is decided on non-comment, non-blank lines, so `.env` already
+/// added by `tracker-linear`'s `init_workflow` is never duplicated here.
+fn ensure_agent_gitignore(agent: &Path) -> Result<bool> {
+    let path = agent.join(".gitignore");
+    let existing = match fs::read_to_string(&path) {
+        Ok(contents) => Some(contents),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+
+    let Some(existing) = existing else {
+        fs::write(&path, STANDARD_GITIGNORE)
+            .with_context(|| format!("writing {}", path.display()))?;
+        return Ok(true);
+    };
+
+    let present: std::collections::HashSet<&str> = existing
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+
+    let mut additions = String::new();
+    let mut header: Option<&str> = None;
+    let mut header_written = false;
+    for line in STANDARD_GITIGNORE.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            header = Some(line);
+            header_written = false;
+            continue;
+        }
+        if present.contains(trimmed) {
+            continue;
+        }
+        if !header_written {
+            if let Some(header) = header {
+                if !additions.is_empty() {
+                    additions.push('\n');
+                }
+                additions.push_str(header);
+                additions.push('\n');
+            }
+            header_written = true;
+        }
+        additions.push_str(line);
+        additions.push('\n');
+    }
+
+    if additions.is_empty() {
+        return Ok(false);
+    }
+
+    let mut next = existing;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push('\n');
+    next.push_str(&additions);
+    fs::write(&path, next).with_context(|| format!("writing {}", path.display()))?;
+    Ok(true)
+}
+
 fn write_if_changed(path: &Path, content: &str) -> Result<bool> {
     if matches!(fs::read_to_string(path), Ok(existing) if existing == content) {
         return Ok(false);
@@ -1221,6 +1325,89 @@ requires_stock = ["chat-pi"]
         let source = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
         assert!(manifest.contains("chat-pi = { package = \"dar-chat-pi\", version = "));
         assert!(source.contains("chat_pi::ChatPiExtension"));
+    }
+
+    #[test]
+    fn init_build_creates_full_gitignore_when_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_test_agent_yaml(agent);
+
+        compose(agent).unwrap();
+
+        let contents = std::fs::read_to_string(agent.join(".gitignore")).unwrap();
+        assert_eq!(contents, STANDARD_GITIGNORE);
+        for entry in [
+            ".env",
+            "/bin/",
+            "/.dar/target/",
+            "/data/",
+            "/logs/",
+            "/workspaces/",
+            "/claude-sessions/",
+            "/opencode-sessions/",
+            "/pi-sessions/",
+        ] {
+            assert!(
+                contents.lines().any(|line| line == entry),
+                "missing entry {entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn init_build_appends_missing_entries_and_preserves_user_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_test_agent_yaml(agent);
+        // Pre-existing file with a user line plus `.env` already added (mirrors
+        // tracker-linear's init_workflow behavior).
+        std::fs::write(agent.join(".gitignore"), "my-secret-notes.txt\n.env\n").unwrap();
+
+        compose(agent).unwrap();
+
+        let contents = std::fs::read_to_string(agent.join(".gitignore")).unwrap();
+        // User line untouched and still first.
+        assert!(contents.starts_with("my-secret-notes.txt\n.env\n"));
+        // All standard entries present exactly once (`.env` not re-added).
+        for entry in [
+            ".env",
+            "/bin/",
+            "/.dar/target/",
+            "/data/",
+            "/logs/",
+            "/workspaces/",
+            "/claude-sessions/",
+            "/opencode-sessions/",
+            "/pi-sessions/",
+        ] {
+            assert_eq!(
+                contents.lines().filter(|line| *line == entry).count(),
+                1,
+                "entry {entry} should appear exactly once"
+            );
+        }
+    }
+
+    #[test]
+    fn init_build_gitignore_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_test_agent_yaml(agent);
+
+        compose(agent).unwrap();
+        let first = std::fs::read_to_string(agent.join(".gitignore")).unwrap();
+        compose(agent).unwrap();
+        let second = std::fs::read_to_string(agent.join(".gitignore")).unwrap();
+
+        assert_eq!(first, second, "re-running must not change .gitignore");
+        for entry in [".env", "/bin/", "/data/", "/pi-sessions/"] {
+            assert_eq!(
+                second.lines().filter(|line| *line == entry).count(),
+                1,
+                "entry {entry} duplicated on re-run"
+            );
+        }
     }
 
     fn write_test_agent_yaml(agent: &Path) {

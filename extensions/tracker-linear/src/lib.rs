@@ -452,6 +452,10 @@ pub fn init_workflow_with_options(
     let body =
         workflow_body_with_frontmatter(linear_project_slug, linear_project, expose_graphql_tool);
     std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+    // `dar init-build` owns the full agent `.gitignore` (see
+    // dar-cli composer::ensure_agent_gitignore). We still ensure `.env` here so
+    // a standalone `init_workflow` never leaves secrets un-ignored; the helper
+    // is idempotent, so init-build will not duplicate this entry.
     ensure_gitignore_entry(root, ".env")?;
     println!("wrote {}", path.display());
     Ok(())
