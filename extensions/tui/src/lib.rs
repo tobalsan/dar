@@ -62,6 +62,44 @@ pub struct ChatConfig {
     /// absent uses the default `data/tui/sessions`. No `agent.yaml` change is
     /// required to get the default behavior.
     pub sessions_dir: Option<String>,
+    /// Per-turn timeout in seconds; absent uses [`DEFAULT_TURN_TIMEOUT`]
+    /// (60 minutes). The TUI aborts the in-flight turn after this long and
+    /// shows a retry notice. Validated at register time: must be > 0 and
+    /// no larger than [`MAX_TURN_TIMEOUT_SECS`].
+    pub turn_timeout_secs: Option<u64>,
+}
+
+/// Default per-turn timeout when `turn_timeout_secs` is omitted: 60 minutes.
+pub const DEFAULT_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Upper bound on a configured `turn_timeout_secs` (24 hours). A larger value
+/// is almost certainly a mistake, so it is rejected at boot rather than
+/// silently accepted.
+pub const MAX_TURN_TIMEOUT_SECS: u64 = 86_400;
+
+impl ChatConfig {
+    /// The resolved per-turn timeout: the configured override or the default.
+    pub fn turn_timeout(&self) -> std::time::Duration {
+        self.turn_timeout_secs
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(DEFAULT_TURN_TIMEOUT)
+    }
+
+    /// Reject nonsensical timeouts (zero or absurdly large) so a malformed
+    /// `agent.yaml` fails cleanly at boot/doctor instead of at first use.
+    fn validate(&self) -> Result<()> {
+        if let Some(secs) = self.turn_timeout_secs {
+            anyhow::ensure!(
+                secs > 0,
+                "extensions.tui.chat.turn_timeout_secs must be greater than 0"
+            );
+            anyhow::ensure!(
+                secs <= MAX_TURN_TIMEOUT_SECS,
+                "extensions.tui.chat.turn_timeout_secs must be <= {MAX_TURN_TIMEOUT_SECS} (24h)"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Resolve the TUI sessions dir from the chat config: the configured override
@@ -108,6 +146,7 @@ impl Extension for TuiExtension {
                     .context("invalid extensions.tui config")?,
                 None => TuiConfig::default(),
             };
+            config.chat.validate()?;
             // Register recall tools (`session_list`) against the shared tool
             // registry, but only when the registry service is present — the
             // same conditional wiring as the foreground's `host_tool_bridge`.
@@ -205,12 +244,61 @@ mod tests {
         values.insert(
             "tui".to_string(),
             serde_json::json!({
-                "chat": { "backend": "pi", "command": "pi" }
+                "chat": { "backend": "pi", "command": "pi", "turn_timeout_secs": 3600 }
             }),
         );
         let mut ctx = register_ctx(host_api::ConfigStore::from_values(values));
         TuiExtension.register(&mut ctx).await.unwrap();
         assert!(ctx.foreground.select(Some("tui")).unwrap().is_some());
+    }
+
+    #[test]
+    fn turn_timeout_defaults_when_omitted() {
+        assert_eq!(ChatConfig::default().turn_timeout(), DEFAULT_TURN_TIMEOUT);
+        assert_eq!(DEFAULT_TURN_TIMEOUT, std::time::Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn turn_timeout_secs_overrides_default() {
+        let config = ChatConfig {
+            turn_timeout_secs: Some(7200),
+            ..Default::default()
+        };
+        assert_eq!(config.turn_timeout(), std::time::Duration::from_secs(7200));
+    }
+
+    #[test]
+    fn validate_rejects_zero_and_oversized_timeouts() {
+        for bad in [0, MAX_TURN_TIMEOUT_SECS + 1] {
+            let config = ChatConfig {
+                turn_timeout_secs: Some(bad),
+                ..Default::default()
+            };
+            assert!(
+                config.validate().is_err(),
+                "turn_timeout_secs={bad} must be rejected"
+            );
+        }
+        // Bounds and omission are accepted.
+        for ok in [None, Some(1), Some(MAX_TURN_TIMEOUT_SECS)] {
+            let config = ChatConfig {
+                turn_timeout_secs: ok,
+                ..Default::default()
+            };
+            assert!(config.validate().is_ok(), "turn_timeout_secs={ok:?} ok");
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_turn_timeout_fails_register() {
+        let mut values = std::collections::HashMap::new();
+        values.insert(
+            "tui".to_string(),
+            serde_json::json!({ "chat": { "turn_timeout_secs": 0 } }),
+        );
+        let mut ctx = register_ctx(host_api::ConfigStore::from_values(values));
+        let err = TuiExtension.register(&mut ctx).await.unwrap_err();
+        assert!(err.to_string().contains("turn_timeout_secs"));
     }
 
     #[tokio::test]
