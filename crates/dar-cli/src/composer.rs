@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
+use semver::{Version, VersionReq};
 use serde::Deserialize;
 
 /// Standard `.gitignore` block for an agent folder. Lines are grouped under
@@ -38,7 +39,21 @@ const STANDARD_GITIGNORE: &str = "\
 
 const GENERATED_TOML_HEADER: &str = "# generated - do not hand-edit\n";
 const GENERATED_RUST_HEADER: &str = "// # generated - do not hand-edit\n";
-const STOCK_CRATE_VERSION_REQ: &str = concat!(env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"));
+const STOCK_CRATE_VERSION_REQ: &str = concat!(
+    env!("CARGO_PKG_VERSION_MAJOR"),
+    ".",
+    env!("CARGO_PKG_VERSION_MINOR")
+);
+const LOCAL_CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const PATCHED_REGISTRY_CRATES: &[(&str, &str)] = &[
+    ("dar-host-api", "crates/host-api"),
+    ("dar-cap-chat", "crates/cap-chat"),
+    ("dar-cap-runner", "crates/cap-runner"),
+    ("dar-orchestrator-api", "crates/orchestrator-api"),
+    ("dar-tool-registry", "crates/tool-registry"),
+    ("dar-extension-sdk", "crates/extension-sdk"),
+];
 
 struct StockExtension {
     package: &'static str,
@@ -196,9 +211,9 @@ fn write_composition_crate(agent: &Path) -> Result<(PathBuf, bool)> {
     fs::create_dir_all(crate_dir.join("src"))
         .with_context(|| format!("creating {}", crate_dir.join("src").display()))?;
 
-    let locals = discover_extensions(&agent)?;
-    let stock = selected_stock_extensions(&agent, &locals)?;
     let source_root = dar_source_root()?;
+    let locals = discover_extensions(&agent, &source_root)?;
+    let stock = selected_stock_extensions(&agent, &locals)?;
     let mut changed = write_if_changed(
         &crate_dir.join("Cargo.toml"),
         &cargo_toml(&crate_dir, &stock, &locals, &source_root),
@@ -530,7 +545,7 @@ where
     Ok(())
 }
 
-fn discover_extensions(agent: &Path) -> Result<Vec<LocalExtension>> {
+fn discover_extensions(agent: &Path, source_root: &Path) -> Result<Vec<LocalExtension>> {
     let extensions_dir = agent.join("extensions");
     if !extensions_dir.exists() {
         return Ok(Vec::new());
@@ -549,6 +564,7 @@ fn discover_extensions(agent: &Path) -> Result<Vec<LocalExtension>> {
         let value = manifest
             .parse::<toml::Value>()
             .with_context(|| format!("parsing {}", manifest_path.display()))?;
+        validate_patched_registry_deps(&manifest_path, &value, source_root)?;
         let package = value
             .get("package")
             .and_then(|p| p.get("name"))
@@ -588,6 +604,88 @@ fn discover_extensions(agent: &Path) -> Result<Vec<LocalExtension>> {
     }
     extensions.sort_by(|a, b| a.package.cmp(&b.package));
     Ok(extensions)
+}
+
+fn validate_patched_registry_deps(
+    manifest_path: &Path,
+    manifest: &toml::Value,
+    source_root: &Path,
+) -> Result<()> {
+    let local_version = Version::parse(LOCAL_CRATE_VERSION)
+        .with_context(|| format!("parsing local dar version {LOCAL_CRATE_VERSION}"))?;
+    for (dep_name, req) in registry_dar_dependency_reqs(manifest) {
+        if VersionReq::parse(&req)
+            .with_context(|| {
+                format!(
+                    "parsing dependency requirement {dep_name} = {req:?} in {}",
+                    manifest_path.display()
+                )
+            })?
+            .matches(&local_version)
+        {
+            continue;
+        }
+        bail!(
+            "{} depends on {dep_name} {req:?}, but local dar checkout {} provides {LOCAL_CRATE_VERSION}; use a matching dar checkout or update the extension dependency",
+            manifest_path.display(),
+            source_root.display()
+        );
+    }
+    Ok(())
+}
+
+fn registry_dar_dependency_reqs(manifest: &toml::Value) -> Vec<(String, String)> {
+    let mut reqs = Vec::new();
+    collect_registry_dar_dependency_reqs(manifest.get("dependencies"), &mut reqs);
+    collect_registry_dar_dependency_reqs(manifest.get("dev-dependencies"), &mut reqs);
+    collect_registry_dar_dependency_reqs(manifest.get("build-dependencies"), &mut reqs);
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        for target in targets.values() {
+            collect_registry_dar_dependency_reqs(target.get("dependencies"), &mut reqs);
+            collect_registry_dar_dependency_reqs(target.get("dev-dependencies"), &mut reqs);
+            collect_registry_dar_dependency_reqs(target.get("build-dependencies"), &mut reqs);
+        }
+    }
+    reqs
+}
+
+fn collect_registry_dar_dependency_reqs(
+    section: Option<&toml::Value>,
+    reqs: &mut Vec<(String, String)>,
+) {
+    let Some(deps) = section.and_then(toml::Value::as_table) else {
+        return;
+    };
+    for (key, dep) in deps {
+        match dep {
+            toml::Value::String(req) if is_patched_registry_crate(key) => {
+                reqs.push((key.clone(), req.clone()));
+            }
+            toml::Value::Table(table) => {
+                if table.contains_key("path") || table.contains_key("git") {
+                    continue;
+                }
+                let package = table
+                    .get("package")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(key);
+                if let Some(req) = table
+                    .get("version")
+                    .and_then(toml::Value::as_str)
+                    .filter(|_| is_patched_registry_crate(package))
+                {
+                    reqs.push((package.to_string(), req.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn is_patched_registry_crate(name: &str) -> bool {
+    PATCHED_REGISTRY_CRATES
+        .iter()
+        .any(|(crate_name, _)| *crate_name == name)
 }
 
 fn cargo_toml(
@@ -647,6 +745,7 @@ path = "src/main.rs"
             toml_path(&local.path)
         ));
     }
+    patch_crates_io(&mut out, source_root);
     out.push_str("\n[features]\n");
     let default_features = stock
         .iter()
@@ -662,6 +761,18 @@ path = "src/main.rs"
         ));
     }
     out
+}
+
+fn patch_crates_io(out: &mut String, source_root: &Path) {
+    out.push_str("\n[patch.crates-io]\n");
+    for (package, rel_path) in PATCHED_REGISTRY_CRATES {
+        let abs = source_root.join(rel_path);
+        let abs = abs.canonicalize().unwrap_or(abs);
+        out.push_str(&format!(
+            "{package} = {{ path = \"{}\" }}\n",
+            toml_path(&abs)
+        ));
+    }
 }
 
 fn stock_package(key: &str) -> String {
@@ -882,6 +993,13 @@ mod tests {
         assert!(manifest.contains("host-api = { package = \"dar-host-api\", version = "));
         assert!(manifest.contains("version = \"0."));
         assert!(manifest.contains("my-ext = { path = \"../extensions/my-ext\" }"));
+        assert!(manifest.contains("\n[patch.crates-io]\n"));
+        for (package, _) in PATCHED_REGISTRY_CRATES {
+            assert!(
+                manifest.contains(&format!("{package} = {{ path = ")),
+                "missing patch for {package}: {manifest}"
+            );
+        }
         assert!(source.starts_with("// # generated - do not hand-edit\n"));
         assert!(source.contains("my_ext::extension(),"));
 
@@ -897,6 +1015,61 @@ mod tests {
             source_before,
             std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap()
         );
+    }
+
+    #[test]
+    fn compose_accepts_registry_sdk_dep_when_version_matches() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_test_agent_yaml(agent);
+        write_test_extension_with_dependency(agent, "dar-extension-sdk = \"0.3\"");
+
+        compose(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        assert!(manifest.contains("\n[patch.crates-io]\n"));
+        assert!(manifest.contains("dar-extension-sdk = { path = "));
+    }
+
+    #[test]
+    fn compose_rejects_registry_sdk_dep_when_version_mismatches() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_test_agent_yaml(agent);
+        write_test_extension_with_dependency(agent, "dar-extension-sdk = \"=0.2.0\"");
+
+        let err = compose(agent).unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(message.contains("depends on dar-extension-sdk \"=0.2.0\""));
+        assert!(message.contains("provides 0.3.0"));
+    }
+
+    #[test]
+    fn compose_validates_renamed_registry_sdk_dep() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_test_agent_yaml(agent);
+        write_test_extension_with_dependency(
+            agent,
+            "sdk = { package = \"dar-extension-sdk\", version = \"0.3\" }",
+        );
+
+        compose(agent).unwrap();
+    }
+
+    #[test]
+    fn compose_ignores_path_sdk_dep_version_for_local_extensions() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_test_agent_yaml(agent);
+        let sdk = toml_path(&dar_source_root().unwrap().join("crates/extension-sdk"));
+        write_test_extension_with_dependency(
+            agent,
+            &format!("dar-extension-sdk = {{ version = \"=0.2.0\", path = \"{sdk}\" }}"),
+        );
+
+        compose(agent).unwrap();
     }
 
     #[test]
@@ -1272,11 +1445,31 @@ factory = "my_ext::extension"
         );
     }
 
+    fn write_test_extension_with_dependency(agent: &Path, dependency: &str) {
+        write_test_extension_manifest(agent, dependency);
+    }
+
     fn write_test_extension_with_metadata(agent: &Path, metadata: &str) {
         // Stock crates are `publish = false`, so the local extension's
         // host-api dep must resolve by path into the dar source checkout
         // (the same mechanism the composer emits for stock deps).
         let host_api = toml_path(&dar_source_root().unwrap().join("crates/host-api"));
+        write_test_extension_manifest(
+            agent,
+            &format!(
+                "host-api = {{ package = \"dar-host-api\", version = \"{STOCK_CRATE_VERSION_REQ}\", path = \"{host_api}\" }}"
+            ),
+        );
+        let manifest = agent.join("extensions/my-ext/Cargo.toml");
+        let mut contents = std::fs::read_to_string(&manifest).unwrap();
+        contents = contents.replace(
+            "[package.metadata.dar]\nfactory = \"my_ext::extension\"",
+            metadata.trim_end(),
+        );
+        std::fs::write(manifest, contents).unwrap();
+    }
+
+    fn write_test_extension_manifest(agent: &Path, dependency: &str) {
         let extension = agent.join("extensions/my-ext");
         std::fs::create_dir_all(extension.join("src")).unwrap();
         std::fs::write(
@@ -1287,10 +1480,11 @@ name = "my-ext"
 version = "0.1.0"
 edition = "2021"
 
-{metadata}
+[package.metadata.dar]
+factory = "my_ext::extension"
 
 [dependencies]
-host-api = {{ package = "dar-host-api", version = "{STOCK_CRATE_VERSION_REQ}", path = "{host_api}" }}
+{dependency}
 "#
             ),
         )
