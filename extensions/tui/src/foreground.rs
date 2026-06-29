@@ -10,7 +10,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use anyhow::Result;
-use cap_chat::{ChatBackend, ChatEvent, ChatSession, ChatSessionParams};
+use cap_chat::{ChatBackend, ChatEvent, ChatSession};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
 };
@@ -20,7 +20,6 @@ use host_api::{
     STARTUP_BANNER_TOPIC,
 };
 use orchestrator_api::{RunSnapshot, RUN_SNAPSHOT_TOPIC};
-use system_files::bus::{SystemContext, SYSTEM_CONTEXT_TOPIC};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc::Sender;
@@ -409,35 +408,15 @@ async fn open_session(
     let resume_session_id = (!suppress_resume)
         .then(|| crate::archive::newest_session_id(&session_dir))
         .flatten();
-    let snap = ctx
-        .host
-        .bus
-        .read_retained::<RunSnapshot>(RUN_SNAPSHOT_TOPIC)
-        .ok()
-        .filter(|s| s.version > 0);
-    let model = snap.as_ref().and_then(|s| s.agent.model.clone());
-    let provider = snap.as_ref().and_then(|s| s.agent.provider.clone());
-    // Retained cross-surface system context (the agent's identity files).
-    // Absent topic or empty assembly -> None, so the session opens exactly as
-    // before with no system turn injected.
-    let system_prompt = ctx
-        .host
-        .bus
-        .read_retained::<SystemContext>(SYSTEM_CONTEXT_TOPIC)
-        .ok()
-        .filter(|sc| !sc.is_empty())
-        .map(|sc| sc.text);
-    let params = ChatSessionParams::builder(
-        config.command.as_deref().unwrap_or(""),
-        ctx.paths.root(),
-        &session_dir,
-    )
-    .model(model)
-    .provider(provider)
-    .system_prompt(system_prompt)
-    .host_tool_bridge(host_tool_bridge(ctx))
-    .resume_session_id(resume_session_id)
-    .build();
+    // Build params through the shared SDK helper so the TUI talks to the same
+    // agent identity (model/provider from the retained RunSnapshot, retained
+    // `system.context` as system_prompt, host tool bridge, agent root cwd) as
+    // every out-of-tree chat surface. The TUI-only bits — its configured
+    // backend command and session resume — are layered on top.
+    let params = dar_extension_sdk::chat::agent_session_params(ctx, &session_dir)
+        .command(config.command.as_deref().unwrap_or(""))
+        .resume_session_id(resume_session_id)
+        .build();
     backend.open(params, tx).await
 }
 
@@ -450,32 +429,6 @@ fn sessions_dir(config: &ChatConfig, ctx: &StartCtx) -> Result<std::path::PathBu
         },
         &ctx.paths,
     )
-}
-
-/// Build the host MCP bridge descriptor for the chat backend, or `None` when no
-/// extension registered any tool. Mirrors the orchestrator's worker-spawn path
-/// so interactive chat advertises the same registry tools as issue workers: the
-/// backend is pointed at `<this binary> __mcp-bridge --dir <agent root>`, a
-/// host-owned process that re-loads the agent's config/secrets and executes
-/// registered tools in-host; the chat agent only sees tool schemas and results.
-fn host_tool_bridge(ctx: &StartCtx) -> Option<cap_chat::HostToolBridge> {
-    let registry = ctx
-        .host
-        .services
-        .get_named::<dyn tool_registry::ToolRegistryHandle>(tool_registry::TOOL_REGISTRY_SERVICE)
-        .ok()?;
-    if registry.is_empty() {
-        return None;
-    }
-    let command = std::env::current_exe().ok()?.to_string_lossy().into_owned();
-    Some(cap_chat::HostToolBridge {
-        command,
-        args: vec![
-            "__mcp-bridge".to_string(),
-            "--dir".to_string(),
-            ctx.paths.root().display().to_string(),
-        ],
-    })
 }
 
 #[cfg(test)]

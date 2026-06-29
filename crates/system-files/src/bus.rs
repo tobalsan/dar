@@ -3,42 +3,15 @@
 //! The substrate `system-context` extension resolves `AGENTS.md` + `system_files`
 //! once at boot and publishes the assembled [`SystemContext`] on the retained
 //! [`SYSTEM_CONTEXT_TOPIC`], before the orchestrator loop and any consumer
-//! (TUI chat, issue runner) reads it. Keeping the topic/type here — neutral and
-//! dependency-light — lets every surface share one identity without importing
-//! the orchestrator or a dedicated capability crate.
+//! (TUI chat, issue runner, out-of-tree chat extensions) reads it.
+//!
+//! The payload + topic themselves live in `dar-orchestrator-api` — the
+//! published, dependency-light bus crate — so SDK consumers can read the same
+//! identity context without importing this `publish = false` resolver crate.
+//! They are re-exported here for the in-tree resolver/publisher, which also
+//! owns the [`From`] projection from a resolver result into the bus payload.
 
-use serde::{Deserialize, Serialize};
-
-/// Retained topic carrying the agent's assembled system-file identity context.
-/// Registered and published by the `system-context` substrate extension at boot,
-/// before consumers start, so every surface reads the same `AGENTS.md` +
-/// `system_files` assembly.
-pub const SYSTEM_CONTEXT_TOPIC: &str = "system.context";
-
-/// One file that contributed to the assembled [`SystemContext`], in order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SystemContextFile {
-    /// Root-relative, forward-slash path shown in the tagged block.
-    pub path: String,
-}
-
-/// Retained bus payload: the agent's assembled, path-tagged system context.
-///
-/// `text` is the full assembly (`AGENTS.md` first, then `system_files`); `files`
-/// lists the contributing paths in assembly order. Defaults to empty so the
-/// retained topic can be registered with an inert initial value.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SystemContext {
-    pub text: String,
-    pub files: Vec<SystemContextFile>,
-}
-
-impl SystemContext {
-    /// `true` when no files resolved (empty identity context).
-    pub fn is_empty(&self) -> bool {
-        self.files.is_empty()
-    }
-}
+pub use orchestrator_api::{SystemContext, SystemContextFile, SYSTEM_CONTEXT_TOPIC};
 
 impl From<crate::SystemContext> for SystemContext {
     /// Project a resolver result into the on-bus payload, dropping warnings

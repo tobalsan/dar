@@ -114,6 +114,14 @@ pub struct ChatSessionParamsBuilder {
 }
 
 impl ChatSessionParamsBuilder {
+    /// Override the backend command. Defaults to whatever was passed to
+    /// [`ChatSessionParams::builder`]; the shared SDK helper opens with an empty
+    /// command and lets a surface that needs an explicit one set it here.
+    pub fn command(mut self, value: impl Into<String>) -> Self {
+        self.command = value.into();
+        self
+    }
+
     pub fn model(mut self, value: Option<String>) -> Self {
         self.model = value;
         self

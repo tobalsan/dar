@@ -15,6 +15,41 @@ pub const CONTROL_TOPIC: &str = "orchestrator.control";
 pub const RUN_REQUESTED_TOPIC: &str = "orchestrator.run-requested";
 pub const DISPATCH_REQUESTED_TOPIC: &str = "orchestrator.dispatch-requested";
 
+/// Retained topic carrying the agent's assembled system-file identity context.
+///
+/// Registered and published by the `system-context` substrate extension at
+/// boot, before consumers start, so every surface (TUI chat, issue runner, and
+/// out-of-tree chat extensions) reads the same `AGENTS.md` + `system_files`
+/// assembly. The contract lives here — in the published, dependency-light bus
+/// crate — so SDK consumers can read it without importing `dar-system-files`
+/// (which is `publish = false`).
+pub const SYSTEM_CONTEXT_TOPIC: &str = "system.context";
+
+/// One file that contributed to the assembled [`SystemContext`], in order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemContextFile {
+    /// Root-relative, forward-slash path shown in the tagged block.
+    pub path: String,
+}
+
+/// Retained bus payload: the agent's assembled, path-tagged system context.
+///
+/// `text` is the full assembly (`AGENTS.md` first, then `system_files`); `files`
+/// lists the contributing paths in assembly order. Defaults to empty so the
+/// retained topic can be registered with an inert initial value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemContext {
+    pub text: String,
+    pub files: Vec<SystemContextFile>,
+}
+
+impl SystemContext {
+    /// `true` when no files resolved (empty identity context).
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunStatus {
     Running,

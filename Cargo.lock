@@ -605,7 +605,9 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "dar-cap-chat",
+ "dar-extension-sdk",
  "dar-host-api",
+ "dar-orchestrator-api",
  "dar-runner-core",
  "nix",
  "serde_json",
@@ -950,6 +952,7 @@ dependencies = [
 name = "dar-system-files"
 version = "0.3.0"
 dependencies = [
+ "dar-orchestrator-api",
  "serde",
  "serde_yaml",
  "tempfile",
@@ -1032,6 +1035,7 @@ dependencies = [
  "crossterm",
  "dar-cap-chat",
  "dar-chat-pi",
+ "dar-extension-sdk",
  "dar-frontend-log",
  "dar-host-api",
  "dar-orchestrator-api",
