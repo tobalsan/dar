@@ -30,10 +30,21 @@ use crate::backend::{self, Resolution};
 use crate::dash::{self, DashFeed};
 use crate::{chat, logs, view, ChatConfig, TuiConfig};
 
-/// Fixed per-turn ceiling: the TUI aborts the in-flight turn after this long.
-const TURN_TIMEOUT: Duration = Duration::from_secs(600);
 /// Coalesced redraw cadence; dirty state is painted at most this often.
 const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Human-readable timeout notice shown when a turn is abandoned, e.g.
+/// "turn timed out after 60 minutes; aborted - resend to retry".
+fn timeout_notice(timeout: Duration) -> String {
+    let secs = timeout.as_secs();
+    let unit = if secs % 60 == 0 {
+        let mins = secs / 60;
+        format!("{mins} minute{}", if mins == 1 { "" } else { "s" })
+    } else {
+        format!("{secs} second{}", if secs == 1 { "" } else { "s" })
+    };
+    format!("turn timed out after {unit}; aborted - resend to retry")
+}
 
 pub struct TuiForeground {
     config: TuiConfig,
@@ -166,6 +177,7 @@ async fn run_interactive(
 ) -> Result<()> {
     let mut shutdown = ctx.shutdown.clone();
     let mut app_done = ctx.host.bus.subscribe_retained::<bool>(APP_DONE_TOPIC)?;
+    let turn_timeout = config.turn_timeout();
     let mut term = Terminal::new(CrosstermBackend::new(TermWriter(terminal)))?;
     // Enable mouse-wheel scroll + bracketed paste for the Chat tab. The guard's
     // Drop turns them back off on EVERY exit path (normal return, an early `?`,
@@ -305,13 +317,11 @@ async fn run_interactive(
                 app.dirty = true;
             }
             _ = redraw.tick() => {
-                if app.chat.turn_timed_out(TURN_TIMEOUT) {
+                if app.chat.turn_timed_out(turn_timeout) {
                     if let Some(session) = session.as_mut() {
                         let _ = session.abort().await;
                     }
-                    app.chat.abandon_turn(
-                        "turn timed out after 10 minutes; aborted - resend to retry".to_string(),
-                    );
+                    app.chat.abandon_turn(timeout_notice(turn_timeout));
                     app.dirty = true;
                 }
                 if app.chat.in_flight {
@@ -490,6 +500,43 @@ mod tests {
     use crate::TuiExtension;
 
     use super::*;
+    use crate::{DEFAULT_TURN_TIMEOUT, MAX_TURN_TIMEOUT_SECS};
+
+    #[test]
+    fn default_turn_timeout_is_sixty_minutes() {
+        assert_eq!(DEFAULT_TURN_TIMEOUT, Duration::from_secs(3600));
+        // An omitted config resolves to the 60-minute default.
+        assert_eq!(ChatConfig::default().turn_timeout(), DEFAULT_TURN_TIMEOUT);
+    }
+
+    #[test]
+    fn configured_turn_timeout_overrides_default() {
+        let config = ChatConfig {
+            turn_timeout_secs: Some(1800),
+            ..Default::default()
+        };
+        assert_eq!(config.turn_timeout(), Duration::from_secs(1800));
+    }
+
+    #[test]
+    fn timeout_notice_reports_the_configured_duration() {
+        // The default surfaces as minutes (no "10 minutes" regression).
+        assert_eq!(
+            timeout_notice(DEFAULT_TURN_TIMEOUT),
+            "turn timed out after 60 minutes; aborted - resend to retry"
+        );
+        assert_eq!(
+            timeout_notice(Duration::from_secs(60)),
+            "turn timed out after 1 minute; aborted - resend to retry"
+        );
+        // Non-minute durations fall back to seconds.
+        assert_eq!(
+            timeout_notice(Duration::from_secs(90)),
+            "turn timed out after 90 seconds; aborted - resend to retry"
+        );
+        // Sanity: the upper bound formats without panicking.
+        let _ = timeout_notice(Duration::from_secs(MAX_TURN_TIMEOUT_SECS));
+    }
 
     #[derive(Clone, Default)]
     struct SharedBuf(Arc<Mutex<Vec<u8>>>);
@@ -687,6 +734,7 @@ done"#;
             backend: None, // exercises the "pi" fallback
             command: Some(script.to_str().unwrap().to_string()),
             sessions_dir: None,
+            turn_timeout_secs: None,
         };
         let (chat_tx, mut chat_rx) = tokio::sync::mpsc::channel::<ChatEvent>(64);
         let mut session: Option<Box<dyn ChatSession>> = None;
@@ -767,6 +815,7 @@ done"#;
             backend: None,
             command: Some(script.to_str().unwrap().to_string()),
             sessions_dir: None,
+            turn_timeout_secs: None,
         };
         let (chat_tx, mut chat_rx) = tokio::sync::mpsc::channel::<ChatEvent>(64);
         let mut session: Option<Box<dyn ChatSession>> = None;
@@ -828,6 +877,7 @@ done"#;
             backend: None,
             command: None,
             sessions_dir: None,
+            turn_timeout_secs: None,
         };
         let (chat_tx, _chat_rx) = tokio::sync::mpsc::channel::<ChatEvent>(64);
         let mut session: Option<Box<dyn ChatSession>> = None;
@@ -895,6 +945,7 @@ done"#;
             backend: None,
             command: Some(script.to_str().unwrap().to_string()),
             sessions_dir: None,
+            turn_timeout_secs: None,
         };
         let (chat_tx, mut chat_rx) = tokio::sync::mpsc::channel::<ChatEvent>(64);
         let mut session: Option<Box<dyn ChatSession>> = None;
