@@ -26,21 +26,20 @@ pub mod chat {
     /// Resolve the chat-backend id for an agent-facing chat surface, with the
     /// exact same precedence the TUI uses:
     ///
-    /// 1. an explicit, *registered* `configured` override wins;
+    /// 1. an explicit non-empty `configured` override wins;
     /// 2. else follow the orchestrator's selected runner when it is registered
     ///    as a `dyn ChatBackend` (only off a real snapshot: `version > 0` and a
     ///    non-empty runner id);
     /// 3. else fall back to the stock [`CHAT_FALLBACK_BACKEND`] (`pi`).
     ///
-    /// Returns the fallback id even when nothing is registered; opening that id
-    /// is the surface's chance to report "backend not registered". This keeps
-    /// every chat extension from re-deriving (and drifting on) the precedence.
+    /// Returning an explicit override even when it is not registered mirrors the
+    /// TUI: opening that id is the surface's chance to report
+    /// "backend not registered". Runner-derived ids are checked before use so a
+    /// runner without a chat backend can still fall back cleanly.
     pub fn resolve_agent_backend(ctx: &StartCtx, configured: Option<&str>) -> String {
         let registered = |id: &str| ctx.host.services.get::<dyn ChatBackend>(id).is_ok();
-        if let Some(id) = configured {
-            if !id.is_empty() && registered(id) {
-                return id.to_string();
-            }
+        if let Some(id) = configured.filter(|id| !id.is_empty()) {
+            return id.to_string();
         }
         let runner = ctx
             .host

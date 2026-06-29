@@ -116,9 +116,10 @@ use dar_extension_sdk::chat::{agent_session_params, resolve_agent_backend};
 async fn open_session(ctx: &StartCtx, session_dir: &Path, configured: Option<&str>)
     -> anyhow::Result<Box<dyn ChatSession>>
 {
-    // Same backend precedence as the TUI: an explicit *registered* config
-    // override wins; else follow the orchestrator's selected runner when it is
-    // registered as a chat backend; else the stock "pi" fallback.
+    // Same backend precedence as the TUI: an explicit config override wins
+    // (and fails at open time if misspelled); else follow the orchestrator's
+    // selected runner when it is registered as a chat backend; else the stock
+    // "pi" fallback.
     let backend_id = resolve_agent_backend(ctx, configured);
     let backend = ctx.host.services.get::<dyn ChatBackend>(&backend_id)?;
 
