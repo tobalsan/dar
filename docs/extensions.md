@@ -98,6 +98,50 @@ Real ids in the shipped mix: runners `dyn Runner` under `pi` / `codex` /
 form the key, so `dyn ChatBackend @ "pi"` coexists with `dyn Runner @ "pi"`.
 (`register` is an alias for `service`.)
 
+### Chat surfaces (share the agent identity)
+
+Any extension that opens a `ChatBackend` session for **agent-facing** chat —
+IRC, Telegram, a future web/Discord bridge, and the stock TUI — must talk to the
+same agent identity the TUI uses. Do not hand-build `ChatSessionParams`: model,
+provider, the agent's system prompt, and the host tool bridge all come from
+retained bus state, and copying that wiring by hand is how a surface silently
+drifts (the bug that left IRC replying `(no response)`: it opened sessions
+without the retained `system.context` and the provider rejected them).
+
+Go through the two shared SDK helpers in `dar_extension_sdk::chat`:
+
+```rust
+use dar_extension_sdk::chat::{agent_session_params, resolve_agent_backend};
+
+async fn open_session(ctx: &StartCtx, session_dir: &Path, configured: Option<&str>)
+    -> anyhow::Result<Box<dyn ChatSession>>
+{
+    // Same backend precedence as the TUI: an explicit config override wins
+    // (and fails at open time if misspelled); else follow the orchestrator's
+    // selected runner when it is registered as a chat backend; else the stock
+    // "pi" fallback.
+    let backend_id = resolve_agent_backend(ctx, configured);
+    let backend = ctx.host.services.get::<dyn ChatBackend>(&backend_id)?;
+
+    // Builds ChatSessionParams from retained state: model/provider from the
+    // RunSnapshot, the retained `system.context` as system_prompt, the host
+    // tool bridge, and the agent root cwd. Returns a builder so a surface can
+    // layer on its own bits (e.g. `.command(..)`, `.resume_session_id(..)`)
+    // before `.build()`.
+    let params = agent_session_params(ctx, session_dir).build();
+
+    let (tx, _rx) = tokio::sync::mpsc::channel(256);
+    Ok(backend.open(params, tx).await?)
+}
+```
+
+`agent_session_params` degrades gracefully: an absent or empty `system.context`
+topic yields no system prompt (the session opens exactly as before), and a
+missing `RunSnapshot` leaves model/provider unset. The retained bus contract
+(`SystemContext` + `SYSTEM_CONTEXT_TOPIC`) is published by the substrate
+`system-context` extension and re-exported from `dar_extension_sdk::chat`, so a
+surface never needs to depend on a `publish = false` in-tree crate to read it.
+
 ### Dashboard tab
 
 Any extension can contribute a tab to the web dashboard via the cap-style

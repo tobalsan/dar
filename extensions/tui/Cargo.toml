@@ -15,6 +15,7 @@ name = "tui"
 anyhow = "1"
 async-trait = "0.1"
 cap-chat = { package = "dar-cap-chat", path = "../../crates/cap-chat", version = "0.3" }
+dar-extension-sdk = { path = "../../crates/extension-sdk", version = "0.3" }
 tool-registry = { package = "dar-tool-registry", path = "../../crates/tool-registry", version = "0.3" }
 chrono = { version = "0.4", features = ["serde"] }
 # crossterm pinned to the workspace lock (dar-host has 0.28.x) and

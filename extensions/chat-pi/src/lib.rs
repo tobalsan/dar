@@ -764,6 +764,82 @@ mod tests {
         assert!(!pi_args(&empty).contains(&OsString::from("--append-system-prompt")));
     }
 
+    // -- shared SDK chat path (non-TUI surfaces) ------------------------------
+
+    /// Build a minimal `StartCtx` with an optional retained `SystemContext`,
+    /// the way a non-TUI chat surface (IRC/Telegram) sees the host at runtime.
+    fn start_ctx_with_system_context(
+        root: &Path,
+        context: Option<orchestrator_api::SystemContext>,
+    ) -> dar_extension_sdk::StartCtx {
+        let paths = host_api::HostPaths::new(root).unwrap();
+        let (_reg_tx, reg_rx) = tokio::sync::watch::channel(false);
+        let mut reg = host_api::RegisterCtx {
+            bus: host_api::EventBus::new(),
+            http: host_api::HttpRegistry::disabled(),
+            foreground: host_api::ForegroundRegistry::default(),
+            services: host_api::ServiceRegistry::default(),
+            paths: paths.clone(),
+            config: host_api::ConfigStore::default(),
+            shutdown: host_api::ShutdownToken::new(reg_rx),
+        };
+        if let Some(context) = context {
+            reg.bus
+                .register_retained(orchestrator_api::SYSTEM_CONTEXT_TOPIC, context)
+                .unwrap();
+        }
+        let config = reg.config.clone();
+        let host = reg.into_start_services().unwrap();
+        let (_sd_tx, sd_rx) = tokio::sync::watch::channel(false);
+        dar_extension_sdk::StartCtx {
+            shutdown: host_api::ShutdownToken::new(sd_rx),
+            paths,
+            config,
+            host,
+        }
+    }
+
+    /// The acceptance invariant: a non-TUI chat surface that builds its session
+    /// params through the shared SDK helper (`agent_session_params`) hands the
+    /// retained `system.context` to pi as `--system-prompt`. This is the exact
+    /// path IRC/Telegram now use, and the request-shape difference that left
+    /// IRC replying `(no response)` before this fix.
+    #[test]
+    fn sdk_chat_surface_delivers_system_prompt_to_pi() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = orchestrator_api::SystemContext {
+            text: "<system-file path=\"AGENTS.md\">be the agent</system-file>".to_string(),
+            files: vec![orchestrator_api::SystemContextFile {
+                path: "AGENTS.md".to_string(),
+            }],
+        };
+        let ctx = start_ctx_with_system_context(temp.path(), Some(context.clone()));
+        let session_dir = temp.path().join("sessions");
+
+        let params = dar_extension_sdk::chat::agent_session_params(&ctx, &session_dir).build();
+        let args = pi_args(&params);
+
+        let idx = args
+            .iter()
+            .position(|a| a == "--system-prompt")
+            .expect("non-TUI surface must pass --system-prompt via the shared SDK helper");
+        assert_eq!(args[idx + 1], OsString::from(context.text));
+    }
+
+    /// Graceful degrade, matching the TUI: an absent `system.context` topic
+    /// yields no `--system-prompt`, so chat opens exactly as before.
+    #[test]
+    fn sdk_chat_surface_omits_system_prompt_when_context_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let ctx = start_ctx_with_system_context(temp.path(), None);
+        let session_dir = temp.path().join("sessions");
+
+        let params = dar_extension_sdk::chat::agent_session_params(&ctx, &session_dir).build();
+        let args = pi_args(&params);
+
+        assert!(!args.contains(&OsString::from("--system-prompt")));
+    }
+
     // -- event mapping --------------------------------------------------------
 
     fn mapped_event(line: &str) -> ChatEvent {
