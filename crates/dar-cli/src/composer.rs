@@ -1042,7 +1042,7 @@ mod tests {
 
         let message = format!("{err:#}");
         assert!(message.contains("depends on dar-extension-sdk \"=0.2.0\""));
-        assert!(message.contains("provides 0.3.0"));
+        assert!(message.contains(&format!("provides {LOCAL_CRATE_VERSION}")));
     }
 
     #[test]
