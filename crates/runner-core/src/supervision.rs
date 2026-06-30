@@ -121,6 +121,14 @@ pub fn effective_command(command: &str, default: &str) -> OsString {
 ///   - `AGENT_MODEL`            — model name (only when configured)
 ///   - `AGENT_WORKER_MODEL`     — same as `AGENT_MODEL` (alias, only when configured)
 ///   - `AGENT_SESSION_DIR`      — path to the per-issue session directory (session runners only)
+///
+/// Also forces git into a non-interactive mode so agent-run git commands never
+/// block on an editor, pager, or credential prompt (which would otherwise hang
+/// the child for the full stall window and park the run):
+///   - `GIT_EDITOR=true`          — `git commit`/`rebase` editor invocations succeed instantly
+///   - `GIT_SEQUENCE_EDITOR=true` — interactive rebase todo editor auto-accepts
+///   - `GIT_TERMINAL_PROMPT=0`    — credential/host prompts fail fast instead of waiting on a TTY
+///   - `GIT_PAGER=cat` / `PAGER=cat` — paged output never blocks waiting for a TTY
 pub fn common_env(p: &SpawnParams<'_>) -> Vec<(OsString, OsString)> {
     let mut env = vec![
         (
@@ -149,6 +157,15 @@ pub fn common_env(p: &SpawnParams<'_>) -> Vec<(OsString, OsString)> {
             OsString::from("AGENT_WORKER_PROMPT"),
             OsString::from(&p.prompt),
         ),
+        // Non-interactive git: no editor/pager/credential prompt can hang a child.
+        (OsString::from("GIT_EDITOR"), OsString::from("true")),
+        (
+            OsString::from("GIT_SEQUENCE_EDITOR"),
+            OsString::from("true"),
+        ),
+        (OsString::from("GIT_TERMINAL_PROMPT"), OsString::from("0")),
+        (OsString::from("GIT_PAGER"), OsString::from("cat")),
+        (OsString::from("PAGER"), OsString::from("cat")),
     ];
     if let Some(model) = &p.model {
         env.push((OsString::from("AGENT_MODEL"), OsString::from(model)));
@@ -445,5 +462,71 @@ pub fn wait_for_pids_dead(pids: &[u32], timeout: Duration) {
             break;
         }
         std::thread::sleep(poll_interval.min(remaining));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::DateTime;
+
+    struct NullSink;
+    impl RunnerEventSink for NullSink {
+        fn push(&self, _line: String) {}
+    }
+
+    struct NullStore;
+    impl RunnerEventStore for NullStore {
+        fn insert_event(
+            &self,
+            _run_id: Option<&str>,
+            _issue_identifier: &str,
+            _kind: &'static str,
+            _payload: &str,
+            _ts: DateTime<Utc>,
+        ) {
+        }
+    }
+
+    fn env_value<'a>(env: &'a [(OsString, OsString)], key: &str) -> Option<&'a OsString> {
+        env.iter()
+            .find(|(k, _)| k == OsString::from(key).as_os_str())
+            .map(|(_, v)| v)
+    }
+
+    #[test]
+    fn common_env_forces_noninteractive_git() {
+        let events: Arc<dyn RunnerEventSink> = Arc::new(NullSink);
+        let store: Arc<dyn RunnerEventStore> = Arc::new(NullStore);
+        let last_event_at = Arc::new(Mutex::new(Utc::now()));
+        let params = SpawnParams::builder(
+            "fake",
+            "fake",
+            Path::new("/agent/workspaces/ISSUE-1"),
+            Path::new("/agent/workspaces"),
+            Path::new("/agent"),
+            "do the thing".to_string(),
+            "ISSUE-1".to_string(),
+            "run-1".to_string(),
+            60_000,
+            Arc::clone(&events),
+            Arc::clone(&store),
+            Arc::clone(&last_event_at),
+        )
+        .build();
+
+        let env = common_env(&params);
+
+        assert_eq!(env_value(&env, "GIT_EDITOR"), Some(&OsString::from("true")));
+        assert_eq!(
+            env_value(&env, "GIT_SEQUENCE_EDITOR"),
+            Some(&OsString::from("true"))
+        );
+        assert_eq!(
+            env_value(&env, "GIT_TERMINAL_PROMPT"),
+            Some(&OsString::from("0"))
+        );
+        assert_eq!(env_value(&env, "GIT_PAGER"), Some(&OsString::from("cat")));
+        assert_eq!(env_value(&env, "PAGER"), Some(&OsString::from("cat")));
     }
 }

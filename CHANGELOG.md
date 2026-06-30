@@ -7,6 +7,16 @@ the minor slot carries breaking changes, the patch slot carries compatible ones)
 
 Breaking changes are marked **⚠ BREAKING**.
 
+## [Unreleased]
+
+### Changed
+- Runners: spawn agent children with non-interactive git env (`GIT_EDITOR=true`,
+  `GIT_SEQUENCE_EDITOR=true`, `GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`/`PAGER=cat`)
+  so editor/pager/credential prompts auto-resolve instead of hanging the run until
+  the stall guard parks it (ALG-291).
+- Worker prompt: added Git Usage guidance steering workers away from
+  interactive/TTY-blocking git commands (ALG-291).
+
 ## [0.3.1] — 2026-06-29
 
 Patch release: additive SDK/chat surface plus TUI session recall. No breaking

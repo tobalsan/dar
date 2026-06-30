@@ -505,6 +505,10 @@ When code changes are needed:
 6. Link the PR to the Linear issue.
 7. Move the issue to `In Review`.
 
+## Git Usage
+
+Always use non-interactive git. Never run a git (or any) command that opens an editor or waits on a TTY/stdin — it will hang the run until the stall guard parks it. Use `git commit -m "..."` or `git commit --no-edit`; for rebases, run `git rebase --continue` only after staging changes (the environment already neutralizes `GIT_EDITOR`/`GIT_SEQUENCE_EDITOR` so it will not block on a message editor). Avoid `git commit --amend` without `--no-edit`, interactive rebase (`git rebase -i`), and any command that pages output or prompts for credentials.
+
 ## Blockers
 
 If requirements, ownership, base branch, dependency state, credentials, or validation risk are unclear, ask for human input instead of guessing. Update the Linear comment with the blocker, what you tried, and the decision needed, then move the issue to `Needs Human` and stop.
@@ -1639,6 +1643,8 @@ mod tests {
         assert!(body.contains("Spawn a reviewer subagent"));
         assert!(body.contains("Do not commit until the reviewer comes back clean"));
         assert!(body.contains("Link the PR to the Linear issue"));
+        assert!(body.contains("## Git Usage"));
+        assert!(body.contains("Always use non-interactive git"));
         assert!(body.contains("## Blockers"));
         assert!(body.contains("move the issue to `Needs Human` and stop"));
         assert!(body.contains("## Completion"));
