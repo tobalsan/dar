@@ -38,6 +38,7 @@ impl RunnerEventSink for NullSink {
 #[derive(Default)]
 struct CaptureStore {
     latest_assistant: Mutex<Option<String>>,
+    text_deltas: Mutex<String>,
     latest_error: Mutex<Option<String>>,
 }
 
@@ -67,6 +68,17 @@ impl RunnerEventStore for CaptureStore {
                         .latest_assistant
                         .lock()
                         .expect("capture mutex poisoned") = Some(text.to_string());
+                }
+            }
+            Some("text_delta") => {
+                let Some(text) = value.get("text").and_then(|t| t.as_str()) else {
+                    return;
+                };
+                if !text.is_empty() {
+                    self.text_deltas
+                        .lock()
+                        .expect("capture mutex poisoned")
+                        .push_str(text);
                 }
             }
             Some("error") => {
@@ -196,6 +208,17 @@ pub async fn fire_runner(
         .expect("capture mutex poisoned")
         .clone()
         .unwrap_or_default();
+    let deltas = capture
+        .text_deltas
+        .lock()
+        .expect("capture mutex poisoned")
+        .trim()
+        .to_string();
+    let response = if response.is_empty() {
+        deltas
+    } else {
+        response
+    };
     let error = capture
         .latest_error
         .lock()
@@ -523,6 +546,15 @@ mod tests {
             store.latest_assistant.lock().unwrap().as_deref(),
             Some("second")
         );
+    }
+
+    #[test]
+    fn capture_accumulates_text_deltas() {
+        let store = CaptureStore::default();
+        let ts = Utc::now();
+        store.insert_event(None, "x", "k", r#"{"type":"text_delta","text":"hel"}"#, ts);
+        store.insert_event(None, "x", "k", r#"{"type":"text_delta","text":"lo"}"#, ts);
+        assert_eq!(store.text_deltas.lock().unwrap().as_str(), "hello");
     }
 
     #[test]
