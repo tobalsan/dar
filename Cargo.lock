@@ -828,11 +828,13 @@ name = "dar-runner-builtin"
 version = "0.3.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "dar-cap-chat",
  "dar-cap-runner",
  "dar-host-api",
  "dar-runner-core",
+ "dar-tool-registry",
  "futures-util",
  "reqwest",
  "serde",

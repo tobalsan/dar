@@ -9,6 +9,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod tools;
+
 use anyhow::{anyhow, Context, Result};
 use cap_chat::{ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams};
 use cap_runner::{ExitKind, Runner, RunnerHandle, SpawnParams};
@@ -33,6 +35,14 @@ impl Extension for RunnerBuiltinExtension {
                 .service::<dyn Runner>("builtin", Arc::new(BuiltinRunner))?;
             ctx.services
                 .service::<dyn ChatBackend>("builtin", Arc::new(BuiltinChatBackend))?;
+            if let Ok(registry) = ctx
+                .services
+                .get_named::<dyn tool_registry::ToolRegistryHandle>(
+                    tool_registry::TOOL_REGISTRY_SERVICE,
+                )
+            {
+                tools::register_into(registry.as_ref(), ctx.paths.root().to_path_buf())?;
+            }
             Ok(())
         })
     }
@@ -181,11 +191,11 @@ async fn run_builtin_chat_turn(
                 })
                 .await;
             let result = bridge.call_tool(&name, args).await?;
-            let result_content = result.to_string();
+            let result_content = openai_tool_message_content(&result);
             let _ = tx
                 .send(ChatEvent::ToolOutput {
                     id: id.clone(),
-                    text: result_content.clone(),
+                    text: result_content.to_string(),
                     is_error: false,
                     done: true,
                 })
@@ -358,7 +368,7 @@ async fn run_openai_compatible(
                 chrono::Utc::now(),
             );
             let result = bridge.call_tool(name, args).await?;
-            let result_content = result.to_string();
+            let result_content = openai_tool_message_content(&result);
             let result_payload = serde_json::json!({
                 "type": "tool_result",
                 "id": id,
@@ -394,6 +404,44 @@ struct AgentProviderConfig {
 struct AgentConfigFile {
     #[serde(default)]
     providers: HashMap<String, AgentProviderConfig>,
+}
+
+fn openai_tool_message_content(result: &serde_json::Value) -> serde_json::Value {
+    let Some(content) = result.get("content").and_then(|v| v.as_array()) else {
+        return serde_json::Value::String(result.to_string());
+    };
+    let has_image = content
+        .iter()
+        .any(|part| part.get("type").and_then(|v| v.as_str()) == Some("image"));
+    if !has_image {
+        return serde_json::Value::String(result.to_string());
+    }
+    serde_json::Value::Array(
+        content
+            .iter()
+            .filter_map(|part| match part.get("type").and_then(|v| v.as_str()) {
+                Some("text") => Some(serde_json::json!({
+                    "type": "text",
+                    "text": part.get("text").and_then(|v| v.as_str()).unwrap_or_default(),
+                })),
+                Some("image") => {
+                    let data = part
+                        .get("data")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let mime_type = part
+                        .get("mimeType")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("image/png");
+                    Some(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": { "url": format!("data:{mime_type};base64,{data}") },
+                    }))
+                }
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 fn provider_endpoint(agent_root: &Path, provider: &str) -> Result<(String, String)> {

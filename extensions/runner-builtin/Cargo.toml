@@ -24,6 +24,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 futures-util = "0.3"
+tool-registry = { package = "dar-tool-registry", path = "../../crates/tool-registry", version = "0.3" }
+async-trait = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
