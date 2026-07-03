@@ -877,7 +877,7 @@ where
 ///
 /// Membership is decided on non-comment, non-blank lines, so `.env` already
 /// added by `tracker-linear`'s `init_workflow` is never duplicated here.
-fn ensure_agent_gitignore(agent: &Path) -> Result<bool> {
+pub(crate) fn ensure_agent_gitignore(agent: &Path) -> Result<bool> {
     let path = agent.join(".gitignore");
     let existing = match fs::read_to_string(&path) {
         Ok(contents) => Some(contents),

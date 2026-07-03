@@ -21,6 +21,8 @@ pub enum Command {
     Dash(DashArgs),
     /// Validate agent.yaml, WORKFLOW.md, and the tracker; exit code only.
     Doctor(DoctorArgs),
+    /// Initialize a new agent workspace (writes agent.yaml + .gitignore).
+    Create(CreateArgs),
     /// Bootstrap the per-agent composition crate.
     InitBuild(InitBuildArgs),
     /// Regenerate and build the per-agent binary.
@@ -92,6 +94,26 @@ pub struct BuildArgs {
     /// On macOS, build arm64 + x86_64 and join them with lipo.
     #[arg(long)]
     pub universal: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CreateArgs {
+    /// Config folder to initialize (default: current directory). Absolute if it
+    /// starts with '/', else resolved relative to the current directory.
+    pub path: Option<PathBuf>,
+    /// Runner to use (default: pi).
+    #[arg(long)]
+    pub runner: Option<String>,
+    /// Provider forwarded to the runner (ignored when runner is codex).
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// Model forwarded to the runner (default: the runner's own default).
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Enable the orchestrator loop (writes the tracker/orchestrator/workspace
+    /// trio + WORKFLOW.md).
+    #[arg(long)]
+    pub orchestrator: bool,
 }
 
 #[derive(Debug, Args)]
@@ -173,6 +195,22 @@ impl BuildArgs {
 impl InitBuildArgs {
     pub fn resolve_root(&self) -> Result<PathBuf> {
         resolve_root(self.dir.as_deref())
+    }
+}
+
+impl CreateArgs {
+    /// Resolve the config folder without requiring it to exist yet: absolute
+    /// paths are used as-is, relative paths join the current directory. The
+    /// folder is created later by `create::run` (`resolve_root`'s `canonicalize`
+    /// would fail here because the folder may not exist).
+    pub fn resolve_root(&self) -> Result<PathBuf> {
+        match &self.path {
+            Some(path) if path.is_absolute() => Ok(path.clone()),
+            Some(path) => Ok(std::env::current_dir()
+                .context("resolving current directory")?
+                .join(path)),
+            None => std::env::current_dir().context("resolving current directory"),
+        }
     }
 }
 
