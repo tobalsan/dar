@@ -946,6 +946,8 @@ mod tests {
             root: dir.path().to_path_buf(),
             runner_kind: "fake".to_string(),
             runner_command: String::new(),
+            runner_model: None,
+            runner_provider: None,
             max_run_timeout_ms: 3_600_000,
             poll_interval_ms: 2_000,
             job_timeout_ms: 60_000,

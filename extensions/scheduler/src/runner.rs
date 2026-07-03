@@ -38,6 +38,7 @@ impl RunnerEventSink for NullSink {
 #[derive(Default)]
 struct CaptureStore {
     latest_assistant: Mutex<Option<String>>,
+    latest_error: Mutex<Option<String>>,
 }
 
 impl RunnerEventStore for CaptureStore {
@@ -52,21 +53,33 @@ impl RunnerEventStore for CaptureStore {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
             return;
         };
-        if value.get("type").and_then(|t| t.as_str()) != Some("protocol_event") {
-            return;
-        }
-        if value.get("log_row").and_then(|r| r.as_str()) != Some("assistant") {
-            return;
-        }
-        let Some(text) = value.get("text").and_then(|t| t.as_str()) else {
-            return;
-        };
-        let text = text.trim();
-        if !text.is_empty() {
-            *self
-                .latest_assistant
-                .lock()
-                .expect("capture mutex poisoned") = Some(text.to_string());
+        match value.get("type").and_then(|t| t.as_str()) {
+            Some("protocol_event") => {
+                if value.get("log_row").and_then(|r| r.as_str()) != Some("assistant") {
+                    return;
+                }
+                let Some(text) = value.get("text").and_then(|t| t.as_str()) else {
+                    return;
+                };
+                let text = text.trim();
+                if !text.is_empty() {
+                    *self
+                        .latest_assistant
+                        .lock()
+                        .expect("capture mutex poisoned") = Some(text.to_string());
+                }
+            }
+            Some("error") => {
+                let Some(message) = value.get("message").and_then(|t| t.as_str()) else {
+                    return;
+                };
+                let message = message.trim();
+                if !message.is_empty() {
+                    *self.latest_error.lock().expect("capture mutex poisoned") =
+                        Some(message.to_string());
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -75,6 +88,8 @@ impl RunnerEventStore for CaptureStore {
 pub struct FireRunnerRequest<'a> {
     pub runner_kind: &'a str,
     pub runner_command: &'a str,
+    pub runner_model: Option<String>,
+    pub runner_provider: Option<String>,
     pub workspace: &'a std::path::Path,
     pub workspace_root: &'a std::path::Path,
     pub agent_root: &'a std::path::Path,
@@ -95,6 +110,8 @@ pub async fn fire_runner(
     let FireRunnerRequest {
         runner_kind,
         runner_command,
+        runner_model,
+        runner_provider,
         workspace,
         workspace_root,
         agent_root,
@@ -130,6 +147,8 @@ pub async fn fire_runner(
         store,
         last_event_at,
     )
+    .model(runner_model)
+    .provider(runner_provider)
     .host_tool_bridge(runner_core::host_tool_bridge(services, agent_root))
     .build();
 
@@ -177,11 +196,18 @@ pub async fn fire_runner(
         .expect("capture mutex poisoned")
         .clone()
         .unwrap_or_default();
+    let error = capture
+        .latest_error
+        .lock()
+        .expect("capture mutex poisoned")
+        .clone()
+        .unwrap_or_default();
+    let text = if response.is_empty() { error } else { response };
 
     if timed_out {
         Ok(RunOutcome::TimedOut)
     } else {
-        Ok(RunOutcome::Completed(exit, response))
+        Ok(RunOutcome::Completed(exit, text))
     }
 }
 
@@ -206,6 +232,7 @@ mod tests {
     struct CapturingRunner {
         spawns: Arc<AtomicUsize>,
         bridge: Arc<Mutex<Option<Option<HostToolBridge>>>>,
+        runner_opts: Arc<Mutex<Option<(Option<String>, Option<String>)>>>,
     }
 
     impl Runner for CapturingRunner {
@@ -217,6 +244,8 @@ mod tests {
             self.spawns.fetch_add(1, Ordering::SeqCst);
             *self.bridge.lock().expect("bridge mutex poisoned") =
                 Some(params.host_tool_bridge.clone());
+            *self.runner_opts.lock().expect("runner opts mutex poisoned") =
+                Some((params.model.clone(), params.provider.clone()));
             Box::pin(async move {
                 let (kill_tx, _kill_rx) = tokio::sync::oneshot::channel();
                 let done = tokio::spawn(async { ExitKind::Normal });
@@ -240,9 +269,11 @@ mod tests {
         ServiceRegistry,
         Arc<AtomicUsize>,
         Arc<Mutex<Option<Option<HostToolBridge>>>>,
+        Arc<Mutex<Option<(Option<String>, Option<String>)>>>,
     ) {
         let spawns = Arc::new(AtomicUsize::new(0));
         let bridge = Arc::new(Mutex::new(None));
+        let runner_opts = Arc::new(Mutex::new(None));
         let mut services = ServiceRegistry::default();
         services
             .service::<dyn Runner>(
@@ -250,6 +281,7 @@ mod tests {
                 Arc::new(CapturingRunner {
                     spawns: Arc::clone(&spawns),
                     bridge: Arc::clone(&bridge),
+                    runner_opts: Arc::clone(&runner_opts),
                 }),
             )
             .unwrap();
@@ -258,7 +290,7 @@ mod tests {
                 .service::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE, Arc::new(registry))
                 .unwrap();
         }
-        (services, spawns, bridge)
+        (services, spawns, bridge, runner_opts)
     }
 
     fn registry_with_tool() -> ToolRegistry {
@@ -286,13 +318,16 @@ mod tests {
     #[tokio::test]
     async fn host_tool_bridge_is_passed_to_scheduler_spawn_params_when_tools_exist() {
         let dir = tempfile::tempdir().unwrap();
-        let (services, spawns, bridge) = services_with_capture(Some(registry_with_tool()));
+        let (services, spawns, bridge, runner_opts) =
+            services_with_capture(Some(registry_with_tool()));
         let (_tx, shutdown) = shutdown_token(false);
 
         fire_runner(
             FireRunnerRequest {
                 runner_kind: "fake",
                 runner_command: "",
+                runner_model: Some("model-a".to_string()),
+                runner_provider: Some("provider-a".to_string()),
                 workspace: dir.path(),
                 workspace_root: dir.path(),
                 agent_root: dir.path(),
@@ -317,18 +352,25 @@ mod tests {
         assert_eq!(bridge.args[0], "__mcp-bridge");
         assert_eq!(bridge.args[1], "--dir");
         assert_eq!(bridge.args[2], dir.path().display().to_string());
+        assert_eq!(
+            *runner_opts.lock().expect("runner opts mutex poisoned"),
+            Some((Some("model-a".to_string()), Some("provider-a".to_string())))
+        );
     }
 
     #[tokio::test]
     async fn host_tool_bridge_is_none_for_scheduler_spawn_params_when_registry_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let (services, spawns, bridge) = services_with_capture(Some(ToolRegistry::new()));
+        let (services, spawns, bridge, _runner_opts) =
+            services_with_capture(Some(ToolRegistry::new()));
         let (_tx, shutdown) = shutdown_token(false);
 
         fire_runner(
             FireRunnerRequest {
                 runner_kind: "fake",
                 runner_command: "",
+                runner_model: None,
+                runner_provider: None,
                 workspace: dir.path(),
                 workspace_root: dir.path(),
                 agent_root: dir.path(),
@@ -354,13 +396,16 @@ mod tests {
     #[tokio::test]
     async fn shutdown_before_spawn_returns_without_calling_runner() {
         let dir = tempfile::tempdir().unwrap();
-        let (services, spawns, _bridge) = services_with_capture(Some(registry_with_tool()));
+        let (services, spawns, _bridge, _runner_opts) =
+            services_with_capture(Some(registry_with_tool()));
         let (_tx, shutdown) = shutdown_token(true);
 
         let err = match fire_runner(
             FireRunnerRequest {
                 runner_kind: "fake",
                 runner_command: "",
+                runner_model: None,
+                runner_provider: None,
                 workspace: dir.path(),
                 workspace_root: dir.path(),
                 agent_root: dir.path(),
@@ -437,6 +482,8 @@ mod tests {
                 FireRunnerRequest {
                     runner_kind: "fake",
                     runner_command: "",
+                    runner_model: None,
+                    runner_provider: None,
                     workspace: &root,
                     workspace_root: &root,
                     agent_root: &root,
