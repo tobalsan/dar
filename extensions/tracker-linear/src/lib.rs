@@ -1696,14 +1696,8 @@ mod tests {
     #[test]
     fn init_workflow_can_seed_linear_frontmatter_without_agent_yaml() {
         let dir = tempfile::tempdir().unwrap();
-        super::init_workflow_with_options(
-            dir.path(),
-            false,
-            Some("dar"),
-            Some("Dar"),
-            true,
-        )
-        .unwrap();
+        super::init_workflow_with_options(dir.path(), false, Some("dar"), Some("Dar"), true)
+            .unwrap();
 
         let body = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
         assert!(body.starts_with("---\n"));

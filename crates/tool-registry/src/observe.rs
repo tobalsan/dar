@@ -330,7 +330,10 @@ mod tests {
         let uuid = "a1b2c3d4-5e6f-7890-abcd-ef1234567890";
         let masked = r.redact(&format!("stateId={uuid} done"));
         // Linear resource IDs must survive so the agent can use them in mutations.
-        assert!(masked.contains(uuid), "UUID should not be redacted: {masked}");
+        assert!(
+            masked.contains(uuid),
+            "UUID should not be redacted: {masked}"
+        );
         assert!(!masked.contains(REDACTED));
         // But real opaque credentials of similar length still get masked.
         let secret = "AbCd1234EfGh5678IjKl9012MnOp3456Qr";

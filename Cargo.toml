@@ -26,6 +26,7 @@ members = [
     "extensions/runner-cli",
     "extensions/runner-codex",
     "extensions/runner-fake",
+    "extensions/runner-builtin",
     "extensions/runner-opencode",
     "extensions/runner-pi",
     "extensions/scheduler",

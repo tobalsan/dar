@@ -50,6 +50,9 @@ pub struct AgentConfig {
     /// the terminal. Absent → "logs" (the frontend-log extension).
     #[serde(default = "default_foreground")]
     pub foreground: String,
+    /// Provider config keyed by runner provider name.
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderConfig>,
     /// Per-extension config, keyed by extension id. Each value is handed to the
     /// matching extension via the host `ConfigStore`. Missing section = empty.
     #[serde(default)]
@@ -113,6 +116,14 @@ pub struct TrackerInner {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ProviderConfig {
+    #[serde(default, alias = "base_url")]
+    pub api_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RunnerConfig {
     /// Runner kind. Accepts `use` (canonical), `sdk` (alias). Empty / absent → "pi".
     #[serde(rename = "use", alias = "sdk", default)]
@@ -154,6 +165,45 @@ fn default_max_turns() -> u32 {
 
 fn default_stall_timeout_ms() -> u64 {
     5 * 60 * 1000
+}
+
+fn runner_kind(runner: &RunnerConfig) -> &str {
+    if runner.use_.trim().is_empty() {
+        "pi"
+    } else {
+        runner.use_.trim()
+    }
+}
+
+fn validate_builtin_provider(
+    runner: &RunnerConfig,
+    providers: &HashMap<String, ProviderConfig>,
+) -> Result<()> {
+    let provider = runner
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+        .context("runner.provider is required when runner.use is builtin")?;
+    let config = providers
+        .get(provider)
+        .with_context(|| format!("provider {provider:?} is not configured in providers"))?;
+    resolve_provider_value(config.api_url.as_deref())
+        .with_context(|| format!("provider {provider:?} missing api_url"))?;
+    resolve_provider_value(config.api_key.as_deref())
+        .with_context(|| format!("provider {provider:?} missing api_key"))?;
+    Ok(())
+}
+
+fn resolve_provider_value(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Some(name) = value.strip_prefix("$env:") {
+        return std::env::var(name).ok();
+    }
+    Some(value.to_string())
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -397,6 +447,9 @@ impl AgentConfig {
         {
             bail!("hitl.notifier.command is required when hitl.notifier.use is \"cli\"");
         }
+        if runner_kind(&self.runner) == "builtin" {
+            validate_builtin_provider(&self.runner, &self.providers)?;
+        }
         if self.runner.max_run_timeout_ms == 0 {
             bail!("runner.max_run_timeout_ms must be > 0");
         }
@@ -519,6 +572,29 @@ mod tests {
     fn full_trio_validates() {
         let cfg: AgentConfig = serde_yaml::from_str(BASE).unwrap();
         assert!(cfg.loop_enabled());
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn builtin_runner_requires_configured_provider() {
+        let raw = BASE.replace("use: fake", "use: builtin\n  provider: requesty");
+        let cfg: AgentConfig = serde_yaml::from_str(&raw).unwrap();
+
+        let err = cfg.validate().unwrap_err().to_string();
+
+        assert!(err.contains("provider \"requesty\" is not configured"));
+    }
+
+    #[test]
+    fn builtin_runner_resolves_provider_env() {
+        let raw = BASE.replace(
+            "use: fake",
+            "use: builtin\n  provider: requesty\nproviders:\n  requesty:\n    api_url: $env:DAR_CONFIG_TEST_URL\n    api_key: $env:DAR_CONFIG_TEST_KEY",
+        );
+        std::env::set_var("DAR_CONFIG_TEST_URL", "https://example.test/v1");
+        std::env::set_var("DAR_CONFIG_TEST_KEY", "secret");
+        let cfg: AgentConfig = serde_yaml::from_str(&raw).unwrap();
+
         cfg.validate().unwrap();
     }
 }

@@ -3,7 +3,11 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
-const STOCK_CRATE_VERSION_REQ: &str = concat!(env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"));
+const STOCK_CRATE_VERSION_REQ: &str = concat!(
+    env!("CARGO_PKG_VERSION_MAJOR"),
+    ".",
+    env!("CARGO_PKG_VERSION_MINOR")
+);
 
 fn main() -> Result<()> {
     CargoDar::parse_from(cargo_subcommand_args()).run()

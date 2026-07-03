@@ -335,10 +335,7 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert_eq!(rendered[0], "-c");
-        assert_eq!(
-            rendered[1],
-            "mcp_servers.dar.command=\"/opt/dar\""
-        );
+        assert_eq!(rendered[1], "mcp_servers.dar.command=\"/opt/dar\"");
         assert_eq!(rendered[2], "-c");
         assert_eq!(
             rendered[3],

@@ -824,6 +824,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dar-runner-builtin"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dar-cap-chat",
+ "dar-cap-runner",
+ "dar-host-api",
+ "dar-runner-core",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "dar-runner-cli"
 version = "0.3.1"
 dependencies = [
