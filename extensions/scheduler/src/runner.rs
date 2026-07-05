@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use cap_runner::{ExitKind, KillReason, Runner, RunnerEventSink, RunnerEventStore, SpawnParams};
+use cap_runner::{
+    ExitKind, KillReason, Runner, RunnerEventSink, RunnerEventStore, SpawnParams, TurnDecision,
+};
 use chrono::{DateTime, Utc};
 use host_api::{ServiceRegistry, ShutdownToken};
 
@@ -133,7 +135,7 @@ pub async fn fire_runner(
     .host_tool_bridge(runner_core::host_tool_bridge(services, agent_root))
     .build();
 
-    let handle = tokio::select! {
+    let mut handle = tokio::select! {
         _ = shutdown.cancelled() => anyhow::bail!("scheduler shutdown before runner spawn"),
         handle = runner.spawn(params) => handle.context("spawning runner")?,
     };
@@ -149,6 +151,13 @@ pub async fn fire_runner(
         // deadline is killed and flagged timed-out.
         if handle.is_finished() {
             break (handle.wait().await, false);
+        }
+        // Scheduler runs are single-shot: on the first turn boundary, tell a
+        // turn-capable child to finish so it quits cleanly instead of parking
+        // until job_timeout kills it (false timeout). No-op for turn-opt-out
+        // handles (cli/fake), whose supports_turns() is false.
+        if handle.supports_turns() && handle.try_recv_turn_ended() {
+            handle.send_turn_decision(TurnDecision::Finish);
         }
         if tokio::time::Instant::now() >= deadline {
             tracing::warn!(
@@ -191,7 +200,7 @@ mod tests {
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use cap_runner::{HostToolBridge, RunnerHandle};
+    use cap_runner::{HostToolBridge, RunnerHandle, TurnEnded};
     use serde_json::{json, Value};
     use tool_registry::{
         ToolExecutor, ToolOutcome, ToolRegistry, ToolRegistryHandle, ToolSpec,
@@ -463,6 +472,88 @@ mod tests {
             *kill_reason.lock().expect("kill mutex poisoned"),
             Some(KillReason::OperatorStop)
         ));
+    }
+
+    /// Turn-capable mock: parks at one turn boundary (emits `TurnEnded`) and
+    /// only resolves `done` with `ExitKind::Normal` once it receives
+    /// `TurnDecision::Finish` — mirroring pi/codex/opencode's long-lived child.
+    /// If the decision never arrives it would hang until the scheduler kills it.
+    struct TurnCapableRunner;
+
+    impl Runner for TurnCapableRunner {
+        fn spawn<'a>(
+            &self,
+            _params: SpawnParams<'a>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RunnerHandle>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<KillReason>();
+                let (ended_tx, ended_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (decision_tx, mut decision_rx) = tokio::sync::mpsc::unbounded_channel();
+                // Signal the turn boundary right away.
+                ended_tx.send(TurnEnded).unwrap();
+                let done = tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            reason = &mut kill_rx => {
+                                return match reason {
+                                    Ok(_) => ExitKind::Interrupted { reason: "killed" },
+                                    Err(_) => ExitKind::Normal,
+                                };
+                            }
+                            decision = decision_rx.recv() => {
+                                match decision {
+                                    Some(TurnDecision::Finish) | None => return ExitKind::Normal,
+                                    Some(TurnDecision::Continue { .. }) => continue,
+                                }
+                            }
+                        }
+                    }
+                });
+                Ok(RunnerHandle::with_turns(
+                    0,
+                    kill_tx,
+                    done,
+                    ended_rx,
+                    decision_tx,
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_capable_runner_finishes_on_its_own_before_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut services = ServiceRegistry::default();
+        services
+            .service::<dyn Runner>("fake", Arc::new(TurnCapableRunner))
+            .unwrap();
+        let (_tx, shutdown) = shutdown_token(false);
+
+        let outcome = fire_runner(
+            FireRunnerRequest {
+                runner_kind: "fake",
+                runner_command: "",
+                workspace: dir.path(),
+                workspace_root: dir.path(),
+                agent_root: dir.path(),
+                prompt: "prompt".to_string(),
+                job_id: "job",
+                max_run_timeout_ms: 60_000,
+                // Generous deadline: the run must finish via `Finish`, not by
+                // hitting this timeout.
+                job_timeout: Duration::from_secs(60),
+            },
+            &services,
+            shutdown,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(outcome, RunOutcome::Completed(ExitKind::Normal, _)),
+            "turn-capable scheduler run should finish Normal via Finish, not TimedOut"
+        );
     }
 
     #[test]

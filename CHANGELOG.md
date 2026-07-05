@@ -9,6 +9,13 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+- Scheduler: drive the turn-decision channel for turn-capable runners
+  (pi/codex/opencode). A scheduled job's single-shot run now sends
+  `TurnDecision::Finish` at the first turn boundary so the long-lived child
+  exits cleanly instead of parking until `job_timeout` and being reported as a
+  false `TimedOut`. Turn-opt-out runners (`cli`/`fake`) are unaffected (ALG-348).
+
 ### Changed
 - Runners: spawn agent children with non-interactive git env (`GIT_EDITOR=true`,
   `GIT_SEQUENCE_EDITOR=true`, `GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`/`PAGER=cat`)
