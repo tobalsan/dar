@@ -9,7 +9,27 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+### Added
+- CLI: `dar create` — front-door command that scaffolds an agent workspace
+  (`agent.yaml` + `.gitignore`, plus `WORKFLOW.md` when the orchestrator loop is
+  enabled), usable interactively or via flags. Fills the gap where nothing
+  scaffolded `agent.yaml`.
+- runner-builtin: zero-install builtin runner porting OpenAI-compatible
+  streaming and tool calls into dar, kept optional behind stock extension
+  feature gates.
+- runner-builtin: builtin coding tools — Pi-like file and shell tools for
+  zero-install agents, carrying image outputs through tool results for read
+  parity.
+
 ### Fixed
+- Scheduler: pass configured runner settings so cron jobs use the selected
+  provider and model, and surface builtin runner errors instead of a generic
+  exit code.
+- Scheduler: capture streamed responses so successful scheduled runs no longer
+  record an empty response, falling back to text deltas when a runner omits the
+  final assistant event.
+- Scheduler: populate the new `ToolOutcome` content field for error results to
+  keep scheduler tools building.
 - Scheduler: drive the turn-decision channel for turn-capable runners
   (pi/codex/opencode). A scheduled job's single-shot run now sends
   `TurnDecision::Finish` at the first turn boundary so the long-lived child
