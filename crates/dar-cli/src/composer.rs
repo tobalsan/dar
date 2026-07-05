@@ -237,7 +237,6 @@ const ALL_RUNNERS: &[&str] = &[
     "runner-opencode",
     "runner-cli",
     "runner-fake",
-    "runner-builtin",
 ];
 
 fn selected_stock_extensions(
@@ -246,7 +245,7 @@ fn selected_stock_extensions(
 ) -> Result<Vec<&'static StockExtension>> {
     let selection = agent_selection(agent)?;
     // Validate runner.use early so a typo fails at build time.
-    let _ = runner_package(&selection.runner.use_)?;
+    let selected_runner = runner_package(&selection.runner.use_)?;
     let mut packages = vec![
         "tool-registry-host",
         "frontend-log",
@@ -261,6 +260,9 @@ fn selected_stock_extensions(
         packages.push(tracker_package(&tracker.use_)?);
     }
     packages.extend_from_slice(ALL_RUNNERS);
+    if selected_runner == "runner-builtin" {
+        packages.push(selected_runner);
+    }
     packages.extend(foreground_packages(&selection)?);
     // Opt-in stock extensions: selected only when present in agent.yaml's
     // `extensions` map. Absent → binary behaves as today.
@@ -1330,7 +1332,7 @@ extensions:
     }
 
     #[test]
-    fn init_build_always_includes_all_runners() {
+    fn init_build_includes_shared_runners_but_omits_builtin_unless_selected() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
         write_agent_yaml(agent, "files", "fake", "logs", "");
@@ -1344,13 +1346,16 @@ extensions:
             "runner-opencode",
             "runner-cli",
             "runner-fake",
-            "runner-builtin",
         ] {
             assert!(
                 manifest.contains(&format!("{pkg} = {{ package = ")),
-                "{pkg} should always be linked regardless of runner.use"
+                "{pkg} should stay linked for runtime runner selection"
             );
         }
+        assert!(
+            !manifest.contains("runner-builtin = { package = "),
+            "runner-builtin registers global tools and must only link when selected"
+        );
     }
 
     #[test]
