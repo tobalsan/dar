@@ -61,6 +61,10 @@ impl Extension for RunnerPiExtension {
 pub struct PiRunner;
 
 impl cap_runner::Runner for PiRunner {
+    fn supports_system_prompt(&self) -> bool {
+        true
+    }
+
     fn spawn<'a>(
         &self,
         params: SpawnParams<'a>,
@@ -94,6 +98,7 @@ fn pi_args(
     model: Option<&str>,
     provider: Option<&str>,
     thinking: Option<&str>,
+    system_prompt: Option<&str>,
 ) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("--mode"),
@@ -112,6 +117,10 @@ fn pi_args(
     if let Some(level) = thinking.map(str::trim).filter(|s| !s.is_empty()) {
         args.push(OsString::from("--thinking"));
         args.push(OsString::from(pi_thinking_value(level)));
+    }
+    if let Some(system_prompt) = system_prompt.filter(|s| !s.is_empty()) {
+        args.push(OsString::from("--system-prompt"));
+        args.push(OsString::from(system_prompt));
     }
     args
 }
@@ -139,6 +148,7 @@ async fn spawn_pi(p: SpawnParams<'_>) -> Result<RunnerHandle> {
         p.model.as_deref(),
         p.provider.as_deref(),
         p.thinking.as_deref(),
+        p.system_prompt.as_deref(),
     );
 
     // Wire the host MCP bridge so the pi agent sees the same registry tools as
@@ -939,7 +949,7 @@ mod tests {
     fn pi_args_carry_rpc_mode_session_dir_and_optional_model() {
         let dir = Path::new("/agent/pi-sessions/ISSUE-1");
         assert_eq!(
-            pi_args(dir, None, None, None),
+            pi_args(dir, None, None, None, None),
             vec![
                 OsString::from("--mode"),
                 OsString::from("rpc"),
@@ -947,7 +957,7 @@ mod tests {
                 OsString::from("/agent/pi-sessions/ISSUE-1"),
             ]
         );
-        let args = pi_args(dir, Some("gpt-5"), None, None);
+        let args = pi_args(dir, Some("gpt-5"), None, None, None);
         assert_eq!(args[4], OsString::from("--model"));
         assert_eq!(args[5], OsString::from("gpt-5"));
     }
@@ -955,11 +965,11 @@ mod tests {
     #[test]
     fn pi_args_appends_provider_when_set() {
         let dir = Path::new("/agent/pi-sessions/ISSUE-1");
-        let args = pi_args(dir, None, Some("openai"), None);
+        let args = pi_args(dir, None, Some("openai"), None, None);
         assert_eq!(args[4], OsString::from("--provider"));
         assert_eq!(args[5], OsString::from("openai"));
 
-        let args = pi_args(dir, Some("gpt-5"), Some("openai"), None);
+        let args = pi_args(dir, Some("gpt-5"), Some("openai"), None, None);
         assert_eq!(args[4], OsString::from("--model"));
         assert_eq!(args[5], OsString::from("gpt-5"));
         assert_eq!(args[6], OsString::from("--provider"));
@@ -969,7 +979,7 @@ mod tests {
     #[test]
     fn pi_args_appends_thinking_level_when_set() {
         let dir = Path::new("/agent/pi-sessions/ISSUE-1");
-        let args = pi_args(dir, None, None, Some("high"));
+        let args = pi_args(dir, None, None, Some("high"), None);
         assert_eq!(args[4], OsString::from("--thinking"));
         assert_eq!(args[5], OsString::from("high"));
     }
@@ -977,7 +987,7 @@ mod tests {
     #[test]
     fn pi_args_maps_none_to_off() {
         let dir = Path::new("/agent/pi-sessions/ISSUE-1");
-        let args = pi_args(dir, None, None, Some("none"));
+        let args = pi_args(dir, None, None, Some("none"), None);
         assert_eq!(args[4], OsString::from("--thinking"));
         assert_eq!(args[5], OsString::from("off"));
     }
@@ -985,12 +995,23 @@ mod tests {
     #[test]
     fn pi_args_omits_thinking_when_absent_or_blank() {
         let dir = Path::new("/agent/pi-sessions/ISSUE-1");
-        assert!(!pi_args(dir, None, None, None)
+        assert!(!pi_args(dir, None, None, None, None)
             .iter()
             .any(|a| a == &OsString::from("--thinking")));
-        assert!(!pi_args(dir, None, None, Some("  "))
+        assert!(!pi_args(dir, None, None, Some("  "), None)
             .iter()
             .any(|a| a == &OsString::from("--thinking")));
+    }
+
+    #[test]
+    fn pi_args_appends_system_prompt_when_set() {
+        let dir = Path::new("/agent/pi-sessions/ISSUE-1");
+        let args = pi_args(dir, None, None, None, Some("identity"));
+        assert_eq!(args[4], OsString::from("--system-prompt"));
+        assert_eq!(args[5], OsString::from("identity"));
+        assert!(!pi_args(dir, None, None, None, Some(""))
+            .iter()
+            .any(|a| a == &OsString::from("--system-prompt")));
     }
 
     // -- host MCP bridge wiring ----------------------------------------------

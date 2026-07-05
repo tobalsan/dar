@@ -91,6 +91,9 @@ pub struct SpawnParams<'a> {
     /// `-c model_reasoning_effort=<level>`. Already
     /// validated against the runner's supported subset before dispatch.
     pub thinking: Option<String>,
+    /// Agent identity/system prompt for runners that support a separate system
+    /// prompt channel. Empty/absent preserves legacy prompt-only behavior.
+    pub system_prompt: Option<String>,
     pub workspace: &'a Path,
     pub workspace_root: &'a Path,
     pub agent_root: &'a Path,
@@ -125,6 +128,7 @@ pub struct SpawnParamsBuilder<'a> {
     model: Option<String>,
     provider: Option<String>,
     thinking: Option<String>,
+    system_prompt: Option<String>,
     host_tool_bridge: Option<HostToolBridge>,
 }
 
@@ -168,6 +172,7 @@ impl<'a> SpawnParams<'a> {
             model: None,
             provider: None,
             thinking: None,
+            system_prompt: None,
             host_tool_bridge: None,
         }
     }
@@ -189,6 +194,11 @@ impl<'a> SpawnParamsBuilder<'a> {
         self
     }
 
+    pub fn system_prompt(mut self, value: Option<String>) -> Self {
+        self.system_prompt = value;
+        self
+    }
+
     pub fn host_tool_bridge(mut self, value: Option<HostToolBridge>) -> Self {
         self.host_tool_bridge = value;
         self
@@ -201,6 +211,7 @@ impl<'a> SpawnParamsBuilder<'a> {
             model: self.model,
             provider: self.provider,
             thinking: self.thinking,
+            system_prompt: self.system_prompt,
             workspace: self.workspace,
             workspace_root: self.workspace_root,
             agent_root: self.agent_root,
@@ -232,6 +243,13 @@ pub trait RunnerEventStore: Send + Sync {
 }
 
 pub trait Runner: Send + Sync {
+    /// Whether this runner consumes [`SpawnParams::system_prompt`] through a
+    /// dedicated system/identity channel. Runners that return false must receive
+    /// identity context in the normal prompt text if callers need it delivered.
+    fn supports_system_prompt(&self) -> bool {
+        false
+    }
+
     fn spawn<'a>(
         &self,
         params: SpawnParams<'a>,

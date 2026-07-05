@@ -130,6 +130,8 @@ struct RunnerSection {
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
+    thinking: Option<String>,
+    #[serde(default)]
     max_run_timeout_ms: u64,
 }
 
@@ -250,8 +252,14 @@ impl Extension for SchedulerExtension {
 /// Build the static [`SchedulerConfig`] shared by the timer loop and the
 /// run-now HTTP handler from the agent root + validated scheduler settings.
 fn build_scheduler_config(root: &std::path::Path, settings: &SchedulerSettings) -> SchedulerConfig {
-    let (runner_kind, runner_command, runner_model, runner_provider, max_run_timeout_ms) =
-        read_runner_config(root);
+    let (
+        runner_kind,
+        runner_command,
+        runner_model,
+        runner_provider,
+        runner_thinking,
+        max_run_timeout_ms,
+    ) = read_runner_config(root);
     let poll_interval_ms = if settings.poll_interval_ms == 0 {
         DEFAULT_POLL_INTERVAL_MS
     } else {
@@ -263,17 +271,31 @@ fn build_scheduler_config(root: &std::path::Path, settings: &SchedulerSettings) 
         runner_command,
         runner_model,
         runner_provider,
+        runner_thinking,
+        system_context: read_system_context(root),
         max_run_timeout_ms,
         poll_interval_ms,
         job_timeout_ms: settings.job_timeout_ms.unwrap_or(DEFAULT_JOB_TIMEOUT_MS),
     }
 }
 
+fn read_system_context(root: &std::path::Path) -> Option<String> {
+    let ctx = system_context::resolve_for(root);
+    (!ctx.is_empty()).then_some(ctx.text)
+}
+
 /// Read `runner.use` / `runner.command` / `runner.max_run_timeout_ms` from
 /// `agent.yaml`, applying the same defaults the orchestrator uses.
 fn read_runner_config(
     root: &std::path::Path,
-) -> (String, String, Option<String>, Option<String>, u64) {
+) -> (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    u64,
+) {
     let path = root.join("agent.yaml");
     let parsed = std::fs::read_to_string(&path)
         .ok()
@@ -295,12 +317,14 @@ fn read_runner_config(
                 cfg.runner.command,
                 cfg.runner.model,
                 cfg.runner.provider,
+                cfg.runner.thinking,
                 timeout,
             )
         }
         None => (
             DEFAULT_RUNNER_KIND.to_string(),
             String::new(),
+            None,
             None,
             None,
             DEFAULT_MAX_RUN_TIMEOUT_MS,
@@ -320,11 +344,12 @@ mod tests {
             "id: a\nname: A\nrunner:\n  use: fake\n  max_run_timeout_ms: 1234\n",
         )
         .unwrap();
-        let (kind, command, model, provider, timeout) = read_runner_config(dir.path());
+        let (kind, command, model, provider, thinking, timeout) = read_runner_config(dir.path());
         assert_eq!(kind, "fake");
         assert_eq!(command, "");
         assert_eq!(model, None);
         assert_eq!(provider, None);
+        assert_eq!(thinking, None);
         assert_eq!(timeout, 1234);
     }
 
@@ -332,11 +357,51 @@ mod tests {
     fn defaults_runner_kind_to_pi_when_absent() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("agent.yaml"), "id: a\nname: A\n").unwrap();
-        let (kind, _command, model, provider, timeout) = read_runner_config(dir.path());
+        let (kind, _command, model, provider, thinking, timeout) = read_runner_config(dir.path());
         assert_eq!(kind, "pi");
         assert_eq!(model, None);
         assert_eq!(provider, None);
+        assert_eq!(thinking, None);
         assert_eq!(timeout, DEFAULT_MAX_RUN_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn reads_runner_thinking_from_agent_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("agent.yaml"),
+            "id: a\nname: A\nrunner:\n  use: pi\n  provider: anthropic\n  model: claude-opus-4-8\n  thinking: high\n",
+        )
+        .unwrap();
+        let (_kind, _command, model, provider, thinking, _timeout) = read_runner_config(dir.path());
+        assert_eq!(model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(provider.as_deref(), Some("anthropic"));
+        assert_eq!(thinking.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn reads_system_context_from_agent_yaml_system_files_and_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("agent.yaml"),
+            "id: a\nname: A\nsystem_files:\n  - SOUL.md\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("SOUL.md"), "identity").unwrap();
+        let skill_dir = dir.path().join("skills").join("refactor");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: refactor\ndescription: Improve code shape\n---\nBody",
+        )
+        .unwrap();
+
+        let context = read_system_context(dir.path()).unwrap();
+
+        assert!(context.contains("<system-file path=\"SOUL.md\">"));
+        assert!(context.contains("identity"));
+        assert!(context.contains("<available_skills>"));
+        assert!(context.contains("<name>refactor</name>"));
     }
 
     #[test]

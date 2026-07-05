@@ -213,6 +213,10 @@ async fn run_builtin_chat_turn(
 }
 
 impl Runner for BuiltinRunner {
+    fn supports_system_prompt(&self) -> bool {
+        true
+    }
+
     fn spawn<'a>(
         &self,
         params: SpawnParams<'a>,

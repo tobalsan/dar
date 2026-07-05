@@ -104,6 +104,8 @@ pub struct FireRunnerRequest<'a> {
     pub runner_command: &'a str,
     pub runner_model: Option<String>,
     pub runner_provider: Option<String>,
+    pub runner_thinking: Option<String>,
+    pub system_prompt: Option<String>,
     pub workspace: &'a std::path::Path,
     pub workspace_root: &'a std::path::Path,
     pub agent_root: &'a std::path::Path,
@@ -111,6 +113,26 @@ pub struct FireRunnerRequest<'a> {
     pub job_id: &'a str,
     pub max_run_timeout_ms: u64,
     pub job_timeout: Duration,
+}
+
+fn compose_scheduler_prompt(
+    system_prompt: Option<&str>,
+    supports_system_prompt: bool,
+    prompt: String,
+) -> String {
+    let Some(system_prompt) = system_prompt.filter(|s| !s.is_empty()) else {
+        return prompt;
+    };
+    if supports_system_prompt {
+        return prompt;
+    }
+    let mut out = String::with_capacity(system_prompt.len() + prompt.len() + 1);
+    out.push_str(system_prompt);
+    if !system_prompt.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&prompt);
+    out
 }
 
 /// Resolve the named runner service (`runner.use`, default `pi`) and fire it
@@ -126,6 +148,8 @@ pub async fn fire_runner(
         runner_command,
         runner_model,
         runner_provider,
+        runner_thinking,
+        system_prompt,
         workspace,
         workspace_root,
         agent_root,
@@ -147,6 +171,10 @@ pub async fn fire_runner(
         anyhow::bail!("scheduler shutdown before runner spawn");
     }
 
+    let supports_system_prompt = runner.supports_system_prompt();
+    let prompt = compose_scheduler_prompt(system_prompt.as_deref(), supports_system_prompt, prompt);
+    let system_prompt = system_prompt.filter(|_| supports_system_prompt);
+
     let params = SpawnParams::builder(
         runner_command,
         runner_kind,
@@ -163,6 +191,8 @@ pub async fn fire_runner(
     )
     .model(runner_model)
     .provider(runner_provider)
+    .thinking(runner_thinking)
+    .system_prompt(system_prompt)
     .host_tool_bridge(runner_core::host_tool_bridge(services, agent_root))
     .build();
 
@@ -264,10 +294,24 @@ mod tests {
     struct CapturingRunner {
         spawns: Arc<AtomicUsize>,
         bridge: Arc<Mutex<Option<Option<HostToolBridge>>>>,
-        runner_opts: Arc<Mutex<Option<(Option<String>, Option<String>)>>>,
+        runner_opts: Arc<Mutex<Option<RunnerOpts>>>,
+        supports_system_prompt: bool,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct RunnerOpts {
+        model: Option<String>,
+        provider: Option<String>,
+        thinking: Option<String>,
+        system_prompt: Option<String>,
+        prompt: String,
     }
 
     impl Runner for CapturingRunner {
+        fn supports_system_prompt(&self) -> bool {
+            self.supports_system_prompt
+        }
+
         fn spawn<'a>(
             &self,
             params: SpawnParams<'a>,
@@ -276,8 +320,13 @@ mod tests {
             self.spawns.fetch_add(1, Ordering::SeqCst);
             *self.bridge.lock().expect("bridge mutex poisoned") =
                 Some(params.host_tool_bridge.clone());
-            *self.runner_opts.lock().expect("runner opts mutex poisoned") =
-                Some((params.model.clone(), params.provider.clone()));
+            *self.runner_opts.lock().expect("runner opts mutex poisoned") = Some(RunnerOpts {
+                model: params.model.clone(),
+                provider: params.provider.clone(),
+                thinking: params.thinking.clone(),
+                system_prompt: params.system_prompt.clone(),
+                prompt: params.prompt.clone(),
+            });
             Box::pin(async move {
                 let (kill_tx, _kill_rx) = tokio::sync::oneshot::channel();
                 let done = tokio::spawn(async { ExitKind::Normal });
@@ -301,7 +350,19 @@ mod tests {
         ServiceRegistry,
         Arc<AtomicUsize>,
         Arc<Mutex<Option<Option<HostToolBridge>>>>,
-        Arc<Mutex<Option<(Option<String>, Option<String>)>>>,
+        Arc<Mutex<Option<RunnerOpts>>>,
+    ) {
+        services_with_capture_support(registry, false)
+    }
+
+    fn services_with_capture_support(
+        registry: Option<ToolRegistry>,
+        supports_system_prompt: bool,
+    ) -> (
+        ServiceRegistry,
+        Arc<AtomicUsize>,
+        Arc<Mutex<Option<Option<HostToolBridge>>>>,
+        Arc<Mutex<Option<RunnerOpts>>>,
     ) {
         let spawns = Arc::new(AtomicUsize::new(0));
         let bridge = Arc::new(Mutex::new(None));
@@ -314,6 +375,7 @@ mod tests {
                     spawns: Arc::clone(&spawns),
                     bridge: Arc::clone(&bridge),
                     runner_opts: Arc::clone(&runner_opts),
+                    supports_system_prompt,
                 }),
             )
             .unwrap();
@@ -360,6 +422,8 @@ mod tests {
                 runner_command: "",
                 runner_model: Some("model-a".to_string()),
                 runner_provider: Some("provider-a".to_string()),
+                runner_thinking: None,
+                system_prompt: None,
                 workspace: dir.path(),
                 workspace_root: dir.path(),
                 agent_root: dir.path(),
@@ -385,9 +449,91 @@ mod tests {
         assert_eq!(bridge.args[1], "--dir");
         assert_eq!(bridge.args[2], dir.path().display().to_string());
         assert_eq!(
-            *runner_opts.lock().expect("runner opts mutex poisoned"),
-            Some((Some("model-a".to_string()), Some("provider-a".to_string())))
+            runner_opts
+                .lock()
+                .expect("runner opts mutex poisoned")
+                .as_ref()
+                .map(|opts| (opts.model.as_deref(), opts.provider.as_deref())),
+            Some((Some("model-a"), Some("provider-a")))
         );
+    }
+
+    #[tokio::test]
+    async fn passes_thinking_and_system_prompt_to_supporting_runner() {
+        let dir = tempfile::tempdir().unwrap();
+        let (services, _spawns, _bridge, runner_opts) =
+            services_with_capture_support(Some(ToolRegistry::new()), true);
+        let (_tx, shutdown) = shutdown_token(false);
+
+        fire_runner(
+            FireRunnerRequest {
+                runner_kind: "fake",
+                runner_command: "",
+                runner_model: None,
+                runner_provider: None,
+                runner_thinking: Some("high".to_string()),
+                system_prompt: Some("identity".to_string()),
+                workspace: dir.path(),
+                workspace_root: dir.path(),
+                agent_root: dir.path(),
+                prompt: "job prompt".to_string(),
+                job_id: "job",
+                max_run_timeout_ms: 60_000,
+                job_timeout: Duration::from_secs(60),
+            },
+            &services,
+            shutdown,
+        )
+        .await
+        .unwrap();
+
+        let opts = runner_opts
+            .lock()
+            .expect("runner opts mutex poisoned")
+            .clone()
+            .expect("captured spawn params");
+        assert_eq!(opts.thinking.as_deref(), Some("high"));
+        assert_eq!(opts.system_prompt.as_deref(), Some("identity"));
+        assert_eq!(opts.prompt, "job prompt");
+    }
+
+    #[tokio::test]
+    async fn prefixes_system_context_for_runner_without_system_prompt_support() {
+        let dir = tempfile::tempdir().unwrap();
+        let (services, _spawns, _bridge, runner_opts) =
+            services_with_capture_support(Some(ToolRegistry::new()), false);
+        let (_tx, shutdown) = shutdown_token(false);
+
+        fire_runner(
+            FireRunnerRequest {
+                runner_kind: "fake",
+                runner_command: "",
+                runner_model: None,
+                runner_provider: None,
+                runner_thinking: Some("high".to_string()),
+                system_prompt: Some("identity".to_string()),
+                workspace: dir.path(),
+                workspace_root: dir.path(),
+                agent_root: dir.path(),
+                prompt: "job prompt".to_string(),
+                job_id: "job",
+                max_run_timeout_ms: 60_000,
+                job_timeout: Duration::from_secs(60),
+            },
+            &services,
+            shutdown,
+        )
+        .await
+        .unwrap();
+
+        let opts = runner_opts
+            .lock()
+            .expect("runner opts mutex poisoned")
+            .clone()
+            .expect("captured spawn params");
+        assert_eq!(opts.thinking.as_deref(), Some("high"));
+        assert_eq!(opts.system_prompt, None);
+        assert_eq!(opts.prompt, "identity\njob prompt");
     }
 
     #[tokio::test]
@@ -403,6 +549,8 @@ mod tests {
                 runner_command: "",
                 runner_model: None,
                 runner_provider: None,
+                runner_thinking: None,
+                system_prompt: None,
                 workspace: dir.path(),
                 workspace_root: dir.path(),
                 agent_root: dir.path(),
@@ -438,6 +586,8 @@ mod tests {
                 runner_command: "",
                 runner_model: None,
                 runner_provider: None,
+                runner_thinking: None,
+                system_prompt: None,
                 workspace: dir.path(),
                 workspace_root: dir.path(),
                 agent_root: dir.path(),
@@ -516,6 +666,8 @@ mod tests {
                     runner_command: "",
                     runner_model: None,
                     runner_provider: None,
+                    runner_thinking: None,
+                    system_prompt: None,
                     workspace: &root,
                     workspace_root: &root,
                     agent_root: &root,
@@ -604,6 +756,10 @@ mod tests {
             FireRunnerRequest {
                 runner_kind: "fake",
                 runner_command: "",
+                runner_model: None,
+                runner_provider: None,
+                runner_thinking: None,
+                system_prompt: None,
                 workspace: dir.path(),
                 workspace_root: dir.path(),
                 agent_root: dir.path(),

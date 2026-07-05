@@ -944,6 +944,7 @@ dependencies = [
  "dar-dashboard",
  "dar-host-api",
  "dar-runner-core",
+ "dar-system-context",
  "dar-tool-registry",
  "dar-tool-registry-host",
  "http-body-util",
