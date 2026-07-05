@@ -19,6 +19,12 @@ cargo test --release backoff_grows_then_caps   # a single test by name
 
 The runner backend named by `agent.yaml` `runner.use` must be installed and authenticated on the host (not bundled); `example-agent` ships the `fake` runner so it has no host dependency. `example-agent/` is the test fixture; reset between runs by setting `issues/*.md` `state:` back to `todo`, emptying `workspaces/` (keep `.gitkeep`), and deleting `data/store.db` (persisted run history) plus `logs/agent.log`.
 
+## Maintenance
+
+Update `CHANGELOG.md` for every user-visible behavior change, bug fix, new
+extension surface, config option, or CLI/runtime change. Put entries under
+`[Unreleased]` and keep wording user-facing, not implementation-only.
+
 ## Architecture
 
 ### Extension architecture

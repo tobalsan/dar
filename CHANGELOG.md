@@ -23,8 +23,13 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Fixed
 - Scheduler: pass configured runner settings so cron jobs use the selected
-  provider and model, and surface builtin runner errors instead of a generic
-  exit code.
+  provider, model, and thinking level, and surface builtin runner errors instead
+  of a generic exit code.
+- Scheduler: pass the agent's system context (`AGENTS.md`, `system_files`, and
+  workspace skills) into scheduled runs. Runners with a system-prompt channel
+  receive it there; other runners get it prepended to the job prompt.
+- Composer: omit `runner-builtin` unless `runner.use: builtin`, preventing its
+  globally registered tools from colliding with pi MCP direct tools.
 - Scheduler: capture streamed responses so successful scheduled runs no longer
   record an empty response, falling back to text deltas when a runner omits the
   final assistant event.
