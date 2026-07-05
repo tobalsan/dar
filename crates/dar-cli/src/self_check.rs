@@ -185,9 +185,6 @@ mod tests {
         write_executable(&exe, "current");
         assert!(prev_binary(&exe).is_none());
         write_executable(&temp.path().join("bin/dar.prev"), "prev");
-        assert_eq!(
-            prev_binary(&exe),
-            Some(temp.path().join("bin/dar.prev"))
-        );
+        assert_eq!(prev_binary(&exe), Some(temp.path().join("bin/dar.prev")));
     }
 }

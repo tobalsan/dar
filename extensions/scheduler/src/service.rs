@@ -61,6 +61,8 @@ pub struct SchedulerConfig {
     pub root: PathBuf,
     pub runner_kind: String,
     pub runner_command: String,
+    pub runner_model: Option<String>,
+    pub runner_provider: Option<String>,
     pub max_run_timeout_ms: u64,
     /// How often (ms) to poll `cron/jobs.json` for external edits (hot reload).
     pub poll_interval_ms: u64,
@@ -374,11 +376,14 @@ fn classify_outcome(
             )),
         ),
         Ok(RunOutcome::Completed(ExitKind::Normal, text)) => (RunStatus::Ok, Some(text), None),
-        Ok(RunOutcome::Completed(ExitKind::Abnormal(code), _)) => (
-            RunStatus::Error,
-            None,
-            Some(format!("runner exited abnormally (code {code:?})")),
-        ),
+        Ok(RunOutcome::Completed(ExitKind::Abnormal(code), text)) => {
+            let error = if text.trim().is_empty() {
+                format!("runner exited abnormally (code {code:?})")
+            } else {
+                text
+            };
+            (RunStatus::Error, None, Some(error))
+        }
         Ok(RunOutcome::Completed(ExitKind::Interrupted { reason }, _)) => (
             RunStatus::Error,
             None,
@@ -496,6 +501,8 @@ async fn execute_job(
         FireRunnerRequest {
             runner_kind: &config.runner_kind,
             runner_command: &config.runner_command,
+            runner_model: config.runner_model.clone(),
+            runner_provider: config.runner_provider.clone(),
             workspace: &workspace,
             workspace_root: &config.root,
             agent_root: &config.root,
@@ -724,6 +731,8 @@ mod tests {
             root,
             runner_kind: "fake".to_string(),
             runner_command: String::new(),
+            runner_model: None,
+            runner_provider: None,
             max_run_timeout_ms: 3_600_000,
             poll_interval_ms: 2_000,
             job_timeout_ms,

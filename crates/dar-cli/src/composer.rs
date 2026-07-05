@@ -125,6 +125,10 @@ const STOCK_EXTENSIONS: &[StockExtension] = &[
         factory: "runner_fake::RunnerFakeExtension",
     },
     StockExtension {
+        package: "runner-builtin",
+        factory: "runner_builtin::RunnerBuiltinExtension",
+    },
+    StockExtension {
         package: "chat-opencode",
         factory: "chat_opencode::ChatOpenCodeExtension",
     },
@@ -182,7 +186,7 @@ impl AgentSelection {
 
 #[derive(Debug, Deserialize)]
 struct SelectedUse {
-    #[serde(rename = "use", alias = "sdk")]
+    #[serde(rename = "use", alias = "sdk", alias = "type")]
     use_: String,
 }
 
@@ -233,6 +237,7 @@ const ALL_RUNNERS: &[&str] = &[
     "runner-opencode",
     "runner-cli",
     "runner-fake",
+    "runner-builtin",
 ];
 
 fn selected_stock_extensions(
@@ -338,6 +343,7 @@ fn runner_package(use_: &str) -> Result<&'static str> {
         "opencode" => Ok("runner-opencode"),
         "cli" => Ok("runner-cli"),
         "fake" => Ok("runner-fake"),
+        "builtin" => Ok("runner-builtin"),
         other => bail!("unknown runner.use {other:?}"),
     }
 }
@@ -806,20 +812,23 @@ fn main_rs(stock: &[&StockExtension], locals: &[LocalExtension]) -> String {
     out.push_str(
         r#"#[tokio::main(worker_threads = 2)]
 async fn main() {
-    dar_cli_core::run(host_api::plugins![
+    let mut plugins: Vec<std::sync::Arc<dyn host_api::Extension>> = Vec::new();
 "#,
     );
     for stock in stock {
+        out.push_str(&format!("    #[cfg(feature = \"{}\")]\n", stock.feature()));
         out.push_str(&format!(
-            "        #[cfg(feature = \"{}\")]\n",
-            stock.feature()
+            "    plugins.push(std::sync::Arc::new({}) as std::sync::Arc<dyn host_api::Extension>);\n",
+            stock.factory
         ));
-        out.push_str(&format!("        {},\n", stock.factory));
     }
     for local in locals {
-        out.push_str(&format!("        {}(),\n", local.factory));
+        out.push_str(&format!(
+            "    plugins.push(std::sync::Arc::new({}()) as std::sync::Arc<dyn host_api::Extension>);\n",
+            local.factory
+        ));
     }
-    out.push_str("    ])\n    .await\n}\n");
+    out.push_str("    plugins.shrink_to_fit();\n    dar_cli_core::run(plugins).await\n}\n");
     out
 }
 
@@ -877,7 +886,7 @@ where
 ///
 /// Membership is decided on non-comment, non-blank lines, so `.env` already
 /// added by `tracker-linear`'s `init_workflow` is never duplicated here.
-fn ensure_agent_gitignore(agent: &Path) -> Result<bool> {
+pub(crate) fn ensure_agent_gitignore(agent: &Path) -> Result<bool> {
     let path = agent.join(".gitignore");
     let existing = match fs::read_to_string(&path) {
         Ok(contents) => Some(contents),
@@ -1001,7 +1010,7 @@ mod tests {
             );
         }
         assert!(source.starts_with("// # generated - do not hand-edit\n"));
-        assert!(source.contains("my_ext::extension(),"));
+        assert!(source.contains("my_ext::extension()"));
 
         let manifest_before = manifest;
         let source_before = source;
@@ -1212,10 +1221,14 @@ mod tests {
         assert!(manifest.contains("stock-tracker-files = [\"dep:tracker-files\"]"));
         assert!(manifest.contains("stock-runner-fake = [\"dep:runner-fake\"]"));
         assert!(manifest.contains("stock-orchestrator = [\"dep:orchestrator\"]"));
-        assert!(manifest.contains("system-context = { package = \"dar-system-context\", version = "));
+        assert!(
+            manifest.contains("system-context = { package = \"dar-system-context\", version = ")
+        );
         assert!(manifest.contains("stock-system-context = [\"dep:system-context\"]"));
         assert!(manifest.contains("stock-frontend-log = [\"dep:frontend-log\"]"));
-        assert!(manifest.contains("tracker-linear = { package = \"dar-tracker-linear\", version = "));
+        assert!(
+            manifest.contains("tracker-linear = { package = \"dar-tracker-linear\", version = ")
+        );
         assert!(manifest.contains("stock-tracker-linear = [\"dep:tracker-linear\"]"));
         assert!(source.contains("system_context::SystemContextExtension"));
         assert!(source.contains("tracker_linear::TrackerLinearExtension"));
@@ -1331,12 +1344,32 @@ extensions:
             "runner-opencode",
             "runner-cli",
             "runner-fake",
+            "runner-builtin",
         ] {
             assert!(
                 manifest.contains(&format!("{pkg} = {{ package = ")),
                 "{pkg} should always be linked regardless of runner.use"
             );
         }
+    }
+
+    #[test]
+    fn init_build_feature_gates_builtin_runner_dependency() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(agent, "files", "builtin", "logs", "");
+
+        init_build(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        let source = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
+        assert!(
+            manifest.contains("runner-builtin = { package = \"dar-runner-builtin\", version = ")
+        );
+        assert!(manifest.contains("optional = true"));
+        assert!(manifest.contains("stock-runner-builtin = [\"dep:runner-builtin\"]"));
+        assert!(source.contains("#[cfg(feature = \"stock-runner-builtin\")]"));
+        assert!(source.contains("runner_builtin::RunnerBuiltinExtension"));
     }
 
     #[test]

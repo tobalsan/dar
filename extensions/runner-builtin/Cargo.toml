@@ -1,0 +1,31 @@
+[package]
+name = "dar-runner-builtin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Builtin zero-install runner extension"
+rust-version = "1.83"
+publish = false
+
+[lib]
+name = "runner_builtin"
+
+[dependencies]
+anyhow = "1"
+cap-chat = { package = "dar-cap-chat", path = "../../crates/cap-chat", version = "0.3" }
+cap-runner = { package = "dar-cap-runner", path = "../../crates/cap-runner", version = "0.3" }
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.3" }
+runner-core = { package = "dar-runner-core", path = "../../crates/runner-core", version = "0.3" }
+tokio = { version = "1.43", features = ["rt", "time", "sync", "process", "io-util", "macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+futures-util = "0.3"
+tool-registry = { package = "dar-tool-registry", path = "../../crates/tool-registry", version = "0.3" }
+async-trait = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

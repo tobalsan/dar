@@ -159,10 +159,7 @@ fn registry_dir(ctx: &host_api::StartCtx) -> std::path::PathBuf {
 fn register_presence(
     ctx: &host_api::StartCtx,
     addr: std::net::SocketAddr,
-) -> anyhow::Result<(
-    dar_presence::Registry,
-    dar_presence::PresenceEntry,
-)> {
+) -> anyhow::Result<(dar_presence::Registry, dar_presence::PresenceEntry)> {
     let root = ctx.paths.root();
     let id = read_agent_id(root)?;
     let folder = root.to_string_lossy().to_string();

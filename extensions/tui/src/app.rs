@@ -486,7 +486,10 @@ mod tests {
         // Plain End is cursor-to-line-end now; Ctrl+End re-follows the tail.
         app.handle_event(key(KeyCode::End));
         assert_eq!(app.chat.scroll_back, 10);
-        app.handle_event(Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL)));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::End,
+            KeyModifiers::CONTROL,
+        )));
         assert_eq!(app.chat.scroll_back, 0);
         // Ctrl+Home pins to the oldest line.
         app.handle_event(Event::Key(KeyEvent::new(

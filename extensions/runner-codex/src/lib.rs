@@ -964,10 +964,7 @@ mod tests {
             .find(|w| w[0] == "-c" && w[1].starts_with("mcp_servers.dar.command="))
             .map(|w| w[1].clone())
             .expect("mcp_servers.dar.command flag missing");
-        assert_eq!(
-            command_flag,
-            "mcp_servers.dar.command=\"/opt/dar\""
-        );
+        assert_eq!(command_flag, "mcp_servers.dar.command=\"/opt/dar\"");
         let args_flag = args
             .windows(2)
             .find(|w| w[0] == "-c" && w[1].starts_with("mcp_servers.dar.args="))

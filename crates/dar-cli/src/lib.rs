@@ -3,6 +3,7 @@
 pub mod bridge;
 mod cli;
 pub mod composer;
+mod create;
 pub mod dash;
 mod doctor;
 pub mod self_check;
@@ -140,6 +141,24 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
             let services = plugin_services(&root, plugins).await?;
             let code = doctor::run(&root, &dotenv_report, services)?;
             std::process::exit(code);
+        }
+        Command::Create(args) => {
+            let root = args.resolve_root()?;
+            let outcome = create::run(&root, &args)?;
+            if outcome.loop_enabled {
+                dotenv::load_agent_env(&root)?;
+                let services = plugin_services(&root, plugins).await?;
+                services
+                    .get_named::<dyn HostCommand>("init-workflow")?
+                    .run(serde_json::json!({
+                        "dir": root,
+                        "force": false,
+                        "linear_project_slug": serde_json::Value::Null,
+                        "linear_project": serde_json::Value::Null,
+                        "expose_graphql_tool": false,
+                    }))?;
+            }
+            Ok(())
         }
         Command::InitBuild(args) => composer::init_build_with_options(
             &args.resolve_root()?,
@@ -337,6 +356,29 @@ mod tests {
                 );
             }
             _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn create_command_parses_positional_path_and_flags() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("new-agent");
+        let cli = Cli::try_parse_from([
+            "dar".into(),
+            "create".into(),
+            target.as_os_str().to_os_string(),
+            "--runner".into(),
+            "codex".into(),
+            "--orchestrator".into(),
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Create(args) => {
+                assert_eq!(args.resolve_root().unwrap(), target);
+                assert_eq!(args.runner.as_deref(), Some("codex"));
+                assert!(args.orchestrator);
+            }
+            _ => panic!("expected create command"),
         }
     }
 

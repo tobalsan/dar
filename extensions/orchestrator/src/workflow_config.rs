@@ -608,6 +608,7 @@ mod tests {
                 webhook_secret: None,
             },
             foreground: "logs".to_string(),
+            providers: Default::default(),
             extensions: Default::default(),
             system_files: None,
         }

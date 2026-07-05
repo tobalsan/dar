@@ -47,17 +47,16 @@ pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyho
 
     // 1. Config.
     let cfg = match config::load(&paths.root) {
-        Ok(cfg) => match cfg.validate() {
-            Ok(()) => {
-                pass(&format!("agent.yaml valid (id={})", cfg.id));
-                Some(cfg)
+        Ok(cfg) => {
+            match cfg.validate() {
+                Ok(()) => pass(&format!("agent.yaml valid (id={})", cfg.id)),
+                Err(e) => {
+                    fail(&format!("agent.yaml invalid: {e:#}"));
+                    ok = false;
+                }
             }
-            Err(e) => {
-                fail(&format!("agent.yaml invalid: {e:#}"));
-                ok = false;
-                None
-            }
-        },
+            Some(cfg)
+        }
         Err(e) => {
             fail(&format!("agent.yaml: {e:#}"));
             ok = false;

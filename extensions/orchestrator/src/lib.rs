@@ -152,7 +152,11 @@ fn dashboard_banner(
     match bound {
         Some(addr) => format!(
             "dar running; dashboard on http://{}:{}/ (run `dar dash` for the fleet view)",
-            if bind.is_unspecified() { std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) } else { bind },
+            if bind.is_unspecified() {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            } else {
+                bind
+            },
             addr.port()
         ),
         None => "dar running; run `dar dash` for the dashboard".to_string(),
@@ -2791,17 +2795,14 @@ mod tests {
     use crate::workflow_config::{EffectiveLoopConfig, WorkflowFrontmatter};
     use anyhow::Result;
     use chrono::TimeZone;
-    use system_files::bus::SystemContextFile;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use system_files::bus::SystemContextFile;
 
     #[test]
     fn banner_uses_fixed_port_when_configured() {
         let bind = IpAddr::V4(Ipv4Addr::LOCALHOST);
         let msg = super::dashboard_banner(bind, 7878, None);
-        assert_eq!(
-            msg,
-            "dar running; dashboard on http://127.0.0.1:7878/"
-        );
+        assert_eq!(msg, "dar running; dashboard on http://127.0.0.1:7878/");
     }
 
     #[test]
@@ -2842,6 +2843,7 @@ mod tests {
             workspace: None,
             dashboard: DashboardConfig::default(),
             foreground: "tui".to_string(),
+            providers: Default::default(),
             extensions: Default::default(),
             system_files: None,
         };
@@ -3206,6 +3208,7 @@ mod tests {
                 webhook_secret: None,
             },
             foreground: "logs".to_string(),
+            providers: Default::default(),
             extensions: Default::default(),
             system_files: None,
         }
@@ -4421,6 +4424,7 @@ dashboard:
                 webhook_secret: None,
             },
             foreground: "logs".to_string(),
+            providers: Default::default(),
             extensions: Default::default(),
             system_files: None,
         }

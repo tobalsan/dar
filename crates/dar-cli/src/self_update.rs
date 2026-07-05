@@ -199,10 +199,7 @@ mod tests {
         let err = doctor_gate(&agent, &FakeDoctor { ok: false }).unwrap_err();
 
         assert!(err.to_string().contains("doctor gate failed"));
-        assert_eq!(
-            fs::read_to_string(agent.join("bin/dar")).unwrap(),
-            "old"
-        );
+        assert_eq!(fs::read_to_string(agent.join("bin/dar")).unwrap(), "old");
         assert!(!agent.join("bin/dar.new").exists());
         assert!(!agent.join("bin/dar.prev").exists());
     }
@@ -216,10 +213,7 @@ mod tests {
 
         atomic_swap(&agent).unwrap();
 
-        assert_eq!(
-            fs::read_to_string(agent.join("bin/dar")).unwrap(),
-            "new"
-        );
+        assert_eq!(fs::read_to_string(agent.join("bin/dar")).unwrap(), "new");
         assert_eq!(
             fs::read_to_string(agent.join("bin/dar.prev")).unwrap(),
             "old"
@@ -236,10 +230,7 @@ mod tests {
         let err = atomic_swap(&agent).unwrap_err();
 
         assert!(err.to_string().contains("renaming"));
-        assert_eq!(
-            fs::read_to_string(agent.join("bin/dar")).unwrap(),
-            "old"
-        );
+        assert_eq!(fs::read_to_string(agent.join("bin/dar")).unwrap(), "old");
     }
 
     #[test]

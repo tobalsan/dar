@@ -71,9 +71,7 @@ fn config_content(bridge: &str) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn opencode_serve_calls_echo_upper_through_host_bridge_and_survives_failure() {
     if !opencode_available() {
-        eprintln!(
-            "skipping opencode e2e: set DAR_OPENCODE_E2E=1 with opencode installed + authed"
-        );
+        eprintln!("skipping opencode e2e: set DAR_OPENCODE_E2E=1 with opencode installed + authed");
         return;
     }
 

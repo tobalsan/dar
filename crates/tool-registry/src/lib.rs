@@ -145,8 +145,17 @@ pub struct ToolError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolContent {
+    Text { text: String },
+    Image { data: String, mime_type: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolOutcome {
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content: Vec<ToolContent>,
     pub is_error: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ToolError>,
@@ -154,8 +163,10 @@ pub struct ToolOutcome {
 
 impl ToolOutcome {
     pub fn ok(text: impl Into<String>) -> Self {
+        let text = text.into();
         Self {
-            text: text.into(),
+            content: vec![ToolContent::Text { text: text.clone() }],
+            text,
             is_error: false,
             error: None,
         }
@@ -165,6 +176,7 @@ impl ToolOutcome {
         let text = text.into();
         Self {
             text: text.clone(),
+            content: vec![ToolContent::Text { text: text.clone() }],
             is_error: true,
             error: Some(ToolError {
                 code: "tool_error".to_string(),
@@ -187,6 +199,7 @@ impl ToolOutcome {
             _ => message.clone(),
         };
         Self {
+            content: vec![ToolContent::Text { text: text.clone() }],
             text,
             is_error: true,
             error: Some(ToolError {
@@ -200,6 +213,19 @@ impl ToolOutcome {
     pub fn redacted(&self, redactor: &Redactor) -> Self {
         Self {
             text: redactor.redact(&self.text),
+            content: self
+                .content
+                .iter()
+                .map(|content| match content {
+                    ToolContent::Text { text } => ToolContent::Text {
+                        text: redactor.redact(text),
+                    },
+                    ToolContent::Image { data, mime_type } => ToolContent::Image {
+                        data: data.clone(),
+                        mime_type: mime_type.clone(),
+                    },
+                })
+                .collect(),
             is_error: self.is_error,
             error: self.error.as_ref().map(|err| ToolError {
                 code: err.code.clone(),
@@ -211,8 +237,21 @@ impl ToolOutcome {
 
     /// Render as an MCP `tools/call` result object.
     pub fn to_mcp_result(&self) -> Value {
+        let content: Vec<Value> = if self.content.is_empty() {
+            vec![json!({ "type": "text", "text": self.text })]
+        } else {
+            self.content
+                .iter()
+                .map(|content| match content {
+                    ToolContent::Text { text } => json!({ "type": "text", "text": text }),
+                    ToolContent::Image { data, mime_type } => {
+                        json!({ "type": "image", "data": data, "mimeType": mime_type })
+                    }
+                })
+                .collect()
+        };
         let mut result = json!({
-            "content": [{ "type": "text", "text": self.text }],
+            "content": content,
             "isError": self.is_error,
         });
         if let Some(error) = &self.error {

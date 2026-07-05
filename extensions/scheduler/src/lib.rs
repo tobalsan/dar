@@ -126,6 +126,10 @@ struct RunnerSection {
     #[serde(default)]
     command: String,
     #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
     max_run_timeout_ms: u64,
 }
 
@@ -246,7 +250,8 @@ impl Extension for SchedulerExtension {
 /// Build the static [`SchedulerConfig`] shared by the timer loop and the
 /// run-now HTTP handler from the agent root + validated scheduler settings.
 fn build_scheduler_config(root: &std::path::Path, settings: &SchedulerSettings) -> SchedulerConfig {
-    let (runner_kind, runner_command, max_run_timeout_ms) = read_runner_config(root);
+    let (runner_kind, runner_command, runner_model, runner_provider, max_run_timeout_ms) =
+        read_runner_config(root);
     let poll_interval_ms = if settings.poll_interval_ms == 0 {
         DEFAULT_POLL_INTERVAL_MS
     } else {
@@ -256,6 +261,8 @@ fn build_scheduler_config(root: &std::path::Path, settings: &SchedulerSettings) 
         root: root.to_path_buf(),
         runner_kind,
         runner_command,
+        runner_model,
+        runner_provider,
         max_run_timeout_ms,
         poll_interval_ms,
         job_timeout_ms: settings.job_timeout_ms.unwrap_or(DEFAULT_JOB_TIMEOUT_MS),
@@ -264,7 +271,9 @@ fn build_scheduler_config(root: &std::path::Path, settings: &SchedulerSettings) 
 
 /// Read `runner.use` / `runner.command` / `runner.max_run_timeout_ms` from
 /// `agent.yaml`, applying the same defaults the orchestrator uses.
-fn read_runner_config(root: &std::path::Path) -> (String, String, u64) {
+fn read_runner_config(
+    root: &std::path::Path,
+) -> (String, String, Option<String>, Option<String>, u64) {
     let path = root.join("agent.yaml");
     let parsed = std::fs::read_to_string(&path)
         .ok()
@@ -281,11 +290,19 @@ fn read_runner_config(root: &std::path::Path) -> (String, String, u64) {
             } else {
                 cfg.runner.max_run_timeout_ms
             };
-            (kind, cfg.runner.command, timeout)
+            (
+                kind,
+                cfg.runner.command,
+                cfg.runner.model,
+                cfg.runner.provider,
+                timeout,
+            )
         }
         None => (
             DEFAULT_RUNNER_KIND.to_string(),
             String::new(),
+            None,
+            None,
             DEFAULT_MAX_RUN_TIMEOUT_MS,
         ),
     }
@@ -303,9 +320,11 @@ mod tests {
             "id: a\nname: A\nrunner:\n  use: fake\n  max_run_timeout_ms: 1234\n",
         )
         .unwrap();
-        let (kind, command, timeout) = read_runner_config(dir.path());
+        let (kind, command, model, provider, timeout) = read_runner_config(dir.path());
         assert_eq!(kind, "fake");
         assert_eq!(command, "");
+        assert_eq!(model, None);
+        assert_eq!(provider, None);
         assert_eq!(timeout, 1234);
     }
 
@@ -313,8 +332,10 @@ mod tests {
     fn defaults_runner_kind_to_pi_when_absent() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("agent.yaml"), "id: a\nname: A\n").unwrap();
-        let (kind, _command, timeout) = read_runner_config(dir.path());
+        let (kind, _command, model, provider, timeout) = read_runner_config(dir.path());
         assert_eq!(kind, "pi");
+        assert_eq!(model, None);
+        assert_eq!(provider, None);
         assert_eq!(timeout, DEFAULT_MAX_RUN_TIMEOUT_MS);
     }
 

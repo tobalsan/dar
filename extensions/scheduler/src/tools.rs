@@ -36,7 +36,7 @@ use chrono::{SecondsFormat, TimeZone, Utc};
 use serde_json::{json, Value};
 
 use host_api::ServiceRegistry;
-use tool_registry::{ToolExecutor, ToolOutcome, ToolRegistryHandle, ToolSpec};
+use tool_registry::{ToolContent, ToolExecutor, ToolOutcome, ToolRegistryHandle, ToolSpec};
 
 use crate::schedule::{compute_next_run_at_ms, format_schedule};
 use crate::service::{run_job_now, RunNowOutcome, SchedulerConfig};
@@ -558,6 +558,7 @@ impl ToolExecutor for RunNowTool {
                 match result.status {
                     crate::output::RunStatus::Ok => Ok(ToolOutcome::ok(text)),
                     crate::output::RunStatus::Error => Ok(ToolOutcome {
+                        content: vec![ToolContent::Text { text: text.clone() }],
                         text,
                         is_error: true,
                         error: Some(tool_registry::ToolError {
@@ -945,6 +946,8 @@ mod tests {
             root: dir.path().to_path_buf(),
             runner_kind: "fake".to_string(),
             runner_command: String::new(),
+            runner_model: None,
+            runner_provider: None,
             max_run_timeout_ms: 3_600_000,
             poll_interval_ms: 2_000,
             job_timeout_ms: 60_000,
