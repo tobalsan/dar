@@ -771,6 +771,7 @@ name = "dar-orchestrator"
 version = "0.3.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "dar-cap-runner",

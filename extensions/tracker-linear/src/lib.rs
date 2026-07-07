@@ -13,7 +13,7 @@
 //! relation contains at least one non-terminal issue.
 
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::{path::Path, path::PathBuf};
 
@@ -577,7 +577,10 @@ fn yaml_string(value: &str) -> String {
 pub struct LinearTracker {
     client: reqwest::Client,
     endpoint: String,
-    api_key: String,
+    /// The `Authorization` header value. Wrapped in an `RwLock` so
+    /// [`LinearTracker::reload_secrets`] can swap in a rotated token at runtime
+    /// without rebuilding the tracker (read on every request).
+    api_key: RwLock<String>,
     project_slug: String,
     team: Option<String>,
     assignee_id: Option<String>,
@@ -603,7 +606,7 @@ impl LinearTracker {
             } else {
                 cfg.endpoint
             },
-            api_key: cfg.api_key,
+            api_key: RwLock::new(cfg.api_key),
             project_slug: cfg.project_slug,
             team: cfg.team,
             assignee_id: cfg.assignee_id,
@@ -614,6 +617,34 @@ impl LinearTracker {
             needs_human: cfg.needs_human,
             min_remaining: Arc::new(AtomicI64::new(UNSET_MIN)),
         })
+    }
+
+    /// Current `Authorization` header value (cloned for a single request).
+    fn auth_header(&self) -> String {
+        self.api_key
+            .read()
+            .expect("LinearTracker api_key lock poisoned")
+            .clone()
+    }
+
+    /// Re-resolve the Linear auth header from the environment and swap the
+    /// cached token in place. Callers reload `.env` first (so the env holds the
+    /// rotated token); this refreshes the already-built tracker without a
+    /// rebuild. Returns `true` when the token changed.
+    ///
+    /// A now-missing token resolves to an empty header (same as construction),
+    /// surfacing as a 401 rather than silently keeping the stale value.
+    pub fn reload_secrets(&self) -> bool {
+        let next = resolve_linear_auth_header().unwrap_or_default();
+        let mut guard = self
+            .api_key
+            .write()
+            .expect("LinearTracker api_key lock poisoned");
+        if *guard == next {
+            return false;
+        }
+        *guard = next;
+        true
     }
 
     // --- async internals ---
@@ -755,7 +786,7 @@ query DarCandidates($filter: IssueFilter, $after: String, $first: Int!) {
         let resp = self
             .client
             .post(&self.endpoint)
-            .header("Authorization", &self.api_key)
+            .header("Authorization", self.auth_header())
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -779,7 +810,7 @@ query DarCandidates($filter: IssueFilter, $after: String, $first: Int!) {
             let resp2 = self
                 .client
                 .post(&self.endpoint)
-                .header("Authorization", &self.api_key)
+                .header("Authorization", self.auth_header())
                 .header("Content-Type", "application/json")
                 .json(&body)
                 .send()
@@ -1099,6 +1130,10 @@ impl Tracker for LinearTracker {
         } else {
             Some(v)
         }
+    }
+
+    fn reload_secrets(&self) -> bool {
+        LinearTracker::reload_secrets(self)
     }
 }
 
@@ -1441,6 +1476,45 @@ mod tests {
         std::env::set_var(OAUTH_TOKEN_ENV, "");
         std::env::set_var(API_KEY_ENV, "");
         assert_eq!(resolve_linear_auth_header(), None);
+        std::env::remove_var(OAUTH_TOKEN_ENV);
+        std::env::remove_var(API_KEY_ENV);
+    }
+
+    #[test]
+    fn reload_secrets_swaps_cached_token_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(OAUTH_TOKEN_ENV);
+        std::env::set_var(API_KEY_ENV, "lin_old");
+
+        let tracker = LinearTracker::new(LinearTrackerConfig {
+            endpoint: "http://localhost".to_string(),
+            api_key: resolve_linear_auth_header().unwrap_or_default(),
+            project_slug: "test".to_string(),
+            team: None,
+            assignee_id: None,
+            delegate_id: None,
+            labels: vec![],
+            active_states: vec![],
+            terminal_states: vec![],
+            needs_human: None,
+        })
+        .unwrap();
+        assert_eq!(tracker.auth_header(), "lin_old");
+
+        // No change yet → reload is a no-op.
+        assert!(!tracker.reload_secrets());
+        assert_eq!(tracker.auth_header(), "lin_old");
+
+        // Rotate the env token; reload swaps it in without a rebuild.
+        std::env::set_var(API_KEY_ENV, "lin_new");
+        assert!(tracker.reload_secrets());
+        assert_eq!(tracker.auth_header(), "lin_new");
+
+        // An OAuth token takes precedence and is sent with the Bearer prefix.
+        std::env::set_var(OAUTH_TOKEN_ENV, "oauth_tok");
+        assert!(tracker.reload_secrets());
+        assert_eq!(tracker.auth_header(), "Bearer oauth_tok");
+
         std::env::remove_var(OAUTH_TOKEN_ENV);
         std::env::remove_var(API_KEY_ENV);
     }

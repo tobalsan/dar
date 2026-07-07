@@ -204,6 +204,10 @@ pub enum ControlMsg {
         run_id: String,
         reply: oneshot::Sender<ControlReply>,
     },
+    /// Re-read `.env` and swap the tracker's cached auth token in place.
+    ReloadSecrets {
+        reply: oneshot::Sender<ControlReply>,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

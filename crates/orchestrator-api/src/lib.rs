@@ -256,6 +256,12 @@ pub enum ControlMsg {
         run_id: String,
         reply: ControlReplyTx,
     },
+    /// Re-read the agent `.env` and swap any cached secrets (e.g. the Linear
+    /// auth token) without restarting the host. Published after the agent
+    /// rotates its `.env`.
+    ReloadSecrets {
+        reply: ControlReplyTx,
+    },
 }
 
 pub fn reply_channel() -> (ControlReplyTx, oneshot::Receiver<ControlReply>) {

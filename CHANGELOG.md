@@ -10,6 +10,13 @@ Breaking changes are marked **⚠ BREAKING**.
 ## [Unreleased]
 
 ### Added
+- Secrets: `reload_secrets` host tool — agents can rotate `LINEAR_API_KEY` /
+  `LINEAR_OAUTH_TOKEN` (or any `.env` secret) and refresh the running host
+  without a restart. It re-reads `.env` (overriding only keys originally loaded
+  from the file, never genuine process env) and, inside `dar run`, swaps the
+  Linear client's cached token in place via a new `ReloadSecrets` control
+  message. Reachable through the host MCP bridge; the next Linear request uses
+  the new token. Secret values stay scrubbed from logs and child env.
 - CLI: `dar create` — front-door command that scaffolds an agent workspace
   (`agent.yaml` + `.gitignore`, plus `WORKFLOW.md` when the orchestrator loop is
   enabled), usable interactively or via flags. Fills the gap where nothing
