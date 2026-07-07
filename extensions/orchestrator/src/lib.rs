@@ -66,6 +66,7 @@ pub mod hitl;
 pub mod logging;
 pub mod paths;
 pub mod prompt;
+pub mod reload_secrets;
 pub mod run_query;
 pub mod runner;
 pub mod state;
@@ -186,6 +187,23 @@ impl Extension for OrchestratorExtension {
             );
             ctx.services
                 .service::<dyn orchestrator_api::RunQuery>("orchestrator", run_query)?;
+
+            // Agent-facing `reload_secrets` tool. Registered here (register
+            // pass) so it is reachable in every process that builds the tool
+            // registry — including the host `__mcp-bridge` subprocess the
+            // runner talks to. Resolved leniently: a stripped composition
+            // without the registry still boots the orchestrator.
+            if let Ok(registry) = ctx
+                .services
+                .get_named::<dyn tool_registry::ToolRegistryHandle>(
+                    tool_registry::TOOL_REGISTRY_SERVICE,
+                )
+            {
+                crate::reload_secrets::register_into(
+                    registry.as_ref(),
+                    ctx.paths.root().to_path_buf(),
+                )?;
+            }
             Ok(())
         })
     }
@@ -302,6 +320,11 @@ impl Extension for OrchestratorExtension {
                 Arc::clone(&store),
                 history_seed,
             );
+
+            // Let the agent-facing `reload_secrets` tool reach this live
+            // orchestrator: it publishes `ControlMsg::ReloadSecrets` on this bus
+            // so the tracker token swap goes through the single writer.
+            crate::reload_secrets::set_control_bus(Arc::clone(&ctx.host.bus));
 
             let mut api_control_rx = ctx
                 .host
@@ -488,6 +511,20 @@ async fn bridge_control_msg(
                     run_id,
                     reply: local_tx,
                 })
+                .is_err()
+            {
+                orchestrator_api::send_reply(
+                    &reply,
+                    orchestrator_api::ControlReply::err("orchestrator unavailable"),
+                );
+                return;
+            }
+            forward_reply(reply, local_rx).await;
+        }
+        orchestrator_api::ControlMsg::ReloadSecrets { reply } => {
+            let (local_tx, local_rx) = tokio::sync::oneshot::channel();
+            if tx
+                .send(ControlMsg::ReloadSecrets { reply: local_tx })
                 .is_err()
             {
                 orchestrator_api::send_reply(
@@ -2011,7 +2048,35 @@ impl Orchestrator {
                 let result = self.control_kill(&run_id).await;
                 let _ = reply.send(result);
             }
+            ControlMsg::ReloadSecrets { reply } => {
+                let result = self.control_reload_secrets();
+                let _ = reply.send(result);
+            }
         }
+    }
+
+    /// Re-read the agent `.env` (overriding only file-loaded keys) and swap the
+    /// tracker's cached auth token in place. No run state is touched; this is a
+    /// pull-triggered secret refresh, not a run mutation.
+    fn control_reload_secrets(&mut self) -> ControlReply {
+        let report = match crate::dotenv::reload_agent_env(&self.paths.root) {
+            Ok(report) => report,
+            Err(e) => {
+                logging::ev("-", "control", &format!("reload-secrets failed: {e:#}"));
+                return ControlReply::err(format!("reload .env failed: {e:#}"));
+            }
+        };
+        let token_changed = self.tracker.reload_secrets();
+        // Never log secret values — only key names and counts.
+        let msg = format!(
+            "reloaded {} key(s) from .env ({} skipped as external); tracker token {}",
+            report.reloaded.len(),
+            report.skipped_external.len(),
+            if token_changed { "updated" } else { "unchanged" }
+        );
+        logging::ev("-", "control", &msg);
+        self.persist_system_event(&format!("control reload-secrets: {msg}"));
+        ControlReply::ok(msg)
     }
 
     async fn control_claim(&mut self, identifier: &str) -> ControlReply {
@@ -3026,11 +3091,19 @@ mod tests {
     struct StaticTracker {
         issue: Issue,
         parks: Option<Arc<Mutex<Vec<String>>>>,
+        reloads: Option<Arc<std::sync::atomic::AtomicUsize>>,
     }
 
     impl Tracker for StaticTracker {
         fn poll_candidates(&self) -> Result<Vec<Issue>> {
             Ok(Vec::new())
+        }
+
+        fn reload_secrets(&self) -> bool {
+            if let Some(reloads) = &self.reloads {
+                reloads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            true
         }
 
         fn fetch_states(&self, ids: &[String]) -> Result<Vec<Issue>> {
@@ -3345,6 +3418,7 @@ dashboard:
         let tracker = Arc::new(StaticTracker {
             issue: issue("ISSUE-1", None, None),
             parks: None,
+            reloads: None,
         });
         let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
         let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
@@ -3371,6 +3445,56 @@ dashboard:
     }
 
     #[tokio::test]
+    async fn control_reload_secrets_rereads_env_and_swaps_tracker() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+        // A .env with one file-loaded key. Reload should report it and swap the
+        // tracker token without touching genuine process env.
+        std::env::remove_var("RELOAD_CTRL_KEY");
+        std::fs::write(temp.path().join(".env"), "RELOAD_CTRL_KEY=first\n").unwrap();
+        // Prime the file-loaded-key registry so reload knows it owns this key.
+        crate::dotenv::load_agent_env(temp.path()).unwrap();
+
+        let agent_cfg = test_agent_config();
+        write_agent_yaml(temp.path(), &agent_cfg);
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let (state, control_rx) = test_state(Arc::clone(&store));
+        let reloads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tracker = Arc::new(StaticTracker {
+            issue: issue("ISSUE-1", None, None),
+            parks: None,
+            reloads: Some(Arc::clone(&reloads)),
+        });
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let effective_cfg =
+            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state,
+            control_rx,
+        );
+
+        // Rotate the value on disk, then trigger the control-path reload.
+        std::fs::write(temp.path().join(".env"), "RELOAD_CTRL_KEY=second\n").unwrap();
+        let reply = orchestrator.control_reload_secrets();
+
+        assert!(reply.ok, "reload reply not ok: {}", reply.message);
+        // Tracker swap was invoked exactly once via the single writer.
+        assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The file-loaded key was refreshed in-process; no secret value leaks
+        // into the reply message (only names/counts).
+        assert_eq!(std::env::var("RELOAD_CTRL_KEY").unwrap(), "second");
+        assert!(reply.message.contains("tracker token updated"));
+        assert!(!reply.message.contains("second"));
+
+        std::env::remove_var("RELOAD_CTRL_KEY");
+    }
+
+    #[tokio::test]
     async fn malformed_agent_yaml_keeps_last_good_config() {
         let temp = TempDir::new().unwrap();
         std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
@@ -3382,6 +3506,7 @@ dashboard:
         let tracker = Arc::new(StaticTracker {
             issue: issue("ISSUE-1", None, None),
             parks: None,
+            reloads: None,
         });
         let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
         let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
@@ -3421,6 +3546,7 @@ dashboard:
         let tracker = Arc::new(StaticTracker {
             issue: issue("ISSUE-1", None, None),
             parks: None,
+            reloads: None,
         });
         let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
         let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
@@ -3474,6 +3600,7 @@ dashboard:
         let tracker = Arc::new(StaticTracker {
             issue: issue("ISSUE-1", None, None),
             parks: None,
+            reloads: None,
         });
         let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
         let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
@@ -3525,6 +3652,7 @@ dashboard:
         let tracker = Arc::new(StaticTracker {
             issue: issue("ISSUE-1", None, None),
             parks: None,
+            reloads: None,
         });
         let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
         let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &prompt.snapshot().frontmatter);
@@ -3567,6 +3695,7 @@ dashboard:
         let tracker = Arc::new(StaticTracker {
             issue: needs_issue.clone(),
             parks: None,
+            reloads: None,
         });
         let agent_cfg = test_agent_config();
         let mut effective_cfg =
@@ -3724,6 +3853,7 @@ dashboard:
         let tracker = Arc::new(StaticTracker {
             issue: active_issue.clone(),
             parks: Some(Arc::clone(&parks)),
+            reloads: None,
         });
         let agent_cfg = test_agent_config();
         let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
@@ -3889,6 +4019,7 @@ dashboard:
         let tracker = Arc::new(StaticTracker {
             issue: active_issue.clone(),
             parks: Some(Arc::clone(&parks)),
+            reloads: None,
         });
         let agent_cfg = test_agent_config();
         let mut effective_cfg =
@@ -3987,6 +4118,7 @@ dashboard:
         let tracker = Arc::new(StaticTracker {
             issue: active_issue.clone(),
             parks: Some(Arc::clone(&parks)),
+            reloads: None,
         });
         let agent_cfg = test_agent_config();
         let mut effective_cfg =
@@ -4053,6 +4185,7 @@ dashboard:
         let tracker = Arc::new(StaticTracker {
             issue: active_issue.clone(),
             parks: Some(Arc::clone(&parks)),
+            reloads: None,
         });
         let agent_cfg = test_agent_config();
         let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());

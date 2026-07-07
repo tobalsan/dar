@@ -189,6 +189,13 @@ pub trait Tracker: Send + Sync {
     fn sort_candidates_locally(&self) -> bool {
         false
     }
+    /// Re-resolve any cached auth secret from the environment and swap it in
+    /// place, without rebuilding the tracker. Called after the agent rotates
+    /// its `.env` and triggers a secret reload. Returns `true` when the cached
+    /// secret changed. Default: no cached secret, nothing to do.
+    fn reload_secrets(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone)]

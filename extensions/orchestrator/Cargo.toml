@@ -13,6 +13,7 @@ name = "orchestrator"
 
 [dependencies]
 anyhow = "1"
+async-trait = "0.1"
 cap-runner = { package = "dar-cap-runner", path = "../../crates/cap-runner", version = "0.3" }
 cap-tracker = { package = "dar-cap-tracker", path = "../../crates/cap-tracker", version = "0.3" }
 chrono = { version = "0.4", features = ["serde"] }
