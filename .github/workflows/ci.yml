@@ -50,6 +50,7 @@ jobs:
           - dar-runner-pi
           - dar-tracker-files
           - dar-tracker-linear
+          - dar-tracker-plane
           - dar-tui
     steps:
       - uses: actions/checkout@v4

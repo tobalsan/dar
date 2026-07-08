@@ -18,11 +18,14 @@ pub fn build_configured(
         active_states: cfg.active_states.clone(),
         terminal_states: cfg.terminal_states.clone(),
         project_slug: cfg.project_slug.clone(),
+        project: cfg.project.clone(),
+        workspace: cfg.workspace.clone(),
         endpoint: cfg.endpoint.clone(),
         needs_human: cfg.needs_human.clone(),
         team: cfg.team.clone(),
         assignee: cfg.assignee.clone(),
         delegate: cfg.delegate.clone(),
+        mention: cfg.mention.clone(),
         labels: cfg.labels(),
     })
 }

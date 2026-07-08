@@ -28,6 +28,7 @@ frontend-log = { package = "dar-frontend-log", path = "../extensions/frontend-lo
 dashboard = { package = "dar-dashboard", path = "../extensions/dashboard", version = "0.3" }
 tracker-files = { package = "dar-tracker-files", path = "../extensions/tracker-files", version = "0.3" }
 tracker-linear = { package = "dar-tracker-linear", path = "../extensions/tracker-linear", version = "0.3" }
+tracker-plane = { package = "dar-tracker-plane", path = "../extensions/tracker-plane", version = "0.3" }
 runner-pi = { package = "dar-runner-pi", path = "../extensions/runner-pi", version = "0.3" }
 runner-codex = { package = "dar-runner-codex", path = "../extensions/runner-codex", version = "0.3" }
 runner-cli = { package = "dar-runner-cli", path = "../extensions/runner-cli", version = "0.3" }

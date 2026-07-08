@@ -639,6 +639,7 @@ dependencies = [
  "dar-tool-registry-host",
  "dar-tracker-files",
  "dar-tracker-linear",
+ "dar-tracker-plane",
  "dar-tui",
  "tokio",
 ]
@@ -1031,6 +1032,25 @@ dependencies = [
 
 [[package]]
 name = "dar-tracker-linear"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dar-cap-tracker",
+ "dar-host-api",
+ "dar-tool-registry",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dar-tracker-plane"
 version = "0.3.1"
 dependencies = [
  "anyhow",

@@ -64,11 +64,15 @@ pub struct WfTrackerConfig {
     pub needs_human: Option<String>,
     // --- Legacy nested form ---
     pub states: Option<WfTrackerStates>,
-    // --- Tracker kind + Linear-specific ---
-    /// `"files"` or `"linear"`. Overrides agent.yaml `tracker.use`.
+    // --- Tracker kind + tracker-specific ---
+    /// `"files"`, `"linear"`, or `"plane"`. Overrides agent.yaml `tracker.use`.
     pub kind: Option<String>,
     /// Linear project slugId to scope issue polling.
     pub project_slug: Option<String>,
+    /// Plane project UUID.
+    pub project: Option<String>,
+    /// Plane workspace slug.
+    pub workspace: Option<String>,
     /// Linear GraphQL endpoint override (default `https://api.linear.app/graphql`).
     pub endpoint: Option<String>,
     /// Linear team key override.
@@ -77,6 +81,8 @@ pub struct WfTrackerConfig {
     pub assignee: Option<String>,
     /// Linear delegate/app agent override (UUID / @displayName / name / email).
     pub delegate: Option<String>,
+    /// Plane bot display name to target by work-item description @mention.
+    pub mention: Option<String>,
     /// Linear label override (scalar or list).
     pub label: Option<crate::config::StringOrVec>,
 }
@@ -279,6 +285,10 @@ pub struct EffectiveLoopConfig {
     pub needs_human: Option<String>,
     /// Linear project slugId (only relevant when tracker_kind == "linear").
     pub tracker_project_slug: Option<String>,
+    /// Plane project UUID (only relevant when tracker_kind == "plane").
+    pub tracker_project: Option<String>,
+    /// Plane workspace slug (only relevant when tracker_kind == "plane").
+    pub tracker_workspace: Option<String>,
     /// Linear GraphQL endpoint (only relevant when tracker_kind == "linear").
     pub tracker_endpoint: String,
     /// Linear team key filter (only relevant when tracker_kind == "linear").
@@ -287,6 +297,8 @@ pub struct EffectiveLoopConfig {
     pub tracker_assignee: Option<String>,
     /// Linear delegate/app agent filter (raw config value; resolved by the tracker at boot).
     pub tracker_delegate: Option<String>,
+    /// Plane bot display name filter (resolved by the tracker at boot).
+    pub tracker_mention: Option<String>,
     /// Linear label filters (OR within; empty = unconstrained).
     pub tracker_labels: Vec<String>,
     // Polling
@@ -353,6 +365,16 @@ impl EffectiveLoopConfig {
             .as_ref()
             .and_then(|t| t.project_slug.clone())
             .or_else(|| base_tracker.project_slug.clone());
+        let tracker_project = wf
+            .tracker
+            .as_ref()
+            .and_then(|t| t.project.clone())
+            .or_else(|| base_tracker.project.clone());
+        let tracker_workspace = wf
+            .tracker
+            .as_ref()
+            .and_then(|t| t.workspace.clone())
+            .or_else(|| base_tracker.workspace.clone());
         let tracker_endpoint = wf
             .tracker
             .as_ref()
@@ -374,6 +396,11 @@ impl EffectiveLoopConfig {
             .as_ref()
             .and_then(|t| t.delegate.clone())
             .or_else(|| base_tracker.delegate.clone());
+        let tracker_mention = wf
+            .tracker
+            .as_ref()
+            .and_then(|t| t.mention.clone())
+            .or_else(|| base_tracker.mention.clone());
         let tracker_labels = wf
             .tracker
             .as_ref()
@@ -477,10 +504,13 @@ impl EffectiveLoopConfig {
             terminal_states,
             needs_human,
             tracker_project_slug,
+            tracker_project,
+            tracker_workspace,
             tracker_endpoint,
             tracker_team,
             tracker_assignee,
             tracker_delegate,
+            tracker_mention,
             tracker_labels,
             poll_interval_ms,
             poll_jitter_ms,
@@ -574,11 +604,14 @@ mod tests {
                 active_states: vec!["todo".into()],
                 terminal_states: vec!["done".into()],
                 project_slug: None,
+                project: None,
+                workspace: None,
                 endpoint: None,
                 needs_human: None,
                 team: None,
                 assignee: None,
                 delegate: None,
+                mention: None,
                 label: None,
             }),
             runner: RunnerConfig {

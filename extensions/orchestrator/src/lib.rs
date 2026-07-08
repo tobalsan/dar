@@ -292,11 +292,14 @@ impl Extension for OrchestratorExtension {
             tracker_cfg.active_states = effective_cfg.active_states.clone();
             tracker_cfg.terminal_states = effective_cfg.terminal_states.clone();
             tracker_cfg.project_slug = effective_cfg.tracker_project_slug.clone();
+            tracker_cfg.project = effective_cfg.tracker_project.clone();
+            tracker_cfg.workspace = effective_cfg.tracker_workspace.clone();
             tracker_cfg.endpoint = Some(effective_cfg.tracker_endpoint.clone());
             tracker_cfg.needs_human = effective_cfg.needs_human.clone();
             tracker_cfg.team = effective_cfg.tracker_team.clone();
             tracker_cfg.assignee = effective_cfg.tracker_assignee.clone();
             tracker_cfg.delegate = effective_cfg.tracker_delegate.clone();
+            tracker_cfg.mention = effective_cfg.tracker_mention.clone();
             tracker_cfg.label = (!effective_cfg.tracker_labels.is_empty())
                 .then(|| crate::config::StringOrVec::List(effective_cfg.tracker_labels.clone()));
             let services = ctx.host.services.clone();
@@ -937,10 +940,13 @@ impl Orchestrator {
             || new_eff.needs_human != self.effective_cfg.needs_human
             || new_eff.tracker_kind != self.effective_cfg.tracker_kind
             || new_eff.tracker_project_slug != self.effective_cfg.tracker_project_slug
+            || new_eff.tracker_project != self.effective_cfg.tracker_project
+            || new_eff.tracker_workspace != self.effective_cfg.tracker_workspace
             || new_eff.tracker_endpoint != self.effective_cfg.tracker_endpoint
             || new_eff.tracker_team != self.effective_cfg.tracker_team
             || new_eff.tracker_assignee != self.effective_cfg.tracker_assignee
             || new_eff.tracker_delegate != self.effective_cfg.tracker_delegate
+            || new_eff.tracker_mention != self.effective_cfg.tracker_mention
             || new_eff.tracker_labels != self.effective_cfg.tracker_labels;
 
         if tracker_changed {
@@ -950,11 +956,14 @@ impl Orchestrator {
             tracker_cfg.active_states = new_eff.active_states.clone();
             tracker_cfg.terminal_states = new_eff.terminal_states.clone();
             tracker_cfg.project_slug = new_eff.tracker_project_slug.clone();
+            tracker_cfg.project = new_eff.tracker_project.clone();
+            tracker_cfg.workspace = new_eff.tracker_workspace.clone();
             tracker_cfg.endpoint = Some(new_eff.tracker_endpoint.clone());
             tracker_cfg.needs_human = new_eff.needs_human.clone();
             tracker_cfg.team = new_eff.tracker_team.clone();
             tracker_cfg.assignee = new_eff.tracker_assignee.clone();
             tracker_cfg.delegate = new_eff.tracker_delegate.clone();
+            tracker_cfg.mention = new_eff.tracker_mention.clone();
             tracker_cfg.label = (!new_eff.tracker_labels.is_empty())
                 .then(|| crate::config::StringOrVec::List(new_eff.tracker_labels.clone()));
             match tracker::build_configured(
@@ -980,10 +989,13 @@ impl Orchestrator {
                     new_eff.needs_human = self.effective_cfg.needs_human.clone();
                     new_eff.tracker_kind = self.effective_cfg.tracker_kind.clone();
                     new_eff.tracker_project_slug = self.effective_cfg.tracker_project_slug.clone();
+                    new_eff.tracker_project = self.effective_cfg.tracker_project.clone();
+                    new_eff.tracker_workspace = self.effective_cfg.tracker_workspace.clone();
                     new_eff.tracker_endpoint = self.effective_cfg.tracker_endpoint.clone();
                     new_eff.tracker_team = self.effective_cfg.tracker_team.clone();
                     new_eff.tracker_assignee = self.effective_cfg.tracker_assignee.clone();
                     new_eff.tracker_delegate = self.effective_cfg.tracker_delegate.clone();
+                    new_eff.tracker_mention = self.effective_cfg.tracker_mention.clone();
                     new_eff.tracker_labels = self.effective_cfg.tracker_labels.clone();
                     logging::ev(
                         "-",
@@ -3247,11 +3259,14 @@ mod tests {
                 active_states: vec!["todo".to_string()],
                 terminal_states: vec!["done".to_string()],
                 project_slug: None,
+                project: None,
+                workspace: None,
                 endpoint: None,
                 needs_human: None,
                 team: None,
                 assignee: None,
                 delegate: None,
+                mention: None,
                 label: None,
             }),
             runner: RunnerConfig {
@@ -4523,11 +4538,14 @@ dashboard:
                 active_states: vec!["todo".to_string()],
                 terminal_states: vec!["done".to_string()],
                 project_slug: None,
+                project: None,
+                workspace: None,
                 endpoint: None,
                 needs_human: None,
                 team: None,
                 assignee: None,
                 delegate: None,
+                mention: None,
                 label: None,
             }),
             runner: RunnerConfig {

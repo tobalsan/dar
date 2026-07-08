@@ -97,6 +97,10 @@ const STOCK_EXTENSIONS: &[StockExtension] = &[
         factory: "tracker_linear::TrackerLinearExtension",
     },
     StockExtension {
+        package: "tracker-plane",
+        factory: "tracker_plane::TrackerPlaneExtension",
+    },
+    StockExtension {
         package: "orchestrator",
         factory: "orchestrator::OrchestratorExtension::default()",
     },
@@ -334,6 +338,7 @@ fn tracker_package(use_: &str) -> Result<&'static str> {
     match use_ {
         "files" => Ok("tracker-files"),
         "linear" => Ok("tracker-linear"),
+        "plane" => Ok("tracker-plane"),
         other => bail!("unknown tracker.use {other:?}"),
     }
 }

@@ -205,11 +205,14 @@ pub struct TrackerBuildConfig {
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
     pub project_slug: Option<String>,
+    pub project: Option<String>,
+    pub workspace: Option<String>,
     pub endpoint: Option<String>,
     pub needs_human: Option<String>,
     pub team: Option<String>,
     pub assignee: Option<String>,
     pub delegate: Option<String>,
+    pub mention: Option<String>,
     pub labels: Vec<String>,
 }
 

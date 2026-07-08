@@ -17,6 +17,18 @@ Breaking changes are marked **⚠ BREAKING**.
   Linear client's cached token in place via a new `ReloadSecrets` control
   message. Reachable through the host MCP bridge; the next Linear request uses
   the new token. Secret values stay scrubbed from logs and child env.
+- tracker-plane: new Plane issue tracker extension (`tracker.use: plane`),
+  scoped to a workspace + project via `extensions.tracker-plane`
+  (`workspace`, `project`, optional `api_url`/`app_url`). Polls work items,
+  skips issues blocked by non-terminal `blocked_by` relations, parks stalled
+  issues to a needs-human state with a comment, and honours Plane's
+  rate-limit headers. Auth via `PLANE_BOT_TOKEN` / `PLANE_OAUTH_TOKEN`
+  (Bearer, preferred) or `PLANE_API_KEY` (`X-API-Key`). Exposes a `plane_api`
+  host tool (host-held auth, structured errors, token redaction) so agents can
+  call the Plane REST API, supports `tracker.mention` to target work items whose
+  descriptions mention a Plane bot user, and `init-workflow.plane` /
+  `export.plane` commands that scaffold a Plane `WORKFLOW.md` and snapshot the
+  project's work items.
 - CLI: `dar create` — front-door command that scaffolds an agent workspace
   (`agent.yaml` + `.gitignore`, plus `WORKFLOW.md` when the orchestrator loop is
   enabled), usable interactively or via flags. Fills the gap where nothing
@@ -29,6 +41,7 @@ Breaking changes are marked **⚠ BREAKING**.
   parity.
 
 ### Fixed
+- tracker-plane: keep reconcile lookups from applying `tracker.mention`, avoiding false "issue file missing" cancellations when Plane's mention index omits an active work item.
 - Scheduler: pass configured runner settings so cron jobs use the selected
   provider, model, and thinking level, and surface builtin runner errors instead
   of a generic exit code.
@@ -49,6 +62,10 @@ Breaking changes are marked **⚠ BREAKING**.
   false `TimedOut`. Turn-opt-out runners (`cli`/`fake`) are unaffected (ALG-348).
 
 ### Changed
+- CLI: `dar init-workflow` / `dar export` now route to the tracker-specific
+  command for the configured `tracker.use` (e.g. `init-workflow.plane`,
+  `export.plane`), falling back to the tracker-agnostic command when no
+  tracker-specific one is registered. Files/Linear behavior is unchanged.
 - Runners: spawn agent children with non-interactive git env (`GIT_EDITOR=true`,
   `GIT_SEQUENCE_EDITOR=true`, `GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`/`PAGER=cat`)
   so editor/pager/credential prompts auto-resolve instead of hanging the run until

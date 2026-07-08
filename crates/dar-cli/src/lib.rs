@@ -196,25 +196,49 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
             let root = args.resolve_root()?;
             dotenv::load_agent_env(&root)?;
             let services = plugin_services(&root, plugins).await?;
-            services
-                .get_named::<dyn HostCommand>("init-workflow")?
-                .run(serde_json::json!({
-                    "dir": root,
-                    "force": args.force,
-                    "linear_project_slug": args.linear_project_slug,
-                    "linear_project": args.linear_project,
-                    "expose_graphql_tool": args.expose_graphql_tool,
-                }))
+            resolve_tracker_command(&services, &root, "init-workflow")?.run(serde_json::json!({
+                "dir": root,
+                "force": args.force,
+                "linear_project_slug": args.linear_project_slug,
+                "linear_project": args.linear_project,
+                "expose_graphql_tool": args.expose_graphql_tool,
+                "plane_workspace": args.plane_workspace,
+                "plane_project": args.plane_project,
+                "expose_api_tool": args.expose_api_tool,
+            }))
         }
         Command::Export(args) => {
             let root = args.resolve_root()?;
             dotenv::load_agent_env(&root)?;
             let services = plugin_services(&root, plugins).await?;
-            services
-                .get_named::<dyn HostCommand>("export")?
+            resolve_tracker_command(&services, &root, "export")?
                 .run(serde_json::json!({ "dir": root }))
         }
     }
+}
+
+/// Resolve a tracker-scoped `HostCommand`: prefer the `"<cmd>.<tracker.use>"`
+/// id (e.g. `export.plane`) so each tracker extension can ship its own
+/// `init-workflow` / `export`, and fall back to the bare `"<cmd>"` id when no
+/// tracker-specific command is registered. `tracker.use` is read from the
+/// agent's `agent.yaml`; a passive agent with no tracker uses the bare id, and
+/// the files/Linear trackers (which register the bare ids) are unaffected.
+fn resolve_tracker_command(
+    services: &ServiceRegistry,
+    root: &std::path::Path,
+    cmd: &str,
+) -> Result<Arc<dyn HostCommand>> {
+    let tracker_use = config::load(root)?
+        .tracker
+        .map(|tracker| tracker.use_)
+        .unwrap_or_default();
+    if !tracker_use.trim().is_empty() {
+        let scoped = format!("{cmd}.{tracker_use}");
+        if let Ok(command) = services.get_named::<dyn HostCommand>(&scoped) {
+            return Ok(command);
+        }
+    }
+    services.get_named::<dyn HostCommand>(cmd)
 }
 
 /// Run every extension's `register()` pass against a fresh service registry and

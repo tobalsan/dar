@@ -34,6 +34,7 @@ members = [
     "extensions/tool-registry-host",
     "extensions/tracker-files",
     "extensions/tracker-linear",
+    "extensions/tracker-plane",
     "extensions/tui",
     "example-agent/extensions/example-tool",
     "example-agent/extensions/example-jobs",

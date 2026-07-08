@@ -34,7 +34,7 @@ pub enum Command {
     Self_(SelfArgs),
     /// Scaffold the default WORKFLOW.md prompt in the agent folder.
     InitWorkflow(InitWorkflowArgs),
-    /// Export the configured Linear project and issues under the data dir.
+    /// Export the configured tracker project and issues under the data dir.
     Export(ExportArgs),
     /// Host-owned MCP bridge over stdio (spawned by runners; not for direct use).
     #[command(name = "__mcp-bridge", hide = true)]
@@ -165,6 +165,15 @@ pub struct InitWorkflowArgs {
     /// Expose the optional linear_graphql worker tool.
     #[arg(long)]
     pub expose_graphql_tool: bool,
+    /// Seed Plane workspace slug in WORKFLOW.md frontmatter.
+    #[arg(long = "plane-workspace")]
+    pub plane_workspace: Option<String>,
+    /// Seed Plane project UUID in WORKFLOW.md frontmatter.
+    #[arg(long = "plane-project")]
+    pub plane_project: Option<String>,
+    /// Expose the optional plane_api worker tool.
+    #[arg(long)]
+    pub expose_api_tool: bool,
 }
 
 #[derive(Debug, Args)]

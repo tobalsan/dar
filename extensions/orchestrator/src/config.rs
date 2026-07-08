@@ -80,6 +80,12 @@ pub struct TrackerConfig {
     /// Linear project slugId (used when `use: linear`).
     #[serde(default)]
     pub project_slug: Option<String>,
+    /// Plane project UUID (used when `use: plane`).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Plane workspace slug (used when `use: plane`).
+    #[serde(default)]
+    pub workspace: Option<String>,
     /// Linear GraphQL endpoint override (default `https://api.linear.app/graphql`).
     #[serde(default)]
     pub endpoint: Option<String>,
@@ -95,6 +101,9 @@ pub struct TrackerConfig {
     /// Linear delegate/app agent: UUID, displayName (@workeragent), name, or email; resolved at boot.
     #[serde(default)]
     pub delegate: Option<String>,
+    /// Plane bot display name to target by work-item description @mention.
+    #[serde(default)]
+    pub mention: Option<String>,
     /// Linear label name(s): a single string or a list (OR within labels).
     #[serde(default)]
     pub label: Option<StringOrVec>,
