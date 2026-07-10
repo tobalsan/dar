@@ -9,11 +9,11 @@
 //! as the `X-API-Key` header).
 //!
 //! Rate-limit handling (section 5): reads `X-RateLimit-Remaining` /
-//! `X-RateLimit-Reset` on every response. Unlike Linear, Plane's reset header is
-//! a **duration in seconds** (seconds until the bucket refills), not an epoch, so
-//! it is used directly as the sleep length. On HTTP 429 the `Retry-After` header
-//! (or 60 s) is honoured with a single retry. The minimum remaining seen feeds
-//! the dashboard RATE LIMIT stat.
+//! `X-RateLimit-Reset` on every response. Like Linear, Plane's reset header is a
+//! **Unix epoch timestamp** (in seconds) of when the bucket refills, so the sleep
+//! length is `reset - now`. On HTTP 429 the `Retry-After` header (or 60 s) is
+//! honoured with a single retry. The minimum remaining seen feeds the dashboard
+//! RATE LIMIT stat.
 //!
 //! Blocked-issue skipping (section 4 + AMENDMENT): candidacy is derived from the
 //! work item's **relations** (`GET .../work-items/{id}/relations/`), which return
@@ -919,7 +919,7 @@ impl PlaneTracker {
                 bail!(
                     "Plane API returned HTTP {} after retry: {}",
                     status,
-                    &text[..text.len().min(200)]
+                    plane_api::truncate(&text, 200)
                 );
             }
             return parse_json_body(&text);
@@ -933,15 +933,15 @@ impl PlaneTracker {
             bail!(
                 "Plane API returned HTTP {}: {}",
                 status,
-                &text[..text.len().min(200)]
+                plane_api::truncate(&text, 200)
             );
         }
         parse_json_body(&text)
     }
 
     /// Record `X-RateLimit-Remaining` into `min_remaining` and, when exhausted,
-    /// sleep for the reset window. Plane's `X-RateLimit-Reset` is a **duration in
-    /// seconds** (unlike Linear's epoch millis), so it is used directly.
+    /// sleep until the reset window. Plane's `X-RateLimit-Reset` is a Unix epoch
+    /// timestamp (seconds), like Linear's, so the wait is `reset - now`.
     async fn process_rate_limit_headers(&self, headers: &reqwest::header::HeaderMap) {
         let remaining = headers
             .get("x-ratelimit-remaining")
@@ -955,7 +955,7 @@ impl PlaneTracker {
         if let Some(r) = remaining {
             self.min_remaining.fetch_min(r, Ordering::SeqCst);
             if r <= 0 {
-                let wait_secs = reset_wait_secs(reset);
+                let wait_secs = reset_wait_secs(reset, Utc::now().timestamp());
                 if wait_secs > 0 {
                     tracing::warn!(
                         wait_secs,
@@ -994,10 +994,16 @@ impl PlaneTracker {
             let resp = self.get_json(url, &query).await?;
             let (results, next_cursor, has_next) = extract_page(&resp);
             all.extend(results);
-            if has_next {
-                cursor = next_cursor;
-            } else {
-                break;
+            match advance_cursor(has_next, next_cursor, cursor.as_deref()) {
+                Some(next) => cursor = Some(next),
+                None => {
+                    if has_next {
+                        tracing::warn!(
+                            "PlaneTracker: {url} reported more pages but no advancing cursor; stopping pagination"
+                        );
+                    }
+                    break;
+                }
             }
         }
         Ok(all)
@@ -1244,7 +1250,21 @@ impl PlaneTracker {
             if !self.active.contains(&state) {
                 continue;
             }
-            let blocked_by_ids = self.fetch_blocked_by_ids(r).await?;
+            // A single work item's relations fetch failing (e.g. a 404 for an
+            // item deleted between the list and this call, or a transient error)
+            // must not abandon the rest of the candidates for this tick: log and
+            // treat that item as unblocked, mirroring the per-item resilience in
+            // `fetch_all_work_items_with_mention_filter`.
+            let blocked_by_ids = match self.fetch_blocked_by_ids(r).await {
+                Ok(ids) => ids,
+                Err(e) => {
+                    tracing::warn!(
+                        "PlaneTracker: failed to fetch relations for {}: {e:#}; treating as unblocked",
+                        r.id
+                    );
+                    Vec::new()
+                }
+            };
             if is_blocked(&blocked_by_ids, &state_by_uuid, &self.terminal) {
                 continue;
             }
@@ -1353,14 +1373,24 @@ impl PlaneTracker {
         .await
         .with_context(|| format!("moving Plane work item {issue_id} to needs-human state"))?;
 
+        // The state PATCH above is the safety-critical step and has already
+        // committed. A failed explanatory comment must not report the whole park
+        // as failed (which would skip the caller's parked-notification and
+        // bookkeeping despite the real state move, and a retry would double-post
+        // the comment): downgrade it to a warning and still return Ok.
         let comment_url = format!("{base}/work-items/{issue_id}/comments/");
         let comment_body = serde_json::json!({ "comment_html": html_paragraph(comment) });
-        self.send_with_rate_limit_async(|| {
-            self.authed(self.client.post(&comment_url))
-                .json(&comment_body)
-        })
-        .await
-        .with_context(|| format!("commenting on Plane work item {issue_id}"))?;
+        if let Err(e) = self
+            .send_with_rate_limit_async(|| {
+                self.authed(self.client.post(&comment_url))
+                    .json(&comment_body)
+            })
+            .await
+        {
+            tracing::warn!(
+                "PlaneTracker: parked work item {issue_id} to needs-human but failed to post the explanatory comment: {e:#}"
+            );
+        }
         Ok(())
     }
 
@@ -1453,12 +1483,24 @@ fn extract_page(resp: &Value) -> (Vec<Value>, Option<String>, bool) {
     (results, next_cursor, has_next)
 }
 
+/// Decide the cursor for the next pagination request, or `None` to stop. Guards
+/// against a page that claims more results (`has_next`) but returns no advancing
+/// cursor (null/absent, or identical to the current one) — trusting the two
+/// fields to agree would re-request the same page forever.
+fn advance_cursor(has_next: bool, next_cursor: Option<String>, current: Option<&str>) -> Option<String> {
+    match next_cursor {
+        Some(next) if has_next && Some(next.as_str()) != current => Some(next),
+        _ => None,
+    }
+}
+
 /// Sleep length (seconds) for an exhausted bucket. Plane's `X-RateLimit-Reset`
-/// is a duration in seconds (seconds until refill); add 1 s of slack. Negatives
-/// clamp to 0 (so the result is at least 1). Absent → 60 s.
-fn reset_wait_secs(reset: Option<i64>) -> u64 {
+/// is a Unix epoch timestamp (seconds) of when the bucket refills, like Linear's,
+/// so the wait is `reset - now` plus 1 s of slack. A past/absent-enough reset
+/// clamps to 0 (no sleep). Absent header → 60 s.
+fn reset_wait_secs(reset: Option<i64>, now: i64) -> u64 {
     match reset {
-        Some(secs) => secs.max(0) as u64 + 1,
+        Some(epoch) => (epoch - now + 1).max(0) as u64,
         None => 60,
     }
 }
@@ -1806,32 +1848,56 @@ mod tests {
         rt.block_on(
             tracker.process_rate_limit_headers(&header_map(&[("x-ratelimit-remaining", "50")])),
         );
-        assert_eq!(tracker.min_remaining.load(Ordering::SeqCst), 50);
+        assert_eq!(tracker.rate_limit_remaining(), Some(50));
         rt.block_on(
             tracker.process_rate_limit_headers(&header_map(&[("x-ratelimit-remaining", "30")])),
         );
-        assert_eq!(tracker.min_remaining.load(Ordering::SeqCst), 30);
+        assert_eq!(tracker.rate_limit_remaining(), Some(30));
         rt.block_on(
             tracker.process_rate_limit_headers(&header_map(&[("x-ratelimit-remaining", "80")])),
         );
-        assert_eq!(tracker.min_remaining.load(Ordering::SeqCst), 30);
+        assert_eq!(tracker.rate_limit_remaining(), Some(30));
     }
 
     #[test]
-    fn reset_wait_treats_header_as_seconds_duration() {
-        // Plane sends seconds-until-reset, not an epoch: 30 → 31 (with 1s slack),
-        // NOT (30/1000 - now). This is the key divergence from Linear.
-        assert_eq!(reset_wait_secs(Some(30)), 31);
+    fn exhausted_bucket_with_past_reset_does_not_sleep() {
+        // Drives the `remaining <= 0` branch of process_rate_limit_headers end to
+        // end. The reset is a Unix epoch already in the past, so the epoch-based
+        // wait clamps to 0 and the call returns promptly instead of hanging (the
+        // regression when the header is mistaken for a duration would sleep for
+        // ~decades). Also records the exhausted count via the public accessor.
+        let tracker = make_tracker();
+        let past_epoch = (Utc::now().timestamp() - 5).to_string();
+        let headers = header_map(&[
+            ("x-ratelimit-remaining", "0"),
+            ("x-ratelimit-reset", past_epoch.as_str()),
+        ]);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tracker.process_rate_limit_headers(&headers));
+        assert_eq!(tracker.rate_limit_remaining(), Some(0));
+    }
+
+    #[test]
+    fn reset_wait_computes_seconds_until_epoch() {
+        // Plane sends a Unix epoch timestamp (seconds), like Linear: a reset 30 s
+        // in the future waits 30 s + 1 s of slack, NOT the raw header value.
+        let now = 1_700_000_000;
+        assert_eq!(reset_wait_secs(Some(now + 30), now), 31);
     }
 
     #[test]
     fn reset_wait_defaults_when_absent() {
-        assert_eq!(reset_wait_secs(None), 60);
+        assert_eq!(reset_wait_secs(None, 1_700_000_000), 60);
     }
 
     #[test]
-    fn reset_wait_clamps_negative_to_one() {
-        assert_eq!(reset_wait_secs(Some(-5)), 1);
+    fn reset_wait_clamps_past_epoch_to_zero() {
+        // A reset already in the past means the bucket refilled: no sleep.
+        let now = 1_700_000_000;
+        assert_eq!(reset_wait_secs(Some(now - 5), now), 0);
     }
 
     // --- priority mapping ---
@@ -1999,6 +2065,34 @@ mod tests {
         }))
         .unwrap();
         assert!(relations.blocked_by_ids().is_empty());
+    }
+
+    // --- pagination cursor advance ---
+
+    #[test]
+    fn advance_cursor_returns_next_when_it_changes() {
+        assert_eq!(
+            super::advance_cursor(true, Some("c2".to_string()), Some("c1")),
+            Some("c2".to_string())
+        );
+        // First page: no current cursor yet.
+        assert_eq!(
+            super::advance_cursor(true, Some("c1".to_string()), None),
+            Some("c1".to_string())
+        );
+    }
+
+    #[test]
+    fn advance_cursor_stops_when_not_advancing() {
+        // has_next but no cursor → would loop forever if trusted.
+        assert_eq!(super::advance_cursor(true, None, Some("c1")), None);
+        // has_next but the same cursor → non-advancing.
+        assert_eq!(
+            super::advance_cursor(true, Some("c1".to_string()), Some("c1")),
+            None
+        );
+        // Last page.
+        assert_eq!(super::advance_cursor(false, Some("c2".to_string()), Some("c1")), None);
     }
 
     fn state_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -2249,6 +2343,13 @@ mod tests {
             },
             extensions: super::ExportExtensions::default(),
         };
+        let issue = Issue::builder(
+            "wi-1".to_string(),
+            "PROJ-7".to_string(),
+            "Move tracker".to_string(),
+            "Todo".to_string(),
+        )
+        .build();
         let snapshot = super::PlaneExport {
             project: super::PlaneProjectExport {
                 name: Some("Project".to_string()),
@@ -2256,17 +2357,33 @@ mod tests {
                 workspace: "acme".to_string(),
                 api_url: DEFAULT_API_URL.to_string(),
                 exported_at: chrono::Utc::now(),
-                issue_count: 0,
+                issue_count: 1,
             },
-            issues: Vec::new(),
+            issues: vec![issue],
         };
 
         let result = super::write_snapshot(dir.path(), &agent_cfg, snapshot).unwrap();
 
-        assert_eq!(result.issue_count, 0);
+        assert_eq!(result.issue_count, 1);
         assert!(result.project_path.starts_with(dir.path().join("data")));
         assert!(result.issues_path.starts_with(dir.path().join("data")));
-        assert!(result.project_path.exists());
-        assert!(result.issues_path.exists());
+
+        // Read the written JSON back so a regression that drops/garbles fields
+        // (agent_id, nested plane_project, issue contents) is actually caught.
+        let project: Value =
+            serde_json::from_str(&std::fs::read_to_string(&result.project_path).unwrap()).unwrap();
+        assert_eq!(project["agent_id"], "agent-1");
+        assert_eq!(project["agent_name"], "Agent One");
+        assert_eq!(project["plane_project"]["identifier"], "PROJ");
+        assert_eq!(project["plane_project"]["workspace"], "acme");
+        assert_eq!(project["plane_project"]["issue_count"], 1);
+
+        let issues: Value =
+            serde_json::from_str(&std::fs::read_to_string(&result.issues_path).unwrap()).unwrap();
+        assert_eq!(issues.as_array().unwrap().len(), 1);
+        assert_eq!(issues[0]["id"], "wi-1");
+        assert_eq!(issues[0]["identifier"], "PROJ-7");
+        assert_eq!(issues[0]["title"], "Move tracker");
+        assert_eq!(issues[0]["state"], "Todo");
     }
 }

@@ -331,7 +331,7 @@ fn auth_redactor(auth: &PlaneAuth) -> Redactor {
     Redactor::from_secret_values(secrets)
 }
 
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {

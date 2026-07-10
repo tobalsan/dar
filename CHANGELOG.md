@@ -41,6 +41,19 @@ Breaking changes are marked **⚠ BREAKING**.
   parity.
 
 ### Fixed
+- tracker-plane: treat Plane's `X-RateLimit-Reset` as a Unix epoch timestamp
+  (like Linear) rather than a duration, so an exhausted rate-limit bucket sleeps
+  until the real reset instead of hanging the tracker for decades.
+- tracker-plane: a single work item's relations fetch failing (e.g. a 404 for a
+  deleted item) no longer aborts candidate discovery for the whole project — that
+  item is logged and treated as unblocked while the rest of the tick proceeds.
+- tracker-plane: parking an issue to needs-human now succeeds even when the
+  explanatory comment POST fails (the state move is what matters); the comment
+  failure is logged instead of masking the successful park.
+- tracker-plane: guard cursor pagination against a page that reports more results
+  but returns no advancing cursor, which previously looped forever.
+- tracker-plane: truncate HTTP error bodies on a UTF-8 char boundary so a
+  multibyte Plane error message can no longer panic the tracker.
 - tracker-plane: keep reconcile lookups from applying `tracker.mention`, avoiding false "issue file missing" cancellations when Plane's mention index omits an active work item.
 - Scheduler: pass configured runner settings so cron jobs use the selected
   provider, model, and thinking level, and surface builtin runner errors instead
