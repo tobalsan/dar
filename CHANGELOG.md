@@ -41,6 +41,8 @@ Breaking changes are marked **⚠ BREAKING**.
   parity.
 
 ### Fixed
+- CLI: agent builds now link only the tracker selected by `tracker.use`, keeping
+  unused stock trackers out of generated agent binaries.
 - tracker-plane: treat Plane's `X-RateLimit-Reset` as a Unix epoch timestamp
   (like Linear) rather than a duration, so an exhausted rate-limit bucket sleeps
   until the real reset instead of hanging the tracker for decades.

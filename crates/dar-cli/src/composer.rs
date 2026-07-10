@@ -164,8 +164,7 @@ struct LocalExtension {
 
 #[derive(Debug, Deserialize)]
 struct AgentSelection {
-    /// Absent for a passive agent (no orchestrator trio). `tracker-linear`
-    /// remains baseline-linked; `tracker-files` links only when selected.
+    /// Absent for a passive agent (no tracker extension is linked).
     #[serde(default)]
     tracker: Option<SelectedUse>,
     runner: SelectedUse,
@@ -256,10 +255,9 @@ fn selected_stock_extensions(
         "system-context",
         "orchestrator",
         "dashboard",
-        "tracker-linear",
     ];
-    // Passive agents omit `tracker`; files tracker links only when selected.
-    // Linear stays baseline-linked for shared Linear CLI/export support.
+    // Trackers are linked only when selected. Stock metadata remains an
+    // allowlist, so adding a tracker does not add it to every agent binary.
     if let Some(tracker) = &selection.tracker {
         packages.push(tracker_package(&tracker.use_)?);
     }
@@ -1233,14 +1231,51 @@ mod tests {
         );
         assert!(manifest.contains("stock-system-context = [\"dep:system-context\"]"));
         assert!(manifest.contains("stock-frontend-log = [\"dep:frontend-log\"]"));
+        assert!(source.contains("system_context::SystemContextExtension"));
+        assert!(source.contains("#[cfg(feature = \"stock-tracker-files\")]"));
+        assert!(source.contains("tracker_files::TrackerFilesExtension"));
+        assert!(!manifest.contains("dar-tracker-linear"));
+        assert!(!source.contains("tracker_linear::TrackerLinearExtension"));
+    }
+
+    #[test]
+    fn init_build_links_only_the_selected_plane_tracker() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(agent, "plane", "fake", "logs", "");
+
+        init_build(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        let source = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
+        assert!(manifest.contains("tracker-plane = { package = \"dar-tracker-plane\", version = "));
+        assert!(manifest.contains("stock-tracker-plane = [\"dep:tracker-plane\"]"));
+        assert!(source.contains("tracker_plane::TrackerPlaneExtension"));
+        assert!(!manifest.contains("dar-tracker-files"));
+        assert!(!manifest.contains("dar-tracker-linear"));
+        assert!(!source.contains("tracker_files::TrackerFilesExtension"));
+        assert!(!source.contains("tracker_linear::TrackerLinearExtension"));
+    }
+
+    #[test]
+    fn init_build_links_only_the_selected_linear_tracker() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(agent, "linear", "fake", "logs", "");
+
+        init_build(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        let source = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
         assert!(
             manifest.contains("tracker-linear = { package = \"dar-tracker-linear\", version = ")
         );
         assert!(manifest.contains("stock-tracker-linear = [\"dep:tracker-linear\"]"));
-        assert!(source.contains("system_context::SystemContextExtension"));
         assert!(source.contains("tracker_linear::TrackerLinearExtension"));
-        assert!(source.contains("#[cfg(feature = \"stock-tracker-files\")]"));
-        assert!(source.contains("tracker_files::TrackerFilesExtension"));
+        assert!(!manifest.contains("dar-tracker-files"));
+        assert!(!manifest.contains("dar-tracker-plane"));
+        assert!(!source.contains("tracker_files::TrackerFilesExtension"));
+        assert!(!source.contains("tracker_plane::TrackerPlaneExtension"));
     }
 
     #[test]
