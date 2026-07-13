@@ -1,8 +1,9 @@
 //! Renders `WORKFLOW.md` through minijinja with STRICT undefined behavior.
 //!
 //! Loads the WORKFLOW.md frontmatter into a `WorkflowSnapshot`, exposes
-//! `{{ issue.* }}` and `{{ attempt }}` in the template context, and appends an
-//! orchestrator/Linear context block after the rendered body.
+//! `{{ issue.* }}`, `{{ attempt }}`, and `{{ workflow.* }}` in the template
+//! context, and appends an orchestrator/Linear context block after the
+//! rendered body.
 //!
 //! ## File watching
 //!
@@ -151,6 +152,10 @@ impl PromptRenderer {
             .render(minijinja::context! {
                 issue => issue.for_template(),
                 attempt => attempt,
+                workflow => minijinja::context! {
+                    dir => self.path.parent().unwrap_or(Path::new("")).display().to_string(),
+                    file => self.path.display().to_string(),
+                },
             })
             .context("rendering WORKFLOW.md (strict-undefined)")?;
 
@@ -306,6 +311,29 @@ mod tests {
         writeln!(f, "{{{{ issue.nonexistent_field }}}}").unwrap();
         let renderer = PromptRenderer::load(f.path()).unwrap();
         assert!(renderer.render(&make_issue("X-1"), 0, 3).is_err());
+    }
+
+    #[test]
+    fn render_workflow_variable() {
+        use std::io::Write;
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(
+            f,
+            "dir={{{{ workflow.dir }}}} file={{{{ workflow.file }}}}"
+        )
+        .unwrap();
+        let renderer = PromptRenderer::load(f.path()).unwrap();
+        let out = renderer.render(&make_issue("W-1"), 0, 3).unwrap();
+        let expected_dir = f.path().parent().unwrap().display().to_string();
+        let expected_file = f.path().display().to_string();
+        assert!(
+            out.contains(&format!("dir={expected_dir}")),
+            "got: {out}"
+        );
+        assert!(
+            out.contains(&format!("file={expected_file}")),
+            "got: {out}"
+        );
     }
 
     #[test]

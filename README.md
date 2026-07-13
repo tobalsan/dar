@@ -409,6 +409,23 @@ You are working on {{ issue.identifier }}: {{ issue.title }}
 ...
 ```
 
+### Template variables
+
+The body is rendered under minijinja strict mode: referencing anything not
+listed here fails the dispatch attempt (treated as abnormal → backoff retry).
+Nullable fields render as `none` when absent — guard with `{% if %}`.
+
+- `issue.*` — the tracker's read-only view of the current issue: `id`,
+  `identifier`, `title`, `description` (nullable), `url` (nullable), `state`,
+  `priority` (nullable), `assignees` (list), `labels` (list), `created_at`
+  (nullable), `updated_at` (nullable), `parent_id` (nullable), `blocked_by`
+  (list), `project_name` (nullable), `project_slug` (nullable), `metadata`
+  (tracker-native extra fields, map).
+- `attempt` — 0-based retry counter for this dispatch.
+- `workflow.dir` — directory containing the resolved `WORKFLOW.md` (the repo
+  root, for WORKFLOW.md-inside-a-repo setups).
+- `workflow.file` — the resolved `WORKFLOW.md` path itself.
+
 Fields omitted from frontmatter fall back to: `poll_interval_ms 1000`,
 `max_concurrent 3`, `max_active_runs 3`, `max_retries 3`, `retry_backoff_ms
 30000`, `jitter_ms 0`, `workspace.root "workspaces"`, `reuse true`,
