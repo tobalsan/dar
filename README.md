@@ -550,8 +550,8 @@ value and are the only orchestrator writes to Linear.
 ## Plane tracker
 
 Set `tracker.use: plane` (or `tracker.kind: plane` in WORKFLOW.md). Scope the
-tracker to one Plane workspace + project under `extensions.tracker-plane`, and
-provide a Plane auth token in the environment or `<agent-folder>/.env`:
+tracker to one Plane workspace + project under root `tracker`, and provide a
+Plane auth token in the environment or `<agent-folder>/.env`:
 
 - `PLANE_BOT_TOKEN` — a Plane bot/OAuth token (`Authorization: Bearer <token>`).
 - `PLANE_OAUTH_TOKEN` — legacy/alternate OAuth token env var, also Bearer.
@@ -564,13 +564,13 @@ tracker:
   active_states: [Todo, "In Progress"]
   terminal_states: [Done, Cancelled]
   needs_human: "Needs Human"
+  workspace: my-workspace          # workspace slug
+  project: 00000000-0000-0000-0000-000000000000   # project UUID
+  # endpoint: https://api.plane.so   # self-hosted API base override
   mention: Worker Agent  # optional bot display name; filters description @mentions
 
 extensions:
   tracker-plane:
-    workspace: my-workspace          # workspace slug
-    project: 00000000-0000-0000-0000-000000000000   # project UUID
-    # api_url: https://api.plane.so   # self-hosted API base override
     # app_url: https://app.plane.so   # self-hosted web app base override
 ```
 
