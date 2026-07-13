@@ -142,46 +142,46 @@ fn render(value: &Value) -> String {
 
 /// Look up a job id argument: required, non-empty, filesystem-safe. Returns the
 /// structured error outcome on a bad argument.
-fn require_job_id(args: &Value) -> Result<String, ToolOutcome> {
+fn require_job_id(args: &Value) -> Result<String, Box<ToolOutcome>> {
     let Some(id) = args.get("id").and_then(Value::as_str) else {
-        return Err(ToolOutcome::error_code(
+        return Err(Box::new(ToolOutcome::error_code(
             "invalid_args",
             "missing required 'id' string argument",
             None::<String>,
-        ));
+        )));
     };
     let id = id.trim();
     if id.is_empty() {
-        return Err(ToolOutcome::error_code(
+        return Err(Box::new(ToolOutcome::error_code(
             "invalid_args",
             "'id' must not be empty",
             None::<String>,
-        ));
+        )));
     }
     if !is_safe_job_id(id) {
-        return Err(ToolOutcome::error_code(
+        return Err(Box::new(ToolOutcome::error_code(
             "invalid_args",
             format!("unsafe job id {id:?}: ids must be a single path component (no '/', '\\', '..', or leading '.')"),
             None::<String>,
-        ));
+        )));
     }
     Ok(id.to_string())
 }
 
 /// Build a `Schedule` from a tool args `schedule` object and validate cron / tz
 /// / startAt via the shared next-fire computation (same code the loop uses).
-fn parse_and_validate_schedule(schedule: &Value) -> Result<Schedule, ToolOutcome> {
+fn parse_and_validate_schedule(schedule: &Value) -> Result<Schedule, Box<ToolOutcome>> {
     let cron = schedule
         .get("cron")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
     if cron.trim().is_empty() {
-        return Err(ToolOutcome::error_code(
+        return Err(Box::new(ToolOutcome::error_code(
             "invalid_args",
             "schedule.cron is required (a raw 5-field cron expression)",
             None::<String>,
-        ));
+        )));
     }
     let tz = schedule
         .get("tz")
@@ -189,11 +189,11 @@ fn parse_and_validate_schedule(schedule: &Value) -> Result<Schedule, ToolOutcome
         .unwrap_or_default()
         .to_string();
     if tz.trim().is_empty() {
-        return Err(ToolOutcome::error_code(
+        return Err(Box::new(ToolOutcome::error_code(
             "invalid_args",
             "schedule.tz is required (an IANA timezone, e.g. \"Europe/Paris\")",
             None::<String>,
-        ));
+        )));
     }
     let start_at = schedule
         .get("startAt")
@@ -202,40 +202,40 @@ fn parse_and_validate_schedule(schedule: &Value) -> Result<Schedule, ToolOutcome
     let schedule = Schedule { cron, tz, start_at };
     match compute_next_run_at_ms(&schedule, Utc::now().timestamp_millis()) {
         Ok(_) => Ok(schedule),
-        Err(err) => Err(ToolOutcome::error_code(
+        Err(err) => Err(Box::new(ToolOutcome::error_code(
             "invalid_schedule",
             format!("invalid schedule: {err:#}"),
             Some("Provide a valid raw cron expression and IANA timezone; startAt (if set) must be RFC3339."),
-        )),
+        ))),
     }
 }
 
 /// Build a `Payload` from a tool args `payload` object: a non-empty `message`.
-fn parse_and_validate_payload(payload: &Value) -> Result<Payload, ToolOutcome> {
+fn parse_and_validate_payload(payload: &Value) -> Result<Payload, Box<ToolOutcome>> {
     let message = payload
         .get("message")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
     if message.trim().is_empty() {
-        return Err(ToolOutcome::error_code(
+        return Err(Box::new(ToolOutcome::error_code(
             "invalid_args",
             "payload.message is required (the prompt the job runs)",
             None::<String>,
-        ));
+        )));
     }
     Ok(Payload { message })
 }
 
 /// Persist `jobs` to disk and push into shared state (which wakes the timer
 /// loop to re-arm). Returns a structured error outcome on a write failure.
-fn persist(deps: &ToolDeps, jobs: Vec<ScheduleJob>) -> Result<(), ToolOutcome> {
+fn persist(deps: &ToolDeps, jobs: Vec<ScheduleJob>) -> Result<(), Box<ToolOutcome>> {
     if let Err(e) = save_jobs(&deps.root, &jobs) {
-        return Err(ToolOutcome::error_code(
+        return Err(Box::new(ToolOutcome::error_code(
             "persist_error",
             format!("failed to persist cron/jobs.json: {e}"),
             None::<String>,
-        ));
+        )));
     }
     deps.state.set_jobs(jobs);
     Ok(())
@@ -251,15 +251,15 @@ fn unknown_job(id: &str) -> ToolOutcome {
 }
 
 /// `confirm: true` gate for a destructive operation.
-fn require_confirm(args: &Value, op: &str) -> Result<(), ToolOutcome> {
+fn require_confirm(args: &Value, op: &str) -> Result<(), Box<ToolOutcome>> {
     if args.get("confirm").and_then(Value::as_bool) == Some(true) {
         Ok(())
     } else {
-        Err(ToolOutcome::error_code(
+        Err(Box::new(ToolOutcome::error_code(
             "confirmation_required",
             format!("{op} is destructive and was not performed"),
             Some("Re-call with \"confirm\": true to proceed."),
-        ))
+        )))
     }
 }
 
@@ -326,7 +326,7 @@ impl ToolExecutor for GetTool {
     async fn execute(&self, args: Value) -> Result<ToolOutcome> {
         let id = match require_job_id(&args) {
             Ok(id) => id,
-            Err(out) => return Ok(out),
+            Err(out) => return Ok(*out),
         };
         let now_ms = Utc::now().timestamp_millis();
         match self.deps.state.jobs().into_iter().find(|j| j.id == id) {
@@ -369,7 +369,7 @@ impl ToolExecutor for StatusTool {
     async fn execute(&self, args: Value) -> Result<ToolOutcome> {
         let id = match require_job_id(&args) {
             Ok(id) => id,
-            Err(out) => return Ok(out),
+            Err(out) => return Ok(*out),
         };
         let Some(job) = self.deps.state.jobs().into_iter().find(|j| j.id == id) else {
             return Ok(unknown_job(&id));
@@ -428,7 +428,7 @@ impl ToolExecutor for TailTool {
     async fn execute(&self, args: Value) -> Result<ToolOutcome> {
         let id = match require_job_id(&args) {
             Ok(id) => id,
-            Err(out) => return Ok(out),
+            Err(out) => return Ok(*out),
         };
         if !self.deps.state.jobs().iter().any(|j| j.id == id) {
             return Ok(unknown_job(&id));
@@ -515,7 +515,7 @@ impl ToolExecutor for RunNowTool {
     async fn execute(&self, args: Value) -> Result<ToolOutcome> {
         let id = match require_job_id(&args) {
             Ok(id) => id,
-            Err(out) => return Ok(out),
+            Err(out) => return Ok(*out),
         };
         match run_job_now(&self.deps.config, &self.deps.services, &self.deps.state, &id).await {
             RunNowOutcome::Unknown => Ok(unknown_job(&id)),
@@ -635,7 +635,7 @@ impl ToolExecutor for CreateTool {
         };
         let schedule = match parse_and_validate_schedule(schedule_arg) {
             Ok(s) => s,
-            Err(out) => return Ok(out),
+            Err(out) => return Ok(*out),
         };
         let Some(payload_arg) = args.get("payload") else {
             return Ok(ToolOutcome::error_code(
@@ -646,7 +646,7 @@ impl ToolExecutor for CreateTool {
         };
         let payload = match parse_and_validate_payload(payload_arg) {
             Ok(p) => p,
-            Err(out) => return Ok(out),
+            Err(out) => return Ok(*out),
         };
 
         let mut jobs = self.deps.state.jobs();
@@ -665,7 +665,7 @@ impl ToolExecutor for CreateTool {
         };
         jobs.push(job.clone());
         if let Err(out) = persist(&self.deps, jobs) {
-            return Ok(out);
+            return Ok(*out);
         }
         let now_ms = Utc::now().timestamp_millis();
         Ok(ToolOutcome::ok(render(&job_view(&self.deps, &job, now_ms))))
@@ -724,7 +724,7 @@ impl ToolExecutor for UpdateTool {
     async fn execute(&self, args: Value) -> Result<ToolOutcome> {
         let id = match require_job_id(&args) {
             Ok(id) => id,
-            Err(out) => return Ok(out),
+            Err(out) => return Ok(*out),
         };
         let mut jobs = self.deps.state.jobs();
         let Some(idx) = jobs.iter().position(|j| j.id == id) else {
@@ -737,7 +737,7 @@ impl ToolExecutor for UpdateTool {
         if let Some(enabled) = args.get("enabled").and_then(Value::as_bool) {
             if !enabled && job.enabled {
                 if let Err(out) = require_confirm(&args, "disabling a scheduler job via update") {
-                    return Ok(out);
+                    return Ok(*out);
                 }
             }
             job.enabled = enabled;
@@ -745,13 +745,13 @@ impl ToolExecutor for UpdateTool {
         if let Some(schedule_arg) = args.get("schedule") {
             job.schedule = match parse_and_validate_schedule(schedule_arg) {
                 Ok(s) => s,
-                Err(out) => return Ok(out),
+                Err(out) => return Ok(*out),
             };
         }
         if let Some(payload_arg) = args.get("payload") {
             job.payload = match parse_and_validate_payload(payload_arg) {
                 Ok(p) => p,
-                Err(out) => return Ok(out),
+                Err(out) => return Ok(*out),
             };
         }
         // timeoutMs present-as-null clears the override; present-as-number sets
@@ -764,7 +764,7 @@ impl ToolExecutor for UpdateTool {
         }
         jobs[idx] = job.clone();
         if let Err(out) = persist(&self.deps, jobs) {
-            return Ok(out);
+            return Ok(*out);
         }
         let now_ms = Utc::now().timestamp_millis();
         Ok(ToolOutcome::ok(render(&job_view(&self.deps, &job, now_ms))))
@@ -822,13 +822,13 @@ impl ToolExecutor for SetEnabledTool {
     async fn execute(&self, args: Value) -> Result<ToolOutcome> {
         let id = match require_job_id(&args) {
             Ok(id) => id,
-            Err(out) => return Ok(out),
+            Err(out) => return Ok(*out),
         };
         // Disable is destructive: require explicit confirmation, make no change
         // without it.
         if !self.enable {
             if let Err(out) = require_confirm(&args, "disabling a scheduler job") {
-                return Ok(out);
+                return Ok(*out);
             }
         }
         let mut jobs = self.deps.state.jobs();
@@ -838,7 +838,7 @@ impl ToolExecutor for SetEnabledTool {
         jobs[idx].enabled = self.enable;
         let job = jobs[idx].clone();
         if let Err(out) = persist(&self.deps, jobs) {
-            return Ok(out);
+            return Ok(*out);
         }
         let now_ms = Utc::now().timestamp_millis();
         Ok(ToolOutcome::ok(render(&job_view(&self.deps, &job, now_ms))))
@@ -877,10 +877,10 @@ impl ToolExecutor for DeleteTool {
     async fn execute(&self, args: Value) -> Result<ToolOutcome> {
         let id = match require_job_id(&args) {
             Ok(id) => id,
-            Err(out) => return Ok(out),
+            Err(out) => return Ok(*out),
         };
         if let Err(out) = require_confirm(&args, "deleting a scheduler job") {
-            return Ok(out);
+            return Ok(*out);
         }
         let mut jobs = self.deps.state.jobs();
         let before = jobs.len();
@@ -889,7 +889,7 @@ impl ToolExecutor for DeleteTool {
             return Ok(unknown_job(&id));
         }
         if let Err(out) = persist(&self.deps, jobs) {
-            return Ok(out);
+            return Ok(*out);
         }
         Ok(ToolOutcome::ok(render(&json!({ "deleted": id }))))
     }

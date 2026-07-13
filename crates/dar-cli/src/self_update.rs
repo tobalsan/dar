@@ -144,6 +144,7 @@ fn with_lock<T>(agent: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
         .with_context(|| format!("creating {}", agent.join("data").display()))?;
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(agent.join("data/self-update.lock"))
         .with_context(|| format!("opening {}", agent.join("data/self-update.lock").display()))?;
@@ -167,7 +168,7 @@ impl LockGuard {
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        let _ = self.0.unlock();
+        let _ = FileExt::unlock(&self.0);
     }
 }
 

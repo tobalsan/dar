@@ -395,6 +395,12 @@ fn classify_outcome(
     }
 }
 
+struct ExecutionOutput {
+    status: RunStatus,
+    response: Option<String>,
+    error: Option<String>,
+}
+
 /// Write the output file and update shared runtime state. Returns the
 /// [`ExecuteResult`] for the caller.
 fn persist_execute_result(
@@ -403,11 +409,14 @@ fn persist_execute_result(
     job: &ScheduleJob,
     name: &str,
     fired_at: chrono::DateTime<Utc>,
-    status: RunStatus,
-    response: Option<String>,
-    error: Option<String>,
+    output: ExecutionOutput,
 ) -> ExecuteResult {
     let finished_at = Utc::now();
+    let ExecutionOutput {
+        status,
+        response,
+        error,
+    } = output;
     let schedule = format_schedule(&job.schedule);
 
     // Keep a copy of the error for runtime state before it is moved into the
@@ -491,9 +500,11 @@ async fn execute_job(
                 job,
                 name,
                 fired_at,
-                RunStatus::Error,
-                None,
-                Some(msg),
+                ExecutionOutput {
+                    status: RunStatus::Error,
+                    response: None,
+                    error: Some(msg),
+                },
             );
         }
     };
@@ -521,7 +532,18 @@ async fn execute_job(
     .await;
 
     let (status, response, error) = classify_outcome(outcome, timeout);
-    persist_execute_result(config, state, job, name, fired_at, status, response, error)
+    persist_execute_result(
+        config,
+        state,
+        job,
+        name,
+        fired_at,
+        ExecutionOutput {
+            status,
+            response,
+            error,
+        },
+    )
 }
 
 /// Outcome of a `run-now` request, mapped to an HTTP status by the handler

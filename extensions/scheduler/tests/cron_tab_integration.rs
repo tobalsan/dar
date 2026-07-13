@@ -75,7 +75,11 @@ async fn registered_scheduler_tool_names(
         "id: demo\nname: Demo\nrunner:\n  use: fake\n",
     )
     .unwrap();
-    let paths = HostPaths::new(root).unwrap();
+    let artifact_root = tempfile::tempdir().unwrap();
+    let paths = HostPaths::new(root)
+        .unwrap()
+        .with_artifact_root(artifact_root.path())
+        .unwrap();
     let (_tx, rx) = tokio::sync::watch::channel(false);
     let shutdown = ShutdownToken::new(rx);
     let extensions: Vec<Box<dyn Extension>> = vec![
@@ -102,6 +106,7 @@ async fn registered_scheduler_tool_names(
         .list()
         .into_iter()
         .map(|spec| spec.name)
+        .filter(|name| name.starts_with("scheduler_"))
         .collect::<Vec<_>>();
     names.sort();
     names

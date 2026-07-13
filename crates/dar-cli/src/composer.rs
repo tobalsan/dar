@@ -535,7 +535,7 @@ fn build_universal_to(crate_dir: &Path, dest: &Path, offline: bool) -> Result<()
 
 pub fn lock_refresh(agent: &Path) -> Result<()> {
     let (crate_dir, _) = write_composition_crate(agent)?;
-    run_cargo(&crate_dir, &["update"])
+    run_cargo(&crate_dir, ["update"])
 }
 
 fn run_cargo_with_stderr<I, S>(crate_dir: &Path, args: I) -> Result<()>
@@ -1188,7 +1188,7 @@ mod tests {
         assert!(config.contains("directory = \"vendor\""));
         run_cargo(
             &agent.join(".dar"),
-            &["build", "--release", "--locked", "--offline"],
+            ["build", "--release", "--locked", "--offline"],
         )
         .unwrap();
     }

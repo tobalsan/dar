@@ -344,26 +344,21 @@ mod tests {
         }
     }
 
-    fn services_with_capture(
-        registry: Option<ToolRegistry>,
-    ) -> (
+    type CapturedServices = (
         ServiceRegistry,
         Arc<AtomicUsize>,
         Arc<Mutex<Option<Option<HostToolBridge>>>>,
         Arc<Mutex<Option<RunnerOpts>>>,
-    ) {
+    );
+
+    fn services_with_capture(registry: Option<ToolRegistry>) -> CapturedServices {
         services_with_capture_support(registry, false)
     }
 
     fn services_with_capture_support(
         registry: Option<ToolRegistry>,
         supports_system_prompt: bool,
-    ) -> (
-        ServiceRegistry,
-        Arc<AtomicUsize>,
-        Arc<Mutex<Option<Option<HostToolBridge>>>>,
-        Arc<Mutex<Option<RunnerOpts>>>,
-    ) {
+    ) -> CapturedServices {
         let spawns = Arc::new(AtomicUsize::new(0));
         let bridge = Arc::new(Mutex::new(None));
         let runner_opts = Arc::new(Mutex::new(None));
