@@ -9,7 +9,7 @@
 //! protocol drift. Note: the `jsonrpc/turn` shape in `runner-pi` is NOT stock
 //! pi's protocol and is deliberately not used here.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::OsString;
 use std::io;
 use std::process::Stdio;
@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use cap_chat::{ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams};
+use cap_chat::{ArtifactReady, ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams};
 use host_api::{Extension, RegisterCtx};
 use runner_core::{
     effective_command, scrub_loaded_env, setup_process_group, strip_ansi, term_then_kill,
@@ -130,6 +130,7 @@ impl PiChatSession {
             Arc::clone(&stdin),
             Arc::clone(&queue),
             context_window,
+            params.artifact_ready.clone(),
         );
         spawn_stderr_pump(stderr, tx.clone());
 
@@ -527,13 +528,29 @@ fn spawn_stdout_pump(
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     queue: Arc<Mutex<TurnQueue>>,
     context_window: Option<u64>,
+    artifact_ready: Option<Sender<ArtifactReady>>,
 ) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
+        let mut artifact_calls = HashSet::new();
         while let Ok(Some(line)) = lines.next_line().await {
             let clean = strip_ansi(line.trim_end_matches('\r'));
             match map_stdout_line(&clean, context_window) {
                 Mapped::Emit(event) => {
+                    if let ChatEvent::ToolCall { id, name, .. } = &event {
+                        if name == "artifact.publish" {
+                            artifact_calls.insert(id.clone());
+                        }
+                    }
+                    if let ChatEvent::ToolOutput { id, done: true, .. } = &event {
+                        if artifact_calls.remove(id) {
+                            if let Some(ready) = artifact_ready_from_pi(&clean) {
+                                if let Some(sink) = &artifact_ready {
+                                    let _ = sink.send(ready).await;
+                                }
+                            }
+                        }
+                    }
                     let turn_finished = match &event {
                         ChatEvent::TurnFinished { ok, .. } => Some(*ok),
                         _ => None,
@@ -618,6 +635,15 @@ async fn send_next_queued_turn(
             send_failed_finishes(tx, dropped, "send failed").await;
         }
     }
+}
+
+fn artifact_ready_from_pi(line: &str) -> Option<ArtifactReady> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    let result = value.get("result")?;
+    let content = result.get("content")?.as_array()?;
+    content
+        .iter()
+        .find_map(|resource| ArtifactReady::from_publish_resource("artifact.publish", resource))
 }
 
 fn spawn_stderr_pump(stderr: ChildStderr, tx: Sender<ChatEvent>) {
@@ -948,6 +974,13 @@ mod tests {
             }
             other => panic!("expected ToolOutput, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn artifact_ready_requires_publish_resource_link() {
+        let line = r#"{"type":"tool_execution_end","result":{"content":[{"type":"resource_link","uri":"dar-artifact://550e8400-e29b-41d4-a716-446655440000","name":"report.txt","bytes":5,"sha256":"abc"}]}}"#;
+        assert_eq!(artifact_ready_from_pi(line).unwrap().name, "report.txt");
+        assert!(artifact_ready_from_pi(r#"{"result":"raw text"}"#).is_none());
     }
 
     #[test]

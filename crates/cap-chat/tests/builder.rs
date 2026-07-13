@@ -4,7 +4,8 @@
 
 use std::path::Path;
 
-use cap_chat::{ChatRole, ChatSessionParams, CHAT_FALLBACK_BACKEND};
+use cap_chat::{ArtifactReady, ChatRole, ChatSessionParams, CHAT_FALLBACK_BACKEND};
+use serde_json::json;
 
 #[test]
 fn chat_session_params_builder_round_trips_all_fields() {
@@ -47,6 +48,25 @@ fn chat_session_params_builder_defaults_optional_fields() {
     assert_eq!(params.model, None);
     assert_eq!(params.system_prompt, None);
     assert_eq!(params.resume_session_id, None);
+}
+
+#[test]
+fn artifact_ready_accepts_only_exact_publish_resource() {
+    let resource = json!({
+        "type": "resource_link",
+        "uri": "dar-artifact://550e8400-e29b-41d4-a716-446655440000",
+        "name": "report.txt",
+        "bytes": 5,
+        "sha256": "abc",
+    });
+    assert_eq!(
+        ArtifactReady::from_publish_resource("artifact.publish", &resource)
+            .unwrap()
+            .name,
+        "report.txt"
+    );
+    assert!(ArtifactReady::from_publish_resource("other", &resource).is_none());
+    assert!(ArtifactReady::from_publish_resource("artifact.publish", &json!("raw text")).is_none());
 }
 
 #[test]

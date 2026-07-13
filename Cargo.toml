@@ -4,6 +4,7 @@ members = [
     "crates/dar-cli",
     "crates/dar-host",
     "crates/dar-presence",
+    "crates/artifacts",
     "crates/cap-chat",
     "crates/cap-dashboard-tab",
     "crates/cap-tracker",

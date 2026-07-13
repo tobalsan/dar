@@ -11,6 +11,7 @@ use std::sync::{Mutex, OnceLock};
 // scheduler's polling loop, a Telegram/IRC bridge) — the host skips such
 // extensions when booting a non-default `--workflow` process so the same
 // agent identity never opens that connection twice.
+pub use dar_artifacts as artifacts;
 
 pub use host_api::{
     BoxFuture, ConfigStore, EventBus, Extension, HostPaths, RegisterCtx, ServiceRegistry,
@@ -24,7 +25,7 @@ pub mod chat {
     use orchestrator_api::{RunSnapshot, RUN_SNAPSHOT_TOPIC};
 
     pub use cap_chat::{
-        BoxFuture, ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams,
+        ArtifactReady, BoxFuture, ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams,
         ChatSessionParamsBuilder, HostToolBridge, CHAT_FALLBACK_BACKEND,
     };
     pub use orchestrator_api::{SystemContext, SystemContextFile, SYSTEM_CONTEXT_TOPIC};

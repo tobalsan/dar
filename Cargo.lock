@@ -532,11 +532,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "dar-artifacts"
+version = "0.3.1"
+dependencies = [
+ "fs2",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "dar-cap-chat"
 version = "0.3.1"
 dependencies = [
  "anyhow",
+ "dar-artifacts",
  "dar-cap-runner",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -710,6 +727,7 @@ name = "dar-extension-sdk"
 version = "0.3.1"
 dependencies = [
  "anyhow",
+ "dar-artifacts",
  "dar-cap-chat",
  "dar-host-api",
  "dar-orchestrator-api",
@@ -1004,8 +1022,14 @@ name = "dar-tool-registry-host"
 version = "0.3.1"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "dar-artifacts",
  "dar-host-api",
  "dar-tool-registry",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -3404,7 +3428,9 @@ version = "1.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "144d6b123cef80b301b8f72a9e2ca4370ddec21950d0a103dd22c437006d2db7"
 dependencies = [
+ "getrandom 0.4.2",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

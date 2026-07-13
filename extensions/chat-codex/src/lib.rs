@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use cap_chat::{ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams};
+use cap_chat::{ArtifactReady, ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams};
 use host_api::{Extension, RegisterCtx};
 use runner_core::{
     effective_command, make_initialize, make_initialized, make_thread_start, make_turn_start,
@@ -107,12 +107,11 @@ fn seed_codex_auth(session_dir: &std::path::Path) -> Result<()> {
     let Some(src) = host_codex_home() else {
         return Ok(());
     };
-    for file in ["auth.json"] {
-        let from = src.join(file);
-        if from.exists() {
-            std::fs::copy(&from, session_dir.join(file))
-                .with_context(|| format!("seeding codex {file}"))?;
-        }
+    let file = "auth.json";
+    let from = src.join(file);
+    if from.exists() {
+        std::fs::copy(&from, session_dir.join(file))
+            .with_context(|| format!("seeding codex {file}"))?;
     }
     Ok(())
 }
@@ -171,6 +170,7 @@ impl CodexChatSession {
             Arc::clone(&stdin),
             Arc::clone(&queue),
             thread_id.clone(),
+            params.artifact_ready.clone(),
         );
         spawn_stderr_pump(stderr, tx.clone());
 
@@ -389,12 +389,17 @@ fn spawn_stdout_pump(
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     queue: Arc<Mutex<TurnQueue>>,
     main_thread_id: String,
+    artifact_ready: Option<Sender<ArtifactReady>>,
 ) {
     tokio::spawn(async move {
         while let Ok(Some(line)) = lines.next_line().await {
             let clean = strip_ansi(line.trim_end_matches('\r'));
             if respond_to_server_request(&clean, &stdin).await.is_err() {
                 return;
+            }
+            if let (Some(sink), Some(ready)) = (&artifact_ready, artifact_ready_from_codex(&clean))
+            {
+                let _ = sink.send(ready).await;
             }
             for event in map_stdout_line(&clean) {
                 if tx.send(event).await.is_err() {
@@ -593,6 +598,19 @@ fn tool_events(item: &Value) -> Vec<ChatEvent> {
         done: true,
     });
     events
+}
+
+fn artifact_ready_from_codex(line: &str) -> Option<ArtifactReady> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    let item = value.get("params")?.get("item")?;
+    if item.get("tool").and_then(Value::as_str) != Some("artifact.publish") || tool_is_error(item) {
+        return None;
+    }
+    let output = item.get("output").or_else(|| item.get("result"))?;
+    let content = output.get("content")?.as_array()?;
+    content
+        .iter()
+        .find_map(|resource| ArtifactReady::from_publish_resource("artifact.publish", resource))
 }
 
 fn is_server_request(value: &Value) -> bool {
@@ -878,6 +896,13 @@ mod tests {
         let events = map_stdout_line(line);
         assert_eq!(events.len(), 1, "{events:?}");
         events.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn artifact_ready_requires_exact_publish_resource() {
+        let line = r#"{"params":{"item":{"tool":"artifact.publish","output":{"content":[{"type":"resource_link","uri":"dar-artifact://550e8400-e29b-41d4-a716-446655440000","name":"report.txt","bytes":5,"sha256":"abc"}]}}}}"#;
+        assert_eq!(artifact_ready_from_codex(line).unwrap().name, "report.txt");
+        assert!(artifact_ready_from_codex(r#"{"params":{"item":{"tool":"other"}}}"#).is_none());
     }
 
     #[test]

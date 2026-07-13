@@ -10,7 +10,13 @@ rust-version = "1.83"
 [lib]
 name = "cap_chat"
 
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
+
 [dependencies]
 anyhow = "1"
 cap-runner = { package = "dar-cap-runner", path = "../cap-runner", version = "0.3" }
+dar-artifacts = { path = "../artifacts", version = "0.3" }
+serde_json = "1"
 tokio = { version = "1.43", features = ["sync"] }

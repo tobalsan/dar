@@ -147,8 +147,23 @@ pub struct ToolError {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolContent {
-    Text { text: String },
-    Image { data: String, mime_type: String },
+    Text {
+        text: String,
+    },
+    Image {
+        data: String,
+        mime_type: String,
+    },
+    ResourceLink {
+        uri: String,
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+        bytes: u64,
+        sha256: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        caption: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +239,21 @@ impl ToolOutcome {
                         data: data.clone(),
                         mime_type: mime_type.clone(),
                     },
+                    ToolContent::ResourceLink {
+                        uri,
+                        name,
+                        mime_type,
+                        bytes,
+                        sha256,
+                        caption,
+                    } => ToolContent::ResourceLink {
+                        uri: uri.clone(),
+                        name: redactor.redact(name),
+                        mime_type: mime_type.clone(),
+                        bytes: *bytes,
+                        sha256: sha256.clone(),
+                        caption: caption.as_ref().map(|caption| redactor.redact(caption)),
+                    },
                 })
                 .collect(),
             is_error: self.is_error,
@@ -247,6 +277,22 @@ impl ToolOutcome {
                     ToolContent::Image { data, mime_type } => {
                         json!({ "type": "image", "data": data, "mimeType": mime_type })
                     }
+                    ToolContent::ResourceLink {
+                        uri,
+                        name,
+                        mime_type,
+                        bytes,
+                        sha256,
+                        caption,
+                    } => json!({
+                        "type": "resource_link",
+                        "uri": uri,
+                        "name": name,
+                        "mimeType": mime_type,
+                        "bytes": bytes,
+                        "sha256": sha256,
+                        "caption": caption,
+                    }),
                 })
                 .collect()
         };

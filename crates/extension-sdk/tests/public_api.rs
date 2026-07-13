@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use dar_extension_sdk::chat::{
-    ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams, CHAT_FALLBACK_BACKEND,
+    ArtifactReady, ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams,
+    CHAT_FALLBACK_BACKEND,
 };
 use dar_extension_sdk::orchestrator::{RunSnapshot, RUN_SNAPSHOT_TOPIC};
 use dar_extension_sdk::{BoxFuture, Extension, RegisterCtx, ServiceRegistry, StartCtx};
@@ -48,6 +49,8 @@ fn sdk_reexports_extension_contracts() {
     assert_eq!(CHAT_FALLBACK_BACKEND, "pi");
 
     let _role = ChatRole::Assistant;
+    let _ready: Option<ArtifactReady> = None;
+    let _artifact_id = dar_extension_sdk::artifacts::ArtifactId::new();
 }
 
 #[test]

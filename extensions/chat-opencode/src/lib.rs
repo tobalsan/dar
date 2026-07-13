@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use cap_chat::{ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams};
+use cap_chat::{ArtifactReady, ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams};
 use host_api::{Extension, RegisterCtx};
 use opencode_client::{OpenCodeEvent, OpenCodeServer};
 use runner_core::{effective_command, opencode_config, write_opencode_config};
@@ -88,6 +88,7 @@ impl OpenCodeChatSession {
         };
         let pump_client = client.clone();
         let pump_session = session_id.clone();
+        let artifact_ready = params.artifact_ready.clone();
         let pump = tokio::spawn(async move {
             loop {
                 match events.next_event().await {
@@ -97,6 +98,11 @@ impl OpenCodeChatSession {
                                 .respond_permission(&pump_session, &permission_id, "once", false)
                                 .await;
                             continue;
+                        }
+                        if let (Some(sink), Some(ready)) =
+                            (&artifact_ready, artifact_ready_from_opencode(&event))
+                        {
+                            let _ = sink.send(ready).await;
                         }
                         if let Some(chat_event) = map_event(&event) {
                             if tx.send(chat_event).await.is_err() {
@@ -254,6 +260,24 @@ fn opencode_env(
     ]
 }
 
+fn artifact_ready_from_opencode(event: &OpenCodeEvent) -> Option<ArtifactReady> {
+    let value = event_payload(event)?;
+    if value.get("type")?.as_str()? != "message.part.updated" {
+        return None;
+    }
+    let part = value.get("properties")?.get("part")?;
+    let name = part.get("tool").or_else(|| part.get("name"))?.as_str()?;
+    let state = part.get("state").unwrap_or(part);
+    if name != "artifact.publish" || state.get("error").is_some() {
+        return None;
+    }
+    let output = state.get("output")?;
+    let content = output.get("content")?.as_array()?;
+    content
+        .iter()
+        .find_map(|resource| ArtifactReady::from_publish_resource("artifact.publish", resource))
+}
+
 fn map_event(event: &OpenCodeEvent) -> Option<ChatEvent> {
     let value = event_payload(event)?;
     match value.get("type").and_then(|v| v.as_str()) {
@@ -409,6 +433,23 @@ mod tests {
             event: None,
             data: data.to_string(),
         })
+    }
+
+    #[test]
+    fn artifact_ready_requires_exact_publish_resource() {
+        let event = OpenCodeEvent {
+            event: None,
+            data: r#"{"type":"message.part.updated","properties":{"part":{"tool":"artifact.publish","state":{"output":{"content":[{"type":"resource_link","uri":"dar-artifact://550e8400-e29b-41d4-a716-446655440000","name":"report.txt","bytes":5,"sha256":"abc"}]}}}}}"#.to_string(),
+        };
+        assert_eq!(
+            artifact_ready_from_opencode(&event).unwrap().name,
+            "report.txt"
+        );
+        assert!(artifact_ready_from_opencode(&OpenCodeEvent {
+            event: None,
+            data: "{}".to_string()
+        })
+        .is_none());
     }
 
     #[test]

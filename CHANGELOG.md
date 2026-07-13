@@ -10,6 +10,7 @@ Breaking changes are marked **⚠ BREAKING**.
 ## [Unreleased]
 
 ### Added
+- Artifacts: `artifact.publish` now copies exports into host-private immutable storage under OS data home, instead of agent-writable `data/`. Publishing is limited to 25 MiB for cross-surface compatibility (including Slack). Delivery APIs validate canonical vault metadata and atomically claim each surface/origin destination before upload.
 - Secrets: `reload_secrets` host tool — agents can rotate `LINEAR_API_KEY` /
   `LINEAR_OAUTH_TOKEN` (or any `.env` secret) and refresh the running host
   without a restart. It re-reads `.env` (overriding only keys originally loaded
