@@ -326,6 +326,12 @@ tracker:
 workspace:
   root: ./workspaces          # supports $AGENT_HOME and ~ expansion
 
+# Optional identity files for agent prompts. Root AGENTS.md loads first when present.
+system_files:
+  - docs/style.md             # optional path, relative to agent folder
+  - path: docs/policy.md
+    required: true            # missing file fails `dar doctor`
+
 dashboard:
   bind: 127.0.0.1
   port: 7878
@@ -339,6 +345,13 @@ hitl:
     # webhook_url: https://...  # required when use: webhook
     # command: [notify-send]    # required when use: cli
 ```
+
+### System files
+
+`AGENTS.md` in agent folder loads automatically, first. `system_files` adds
+agent-folder-relative files in listed order. Entries are optional unless
+`required: true`; missing optional files warn and skip. Paths cannot escape
+agent folder. Do not list `AGENTS.md` again.
 
 ## WORKFLOW.md
 
