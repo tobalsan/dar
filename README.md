@@ -56,7 +56,7 @@ whatever the issue files say. Run history is restored from SQLite on startup.
 ```
 my-agent/
 ├── agent.yaml          # base config
-├── WORKFLOW.md         # required only when orchestrator/tracker/workspace trio is enabled
+├── WORKFLOW.md         # required only when the issue loop is enabled (tracker/polling/workspace live here)
 ├── issues/             # required only for the local files tracker
 │   ├── ISSUE-1.md
 │   └── ISSUE-2.md
@@ -158,22 +158,21 @@ start from `extensions/example` (the living reference, kept green in CI).
 
 Linked is not the same as enabled. Runner and tracker extensions only
 *register* named services. `runner.use` is always required and selects the
-agent harness/model backend. `tracker.use` is present only when the optional
-orchestrator trio is enabled:
+agent harness/model backend:
 
 ```yaml
 runner:
   use: pi               # pi | codex | cli | fake
-
-# only for issue-loop agents
-tracker:
-  use: files            # files | linear
 ```
 
+The issue loop itself is a `WORKFLOW.md` concern, not `agent.yaml`: tracker
+(`tracker.kind`, `tracker.projects`, states, …), polling, and workspace config
+all live in `WORKFLOW.md` frontmatter — see [WORKFLOW.md](#workflowmd) below.
 Background extensions in `plugins![]` (orchestrator, dashboard, frontend-log)
-start unconditionally. With no orchestrator/tracker/workspace trio, the
-orchestrator starts in passive mode: no issue loop, no tracker, no WORKFLOW.md
-required. The foreground extension — the one that owns terminal
+start unconditionally. With no resolved `WORKFLOW.md`, or one whose
+frontmatter is missing `tracker.kind` or non-empty `active_states`/
+`terminal_states`, the orchestrator starts in passive mode: no issue loop, no
+tracker required. The foreground extension — the one that owns terminal
 output — is selected per agent via the top-level `foreground:` key in
 `agent.yaml` (default `"logs"`, the frontend-log extension; `"tui"` selects the
 [terminal UI](#terminal-ui-foreground-tui)). An unknown id causes a clean boot
@@ -256,17 +255,25 @@ dar init-workflow --dir ./my-agent --force                      # overwrite exis
 dar init-workflow --dir ./my-agent --linear-project-slug abc123 # seed Linear frontmatter
 dar init-workflow --dir ./my-agent --expose-graphql-tool        # enable linear_graphql tool
 
-# Validate agent.yaml. If the orchestrator trio is configured, also validates
-# WORKFLOW.md + tracker. Exit code only.
+# Validate agent.yaml. If the resolved WORKFLOW.md has a valid loop config,
+# also validates the tracker. Exit code only.
 dar doctor --dir ./my-agent
 
-# Run the agent host (long-running). With the orchestrator trio configured,
-# this runs the issue loop; otherwise it runs foreground/custom extensions only.
+# Run the agent host (long-running). When the resolved WORKFLOW.md has a
+# valid loop config, this runs the issue loop; otherwise it runs
+# foreground/custom extensions only.
 cd my-agent && dar run
 dar run --dir ./my-agent          # or point at a folder
 
-# Export the configured Linear project and issues to data/.
+# Run a non-default workflow: one agent identity, several WORKFLOW.md hats.
+# --workflow accepts a directory (its WORKFLOW.md is used) or an explicit
+# .../WORKFLOW.md path; also accepted by doctor and export.
+dar run --dir ./my-agent --workflow ./workflows/triage
+dar run --dir ./my-agent --workflow ./workflows/triage/WORKFLOW.md
+
+# Export the configured tracker's project and issues to data/.
 dar export --dir ./my-agent
+dar export --dir ./my-agent --workflow ./workflows/triage
 
 # Quick start with the bundled example:
 dar doctor --dir ./example-agent
@@ -278,12 +285,13 @@ open http://127.0.0.1:7878/
 
 ## Configuration (`agent.yaml`)
 
-`agent.yaml` is the base config. `runner` is always required: it selects the
-agent harness/model backend. `orchestrator`, `tracker`, and `workspace` form an
-optional trio: omit all three for a passive agent that only runs foreground,
-scheduler, or custom extensions; configure all three to enable the issue loop.
-Most loop fields can be overridden per-run in `WORKFLOW.md` frontmatter
-(WORKFLOW.md wins).
+`agent.yaml` is agent **identity and host config only**: `id`, `name`,
+`runner`, `hitl`, `dashboard`, `foreground`, `providers`, `extensions`,
+`system_files`. The issue-loop config — tracker, polling, workspace — lives
+entirely in `WORKFLOW.md` frontmatter (see [WORKFLOW.md](#workflowmd) below);
+`agent.yaml` has no tracker/orchestrator/workspace keys of its own. Old
+`agent.yaml` files that still carry those keys keep parsing: they're unknown
+fields now, silently ignored.
 
 ```yaml
 id: my-agent
@@ -297,34 +305,6 @@ runner:
   # thinking: high            # reasoning level (alias: effort); see "Thinking / reasoning level"
   max_run_timeout_ms: 3600000 # 1 h hard cap per attempt (alias: turn_timeout_ms)
   stall_timeout_ms: 300000    # 5 min silence → stall kill
-
-# Optional issue-loop trio. Either configure all three sections below, or omit
-# all three for a passive agent.
-orchestrator:
-  poll_interval_ms: 10000
-  max_concurrent: 3           # parallel slots
-  max_retries: 3              # backoff retry cap (not counting continuation retries)
-  retry_backoff_ms: 30000     # base delay; doubles each attempt, capped at 30 min
-  # max_active_runs: 3        # park barrier: max consecutive completed runs without leaving active
-
-tracker:
-  use: files                  # "files" or "linear"
-  config:
-    path: ./issues            # required when use: files
-  active_states: [todo, in_progress]
-  terminal_states: [done, cancelled]
-  # needs_human: "Needs Human"    # state that stops re-dispatch (default: "Needs Human")
-  # project_slug: abc123          # Linear project slugId (use: linear only)
-  # team: ALG                     # Linear team key (use: linear only)
-  # assignee: "@thinh"            # human/account assignee: UUID / @displayName / name / email
-  # delegate: "@workeragent"      # Linear app/agent delegate: UUID / @displayName / name / email
-  # label: [bug, urgent]          # single label or list; OR within labels (use: linear only)
-
-# Linear filters (project_slug / team / assignee / delegate / label) combine with strict AND;
-# at least one must resolve or the daemon refuses to boot.
-
-workspace:
-  root: ./workspaces          # supports $AGENT_HOME and ~ expansion
 
 # Optional identity files for agent prompts. Root AGENTS.md loads first when present.
 system_files:
@@ -355,52 +335,59 @@ agent folder. Do not list `AGENTS.md` again.
 
 ## WORKFLOW.md
 
-`WORKFLOW.md` is required only when the orchestrator/tracker/workspace trio is
-enabled. Passive agents may omit it.
+`WORKFLOW.md` is required only when the issue loop is enabled: the resolved
+`WORKFLOW.md` must exist and its frontmatter must carry `tracker.kind` plus
+non-empty `active_states`/`terminal_states`, or the orchestrator stays
+passive. Passive agents may omit it.
 
 When present, `WORKFLOW.md` = optional YAML frontmatter + Markdown prompt body.
 The **body** is a minijinja template rendered per issue against `{{ issue.* }}`
 variables. Strict mode: an unknown variable fails the dispatch attempt (treated
 as abnormal → backoff retry).
 
-The **frontmatter** overrides any matching `agent.yaml` field for the run
-without touching the base config. All sections are optional:
+The **frontmatter** is the sole home for the issue-loop config (tracker,
+polling, workspace) — `agent.yaml` carries none of it. The `agent:` section is
+the one exception: it overrides matching `agent.yaml` `runner` fields for the
+run, without touching the base config. All sections are optional (defaults
+noted inline):
 
 ```yaml
 ---
 tracker:
-  kind: linear                    # or "files"
-  active_states: [In Progress]
-  terminal_states: [Done, Cancelled]
-  needs_human: "Needs Human"
-  project_slug: abc123            # Linear project slugId
-  # team: ALG                     # Linear team key
+  kind: linear                    # files | linear | plane
+  active_states: [In Progress]    # issue states the loop treats as dispatchable
+  terminal_states: [Done, Cancelled] # issue states that stop the loop; no retry
+  needs_human: "Needs Human"      # pauses re-dispatch; no default (omit ⇒ no parking)
+  projects: abc123                 # scalar: one Linear slugId / Plane project UUID
+  # projects: [abc123, def456]     # or a list: OR-matched (Linear), merged fetch (Plane)
+  # path: ./issues                 # files tracker only; default "issues", relative to this WORKFLOW.md
+  # team: ALG                     # Linear team key filter
   # assignee: "@thinh"            # UUID / @displayName / name / email
   # label: [bug, urgent]          # single label or list; OR within labels
-  # endpoint: https://api.linear.app/graphql
+  # endpoint: https://api.linear.app/graphql   # Linear GraphQL endpoint override
 
 polling:
-  interval_ms: 15000
-  jitter_ms: 500
-  max_concurrent: 2
-  max_retries: 5
-  retry_backoff_ms: 60000
+  interval_ms: 15000              # poll frequency, ms (default 1000)
+  jitter_ms: 500                  # random jitter added to each poll (default 0)
+  max_concurrent: 2               # parallel run slots (default 3)
+  max_retries: 5                  # backoff retry cap; doesn't count continuation retries (default 3)
+  retry_backoff_ms: 60000         # base delay; doubles each attempt, capped at 30 min (default 30000)
   allow_stale: true               # keep last-good snapshot on reload error (default true)
 
 workspace:
-  root: ./workspaces
+  root: ./workspaces              # relative to WORKFLOW.md's dir; supports $AGENT_HOME/~ (default "workspaces")
   reuse: true                     # reuse existing workspace dir (default true)
-  cleanup_on_terminal: false      # remove workspace on success (default false)
+  cleanup_on_terminal: false      # remove workspace once the run reaches a terminal outcome (default false)
 
 agent:
-  runner: pi                      # or codex, cli
-  command: pi
-  model: gpt-5
+  runner: pi                      # runner override: pi | codex | cli (default: agent.yaml runner.use)
+  command: pi                     # runner binary override (default: agent.yaml runner.command)
+  model: gpt-5                    # model id passed to the runner (default: agent.yaml runner.model)
   # provider: openai              # passed to runners that accept a provider flag
   # thinking: high                # reasoning level (alias: effort); overrides runner.thinking
-  max_run_timeout_ms: 1800000
-  stall_timeout_ms: 300000
-  max_active_runs: 3              # park barrier
+  max_run_timeout_ms: 1800000     # hard per-attempt timeout (alias: turn_timeout_ms)
+  stall_timeout_ms: 300000        # no runner events for this long → stall kill
+  max_active_runs: 3              # park barrier: runs completed in a row w/o leaving active state (default 3)
 
 hooks:
   after_create: ./scripts/setup.sh    # new workspace created
@@ -409,18 +396,24 @@ hooks:
   before_remove: ./scripts/cleanup.sh # before workspace removal
 
 server:
-  bind: 127.0.0.1
-  port: 7878
+  bind: 127.0.0.1                 # dashboard bind override (default: agent.yaml dashboard.bind)
+  port: 7878                      # dashboard port override (default: agent.yaml dashboard.port)
 
 linear:
-  project: my-project
-  worker_tool: true               # expose linear_graphql tool to child (alias: exposeGraphqlTool)
-  webhook_secret: secret123       # HMAC-SHA256 secret for POST /webhook
+  project: my-project             # shown to the agent in the rendered prompt context (informational only)
+  worker_tool: true               # deprecated no-op: linear_graphql is now always on via the host MCP bridge
+  webhook_secret: secret123       # HMAC-SHA256 secret for POST /webhook (default: dashboard.webhook_secret)
 ---
 
 You are working on {{ issue.identifier }}: {{ issue.title }}
 ...
 ```
+
+Fields omitted from frontmatter fall back to: `poll_interval_ms 1000`,
+`max_concurrent 3`, `max_active_runs 3`, `max_retries 3`, `retry_backoff_ms
+30000`, `jitter_ms 0`, `workspace.root "workspaces"`, `reuse true`,
+`cleanup_on_terminal false`. `tracker.needs_human` has no default — omitting
+it means the orchestrator has no dedicated parking state.
 
 Scaffold the canonical default body:
 
@@ -430,6 +423,48 @@ dar init-workflow --dir ./my-agent
 
 The child must eventually leave the issue in a non-active state (or set it to
 `needs_human`). The orchestrator never writes issue state (except safety parks).
+
+### Running a non-default workflow (`--workflow`)
+
+One agent identity (`agent.yaml`, `.env`, system files) can drive more than
+one `WORKFLOW.md` — "one agent, many hats." `dar run`, `dar doctor`, and
+`dar export` all accept `--workflow <path>`:
+
+```bash
+dar run --dir ./my-agent                                            # default: <dir>/WORKFLOW.md
+dar run --dir ./my-agent --workflow ./workflows/triage               # a dir containing WORKFLOW.md
+dar run --dir ./my-agent --workflow ./workflows/triage/WORKFLOW.md   # or the explicit file
+```
+
+`--workflow` takes a directory (its `WORKFLOW.md` is used) or an explicit path
+that must be named `WORKFLOW.md`. Workflow identity is the *canonical*
+resolved path, so re-running the same `--workflow` value resumes its state.
+Everything still lives under the agent folder:
+
+- **Default workflow** (`<agent>/WORKFLOW.md`, i.e. no flag, or a flag that
+  resolves to it): unchanged, legacy layout — `<agent>/data/store.db`,
+  `<agent>/logs/agent.log`.
+- **Non-default workflow**: run-history db + logs live under
+  `<agent>/workflows/<key>/{data/store.db,logs/agent.log}`, where `<key>` is
+  `<workflow-dir-basename>-<shorthash-of-canonical-path>` (e.g.
+  `triage-3f9c2a`), so concurrent workflows never share state.
+- **Identity** — `agent.yaml`, `.env`, system files, extension data dirs
+  (`cron/`, `pi-sessions/`, …) — always resolves against the agent root, never
+  the workflow dir.
+- **Workspaces** resolve `workspace.root` relative to the WORKFLOW.md's own
+  directory, not the agent root (default `workspaces`, so the default
+  workflow's `workspaces/` is unchanged).
+
+A non-default `--workflow` process skips **agent-singleton extensions** — the
+scheduler, and any future extension that connects the agent to an external
+surface at most once (e.g. a Telegram/IRC bridge). Chat backends (`chat-pi`,
+`chat-codex`, `chat-opencode`) are not singletons: the TUI Chat tab works
+normally in every `--workflow` process.
+
+`dar dash` tracks one live presence entry per agent **+ workflow**, so
+concurrent `dar run --workflow` processes for the same agent both show up
+without clobbering each other; a workflow's own dashboard header shows
+`id · folder · workflow`.
 
 ## Runners
 
@@ -523,7 +558,10 @@ Create a file `hello.md` in this workspace with the text "hello from dar".
 
 ## Linear tracker
 
-Set `tracker.use: linear` (or `tracker.kind: linear` in WORKFLOW.md). Requires:
+Set `tracker.kind: linear` in `WORKFLOW.md` frontmatter (a build B binary also
+needs agent.yaml `tracker: {use: linear}` to link the `tracker-linear`
+extension — see [self-contained agents](#self-contained-agents-build-b--per-agent-binary--self-update)).
+Requires:
 
 - A Linear auth token, either in the process environment or in
   `<agent-folder>/.env`. Two token types are supported via the same header:
@@ -531,12 +569,40 @@ Set `tracker.use: linear` (or `tracker.kind: linear` in WORKFLOW.md). Requires:
   - `LINEAR_OAUTH_TOKEN` — an OAuth app access token (`actor=app`), sent as
     `Authorization: Bearer <token>`. App tokens are long-lived and don't
     consume a workspace seat. When both are set, `LINEAR_OAUTH_TOKEN` wins.
-- `tracker.project_slug` set to the Linear project's slugId.
+- `tracker.projects` set to the Linear project's slugId (scalar), or a list of
+  slugIds — matched OR (`{"or":[{"project":{"slugId":{"eq":p}}},…]}`).
 
-The Linear tracker polls via GraphQL, scopes to the configured project, and
+A complete minimal runnable frontmatter — tracker + polling + workspace, the
+three sections the loop actually needs:
+
+```yaml
+# WORKFLOW.md frontmatter
+tracker:
+  kind: linear
+  active_states: [In Progress]
+  terminal_states: [Done, Cancelled]
+  needs_human: "Needs Human"
+  projects: abc123          # Linear project slugId
+
+polling:
+  interval_ms: 10000        # poll every 10s
+  max_concurrent: 2         # 2 parallel run slots
+
+workspace:
+  root: ./workspaces
+```
+
+```yaml
+# agent.yaml — only needed for a build B (self-contained) binary
+tracker:
+  use: linear                # links tracker-linear at build time
+```
+
+The Linear tracker polls via GraphQL, scopes to the configured project(s), and
 respects the configured `active_states` / `terminal_states` / `needs_human`
 names. Rate-limit responses are handled with backoff. The tracker is read-only;
-all issue-state writes are done by the child agent.
+all issue-state writes are done by the child agent. `dar export` requires
+exactly one configured project (bails on 0 or more than 1).
 
 Linear's app/agent assignment appears as `delegate` in the API while the parent
 human/account remains `assignee`. Use `tracker.assignee` to target the human
@@ -549,9 +615,10 @@ value and are the only orchestrator writes to Linear.
 
 ## Plane tracker
 
-Set `tracker.use: plane` (or `tracker.kind: plane` in WORKFLOW.md). Scope the
-tracker to one Plane workspace + project under root `tracker`, and provide a
-Plane auth token in the environment or `<agent-folder>/.env`:
+Set `tracker.kind: plane` in `WORKFLOW.md` frontmatter (a build B binary also
+needs agent.yaml `tracker: {use: plane}` to link the `tracker-plane`
+extension). Scope the tracker to one Plane workspace + zero or more projects,
+and provide a Plane auth token in the environment or `<agent-folder>/.env`:
 
 - `PLANE_BOT_TOKEN` — a Plane bot/OAuth token (`Authorization: Bearer <token>`).
 - `PLANE_OAUTH_TOKEN` — legacy/alternate OAuth token env var, also Bearer.
@@ -559,29 +626,35 @@ Plane auth token in the environment or `<agent-folder>/.env`:
   over `PLANE_API_KEY`; `PLANE_BOT_TOKEN` wins over `PLANE_OAUTH_TOKEN`.
 
 ```yaml
+# WORKFLOW.md frontmatter
 tracker:
-  use: plane
+  kind: plane
   active_states: [Todo, "In Progress"]
   terminal_states: [Done, Cancelled]
   needs_human: "Needs Human"
   workspace: my-workspace          # workspace slug
-  project: 00000000-0000-0000-0000-000000000000   # project UUID
+  projects: 00000000-0000-0000-0000-000000000000   # one project UUID (scalar)
+  # projects: [00000000-…, 11111111-…]             # or a list: fetched per-project and merged
   # endpoint: https://api.plane.so   # self-hosted API base override
   mention: Worker Agent  # optional bot display name; filters description @mentions
+```
 
+```yaml
+# agent.yaml
 extensions:
   tracker-plane:
     # app_url: https://app.plane.so   # self-hosted web app base override
 ```
 
-The Plane tracker polls work items via the REST API, resolves state names from
-the project's state table, skips issues blocked by non-terminal `blocked_by`
+Empty/absent `tracker.projects` polls the whole workspace, as before. The Plane
+tracker polls work items via the REST API, resolves state names from the
+project's state table, skips issues blocked by non-terminal `blocked_by`
 relations, and honours Plane's rate-limit headers. Optional `tracker.mention`
 resolves a bot display name at boot and polls only work items whose description
 @mentions that bot. It also exposes a `plane_api` host tool (host-held auth,
 token redaction) so the child agent can call the Plane REST API directly. `dar
 init-workflow` / `dar export` route to the Plane tracker automatically when
-`tracker.use: plane`.
+`tracker.kind: plane`. `dar export` requires exactly one configured project.
 
 ## Dashboard
 
@@ -724,16 +797,16 @@ Prerequisites: `cargo`/`rustc` on PATH, plus the `cargo-dar` helper
 `cargo-dar` on PATH).
 
 1. Write `~/agents/worker/agent.yaml` — the `use:` / `foreground:` keys
-   decide which stock extensions get linked:
+   decide which stock extensions get linked. `tracker.use` here only selects
+   the linked tracker crate at build time; the tracker's actual behavior
+   (project scope, states, …) is configured in `WORKFLOW.md`, not here:
 
    ```yaml
    id: worker
    name: "Worker"
 
    tracker:
-     use: linear            # links tracker-linear
-     project_slug: abc123   # Linear project slugId
-     delegate: "@workeragent" # optional: target a Linear app/agent delegate
+     use: linear             # links tracker-linear (build-time selection only)
    runner:
      use: codex             # links runner-codex
    foreground: tui          # links tui + frontend-log + chat-pi, and chat-codex
@@ -748,9 +821,13 @@ Prerequisites: `cargo`/`rustc` on PATH, plus the `cargo-dar` helper
 
    ```bash
    cd ~/agents/worker
-   dar init-workflow --dir .                       # writes WORKFLOW.md
-   cargo dar new standup-poster --kind background  # → extensions/standup-poster/
+   dar init-workflow --dir . --linear-project-slug abc123  # writes WORKFLOW.md with tracker.projects
+   cargo dar new standup-poster --kind background          # → extensions/standup-poster/
    ```
+
+   Add `tracker.delegate: "@workeragent"` (or `tracker.team`, `tracker.label`,
+   …) to the generated `WORKFLOW.md` frontmatter for any other Linear filters
+   — see [Linear tracker](#linear-tracker).
 
    The new crate's `Cargo.toml` carries the discovery marker
    `[package.metadata.dar] factory = "standup_poster::extension"` and a

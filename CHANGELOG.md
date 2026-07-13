@@ -17,9 +17,10 @@ Breaking changes are marked **⚠ BREAKING**.
   Linear client's cached token in place via a new `ReloadSecrets` control
   message. Reachable through the host MCP bridge; the next Linear request uses
   the new token. Secret values stay scrubbed from logs and child env.
-- tracker-plane: new Plane issue tracker extension (`tracker.use: plane`),
-  scoped to a workspace + project via `extensions.tracker-plane`
-  (`workspace`, `project`, optional `api_url`/`app_url`). Polls work items,
+- tracker-plane: new Plane issue tracker extension (`tracker.kind: plane` in
+  `WORKFLOW.md`), scoped to a workspace + project(s) via `tracker.workspace` /
+  `tracker.projects` (or the `extensions.tracker-plane` fallback:
+  `workspace`, `projects`, optional `api_url`/`app_url`). Polls work items,
   skips issues blocked by non-terminal `blocked_by` relations, parks stalled
   issues to a needs-human state with a comment, and honours Plane's
   rate-limit headers. Auth via `PLANE_BOT_TOKEN` / `PLANE_OAUTH_TOKEN`
@@ -78,9 +79,46 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Changed
 - CLI: `dar init-workflow` / `dar export` now route to the tracker-specific
-  command for the configured `tracker.use` (e.g. `init-workflow.plane`,
-  `export.plane`), falling back to the tracker-agnostic command when no
-  tracker-specific one is registered. Files/Linear behavior is unchanged.
+  command for the resolved `WORKFLOW.md`'s `tracker.kind` (e.g.
+  `init-workflow.plane`, `export.plane`), falling back to the
+  tracker-agnostic command when no tracker-specific one is registered.
+  Files/Linear behavior is unchanged.
+- **⚠ BREAKING — config home**: the issue-loop config (tracker, polling, workspace) is no
+  longer readable from `agent.yaml` — it lives entirely in `WORKFLOW.md`
+  frontmatter now. `agent.yaml`'s `tracker`, `orchestrator`, and `workspace`
+  top-level keys are removed from the schema and silently ignored if present
+  (unknown keys); `agent.yaml` retains `id`, `name`, `runner`, `hitl`,
+  `dashboard`, `foreground`, `providers`, `extensions`, `system_files`. The
+  orchestrator loop now runs whenever the resolved `WORKFLOW.md` exists and
+  its frontmatter validates (`tracker.kind` plus non-empty `active_states`/
+  `terminal_states`); no `agent.yaml` gate. `dar create --orchestrator` and
+  `dar init-workflow` no longer write the retired trio into `agent.yaml`.
+- **`dar run`/`doctor`/`export --workflow <path>`**: one agent identity
+  (`agent.yaml`, `.env`, system files) can now drive more than one
+  `WORKFLOW.md` — "one agent, many hats." `--workflow` accepts a directory
+  (its `WORKFLOW.md` is used) or an explicit `…/WORKFLOW.md` path; workflow
+  identity is the canonical resolved path, so re-running the same value
+  resumes its state. The default workflow (`<agent>/WORKFLOW.md`) keeps the
+  legacy `<agent>/data/store.db` + `<agent>/logs/agent.log` layout
+  byte-identical; a non-default workflow's run-history db + logs live under
+  `<agent>/workflows/<key>/{data/store.db,logs/agent.log}` so concurrent
+  workflows never share state, while identity paths always stay on the agent
+  root. `workspace.root` now resolves relative to the WORKFLOW.md's own
+  directory rather than always the agent root. A non-default `--workflow`
+  process skips agent-singleton extensions (the scheduler) so one agent
+  identity connects to that external surface at most once; chat backends work
+  normally in `--workflow` processes. `dar dash` presence now tracks one live
+  entry per agent + workflow, and a workflow's own dashboard header shows
+  `id · folder · workflow`.
+- **⚠ BREAKING — tracker project scope unified**: Linear's `tracker.project_slug` and
+  Plane's `tracker.project` are replaced by one tracker-agnostic
+  `tracker.projects` key in `WORKFLOW.md` frontmatter, accepting a scalar or a
+  list. Linear matches project(s) with an OR-of-equality GraphQL clause
+  (never an unverified `in`); Plane fetches and merges per configured
+  project, with an empty/absent list still fetching the whole workspace as
+  before. Multiple Linear/Plane projects can now be polled by one tracker.
+  `dar export` requires exactly one configured project and bails clearly on 0
+  or more than 1.
 - Runners: spawn agent children with non-interactive git env (`GIT_EDITOR=true`,
   `GIT_SEQUENCE_EDITOR=true`, `GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`/`PAGER=cat`)
   so editor/pager/credential prompts auto-resolve instead of hanging the run until
