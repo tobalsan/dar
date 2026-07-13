@@ -2,7 +2,7 @@
 id: ISSUE-2
 identifier: ISSUE-2
 title: "Write the first 10 Fibonacci numbers"
-state: done
+state: todo
 priority: 2
 created_at: 2026-01-15T10:05:00Z
 ---

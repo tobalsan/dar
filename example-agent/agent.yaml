@@ -1,27 +1,11 @@
 id: example-agent
 name: "Example Agent"
 
-tracker:
-  use: files
-  config:
-    path: ./issues
-  active_states: [todo, in_progress]
-  terminal_states: [done, cancelled]
-
 runner:
   use: fake
   max_run_timeout_ms: 3600000
   stall_timeout_ms: 300000
   max_turns: 20
-
-orchestrator:
-  poll_interval_ms: 10000
-  max_concurrent: 1
-  max_retries: 3
-  retry_backoff_ms: 30000
-
-workspace:
-  root: ./workspaces
 
 # Optional agent-identity files assembled into the system context at boot.
 # `AGENTS.md` (agent root) is always loaded first when present; these follow in

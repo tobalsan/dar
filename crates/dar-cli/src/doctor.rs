@@ -16,14 +16,29 @@ use anyhow::Context;
 use host_api::ServiceRegistry;
 use orchestrator::config;
 use orchestrator::dotenv::LoadReport;
-use orchestrator::paths::AgentPaths;
+use orchestrator::paths::{workflow_key, AgentPaths};
 use orchestrator::prompt::PromptRenderer;
 use orchestrator::tracker;
 use orchestrator::workflow_config::EffectiveLoopConfig;
 
-/// Run all preflight checks against `root`. Returns the process exit code.
-pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyhow::Result<i32> {
-    let paths = AgentPaths::new(root.to_path_buf());
+/// Run all preflight checks against `root`, validating the workflow resolved at
+/// `workflow_root` (equals `root` for the default workflow; a `--workflow
+/// <path>` dir otherwise). Returns the process exit code. Path derivation
+/// mirrors the orchestrator's `start()` so doctor validates exactly what a
+/// subsequent `dar run --workflow …` would run.
+pub fn run(
+    root: &Path,
+    workflow_root: &Path,
+    dotenv: &LoadReport,
+    services: ServiceRegistry,
+) -> anyhow::Result<i32> {
+    let paths = if workflow_root == root {
+        AgentPaths::new(root.to_path_buf())
+    } else {
+        let key = workflow_key(&workflow_root.join("WORKFLOW.md"));
+        let state_dir = root.join("workflows").join(key);
+        AgentPaths::with_workflow(root.to_path_buf(), workflow_root.to_path_buf(), state_dir)
+    };
     let mut ok = true;
 
     if dotenv.found {
@@ -78,11 +93,13 @@ pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyho
         }
     }
 
-    // Passive agent (no tracker/orchestrator/workspace trio): the loop checks
-    // (WORKFLOW.md, tracker) do not apply. The runner check still runs below.
-    let passive = cfg.as_ref().is_some_and(|c| !c.loop_enabled());
+    // Passive agent: no WORKFLOW.md at the resolved workflow root. The loop
+    // checks (WORKFLOW.md, tracker) do not apply. The runner check still runs
+    // below.
+    let passive = !paths.workflow_md().exists();
 
-    // 2. WORKFLOW.md prompt template — only when the loop is configured.
+    // 2. WORKFLOW.md prompt template + loop config — only when the loop is
+    // configured.
     let prompt = if passive {
         pass("WORKFLOW.md: n/a — passive agent (no orchestrator loop)");
         None
@@ -90,6 +107,13 @@ pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyho
         match PromptRenderer::load(&paths.workflow_md()) {
             Ok(prompt) => {
                 pass("WORKFLOW.md loads");
+                match prompt.snapshot().frontmatter.validate_loop() {
+                    Ok(()) => pass("WORKFLOW.md loop config valid (tracker.kind + states)"),
+                    Err(e) => {
+                        fail(&format!("WORKFLOW.md loop config incomplete: {e:#}"));
+                        ok = false;
+                    }
+                }
                 Some(prompt)
             }
             Err(e) => {
@@ -102,12 +126,12 @@ pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyho
 
     // 3. Runner + loop checks (only if config parsed).
     if let Some(cfg) = cfg {
-        // effective_cfg falls back to config defaults when there is no
+        // effective_cfg falls back to inline defaults when there is no
         // WORKFLOW.md (passive agents have none); the runner fields are taken
         // from agent.yaml `runner` regardless.
         let effective_cfg = match &prompt {
-            Some(prompt) => EffectiveLoopConfig::merge(&cfg, &prompt.snapshot().frontmatter),
-            None => EffectiveLoopConfig::merge(&cfg, &Default::default()),
+            Some(prompt) => EffectiveLoopConfig::resolve(&cfg, &prompt.snapshot().frontmatter),
+            None => EffectiveLoopConfig::resolve(&cfg, &Default::default()),
         };
 
         // 3a. Tracker — n/a for a passive agent.
@@ -115,25 +139,12 @@ pub fn run(root: &Path, dotenv: &LoadReport, services: ServiceRegistry) -> anyho
             pass("tracker: n/a — passive agent (no orchestrator loop)");
             pass("orchestrator: n/a — passive agent (no orchestrator loop)");
         } else {
-            let mut tracker_cfg = cfg.tracker_or_default();
-            tracker_cfg.use_ = effective_cfg.tracker_kind.clone();
-            tracker_cfg.active_states = effective_cfg.active_states.clone();
-            tracker_cfg.terminal_states = effective_cfg.terminal_states.clone();
-            tracker_cfg.project_slug = effective_cfg.tracker_project_slug.clone();
-            tracker_cfg.endpoint = Some(effective_cfg.tracker_endpoint.clone());
-            tracker_cfg.needs_human = effective_cfg.needs_human.clone();
-            tracker_cfg.team = effective_cfg.tracker_team.clone();
-            tracker_cfg.assignee = effective_cfg.tracker_assignee.clone();
-            tracker_cfg.delegate = effective_cfg.tracker_delegate.clone();
-            tracker_cfg.label = (!effective_cfg.tracker_labels.is_empty()).then(|| {
-                orchestrator::config::StringOrVec::List(effective_cfg.tracker_labels.clone())
-            });
-
-            match tracker::build_configured(&services, &tracker_cfg, paths.root.clone()) {
+            match tracker::build_configured(&services, &effective_cfg, paths.workflow_root.clone())
+            {
                 Ok(t) => match t.poll_candidates() {
                     Ok(issues) => pass(&format!(
                         "tracker '{}' reachable ({} active issue(s))",
-                        tracker_cfg.use_,
+                        effective_cfg.tracker_kind,
                         issues.len()
                     )),
                     Err(e) => {

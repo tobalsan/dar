@@ -61,7 +61,7 @@ pub struct LinearTrackerConfig {
     /// The full `Authorization` header value (raw API key, or `Bearer <token>`
     /// for an OAuth app token). Built via [`resolve_linear_auth_header`].
     pub api_key: String,
-    pub project_slug: String, // "" = unconstrained
+    pub projects: Vec<String>, // empty = unconstrained
     pub team: Option<String>,
     pub assignee_id: Option<String>, // already-resolved Linear user id
     pub delegate_id: Option<String>, // already-resolved Linear user id
@@ -164,7 +164,12 @@ impl TrackerFactory for LinearTrackerFactory {
                 String::new()
             }
         };
-        let project_slug = cfg.project_slug.clone().unwrap_or_default();
+        let projects: Vec<String> = cfg
+            .projects
+            .iter()
+            .filter(|p| !p.is_empty())
+            .cloned()
+            .collect();
         let team = cfg.team.clone().filter(|t| !t.is_empty());
         let assignee_raw = cfg.assignee.clone().filter(|a| !a.is_empty());
         let delegate_raw = cfg.delegate.clone().filter(|d| !d.is_empty());
@@ -174,7 +179,7 @@ impl TrackerFactory for LinearTrackerFactory {
         // are not yet resolved here, so configured-but-unresolved values still
         // count as constraining dimensions.
         let configured = ResolvedDims {
-            project_slug: Some(project_slug.clone()).filter(|s| !s.is_empty()),
+            projects: projects.clone(),
             team_key: team.clone(),
             assignee_id: assignee_raw.clone(),
             delegate_id: delegate_raw.clone(),
@@ -182,14 +187,14 @@ impl TrackerFactory for LinearTrackerFactory {
         };
         if configured.is_empty() {
             bail!(
-                "Linear tracker has no filter configured; set at least one of tracker.project_slug, tracker.team, tracker.assignee, tracker.delegate, tracker.label"
+                "Linear tracker has no filter configured; set at least one of tracker.projects, tracker.team, tracker.assignee, tracker.delegate, tracker.label"
             );
         }
 
         let mut tracker = LinearTracker::new(LinearTrackerConfig {
             endpoint: cfg.endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
             api_key,
-            project_slug,
+            projects,
             team,
             assignee_id: None,
             delegate_id: None,
@@ -252,21 +257,23 @@ pub struct ExportResult {
 struct ExportAgentConfig {
     id: String,
     name: String,
-    tracker: ExportTrackerConfig,
 }
 
+/// A YAML scalar or list, normalised to `Vec<String>`. Used by `tracker.projects`.
 #[derive(Debug, Clone, Deserialize)]
-struct ExportTrackerConfig {
-    #[serde(rename = "use")]
-    use_: String,
-    active_states: Vec<String>,
-    terminal_states: Vec<String>,
-    #[serde(default)]
-    project_slug: Option<String>,
-    #[serde(default)]
-    endpoint: Option<String>,
-    #[serde(default)]
-    needs_human: Option<String>,
+#[serde(untagged)]
+enum ExportStringOrVec {
+    Scalar(String),
+    List(Vec<String>),
+}
+
+impl ExportStringOrVec {
+    fn to_vec(&self) -> Vec<String> {
+        match self {
+            ExportStringOrVec::Scalar(s) => vec![s.clone()],
+            ExportStringOrVec::List(v) => v.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -279,7 +286,7 @@ struct ExportWorkflowTracker {
     #[serde(default, alias = "kind")]
     use_: Option<String>,
     #[serde(default)]
-    project_slug: Option<String>,
+    projects: Option<ExportStringOrVec>,
     #[serde(default)]
     endpoint: Option<String>,
     #[serde(default)]
@@ -290,40 +297,18 @@ struct ExportWorkflowTracker {
     terminal_states: Option<Vec<String>>,
 }
 
+/// Export config now reads WORKFLOW.md frontmatter only — agent.yaml no
+/// longer carries a `tracker` key (config-home flag-day, P3).
 pub fn export_linear_project_from_root(root: &Path) -> Result<ExportResult> {
     let agent_cfg: ExportAgentConfig =
         serde_yaml::from_str(&std::fs::read_to_string(root.join("agent.yaml"))?)
             .context("parsing agent.yaml for Linear export")?;
-    let workflow = load_workflow_frontmatter(&root.join("WORKFLOW.md"))?;
-    let tracker = merge_export_tracker(agent_cfg.tracker.clone(), workflow.tracker);
-    export_linear_project(root, &agent_cfg, &tracker)
-}
-
-fn merge_export_tracker(
-    mut base: ExportTrackerConfig,
-    workflow: Option<ExportWorkflowTracker>,
-) -> ExportTrackerConfig {
-    if let Some(workflow) = workflow {
-        if let Some(use_) = workflow.use_ {
-            base.use_ = use_;
-        }
-        if workflow.project_slug.is_some() {
-            base.project_slug = workflow.project_slug;
-        }
-        if workflow.endpoint.is_some() {
-            base.endpoint = workflow.endpoint;
-        }
-        if workflow.needs_human.is_some() {
-            base.needs_human = workflow.needs_human;
-        }
-        if let Some(active_states) = workflow.active_states {
-            base.active_states = active_states;
-        }
-        if let Some(terminal_states) = workflow.terminal_states {
-            base.terminal_states = terminal_states;
-        }
-    }
-    base
+    let workflow_path = root.join("WORKFLOW.md");
+    let workflow = load_workflow_frontmatter(&workflow_path)?;
+    let tracker_cfg = workflow
+        .tracker
+        .with_context(|| format!("{} has no tracker section", workflow_path.display()))?;
+    export_linear_project(root, &agent_cfg, &tracker_cfg)
 }
 
 fn load_workflow_frontmatter(path: &Path) -> Result<ExportWorkflowFrontmatter> {
@@ -364,21 +349,26 @@ fn split_frontmatter(src: &str) -> (Option<&str>, &str) {
 fn export_linear_project(
     root: &Path,
     agent_cfg: &ExportAgentConfig,
-    tracker_cfg: &ExportTrackerConfig,
+    tracker_cfg: &ExportWorkflowTracker,
 ) -> Result<ExportResult> {
-    if tracker_cfg.use_ != "linear" {
+    let kind = tracker_cfg.use_.as_deref().unwrap_or_default();
+    if kind != "linear" {
         bail!(
-            "export requires tracker.kind/use \"linear\" (got {:?})",
+            "export requires tracker.kind \"linear\" (got {:?})",
             tracker_cfg.use_
         );
     }
+    let projects = tracker_cfg
+        .projects
+        .as_ref()
+        .map(ExportStringOrVec::to_vec)
+        .unwrap_or_default();
+    let project_slug = match projects.len() {
+        1 => projects[0].clone(),
+        n => bail!("tracker.projects must have exactly one project for Linear export (got {n})"),
+    };
     let api_key = resolve_linear_auth_header()
         .context("LINEAR_OAUTH_TOKEN or LINEAR_API_KEY is required for Linear export")?;
-    let project_slug = tracker_cfg
-        .project_slug
-        .clone()
-        .filter(|slug| !slug.is_empty())
-        .context("tracker.project_slug is required for Linear export")?;
 
     let tracker = LinearTracker::new(LinearTrackerConfig {
         endpoint: tracker_cfg
@@ -386,13 +376,13 @@ fn export_linear_project(
             .clone()
             .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
         api_key,
-        project_slug,
+        projects: vec![project_slug],
         team: None,
         assignee_id: None,
         delegate_id: None,
         labels: vec![],
-        active_states: tracker_cfg.active_states.clone(),
-        terminal_states: tracker_cfg.terminal_states.clone(),
+        active_states: tracker_cfg.active_states.clone().unwrap_or_default(),
+        terminal_states: tracker_cfg.terminal_states.clone().unwrap_or_default(),
         needs_human: tracker_cfg.needs_human.clone(),
     })?;
     let snapshot = tracker.export_snapshot()?;
@@ -537,22 +527,35 @@ fn ensure_gitignore_entry(root: &Path, entry: &str) -> Result<()> {
     std::fs::write(&path, next).with_context(|| format!("writing {}", path.display()))
 }
 
+/// Render full WORKFLOW.md frontmatter for the Linear tracker: `tracker.kind`,
+/// `tracker.projects` (the tracker-agnostic scope key; only written when a
+/// project slug is given, else the tracker is unconstrained), default
+/// active/terminal/needs-human states, explicit polling, and a workspace
+/// block. WORKFLOW.md frontmatter is now the sole home for loop config, so
+/// this always emits a runnable config (unlike the old agent.yaml trio, which
+/// this replaces) rather than only when a project flag is passed.
 fn workflow_body_with_frontmatter(
     linear_project_slug: Option<&str>,
     linear_project: Option<&str>,
     expose_graphql_tool: bool,
 ) -> String {
-    if linear_project_slug.is_none() && linear_project.is_none() && !expose_graphql_tool {
-        return format!("{DEFAULT_WORKFLOW_MD_BODY}\n");
-    }
-
     let mut out = String::from("---\n");
+    out.push_str("tracker:\n");
+    out.push_str("  kind: linear\n");
     if let Some(slug) = linear_project_slug {
-        out.push_str("tracker:\n");
-        out.push_str("  kind: linear\n");
-        out.push_str(&format!("  project_slug: {}\n", yaml_string(slug)));
+        out.push_str(&format!("  projects: {}\n", yaml_string(slug)));
     }
+    out.push_str("  active_states: [In Progress]\n");
+    out.push_str("  terminal_states: [Done, Cancelled]\n");
+    out.push_str("  needs_human: \"Needs Human\"\n");
+    out.push('\n');
+    out.push_str("polling:\n");
+    out.push_str("  interval_ms: 1000\n");
+    out.push('\n');
+    out.push_str("workspace:\n");
+    out.push_str("  root: ./workspaces\n");
     if linear_project.is_some() || expose_graphql_tool {
+        out.push('\n');
         out.push_str("linear:\n");
         if let Some(project) = linear_project {
             out.push_str(&format!("  project: {}\n", yaml_string(project)));
@@ -581,7 +584,7 @@ pub struct LinearTracker {
     /// [`LinearTracker::reload_secrets`] can swap in a rotated token at runtime
     /// without rebuilding the tracker (read on every request).
     api_key: RwLock<String>,
-    project_slug: String,
+    projects: Vec<String>,
     team: Option<String>,
     assignee_id: Option<String>,
     delegate_id: Option<String>,
@@ -607,7 +610,7 @@ impl LinearTracker {
                 cfg.endpoint
             },
             api_key: RwLock::new(cfg.api_key),
-            project_slug: cfg.project_slug,
+            projects: cfg.projects,
             team: cfg.team,
             assignee_id: cfg.assignee_id,
             delegate_id: cfg.delegate_id,
@@ -649,10 +652,10 @@ impl LinearTracker {
 
     // --- async internals ---
 
-    /// Resolved filter dimensions for this tracker (project_slug "" → None).
+    /// Resolved filter dimensions for this tracker (empty `projects` → unconstrained).
     fn dims(&self) -> ResolvedDims {
         ResolvedDims {
-            project_slug: Some(self.project_slug.clone()).filter(|s| !s.is_empty()),
+            projects: self.projects.clone(),
             team_key: self.team.clone(),
             assignee_id: self.assignee_id.clone(),
             delegate_id: self.delegate_id.clone(),
@@ -967,7 +970,8 @@ query DarCandidates($filter: IssueFilter, $after: String, $first: Int!) {
             Ok(LinearExport {
                 project: LinearProjectExport {
                     name: pname,
-                    slug: pslug.unwrap_or_else(|| self.project_slug.clone()),
+                    slug: pslug
+                        .unwrap_or_else(|| self.projects.first().cloned().unwrap_or_default()),
                     endpoint: self.endpoint.clone(),
                     exported_at: Utc::now(),
                     issue_count: issues.len(),
@@ -1210,7 +1214,7 @@ fn raw_to_issue(r: &RawIssue) -> Issue {
 /// Resolved filter dimensions for one tracker. Empty fields = unconstrained.
 #[derive(Debug, Clone, Default)]
 struct ResolvedDims {
-    project_slug: Option<String>,
+    projects: Vec<String>,
     team_key: Option<String>,
     assignee_id: Option<String>,
     delegate_id: Option<String>,
@@ -1220,7 +1224,7 @@ struct ResolvedDims {
 impl ResolvedDims {
     /// True when no dimension constrains the poll (whole-workspace risk).
     fn is_empty(&self) -> bool {
-        self.project_slug.is_none()
+        self.projects.is_empty()
             && self.team_key.is_none()
             && self.assignee_id.is_none()
             && self.delegate_id.is_none()
@@ -1228,12 +1232,19 @@ impl ResolvedDims {
     }
 }
 
-/// Build a Linear `IssueFilter` (AND across dimensions). `active_states`, when
+/// Build a Linear `IssueFilter` (AND across dimensions). `projects`, when
+/// non-empty, adds an OR-of-eq clause on `project.slugId` (NOT an `in`
+/// operator — unverified against Linear's API). `active_states`, when
 /// non-empty, adds a `state.name.in` clause. Pure: no I/O.
 fn build_issue_filter(dims: &ResolvedDims, active_states: &[String]) -> Value {
     let mut and: Vec<Value> = Vec::new();
-    if let Some(slug) = dims.project_slug.as_deref().filter(|s| !s.is_empty()) {
-        and.push(json!({ "project": { "slugId": { "eq": slug } } }));
+    if !dims.projects.is_empty() {
+        let or: Vec<Value> = dims
+            .projects
+            .iter()
+            .map(|slug| json!({ "project": { "slugId": { "eq": slug } } }))
+            .collect();
+        and.push(json!({ "or": or }));
     }
     if let Some(key) = dims.team_key.as_deref().filter(|s| !s.is_empty()) {
         and.push(json!({ "team": { "key": { "eq": key } } }));
@@ -1489,7 +1500,7 @@ mod tests {
         let tracker = LinearTracker::new(LinearTrackerConfig {
             endpoint: "http://localhost".to_string(),
             api_key: resolve_linear_auth_header().unwrap_or_default(),
-            project_slug: "test".to_string(),
+            projects: vec!["test".to_string()],
             team: None,
             assignee_id: None,
             delegate_id: None,
@@ -1523,7 +1534,7 @@ mod tests {
         LinearTracker::new(LinearTrackerConfig {
             endpoint: "http://localhost".to_string(),
             api_key: "test".to_string(),
-            project_slug: "test".to_string(),
+            projects: vec!["test".to_string()],
             team: None,
             assignee_id: None,
             delegate_id: None,
@@ -1739,7 +1750,14 @@ mod tests {
         super::init_workflow(dir.path(), false).unwrap();
 
         let body = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
-        assert_eq!(body, format!("{}\n", super::DEFAULT_WORKFLOW_MD_BODY));
+        assert!(body.starts_with("---\n"));
+        assert!(body.contains("  kind: linear\n"));
+        assert!(!body.contains("projects:"));
+        assert!(body.contains("  active_states: [In Progress]\n"));
+        assert!(body.contains("  terminal_states: [Done, Cancelled]\n"));
+        assert!(body.contains("interval_ms: 1000\n"));
+        assert!(body.contains("workspace:\n  root: ./workspaces\n"));
+        assert!(body.ends_with(&format!("{}\n", super::DEFAULT_WORKFLOW_MD_BODY)));
         assert_eq!(
             std::fs::read_to_string(dir.path().join(".gitignore")).unwrap(),
             ".env\n"
@@ -1764,7 +1782,7 @@ mod tests {
         std::fs::write(dir.path().join("WORKFLOW.md"), "existing").unwrap();
         super::init_workflow(dir.path(), true).unwrap();
         let body = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
-        assert_eq!(body, format!("{}\n", super::DEFAULT_WORKFLOW_MD_BODY));
+        assert!(body.contains("  kind: linear\n"));
     }
 
     #[test]
@@ -1776,9 +1794,27 @@ mod tests {
         let body = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
         assert!(body.starts_with("---\n"));
         assert!(body.contains("  kind: linear\n"));
-        assert!(body.contains("  project_slug: dar\n"));
+        assert!(body.contains("  projects: dar\n"));
         assert!(body.contains("  project: Dar\n"));
         assert!(body.contains("  exposeGraphqlTool: true\n"));
+    }
+
+    #[test]
+    fn init_workflow_default_frontmatter_is_runnable_without_project_flags() {
+        // The scaffold written for a plain `dar create --orchestrator` (no
+        // project flags) must still parse as a runnable loop config: a
+        // tracker.kind plus non-empty active/terminal states (mirrors
+        // `WorkflowFrontmatter::validate_loop`'s requirements).
+        let dir = tempfile::tempdir().unwrap();
+        super::init_workflow(dir.path(), false).unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
+        let (frontmatter, _) = super::split_frontmatter(&raw);
+        let frontmatter: super::ExportWorkflowFrontmatter =
+            serde_yaml::from_str(frontmatter.unwrap()).unwrap();
+        let tracker = frontmatter.tracker.expect("tracker section present");
+        assert_eq!(tracker.use_.as_deref(), Some("linear"));
+        assert!(!tracker.active_states.unwrap_or_default().is_empty());
+        assert!(!tracker.terminal_states.unwrap_or_default().is_empty());
     }
 
     #[test]
@@ -1801,14 +1837,6 @@ mod tests {
         let agent_cfg = super::ExportAgentConfig {
             id: "agent-1".to_string(),
             name: "Agent One".to_string(),
-            tracker: super::ExportTrackerConfig {
-                use_: "linear".to_string(),
-                active_states: vec!["Todo".to_string()],
-                terminal_states: vec!["Done".to_string()],
-                project_slug: Some("proj".to_string()),
-                endpoint: None,
-                needs_human: None,
-            },
         };
         let snapshot = super::LinearExport {
             project: super::LinearProjectExport {
@@ -1830,6 +1858,68 @@ mod tests {
         assert!(result.issues_path.exists());
     }
 
+    // --- Export: exactly-one-project guard ---
+
+    fn export_agent_cfg() -> super::ExportAgentConfig {
+        super::ExportAgentConfig {
+            id: "agent-1".to_string(),
+            name: "Agent One".to_string(),
+        }
+    }
+
+    fn export_tracker_cfg(
+        projects: Option<super::ExportStringOrVec>,
+    ) -> super::ExportWorkflowTracker {
+        super::ExportWorkflowTracker {
+            use_: Some("linear".to_string()),
+            projects,
+            endpoint: None,
+            needs_human: None,
+            active_states: Some(vec!["Todo".to_string()]),
+            terminal_states: Some(vec!["Done".to_string()]),
+        }
+    }
+
+    #[test]
+    fn export_bails_on_zero_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = super::export_linear_project(
+            dir.path(),
+            &export_agent_cfg(),
+            &export_tracker_cfg(None),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("exactly one project"));
+        assert!(err.to_string().contains("got 0"));
+    }
+
+    #[test]
+    fn export_bails_on_multiple_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = super::ExportStringOrVec::List(vec!["a".to_string(), "b".to_string()]);
+        let err = super::export_linear_project(
+            dir.path(),
+            &export_agent_cfg(),
+            &export_tracker_cfg(Some(projects)),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("exactly one project"));
+        assert!(err.to_string().contains("got 2"));
+    }
+
+    #[test]
+    fn export_from_root_bails_when_workflow_has_no_tracker_section() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("agent.yaml"),
+            "id: agent-1\nname: Agent One\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("WORKFLOW.md"), "no frontmatter here").unwrap();
+        let err = super::export_linear_project_from_root(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("no tracker section"));
+    }
+
     // --- Filter builder ---
 
     use super::{
@@ -1839,7 +1929,7 @@ mod tests {
 
     fn dims_project() -> ResolvedDims {
         ResolvedDims {
-            project_slug: Some("dar".into()),
+            projects: vec!["dar".into()],
             ..Default::default()
         }
     }
@@ -1851,8 +1941,26 @@ mod tests {
         assert_eq!(
             f,
             json!({ "and": [
-                { "project": { "slugId": { "eq": "dar" } } },
+                { "or": [{ "project": { "slugId": { "eq": "dar" } } }] },
                 { "state": { "name": { "in": ["Todo"] } } }
+            ]})
+        );
+    }
+
+    #[test]
+    fn filter_projects_list_multiple_is_or_of_eq() {
+        let dims = ResolvedDims {
+            projects: vec!["dar".into(), "alg".into()],
+            ..Default::default()
+        };
+        let f = build_issue_filter(&dims, &[]);
+        assert_eq!(
+            f,
+            json!({ "and": [
+                { "or": [
+                    { "project": { "slugId": { "eq": "dar" } } },
+                    { "project": { "slugId": { "eq": "alg" } } }
+                ] }
             ]})
         );
     }
@@ -1960,7 +2068,7 @@ mod tests {
     #[test]
     fn filter_all_dimensions_combined() {
         let dims = ResolvedDims {
-            project_slug: Some("dar".into()),
+            projects: vec!["dar".into()],
             team_key: Some("ALG".into()),
             assignee_id: Some("u1".into()),
             delegate_id: Some("u2".into()),
@@ -1970,7 +2078,7 @@ mod tests {
         assert_eq!(
             f,
             json!({ "and": [
-                { "project": { "slugId": { "eq": "dar" } } },
+                { "or": [{ "project": { "slugId": { "eq": "dar" } } }] },
                 { "team": { "key": { "eq": "ALG" } } },
                 { "assignee": { "id": { "eq": "u1" } } },
                 { "delegate": { "id": { "eq": "u2" } } },
@@ -1994,7 +2102,7 @@ mod tests {
         let f = build_issue_filter(&dims_project(), &[]);
         assert_eq!(
             f,
-            json!({ "and": [{ "project": { "slugId": { "eq": "dar" } } }] })
+            json!({ "and": [{ "or": [{ "project": { "slugId": { "eq": "dar" } } }] }] })
         );
     }
 
@@ -2008,7 +2116,7 @@ mod tests {
     #[test]
     fn resolved_dims_any_single_field_is_non_empty() {
         assert!(!ResolvedDims {
-            project_slug: Some("p".into()),
+            projects: vec!["p".into()],
             ..Default::default()
         }
         .is_empty());
@@ -2032,6 +2140,29 @@ mod tests {
             ..Default::default()
         }
         .is_empty());
+    }
+
+    #[test]
+    fn factory_build_bails_naming_tracker_projects() {
+        use cap_tracker::{TrackerBuildConfig, TrackerFactory};
+
+        let cfg = TrackerBuildConfig {
+            root: std::path::PathBuf::from("."),
+            config_path: None,
+            active_states: vec![],
+            terminal_states: vec![],
+            projects: vec![],
+            workspace: None,
+            endpoint: None,
+            needs_human: None,
+            team: None,
+            assignee: None,
+            delegate: None,
+            mention: None,
+            labels: vec![],
+        };
+        let err = super::LinearTrackerFactory.build(cfg).err().unwrap();
+        assert!(err.to_string().contains("tracker.projects"));
     }
 
     // --- Blocked-by scope ---

@@ -140,6 +140,10 @@ impl Extension for SchedulerExtension {
         "scheduler"
     }
 
+    fn agent_singleton(&self) -> bool {
+        true
+    }
+
     fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             // Parse `extensions.scheduler` once. An absent section is the

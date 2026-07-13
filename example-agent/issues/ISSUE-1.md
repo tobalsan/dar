@@ -2,7 +2,7 @@
 id: ISSUE-1
 identifier: ISSUE-1
 title: "Create hello.md"
-state: done
+state: todo
 priority: 1
 created_at: 2026-01-15T10:00:00Z
 ---

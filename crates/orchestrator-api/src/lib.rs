@@ -80,6 +80,10 @@ pub struct AgentInfo {
     pub model: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
+    /// Display label for a non-default `--workflow <path>` run (the
+    /// workflow dir's basename); `None` for the default workflow.
+    #[serde(default)]
+    pub workflow: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +220,7 @@ impl RunSnapshot {
                 runner: String::new(),
                 model: None,
                 provider: None,
+                workflow: None,
             },
             paused: false,
             active: None,

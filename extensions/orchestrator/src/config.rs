@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use cap_runner::DEFAULT_MAX_RUN_TIMEOUT_MS;
@@ -30,20 +30,9 @@ pub struct AgentConfig {
     pub id: String,
     #[allow(dead_code)]
     pub name: String,
-    /// Tracker config. Part of the orchestrator trio (tracker, orchestrator,
-    /// workspace): all three present runs the loop, all three absent boots a
-    /// passive agent (TUI / scheduled jobs / custom extensions only).
-    #[serde(default)]
-    pub tracker: Option<TrackerConfig>,
     pub runner: RunnerConfig,
-    /// Orchestrator loop config. See `tracker` for the trio contract.
-    #[serde(default)]
-    pub orchestrator: Option<OrchestratorConfig>,
     #[serde(default)]
     pub hitl: HitlConfig,
-    /// Workspace config. See `tracker` for the trio contract.
-    #[serde(default)]
-    pub workspace: Option<WorkspaceConfig>,
     #[serde(default)]
     pub dashboard: DashboardConfig,
     /// Host-level foreground slot selection: the id of the extension that owns
@@ -66,62 +55,6 @@ pub struct AgentConfig {
 
 fn default_foreground() -> String {
     "logs".to_string()
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
-pub struct TrackerConfig {
-    #[serde(rename = "use")]
-    pub use_: String,
-    /// Required for `use: files`; ignored for `use: linear`.
-    #[serde(default)]
-    pub config: Option<TrackerInner>,
-    pub active_states: Vec<String>,
-    pub terminal_states: Vec<String>,
-    /// Linear project slugId (used when `use: linear`).
-    #[serde(default)]
-    pub project_slug: Option<String>,
-    /// Plane project UUID (used when `use: plane`).
-    #[serde(default)]
-    pub project: Option<String>,
-    /// Plane workspace slug (used when `use: plane`).
-    #[serde(default)]
-    pub workspace: Option<String>,
-    /// Linear GraphQL endpoint override (default `https://api.linear.app/graphql`).
-    #[serde(default)]
-    pub endpoint: Option<String>,
-    /// State name used by orchestrator safety/parking writes.
-    #[serde(default)]
-    pub needs_human: Option<String>,
-    /// Linear team key (e.g. "ALG"); unconstrained when absent.
-    #[serde(default)]
-    pub team: Option<String>,
-    /// Linear assignee: UUID, displayName (@thinh), name, or email; resolved at boot.
-    #[serde(default)]
-    pub assignee: Option<String>,
-    /// Linear delegate/app agent: UUID, displayName (@workeragent), name, or email; resolved at boot.
-    #[serde(default)]
-    pub delegate: Option<String>,
-    /// Plane bot display name to target by work-item description @mention.
-    #[serde(default)]
-    pub mention: Option<String>,
-    /// Linear label name(s): a single string or a list (OR within labels).
-    #[serde(default)]
-    pub label: Option<StringOrVec>,
-}
-
-impl TrackerConfig {
-    /// Configured label names, empty when unset.
-    pub fn labels(&self) -> Vec<String> {
-        self.label
-            .as_ref()
-            .map(StringOrVec::to_vec)
-            .unwrap_or_default()
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct TrackerInner {
-    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -215,30 +148,6 @@ fn resolve_provider_value(value: Option<&str>) -> Option<String> {
     Some(value.to_string())
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct OrchestratorConfig {
-    pub poll_interval_ms: u64,
-    #[serde(default = "default_max_concurrent")]
-    pub max_concurrent: usize,
-    #[serde(default = "default_max_active_runs")]
-    pub max_active_runs: u32,
-    pub max_retries: u32,
-    #[serde(default = "default_retry_backoff_ms")]
-    pub retry_backoff_ms: u64,
-}
-
-impl Default for OrchestratorConfig {
-    fn default() -> Self {
-        Self {
-            poll_interval_ms: 1000,
-            max_concurrent: default_max_concurrent(),
-            max_active_runs: default_max_active_runs(),
-            max_retries: 3,
-            retry_backoff_ms: default_retry_backoff_ms(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
 pub struct HitlConfig {
     #[serde(default)]
@@ -281,23 +190,6 @@ fn default_hitl_window_secs() -> u64 {
 
 fn default_hitl_max_items() -> usize {
     5
-}
-
-fn default_max_concurrent() -> usize {
-    3
-}
-
-fn default_max_active_runs() -> u32 {
-    3
-}
-
-fn default_retry_backoff_ms() -> u64 {
-    30 * 1000
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
-pub struct WorkspaceConfig {
-    pub root: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -359,68 +251,10 @@ impl AgentConfig {
             .collect()
     }
 
-    /// True when the orchestrator trio (`tracker` + `orchestrator` +
-    /// `workspace`) is fully configured, i.e. the loop should run. False for a
-    /// passive agent (all three absent).
-    pub fn loop_enabled(&self) -> bool {
-        self.trio().is_some()
-    }
-
-    /// Tracker config or a neutral default. Used by `EffectiveLoopConfig::merge`
-    /// so it stays total even for a passive agent (whose effective config is
-    /// never consumed by a loop). Real loops always have the trio present.
-    pub fn tracker_or_default(&self) -> TrackerConfig {
-        self.tracker.clone().unwrap_or_default()
-    }
-
-    /// Orchestrator config or a neutral default. See `tracker_or_default`.
-    pub fn orchestrator_or_default(&self) -> OrchestratorConfig {
-        self.orchestrator.clone().unwrap_or_default()
-    }
-
-    /// Workspace config or a neutral default. See `tracker_or_default`.
-    pub fn workspace_or_default(&self) -> WorkspaceConfig {
-        self.workspace.clone().unwrap_or_default()
-    }
-
-    /// Borrow the orchestrator trio when all three are present; `None` for a
-    /// passive agent. Partial configs are rejected by `validate`, so callers
-    /// reaching this after validation see all-or-nothing.
-    pub fn trio(&self) -> Option<(&TrackerConfig, &OrchestratorConfig, &WorkspaceConfig)> {
-        match (&self.tracker, &self.orchestrator, &self.workspace) {
-            (Some(t), Some(o), Some(w)) => Some((t, o, w)),
-            _ => None,
-        }
-    }
-
-    /// Validate invariants the loop relies on. Best-effort, called at startup
-    /// and by `doctor`.
+    /// Validate invariants the host relies on. Best-effort, called at startup
+    /// and by `doctor`. Loop config (tracker/polling/workspace) lives in
+    /// WORKFLOW.md frontmatter now; see `WorkflowFrontmatter::validate_loop`.
     pub fn validate(&self) -> Result<()> {
-        // The orchestrator trio is all-or-nothing: either all three configure a
-        // running loop, or none do for a passive agent. A partial trio is a
-        // misconfiguration.
-        let present = self.tracker.is_some() as u8
-            + self.orchestrator.is_some() as u8
-            + self.workspace.is_some() as u8;
-        if present != 0 && present != 3 {
-            bail!("tracker, orchestrator, and workspace must be configured together (or all omitted for a passive agent)");
-        }
-
-        if let Some((tracker, orchestrator, _workspace)) = self.trio() {
-            if tracker.use_.trim().is_empty() {
-                bail!("tracker.use must be non-empty");
-            }
-            if tracker.active_states.is_empty() {
-                bail!("tracker.active_states must be non-empty");
-            }
-            if tracker.terminal_states.is_empty() {
-                bail!("tracker.terminal_states must be non-empty");
-            }
-            if orchestrator.max_concurrent < 1 {
-                bail!("orchestrator.max_concurrent must be >= 1");
-            }
-        }
-
         if !matches!(
             self.hitl.notifier.use_.as_str(),
             "none" | "stdout" | "webhook" | "cli"
@@ -473,7 +307,8 @@ impl AgentConfig {
 mod tests {
     use super::*;
 
-    const BASE: &str = "id: a\nname: A\ntracker:\n  use: files\n  config:\n    path: ./issues\n  active_states: [todo]\n  terminal_states: [done]\nrunner:\n  use: fake\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
+    const BASE: &str =
+        "id: a\nname: A\nrunner:\n  use: fake\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
 
     #[test]
     fn extension_configs_extracts_per_extension_section() {
@@ -505,15 +340,18 @@ mod tests {
         assert_eq!(cfg.foreground, "tui");
     }
 
+    /// Old agent.yaml files carrying the retired trio (`tracker`,
+    /// `orchestrator`, `workspace`) still parse: those keys are now owned by
+    /// WORKFLOW.md and silently ignored here (serde ignores unknown keys).
     #[test]
-    fn tracker_dimensions_parse_with_scalar_label() {
-        let raw = "id: a\nname: A\ntracker:\n  use: linear\n  active_states: [todo]\n  terminal_states: [done]\n  team: ALG\n  assignee: \"@thinh\"\n  delegate: \"@workeragent\"\n  label: bug\nrunner:\n  use: fake\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
-        let cfg: AgentConfig = serde_yaml::from_str(raw).unwrap();
-        let tracker = cfg.tracker.as_ref().unwrap();
-        assert_eq!(tracker.team.as_deref(), Some("ALG"));
-        assert_eq!(tracker.assignee.as_deref(), Some("@thinh"));
-        assert_eq!(tracker.delegate.as_deref(), Some("@workeragent"));
-        assert_eq!(tracker.labels(), vec!["bug"]);
+    fn stale_trio_keys_are_ignored() {
+        let raw = format!(
+            "{BASE}tracker:\n  use: files\n  config:\n    path: ./issues\n  active_states: [todo]\n  terminal_states: [done]\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\n"
+        );
+        let cfg: AgentConfig = serde_yaml::from_str(&raw).unwrap();
+        assert_eq!(cfg.id, "a");
+        assert_eq!(cfg.runner.use_, "fake");
+        cfg.validate().unwrap();
     }
 
     #[test]
@@ -545,42 +383,11 @@ mod tests {
         );
     }
 
+    /// An identity-only agent.yaml (runner + host bits, no loop config) loads
+    /// and validates OK.
     #[test]
-    fn tracker_label_parses_as_list() {
-        let raw = "id: a\nname: A\ntracker:\n  use: linear\n  active_states: [todo]\n  terminal_states: [done]\n  label: [bug, urgent]\nrunner:\n  use: fake\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
-        let cfg: AgentConfig = serde_yaml::from_str(raw).unwrap();
-        assert_eq!(cfg.tracker.unwrap().labels(), vec!["bug", "urgent"]);
-    }
-
-    /// A passive agent (runner only, no trio) loads and validates OK.
-    #[test]
-    fn passive_agent_validates() {
-        let raw = "id: a\nname: A\nrunner:\n  use: fake\n";
-        let cfg: AgentConfig = serde_yaml::from_str(raw).unwrap();
-        assert!(cfg.tracker.is_none());
-        assert!(cfg.orchestrator.is_none());
-        assert!(cfg.workspace.is_none());
-        assert!(!cfg.loop_enabled());
-        cfg.validate().unwrap();
-    }
-
-    /// A partial trio (tracker + orchestrator but no workspace) fails validation.
-    #[test]
-    fn partial_trio_fails_validation() {
-        let raw = "id: a\nname: A\ntracker:\n  use: files\n  config:\n    path: ./issues\n  active_states: [todo]\n  terminal_states: [done]\nrunner:\n  use: fake\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\n";
-        let cfg: AgentConfig = serde_yaml::from_str(raw).unwrap();
-        let err = cfg.validate().unwrap_err().to_string();
-        assert!(
-            err.contains("tracker, orchestrator, and workspace must be configured together"),
-            "{err}"
-        );
-    }
-
-    /// The full trio still validates OK.
-    #[test]
-    fn full_trio_validates() {
+    fn identity_only_agent_validates() {
         let cfg: AgentConfig = serde_yaml::from_str(BASE).unwrap();
-        assert!(cfg.loop_enabled());
         cfg.validate().unwrap();
     }
 

@@ -54,6 +54,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use anyhow::{anyhow, bail, Context as _, Result};
 use axum::Router;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, watch};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -69,6 +70,20 @@ pub const STARTUP_BANNER_TOPIC: &str = "host.startup-banner";
 pub trait Extension: Send + Sync {
     fn id(&self) -> &'static str;
 
+    /// Whether this extension holds a singleton external connection — a
+    /// scheduler's polling loop, a Telegram/IRC bridge — that must run at
+    /// most once per agent identity. An agent connects to each such external
+    /// surface once; running two loop processes for the same identity
+    /// concurrently (e.g. via `--workflow`) must not open it twice.
+    /// Extensions that return `true` here are skipped by hosts booted with
+    /// `skip_agent_singletons` (non-default `--workflow` processes), so
+    /// only the default-workflow process owns the connection. Defaults to
+    /// `false`: most extensions, including per-process chat backends, are
+    /// per-process-safe.
+    fn agent_singleton(&self) -> bool {
+        false
+    }
+
     fn register<'a>(&'a self, _ctx: &'a mut RegisterCtx) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Ok(()) })
     }
@@ -81,6 +96,10 @@ pub trait Extension: Send + Sync {
 impl Extension for Box<dyn Extension> {
     fn id(&self) -> &'static str {
         self.as_ref().id()
+    }
+
+    fn agent_singleton(&self) -> bool {
+        self.as_ref().agent_singleton()
     }
 
     fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> BoxFuture<'a, Result<()>> {
@@ -268,6 +287,8 @@ impl ShutdownToken {
 pub struct HostPaths {
     root: PathBuf,
     data_root: PathBuf,
+    workflow_root: PathBuf,
+    artifact_root: Option<PathBuf>,
 }
 
 impl HostPaths {
@@ -277,11 +298,61 @@ impl HostPaths {
             .canonicalize()
             .context("canonicalizing host root")?;
         let data_root = root.join("data");
-        Ok(Self { root, data_root })
+        let workflow_root = root.clone();
+        Ok(Self {
+            root,
+            data_root,
+            workflow_root,
+            artifact_root: None,
+        })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The resolved WORKFLOW.md's directory. Defaults to [`Self::root`]; a
+    /// non-default `--workflow <path>` run overrides it via
+    /// [`Self::with_workflow_root`].
+    pub fn workflow_root(&self) -> &Path {
+        &self.workflow_root
+    }
+
+    /// Override the workflow root to something other than the agent root,
+    /// for a `--workflow <path>` run whose WORKFLOW.md lives outside the
+    /// agent folder.
+    pub fn with_workflow_root(mut self, workflow_root: impl AsRef<Path>) -> Result<Self> {
+        self.workflow_root = workflow_root
+            .as_ref()
+            .canonicalize()
+            .context("canonicalizing workflow root")?;
+        Ok(self)
+    }
+
+    /// Set host-owned storage for immutable artifacts. This must not be under
+    /// agent root: chat runners can write agent files.
+    pub fn with_artifact_root(mut self, artifact_root: impl AsRef<Path>) -> Result<Self> {
+        std::fs::create_dir_all(artifact_root.as_ref()).context("creating artifact root")?;
+        let artifact_root = artifact_root
+            .as_ref()
+            .canonicalize()
+            .context("canonicalizing artifact root")?;
+        if artifact_root.starts_with(&self.root) {
+            bail!("artifact root must be outside agent root");
+        }
+        self.artifact_root = Some(artifact_root);
+        Ok(self)
+    }
+
+    /// Per-agent private vault path. No artifact path is derived from agent input.
+    pub fn artifact_dir(&self) -> Result<PathBuf> {
+        let root = self
+            .artifact_root
+            .as_ref()
+            .context("artifact root is not configured")?;
+        let digest = Sha256::digest(self.root.as_os_str().as_encoded_bytes());
+        let id: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        Ok(root.join(id))
     }
 
     pub fn assert_contained(&self, path: impl AsRef<Path>) -> Result<PathBuf> {
@@ -682,5 +753,33 @@ impl StartServices {
     /// Record the bound address. Called once by the host; ignored if already set.
     pub fn set_http_addr(&self, addr: std::net::SocketAddr) {
         let _ = self.http_addr.set(addr);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HostPaths;
+
+    #[test]
+    fn artifact_root_must_be_host_private() {
+        let agent = tempfile::tempdir().unwrap();
+        assert!(HostPaths::new(agent.path())
+            .unwrap()
+            .with_artifact_root(agent.path().join("data/artifacts"))
+            .is_err());
+    }
+
+    #[test]
+    fn artifact_dir_is_stable_and_outside_agent_root() {
+        let agent = tempfile::tempdir().unwrap();
+        let host = tempfile::tempdir().unwrap();
+        let paths = HostPaths::new(agent.path())
+            .unwrap()
+            .with_artifact_root(host.path().join("artifacts"))
+            .unwrap();
+        let artifact_dir = paths.artifact_dir().unwrap();
+        assert!(artifact_dir.starts_with(host.path().canonicalize().unwrap()));
+        assert!(!artifact_dir.starts_with(agent.path().canonicalize().unwrap()));
+        assert_eq!(artifact_dir, paths.artifact_dir().unwrap());
     }
 }

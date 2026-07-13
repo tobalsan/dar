@@ -141,6 +141,9 @@ pub struct AgentInfo {
     pub folder: String,
     pub tracker: String,
     pub runner: String,
+    /// Display label for a non-default `--workflow <path>` run (the
+    /// workflow dir's basename); `None` for the default workflow.
+    pub workflow: Option<String>,
 }
 
 /// Fixed-capacity ring of recent event lines (child stdout/stderr + lifecycle).

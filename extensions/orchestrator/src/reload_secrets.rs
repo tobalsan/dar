@@ -110,15 +110,11 @@ impl ToolExecutor for ReloadSecretsTool {
             Some(bus) => {
                 let (reply, rx) = reply_channel();
                 match bus.publish(CONTROL_TOPIC, ControlMsg::ReloadSecrets { reply }) {
-                    Ok(()) => {
-                        match tokio::time::timeout(Duration::from_secs(10), rx).await {
-                            Ok(Ok(reply)) if reply.ok => "tracker refreshed".to_string(),
-                            Ok(Ok(reply)) => format!("tracker refresh failed: {}", reply.message),
-                            Ok(Err(_)) | Err(_) => {
-                                "tracker refresh timed out or dropped".to_string()
-                            }
-                        }
-                    }
+                    Ok(()) => match tokio::time::timeout(Duration::from_secs(10), rx).await {
+                        Ok(Ok(reply)) if reply.ok => "tracker refreshed".to_string(),
+                        Ok(Ok(reply)) => format!("tracker refresh failed: {}", reply.message),
+                        Ok(Err(_)) | Err(_) => "tracker refresh timed out or dropped".to_string(),
+                    },
                     Err(err) => format!("tracker refresh not delivered: {err}"),
                 }
             }
@@ -132,7 +128,10 @@ impl ToolExecutor for ReloadSecretsTool {
                 report.skipped_external.len(),
             )
         } else {
-            format!("no .env found at {}; {tracker_status}", report.path.display())
+            format!(
+                "no .env found at {}; {tracker_status}",
+                report.path.display()
+            )
         };
         Ok(ToolOutcome::ok(summary))
     }

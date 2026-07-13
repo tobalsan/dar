@@ -6,6 +6,12 @@
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
+// `Extension::agent_singleton()` defaults to `false`; override it to `true`
+// only for extensions that hold a singleton external connection (a
+// scheduler's polling loop, a Telegram/IRC bridge) — the host skips such
+// extensions when booting a non-default `--workflow` process so the same
+// agent identity never opens that connection twice.
+
 pub use host_api::{
     BoxFuture, ConfigStore, EventBus, Extension, HostPaths, RegisterCtx, ServiceRegistry,
     ShutdownToken, StartCtx,

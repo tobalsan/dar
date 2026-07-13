@@ -2,7 +2,7 @@
 id: ISSUE-3
 identifier: ISSUE-3
 title: "Write a short README"
-state: done
+state: todo
 priority: 3
 created_at: 2026-01-15T10:10:00Z
 ---

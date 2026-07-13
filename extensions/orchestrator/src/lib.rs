@@ -42,7 +42,7 @@ use crate::agent_config_reload::AgentConfigReloader;
 use crate::config::AgentConfig;
 use crate::domain::Issue;
 use crate::hitl::{HitlNotification, HitlNotify};
-use crate::paths::{issue_workspace, issue_workspace_path, resolve_workspace_root, AgentPaths};
+use crate::paths::{issue_workspace, issue_workspace_path, workflow_key, AgentPaths};
 use crate::prompt::PromptRenderer;
 use crate::runner::{ExitKind, KillReason, RunnerHandle, SpawnParams, TurnDecision};
 use crate::state::{
@@ -210,7 +210,15 @@ impl Extension for OrchestratorExtension {
 
     fn start<'a>(&'a self, ctx: host_api::StartCtx) -> host_api::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let paths = AgentPaths::new(ctx.paths.root().to_path_buf());
+            let root = ctx.paths.root().to_path_buf();
+            let workflow_root = ctx.paths.workflow_root().to_path_buf();
+            let paths = if workflow_root == root {
+                AgentPaths::new(root)
+            } else {
+                let key = workflow_key(&workflow_root.join("WORKFLOW.md"));
+                let state_dir = root.join("workflows").join(key);
+                AgentPaths::with_workflow(root, workflow_root, state_dir)
+            };
             std::fs::create_dir_all(paths.logs_dir())
                 .with_context(|| format!("creating logs dir {}", paths.logs_dir().display()))?;
             let log_guard = logging::init(&paths.log_file())?;
@@ -238,10 +246,10 @@ impl Extension for OrchestratorExtension {
             let _ = self.store_cell.set(Arc::clone(&store));
             cleanup_stale_runs(&store);
 
-            // Passive agent: no tracker/orchestrator/workspace trio → no loop.
-            // Boot on runner + foreground + extensions alone; skip WORKFLOW.md,
-            // tracker build, runner resolve and the tick loop entirely.
-            if !agent_cfg.loop_enabled() {
+            // Passive agent: no WORKFLOW.md for this workflow → no loop.
+            // Boot on runner + foreground + extensions alone; skip the tracker
+            // build, runner resolve and the tick loop entirely.
+            if !paths.workflow_md().exists() {
                 let dashboard = dashboard_banner(
                     agent_cfg.dashboard.bind,
                     agent_cfg.dashboard.port,
@@ -264,7 +272,11 @@ impl Extension for OrchestratorExtension {
                     .bus
                     .publish(
                         RUN_SNAPSHOT_TOPIC,
-                        passive_snapshot(&agent_cfg, paths.root.display().to_string()),
+                        passive_snapshot(
+                            &agent_cfg,
+                            paths.root.display().to_string(),
+                            paths.workflow_label(),
+                        ),
                     )
                     .context("publishing passive run snapshot")?;
                 // No loop task to own the writer guard; keep the process-wide log
@@ -275,35 +287,24 @@ impl Extension for OrchestratorExtension {
             }
             let hitl = hitl::BurstHitlNotifier::from_config(&agent_cfg.hitl.notifier)?;
             let prompt = PromptRenderer::load(&paths.workflow_md())?;
+            prompt
+                .snapshot()
+                .frontmatter
+                .validate_loop()
+                .context("incomplete WORKFLOW.md loop config")?;
             let effective_cfg =
-                EffectiveLoopConfig::merge(&agent_cfg, &prompt.snapshot().frontmatter);
+                EffectiveLoopConfig::resolve(&agent_cfg, &prompt.snapshot().frontmatter);
             thinking::validate_thinking_for_runner(
                 runner_service_id(&effective_cfg.runner_kind),
                 effective_cfg.thinking.as_deref(),
             )
             .context("invalid thinking/effort level")?;
 
-            // Trio is present (loop_enabled checked above); tracker is Some.
-            let mut tracker_cfg = agent_cfg
-                .tracker
-                .clone()
-                .expect("loop_enabled implies tracker present");
-            tracker_cfg.use_ = effective_cfg.tracker_kind.clone();
-            tracker_cfg.active_states = effective_cfg.active_states.clone();
-            tracker_cfg.terminal_states = effective_cfg.terminal_states.clone();
-            tracker_cfg.project_slug = effective_cfg.tracker_project_slug.clone();
-            tracker_cfg.project = effective_cfg.tracker_project.clone();
-            tracker_cfg.workspace = effective_cfg.tracker_workspace.clone();
-            tracker_cfg.endpoint = Some(effective_cfg.tracker_endpoint.clone());
-            tracker_cfg.needs_human = effective_cfg.needs_human.clone();
-            tracker_cfg.team = effective_cfg.tracker_team.clone();
-            tracker_cfg.assignee = effective_cfg.tracker_assignee.clone();
-            tracker_cfg.delegate = effective_cfg.tracker_delegate.clone();
-            tracker_cfg.mention = effective_cfg.tracker_mention.clone();
-            tracker_cfg.label = (!effective_cfg.tracker_labels.is_empty())
-                .then(|| crate::config::StringOrVec::List(effective_cfg.tracker_labels.clone()));
+            // Tracker dimensions come entirely from the resolved (frontmatter)
+            // loop config.
             let services = ctx.host.services.clone();
-            let tracker = tracker::build_configured(&services, &tracker_cfg, paths.root.clone())?;
+            let tracker =
+                tracker::build_configured(&services, &effective_cfg, paths.workflow_root.clone())?;
             let runner_id = runner_service_id(&effective_cfg.runner_kind);
             let runner = services.get_named::<dyn cap_runner::Runner>(runner_id)?;
 
@@ -316,6 +317,7 @@ impl Extension for OrchestratorExtension {
                 folder: paths.root.display().to_string(),
                 tracker: effective_cfg.tracker_kind.clone(),
                 runner: effective_cfg.runner_kind.clone(),
+                workflow: paths.workflow_label(),
             };
             let app_state = AppState::new(
                 agent_info,
@@ -411,7 +413,11 @@ fn cleanup_stale_runs(store: &Store) {
     }
 }
 
-fn passive_snapshot(agent_cfg: &AgentConfig, folder: String) -> RunSnapshot {
+fn passive_snapshot(
+    agent_cfg: &AgentConfig,
+    folder: String,
+    workflow: Option<String>,
+) -> RunSnapshot {
     RunSnapshot {
         agent: orchestrator_api::AgentInfo {
             id: agent_cfg.id.clone(),
@@ -420,6 +426,7 @@ fn passive_snapshot(agent_cfg: &AgentConfig, folder: String) -> RunSnapshot {
             runner: runner_service_id(&agent_cfg.runner.use_).to_string(),
             model: agent_cfg.runner.model.clone(),
             provider: agent_cfg.runner.provider.clone(),
+            workflow,
         },
         version: 1,
         ..RunSnapshot::empty()
@@ -831,7 +838,7 @@ impl Orchestrator {
         match self.prompt.maybe_reload() {
             Ok(false) => {}
             Ok(true) => {
-                let new_eff = EffectiveLoopConfig::merge(
+                let new_eff = EffectiveLoopConfig::resolve(
                     &self.agent_cfg,
                     &self.prompt.snapshot().frontmatter,
                 );
@@ -848,7 +855,7 @@ impl Orchestrator {
     }
 
     fn maybe_reload_agent_config(&mut self) {
-        let Some(mut new_cfg) = (match self.agent_config_reloader.maybe_reload_loop_enabled() {
+        let Some(mut new_cfg) = (match self.agent_config_reloader.maybe_reload() {
             Ok(cfg) => cfg,
             Err(e) => {
                 logging::ev(
@@ -866,12 +873,9 @@ impl Orchestrator {
         let old_cfg = self.agent_cfg.clone();
         self.agent_cfg = new_cfg;
         let new_eff =
-            EffectiveLoopConfig::merge(&self.agent_cfg, &self.prompt.snapshot().frontmatter);
+            EffectiveLoopConfig::resolve(&self.agent_cfg, &self.prompt.snapshot().frontmatter);
         let outcome = self.apply_effective_config(new_eff, "agent_config_reload");
 
-        if !outcome.tracker_applied {
-            self.agent_cfg.tracker = old_cfg.tracker;
-        }
         if !outcome.runner_applied {
             self.agent_cfg.runner = old_cfg.runner;
         }
@@ -900,10 +904,6 @@ impl Orchestrator {
                 .hitl
                 .notifier
                 .clone_from(&self.agent_cfg.hitl.notifier);
-        }
-        if new_cfg.workspace != self.agent_cfg.workspace {
-            warn_restart_required("workspace.root");
-            new_cfg.workspace.clone_from(&self.agent_cfg.workspace);
         }
         if new_cfg.dashboard.bind != self.agent_cfg.dashboard.bind {
             warn_restart_required("dashboard.bind");
@@ -939,8 +939,8 @@ impl Orchestrator {
             || new_eff.terminal_states != self.effective_cfg.terminal_states
             || new_eff.needs_human != self.effective_cfg.needs_human
             || new_eff.tracker_kind != self.effective_cfg.tracker_kind
-            || new_eff.tracker_project_slug != self.effective_cfg.tracker_project_slug
-            || new_eff.tracker_project != self.effective_cfg.tracker_project
+            || new_eff.tracker_projects != self.effective_cfg.tracker_projects
+            || new_eff.tracker_config_path != self.effective_cfg.tracker_config_path
             || new_eff.tracker_workspace != self.effective_cfg.tracker_workspace
             || new_eff.tracker_endpoint != self.effective_cfg.tracker_endpoint
             || new_eff.tracker_team != self.effective_cfg.tracker_team
@@ -950,26 +950,12 @@ impl Orchestrator {
             || new_eff.tracker_labels != self.effective_cfg.tracker_labels;
 
         if tracker_changed {
-            // Live loop ⇒ trio present; default only guards a reload that drops it.
-            let mut tracker_cfg = self.agent_cfg.tracker_or_default();
-            tracker_cfg.use_ = new_eff.tracker_kind.clone();
-            tracker_cfg.active_states = new_eff.active_states.clone();
-            tracker_cfg.terminal_states = new_eff.terminal_states.clone();
-            tracker_cfg.project_slug = new_eff.tracker_project_slug.clone();
-            tracker_cfg.project = new_eff.tracker_project.clone();
-            tracker_cfg.workspace = new_eff.tracker_workspace.clone();
-            tracker_cfg.endpoint = Some(new_eff.tracker_endpoint.clone());
-            tracker_cfg.needs_human = new_eff.needs_human.clone();
-            tracker_cfg.team = new_eff.tracker_team.clone();
-            tracker_cfg.assignee = new_eff.tracker_assignee.clone();
-            tracker_cfg.delegate = new_eff.tracker_delegate.clone();
-            tracker_cfg.mention = new_eff.tracker_mention.clone();
-            tracker_cfg.label = (!new_eff.tracker_labels.is_empty())
-                .then(|| crate::config::StringOrVec::List(new_eff.tracker_labels.clone()));
+            // Tracker dimensions are resolved entirely from the (frontmatter)
+            // loop config; rebuild from the new resolved config.
             match tracker::build_configured(
                 &self.runner_services,
-                &tracker_cfg,
-                self.paths.root.clone(),
+                &new_eff,
+                self.paths.workflow_root.clone(),
             ) {
                 Ok(t) => {
                     self.tracker = t;
@@ -988,8 +974,8 @@ impl Orchestrator {
                     new_eff.terminal_states = self.effective_cfg.terminal_states.clone();
                     new_eff.needs_human = self.effective_cfg.needs_human.clone();
                     new_eff.tracker_kind = self.effective_cfg.tracker_kind.clone();
-                    new_eff.tracker_project_slug = self.effective_cfg.tracker_project_slug.clone();
-                    new_eff.tracker_project = self.effective_cfg.tracker_project.clone();
+                    new_eff.tracker_projects = self.effective_cfg.tracker_projects.clone();
+                    new_eff.tracker_config_path = self.effective_cfg.tracker_config_path.clone();
                     new_eff.tracker_workspace = self.effective_cfg.tracker_workspace.clone();
                     new_eff.tracker_endpoint = self.effective_cfg.tracker_endpoint.clone();
                     new_eff.tracker_team = self.effective_cfg.tracker_team.clone();
@@ -1661,7 +1647,9 @@ impl Orchestrator {
             }
         };
 
-        let ws_root = resolve_workspace_root(&self.paths.root, &self.effective_cfg.workspace_root);
+        let ws_root = self
+            .paths
+            .workspace_root(&self.effective_cfg.workspace_root);
         if let Err(e) = std::fs::create_dir_all(&ws_root) {
             let msg = format!("creating workspace root {}: {e}", ws_root.display());
             logging::ev(&issue.identifier, "workspace_error", &msg);
@@ -2084,7 +2072,11 @@ impl Orchestrator {
             "reloaded {} key(s) from .env ({} skipped as external); tracker token {}",
             report.reloaded.len(),
             report.skipped_external.len(),
-            if token_changed { "updated" } else { "unchanged" }
+            if token_changed {
+                "updated"
+            } else {
+                "unchanged"
+            }
         );
         logging::ev("-", "control", &msg);
         self.persist_system_event(&format!("control reload-secrets: {msg}"));
@@ -2395,7 +2387,12 @@ impl Orchestrator {
         let project_id = issue
             .project_slug
             .as_deref()
-            .or(self.effective_cfg.tracker_project_slug.as_deref())
+            .or_else(|| {
+                self.effective_cfg
+                    .tracker_projects
+                    .first()
+                    .map(String::as_str)
+            })
             .unwrap_or(&self.agent_cfg.id);
         let mut command = Command::new("sh");
         dotenv::scrub_loaded_env(&mut command);
@@ -2613,6 +2610,7 @@ impl Orchestrator {
                 runner: self.state.agent.runner.clone(),
                 model: self.effective_cfg.model.clone(),
                 provider: self.effective_cfg.provider.clone(),
+                workflow: self.state.agent.workflow.clone(),
             },
             paused: self.state.paused.load(Ordering::SeqCst),
             active: self.state.active.read().await.clone().map(api_active_run),
@@ -2860,16 +2858,28 @@ fn runner_service_id(raw: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
-        AgentConfig, DashboardConfig, HitlConfig, OrchestratorConfig, RunnerConfig, TrackerConfig,
-        TrackerInner, WorkspaceConfig,
-    };
+    use crate::config::{AgentConfig, DashboardConfig, HitlConfig, RunnerConfig};
     use crate::paths::AgentPaths;
     use crate::prompt::PromptRenderer;
     use crate::state::{AgentInfo, AppState};
     use crate::store::{Store, ACTIVE_CONTINUATION_EVENT};
     use crate::tracker::Tracker;
-    use crate::workflow_config::{EffectiveLoopConfig, WorkflowFrontmatter};
+    use crate::workflow_config::{parse_workflow_md, EffectiveLoopConfig, WorkflowFrontmatter};
+
+    /// WORKFLOW.md frontmatter carrying the loop config the orchestrator tests
+    /// rely on (files tracker, todo/done, fast polling). Loop config now lives
+    /// in frontmatter, not agent.yaml.
+    const TEST_WF_FM: &str = "---\ntracker:\n  kind: files\n  path: issues\n  active_states: [todo]\n  terminal_states: [done]\npolling:\n  interval_ms: 100\n  max_concurrent: 1\n  max_retries: 3\n  retry_backoff_ms: 1000\nworkspace:\n  root: workspaces\n---\n";
+
+    fn test_frontmatter() -> WorkflowFrontmatter {
+        parse_workflow_md(TEST_WF_FM).unwrap().frontmatter
+    }
+
+    /// Write a WORKFLOW.md carrying `TEST_WF_FM` frontmatter plus `body`, so a
+    /// live reload re-derives the same loop config from the file.
+    fn write_workflow_md(root: &Path, body: &str) {
+        std::fs::write(root.join("WORKFLOW.md"), format!("{TEST_WF_FM}{body}")).unwrap();
+    }
     use anyhow::Result;
     use chrono::TimeZone;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -2904,7 +2914,6 @@ mod tests {
         let cfg = AgentConfig {
             id: "agent-1".to_string(),
             name: "Agent 1".to_string(),
-            tracker: None,
             runner: RunnerConfig {
                 use_: "".to_string(),
                 command: String::new(),
@@ -2915,9 +2924,7 @@ mod tests {
                 stall_timeout_ms: 1000,
                 max_turns: 20,
             },
-            orchestrator: None,
             hitl: HitlConfig::default(),
-            workspace: None,
             dashboard: DashboardConfig::default(),
             foreground: "tui".to_string(),
             providers: Default::default(),
@@ -2925,14 +2932,44 @@ mod tests {
             system_files: None,
         };
 
-        let snapshot = super::passive_snapshot(&cfg, "/tmp/agent".to_string());
+        let snapshot = super::passive_snapshot(&cfg, "/tmp/agent".to_string(), None);
 
         assert_eq!(snapshot.agent.id, "agent-1");
         assert_eq!(snapshot.agent.folder, "/tmp/agent");
         assert_eq!(snapshot.agent.runner, "pi");
         assert_eq!(snapshot.agent.model.as_deref(), Some("model-1"));
         assert_eq!(snapshot.agent.provider.as_deref(), Some("provider-1"));
+        assert_eq!(snapshot.agent.workflow, None);
         assert_eq!(snapshot.version, 1);
+    }
+
+    #[test]
+    fn passive_snapshot_carries_non_default_workflow_label() {
+        let cfg = AgentConfig {
+            id: "agent-1".to_string(),
+            name: "Agent 1".to_string(),
+            runner: RunnerConfig {
+                use_: "".to_string(),
+                command: String::new(),
+                model: None,
+                provider: None,
+                thinking: None,
+                max_run_timeout_ms: 1000,
+                stall_timeout_ms: 1000,
+                max_turns: 20,
+            },
+            hitl: HitlConfig::default(),
+            dashboard: DashboardConfig::default(),
+            foreground: "tui".to_string(),
+            providers: Default::default(),
+            extensions: Default::default(),
+            system_files: None,
+        };
+
+        let snapshot =
+            super::passive_snapshot(&cfg, "/tmp/agent".to_string(), Some("triage".to_string()));
+
+        assert_eq!(snapshot.agent.workflow.as_deref(), Some("triage"));
     }
 
     fn sample_system_context() -> SystemContext {
@@ -3251,24 +3288,6 @@ mod tests {
         AgentConfig {
             id: "test-agent".to_string(),
             name: "Test Agent".to_string(),
-            tracker: Some(TrackerConfig {
-                use_: "files".to_string(),
-                config: Some(TrackerInner {
-                    path: "issues".into(),
-                }),
-                active_states: vec!["todo".to_string()],
-                terminal_states: vec!["done".to_string()],
-                project_slug: None,
-                project: None,
-                workspace: None,
-                endpoint: None,
-                needs_human: None,
-                team: None,
-                assignee: None,
-                delegate: None,
-                mention: None,
-                label: None,
-            }),
             runner: RunnerConfig {
                 use_: "fake".to_string(),
                 command: "fake".to_string(),
@@ -3279,17 +3298,7 @@ mod tests {
                 stall_timeout_ms: 300_000,
                 max_turns: 20,
             },
-            orchestrator: Some(OrchestratorConfig {
-                poll_interval_ms: 100,
-                max_concurrent: 1,
-                max_active_runs: 3,
-                max_retries: 3,
-                retry_backoff_ms: 1000,
-            }),
             hitl: HitlConfig::default(),
-            workspace: Some(WorkspaceConfig {
-                root: "workspaces".into(),
-            }),
             dashboard: DashboardConfig {
                 bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: 7878,
@@ -3302,34 +3311,9 @@ mod tests {
         }
     }
 
+    /// Serialize the identity/host-only agent.yaml (no loop config, which lives
+    /// in WORKFLOW.md now).
     fn write_agent_yaml(root: &Path, cfg: &AgentConfig) {
-        // The test config always supplies the orchestrator trio.
-        let tracker = cfg.tracker.as_ref().expect("test config has tracker");
-        let orchestrator = cfg
-            .orchestrator
-            .as_ref()
-            .expect("test config has orchestrator");
-        let workspace = cfg.workspace.as_ref().expect("test config has workspace");
-        let label = match &tracker.label {
-            Some(crate::config::StringOrVec::Scalar(value)) => {
-                format!("  label: {value}\n")
-            }
-            Some(crate::config::StringOrVec::List(values)) => {
-                format!(
-                    "  label:\n{}",
-                    values
-                        .iter()
-                        .map(|value| format!("    - {value}\n"))
-                        .collect::<String>()
-                )
-            }
-            None => String::new(),
-        };
-        let tracker_config = tracker
-            .config
-            .as_ref()
-            .map(|inner| format!("  config:\n    path: {}\n", inner.path.display()))
-            .unwrap_or_default();
         let dashboard_secret = cfg
             .dashboard
             .webhook_secret
@@ -3359,27 +3343,13 @@ mod tests {
 id: {}
 name: {}
 foreground: {}
-tracker:
-  use: {}
-{}  active_states:
-{}
-  terminal_states:
-{}
-{}runner:
+runner:
   use: {}
   command: {}
 {}{}{}
   max_run_timeout_ms: {}
   stall_timeout_ms: {}
   max_turns: {}
-orchestrator:
-  poll_interval_ms: {}
-  max_concurrent: {}
-  max_active_runs: {}
-  max_retries: {}
-  retry_backoff_ms: {}
-workspace:
-  root: {}
 dashboard:
   bind: {}
   port: {}
@@ -3387,19 +3357,6 @@ dashboard:
             cfg.id,
             cfg.name,
             cfg.foreground,
-            tracker.use_,
-            tracker_config,
-            tracker
-                .active_states
-                .iter()
-                .map(|state| format!("    - {state}\n"))
-                .collect::<String>(),
-            tracker
-                .terminal_states
-                .iter()
-                .map(|state| format!("    - {state}\n"))
-                .collect::<String>(),
-            label,
             cfg.runner.use_,
             cfg.runner.command,
             runner_model,
@@ -3408,12 +3365,6 @@ dashboard:
             cfg.runner.max_run_timeout_ms,
             cfg.runner.stall_timeout_ms,
             cfg.runner.max_turns,
-            orchestrator.poll_interval_ms,
-            orchestrator.max_concurrent,
-            orchestrator.max_active_runs,
-            orchestrator.max_retries,
-            orchestrator.retry_backoff_ms,
-            workspace.root.display(),
             cfg.dashboard.bind,
             cfg.dashboard.port,
             dashboard_secret,
@@ -3422,9 +3373,9 @@ dashboard:
     }
 
     #[tokio::test]
-    async fn tick_reloads_agent_yaml_live_orchestrator_fields() {
+    async fn tick_reloads_agent_yaml_live_runner_fields() {
         let temp = TempDir::new().unwrap();
-        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+        write_workflow_md(temp.path(), "Do {{ issue.title }}");
         let mut agent_cfg = test_agent_config();
         write_agent_yaml(temp.path(), &agent_cfg);
 
@@ -3436,7 +3387,7 @@ dashboard:
             reloads: None,
         });
         let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
-        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         let mut orchestrator = Orchestrator::new(
             agent_cfg.clone(),
             AgentPaths::new(temp.path().to_path_buf()),
@@ -3447,16 +3398,19 @@ dashboard:
             control_rx,
         );
 
-        agent_cfg.orchestrator.as_mut().unwrap().poll_interval_ms = 777;
-        agent_cfg.orchestrator.as_mut().unwrap().max_concurrent = 4;
+        // Loop timing comes from WORKFLOW.md (unchanged); runner fields are the
+        // live-reloadable agent.yaml surface.
+        agent_cfg.runner.max_run_timeout_ms = 777;
+        agent_cfg.runner.stall_timeout_ms = 888;
         write_agent_yaml(temp.path(), &agent_cfg);
         orchestrator.agent_config_reloader.mark_stale_for_test();
 
         orchestrator.tick().await;
 
-        assert_eq!(orchestrator.effective_cfg.poll_interval_ms, 777);
-        assert_eq!(orchestrator.effective_cfg.max_concurrent, 4);
-        assert_eq!(orchestrator.next_poll_delay(), Duration::from_millis(777));
+        assert_eq!(orchestrator.effective_cfg.max_run_timeout_ms, 777);
+        assert_eq!(orchestrator.effective_cfg.stall_timeout_ms, 888);
+        assert_eq!(orchestrator.effective_cfg.poll_interval_ms, 100);
+        assert_eq!(orchestrator.next_poll_delay(), Duration::from_millis(100));
     }
 
     #[tokio::test]
@@ -3481,8 +3435,7 @@ dashboard:
             reloads: Some(Arc::clone(&reloads)),
         });
         let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
-        let effective_cfg =
-            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         let mut orchestrator = Orchestrator::new(
             agent_cfg,
             AgentPaths::new(temp.path().to_path_buf()),
@@ -3512,7 +3465,7 @@ dashboard:
     #[tokio::test]
     async fn malformed_agent_yaml_keeps_last_good_config() {
         let temp = TempDir::new().unwrap();
-        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+        write_workflow_md(temp.path(), "Do {{ issue.title }}");
         let agent_cfg = test_agent_config();
         write_agent_yaml(temp.path(), &agent_cfg);
 
@@ -3524,7 +3477,7 @@ dashboard:
             reloads: None,
         });
         let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
-        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         let mut orchestrator = Orchestrator::new(
             agent_cfg,
             AgentPaths::new(temp.path().to_path_buf()),
@@ -3547,7 +3500,7 @@ dashboard:
     #[tokio::test]
     async fn unknown_runner_in_agent_yaml_reverts_runner_but_keeps_other_live_fields() {
         let temp = TempDir::new().unwrap();
-        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+        write_workflow_md(temp.path(), "Do {{ issue.title }}");
         let mut agent_cfg = test_agent_config();
         agent_cfg.runner.model = Some("old-model".to_string());
         agent_cfg.runner.provider = Some("old-provider".to_string());
@@ -3564,7 +3517,7 @@ dashboard:
             reloads: None,
         });
         let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
-        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         let mut orchestrator = Orchestrator::new(
             agent_cfg.clone(),
             AgentPaths::new(temp.path().to_path_buf()),
@@ -3581,7 +3534,6 @@ dashboard:
         agent_cfg.runner.max_run_timeout_ms = 555;
         agent_cfg.runner.stall_timeout_ms = 666;
         agent_cfg.runner.max_turns = 7;
-        agent_cfg.orchestrator.as_mut().unwrap().poll_interval_ms = 444;
         write_agent_yaml(temp.path(), &agent_cfg);
         orchestrator.agent_config_reloader.mark_stale_for_test();
 
@@ -3600,13 +3552,14 @@ dashboard:
         assert_eq!(orchestrator.effective_cfg.stall_timeout_ms, 222);
         assert_eq!(orchestrator.effective_cfg.max_turns, 3);
         assert_eq!(orchestrator.agent_cfg.runner.use_, "fake");
-        assert_eq!(orchestrator.effective_cfg.poll_interval_ms, 444);
+        // Loop timing stays sourced from WORKFLOW.md across the reload.
+        assert_eq!(orchestrator.effective_cfg.poll_interval_ms, 100);
     }
 
     #[tokio::test]
     async fn boot_only_agent_yaml_fields_are_frozen() {
         let temp = TempDir::new().unwrap();
-        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+        write_workflow_md(temp.path(), "Do {{ issue.title }}");
         let mut agent_cfg = test_agent_config();
         write_agent_yaml(temp.path(), &agent_cfg);
 
@@ -3618,7 +3571,7 @@ dashboard:
             reloads: None,
         });
         let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
-        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         let mut orchestrator = Orchestrator::new(
             agent_cfg.clone(),
             AgentPaths::new(temp.path().to_path_buf()),
@@ -3632,7 +3585,6 @@ dashboard:
         agent_cfg.id = "new-id".to_string();
         agent_cfg.name = "New Name".to_string();
         agent_cfg.foreground = "orchestrator".to_string();
-        agent_cfg.workspace.as_mut().unwrap().root = "other-workspaces".into();
         agent_cfg.dashboard.port = 9999;
         agent_cfg.dashboard.webhook_secret = Some("rotated".to_string());
         write_agent_yaml(temp.path(), &agent_cfg);
@@ -3643,6 +3595,7 @@ dashboard:
         assert_eq!(orchestrator.agent_cfg.id, "test-agent");
         assert_eq!(orchestrator.agent_cfg.name, "Test Agent");
         assert_eq!(orchestrator.agent_cfg.foreground, "logs");
+        // workspace_root comes from WORKFLOW.md frontmatter, unchanged here.
         assert_eq!(
             orchestrator.effective_cfg.workspace_root,
             Path::new("workspaces")
@@ -3651,12 +3604,14 @@ dashboard:
         assert_eq!(orchestrator.effective_cfg.webhook_secret, None);
     }
 
+    /// WORKFLOW.md is the sole source of loop timing: an agent.yaml reload
+    /// (here a runner field) leaves the frontmatter-sourced poll interval intact.
     #[tokio::test]
-    async fn workflow_frontmatter_still_overrides_reloaded_agent_yaml() {
+    async fn workflow_frontmatter_polling_survives_agent_yaml_reload() {
         let temp = TempDir::new().unwrap();
         std::fs::write(
             temp.path().join("WORKFLOW.md"),
-            "---\npolling:\n  interval_ms: 222\n---\nDo {{ issue.title }}",
+            "---\ntracker:\n  kind: files\n  path: issues\n  active_states: [todo]\n  terminal_states: [done]\npolling:\n  interval_ms: 222\nworkspace:\n  root: workspaces\n---\nDo {{ issue.title }}",
         )
         .unwrap();
         let mut agent_cfg = test_agent_config();
@@ -3670,7 +3625,8 @@ dashboard:
             reloads: None,
         });
         let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
-        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &prompt.snapshot().frontmatter);
+        let effective_cfg =
+            EffectiveLoopConfig::resolve(&agent_cfg, &prompt.snapshot().frontmatter);
         let mut orchestrator = Orchestrator::new(
             agent_cfg.clone(),
             AgentPaths::new(temp.path().to_path_buf()),
@@ -3681,21 +3637,13 @@ dashboard:
             control_rx,
         );
 
-        agent_cfg.orchestrator.as_mut().unwrap().poll_interval_ms = 999;
+        agent_cfg.runner.max_run_timeout_ms = 999;
         write_agent_yaml(temp.path(), &agent_cfg);
         orchestrator.agent_config_reloader.mark_stale_for_test();
 
         orchestrator.tick().await;
 
-        assert_eq!(
-            orchestrator
-                .agent_cfg
-                .orchestrator
-                .as_ref()
-                .unwrap()
-                .poll_interval_ms,
-            999
-        );
+        assert_eq!(orchestrator.agent_cfg.runner.max_run_timeout_ms, 999);
         assert_eq!(orchestrator.effective_cfg.poll_interval_ms, 222);
     }
 
@@ -3713,8 +3661,7 @@ dashboard:
             reloads: None,
         });
         let agent_cfg = test_agent_config();
-        let mut effective_cfg =
-            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let mut effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         effective_cfg.needs_human = Some("needs_human".to_string());
 
         let (control_tx, control_rx) = mpsc::unbounded_channel();
@@ -3725,6 +3672,7 @@ dashboard:
                 folder: temp.path().display().to_string(),
                 tracker: "files".to_string(),
                 runner: "fake".to_string(),
+                workflow: None,
             },
             control_tx,
             Arc::clone(&store),
@@ -3805,8 +3753,7 @@ dashboard:
         let active_issue = issue("ISSUE-1", None, None);
         let tracker = Arc::new(MissingTracker);
         let agent_cfg = test_agent_config();
-        let mut effective_cfg =
-            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let mut effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         effective_cfg.needs_human = None;
 
         let (control_tx, control_rx) = mpsc::unbounded_channel();
@@ -3817,6 +3764,7 @@ dashboard:
                 folder: temp.path().display().to_string(),
                 tracker: "files".to_string(),
                 runner: "fake".to_string(),
+                workflow: None,
             },
             control_tx,
             Arc::clone(&store),
@@ -3871,7 +3819,7 @@ dashboard:
             reloads: None,
         });
         let agent_cfg = test_agent_config();
-        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
 
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
@@ -3881,6 +3829,7 @@ dashboard:
                 folder: temp.path().display().to_string(),
                 tracker: "files".to_string(),
                 runner: "fake".to_string(),
+                workflow: None,
             },
             control_tx,
             Arc::clone(&store),
@@ -3952,7 +3901,7 @@ dashboard:
         let active_issue = issue("ISSUE-1", None, None);
         let tracker = Arc::new(MissingTracker);
         let agent_cfg = test_agent_config();
-        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
         let state = AppState::new(
@@ -3961,6 +3910,7 @@ dashboard:
                 folder: temp.path().display().to_string(),
                 tracker: "files".to_string(),
                 runner: "fake".to_string(),
+                workflow: None,
             },
             control_tx,
             Arc::clone(&store),
@@ -4037,8 +3987,7 @@ dashboard:
             reloads: None,
         });
         let agent_cfg = test_agent_config();
-        let mut effective_cfg =
-            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let mut effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         effective_cfg.stall_timeout_ms = 1;
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
@@ -4048,6 +3997,7 @@ dashboard:
                 folder: temp.path().display().to_string(),
                 tracker: "files".to_string(),
                 runner: "fake".to_string(),
+                workflow: None,
             },
             control_tx,
             Arc::clone(&store),
@@ -4136,8 +4086,7 @@ dashboard:
             reloads: None,
         });
         let agent_cfg = test_agent_config();
-        let mut effective_cfg =
-            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let mut effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         effective_cfg.needs_human = Some("stuck".to_string());
 
         let (control_tx, control_rx) = mpsc::unbounded_channel();
@@ -4148,6 +4097,7 @@ dashboard:
                 folder: temp.path().display().to_string(),
                 tracker: "files".to_string(),
                 runner: "fake".to_string(),
+                workflow: None,
             },
             control_tx,
             Arc::clone(&store),
@@ -4203,7 +4153,7 @@ dashboard:
             reloads: None,
         });
         let agent_cfg = test_agent_config();
-        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
 
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
@@ -4213,6 +4163,7 @@ dashboard:
                 folder: temp.path().display().to_string(),
                 tracker: "files".to_string(),
                 runner: "fake".to_string(),
+                workflow: None,
             },
             control_tx,
             Arc::clone(&store),
@@ -4285,8 +4236,7 @@ dashboard:
             park_ok: true,
         });
         let agent_cfg = test_agent_config();
-        let mut effective_cfg =
-            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let mut effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         effective_cfg.max_active_runs = 2;
 
         let (control_tx, control_rx) = mpsc::unbounded_channel();
@@ -4337,6 +4287,7 @@ dashboard:
                 folder: temp.path().display().to_string(),
                 tracker: "files".to_string(),
                 runner: "fake".to_string(),
+                workflow: None,
             },
             control_tx,
             Arc::clone(&store),
@@ -4383,8 +4334,7 @@ dashboard:
             park_ok: false,
         });
         let agent_cfg = test_agent_config();
-        let mut effective_cfg =
-            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let mut effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         effective_cfg.max_active_runs = 1;
 
         let (control_tx, control_rx) = mpsc::unbounded_channel();
@@ -4432,6 +4382,7 @@ dashboard:
                 folder: temp.path().display().to_string(),
                 tracker: "files".to_string(),
                 runner: "fake".to_string(),
+                workflow: None,
             },
             control_tx,
             Arc::clone(&store),
@@ -4530,24 +4481,6 @@ dashboard:
         AgentConfig {
             id: "test-agent".to_string(),
             name: "Test Agent".to_string(),
-            tracker: Some(TrackerConfig {
-                use_: "files".to_string(),
-                config: Some(TrackerInner {
-                    path: "issues".into(),
-                }),
-                active_states: vec!["todo".to_string()],
-                terminal_states: vec!["done".to_string()],
-                project_slug: None,
-                project: None,
-                workspace: None,
-                endpoint: None,
-                needs_human: None,
-                team: None,
-                assignee: None,
-                delegate: None,
-                mention: None,
-                label: None,
-            }),
             runner: RunnerConfig {
                 use_: "fake".to_string(),
                 command,
@@ -4558,17 +4491,7 @@ dashboard:
                 stall_timeout_ms: 300_000,
                 max_turns: 20,
             },
-            orchestrator: Some(OrchestratorConfig {
-                poll_interval_ms: 10,
-                max_concurrent: 1,
-                max_active_runs: 3,
-                max_retries: 1,
-                retry_backoff_ms: 10,
-            }),
             hitl: HitlConfig::default(),
-            workspace: Some(WorkspaceConfig {
-                root: "workspaces".into(),
-            }),
             dashboard: DashboardConfig {
                 bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: 0,
@@ -4581,6 +4504,16 @@ dashboard:
         }
     }
 
+    /// Frontmatter for `test_config`-based dispatch tests: fast retry cadence
+    /// (max_retries 1, 10ms backoff) matching the retired agent.yaml trio.
+    fn test_config_frontmatter() -> WorkflowFrontmatter {
+        parse_workflow_md(
+            "---\ntracker:\n  kind: files\n  path: issues\n  active_states: [todo]\n  terminal_states: [done]\npolling:\n  interval_ms: 10\n  max_concurrent: 1\n  max_retries: 1\n  retry_backoff_ms: 10\nworkspace:\n  root: workspaces\n---\n",
+        )
+        .unwrap()
+        .frontmatter
+    }
+
     fn test_state(store: Arc<Store>) -> (AppState, mpsc::UnboundedReceiver<ControlMsg>) {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let state = AppState::new(
@@ -4589,6 +4522,7 @@ dashboard:
                 folder: "/tmp/test-agent".to_string(),
                 tracker: "files".to_string(),
                 runner: "fake".to_string(),
+                workflow: None,
             },
             control_tx,
             store,
@@ -4607,12 +4541,12 @@ dashboard:
         let paths = AgentPaths::new(root.clone());
         let tracker = Arc::new(FileTracker::new(
             root.join("issues"),
-            cfg.tracker.as_ref().unwrap().active_states.clone(),
-            cfg.tracker.as_ref().unwrap().terminal_states.clone(),
+            vec!["todo".to_string()],
+            vec!["done".to_string()],
         ));
         std::fs::write(root.join("WORKFLOW.md"), "noop").unwrap();
         let prompt = PromptRenderer::load(&root.join("WORKFLOW.md")).unwrap();
-        let effective_cfg = EffectiveLoopConfig::merge(&cfg, &prompt.snapshot().frontmatter);
+        let effective_cfg = EffectiveLoopConfig::resolve(&cfg, &test_config_frontmatter());
         let mut orch = Orchestrator::new(
             cfg,
             paths,
@@ -4640,6 +4574,55 @@ dashboard:
         assert!(payloads.contains(&"control paused"));
         assert!(payloads.contains(&"control resumed"));
         assert!(payloads.contains(&"shutdown signal received, stopping"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_carries_non_default_workflow_label() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("store.db")).unwrap());
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let state = AppState::new(
+            AgentInfo {
+                id: "test-agent".to_string(),
+                folder: "/tmp/test-agent".to_string(),
+                tracker: "files".to_string(),
+                runner: "fake".to_string(),
+                workflow: Some("triage".to_string()),
+            },
+            control_tx,
+            Arc::clone(&store),
+            Vec::new(),
+        );
+        let cfg = test_config("/usr/bin/true".to_string());
+        let root = dir.path().canonicalize().unwrap();
+        let workflow_root = root.join("wf-a");
+        std::fs::create_dir_all(&workflow_root).unwrap();
+        std::fs::write(workflow_root.join("WORKFLOW.md"), "noop").unwrap();
+        let paths = AgentPaths::with_workflow(
+            root.clone(),
+            workflow_root.clone(),
+            root.join("workflows")
+                .join(workflow_key(&workflow_root.join("WORKFLOW.md"))),
+        );
+        let tracker = Arc::new(FileTracker::new(
+            workflow_root.join("issues"),
+            vec!["todo".to_string()],
+            vec!["done".to_string()],
+        ));
+        let prompt = PromptRenderer::load(&workflow_root.join("WORKFLOW.md")).unwrap();
+        let effective_cfg = EffectiveLoopConfig::resolve(&cfg, &test_config_frontmatter());
+        let orch = Orchestrator::new(
+            cfg,
+            paths,
+            tracker,
+            prompt,
+            effective_cfg,
+            state,
+            control_rx,
+        );
+
+        let snapshot = orch.snapshot().await;
+        assert_eq!(snapshot.agent.workflow.as_deref(), Some("triage"));
     }
 
     #[tokio::test]
@@ -4672,12 +4655,12 @@ dashboard:
         let cfg = test_config(runner.display().to_string());
         let tracker = Arc::new(FileTracker::new(
             issues.clone(),
-            cfg.tracker.as_ref().unwrap().active_states.clone(),
-            cfg.tracker.as_ref().unwrap().terminal_states.clone(),
+            vec!["todo".to_string()],
+            vec!["done".to_string()],
         ));
         let prompt = PromptRenderer::load(&root.join("WORKFLOW.md")).unwrap();
         let paths = AgentPaths::new(root.clone());
-        let effective_cfg = EffectiveLoopConfig::merge(&cfg, &prompt.snapshot().frontmatter);
+        let effective_cfg = EffectiveLoopConfig::resolve(&cfg, &test_config_frontmatter());
         let mut orch = Orchestrator::new(
             cfg,
             paths,
@@ -4746,7 +4729,7 @@ dashboard:
             poll_count: Arc::clone(&poll_count),
         });
         let agent_cfg = test_agent_config();
-        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let state = AppState::new(
@@ -4755,6 +4738,7 @@ dashboard:
                 folder: temp.path().display().to_string(),
                 tracker: "files".to_string(),
                 runner: "fake".to_string(),
+                workflow: None,
             },
             control_tx,
             Arc::clone(&store),
@@ -4801,7 +4785,7 @@ dashboard:
             .unwrap();
 
         let agent_cfg = test_agent_config();
-        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
         let (state, control_rx) = test_state(Arc::clone(&store));
         let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
@@ -4879,7 +4863,7 @@ dashboard:
             park_ok: true,
         });
         let agent_cfg = test_agent_config();
-        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
 
         let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
         let (state, control_rx) = test_state(Arc::clone(&store));
@@ -4945,6 +4929,7 @@ dashboard:
                 folder: temp.path().display().to_string(),
                 tracker: "files".to_string(),
                 runner: "fake".to_string(),
+                workflow: None,
             },
             control_tx,
             Arc::clone(&store),
@@ -5003,7 +4988,7 @@ dashboard:
         let active_issue = issue("ISSUE-1", None, None);
         let tracker = Arc::new(MutableTracker::new(active_issue.clone()));
         let agent_cfg = test_agent_config();
-        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         let (mut orch, _state, mut harness, store, _run_id) =
             turn_loop_fixture(&temp, tracker, &active_issue, effective_cfg).await;
 
@@ -5032,7 +5017,7 @@ dashboard:
         let active_issue = issue("ISSUE-1", None, None);
         let tracker = Arc::new(MutableTracker::new(active_issue.clone()));
         let agent_cfg = test_agent_config();
-        let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         let (mut orch, state, mut harness, store, _run_id) = turn_loop_fixture(
             &temp,
             Arc::clone(&tracker) as Arc<dyn Tracker>,
@@ -5075,8 +5060,7 @@ dashboard:
         let active_issue = issue("ISSUE-1", None, None);
         let tracker = Arc::new(MutableTracker::new(active_issue.clone()));
         let agent_cfg = test_agent_config();
-        let mut effective_cfg =
-            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let mut effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         effective_cfg.max_turns = 1;
         let (mut orch, _state, mut harness, _store, _run_id) =
             turn_loop_fixture(&temp, tracker, &active_issue, effective_cfg).await;
@@ -5135,8 +5119,7 @@ dashboard:
             park_ok: true,
         });
         let agent_cfg = test_agent_config();
-        let mut effective_cfg =
-            EffectiveLoopConfig::merge(&agent_cfg, &WorkflowFrontmatter::default());
+        let mut effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
         effective_cfg.max_active_runs = 2;
 
         let (control_tx, control_rx) = mpsc::unbounded_channel();
@@ -5188,6 +5171,7 @@ dashboard:
                 folder: temp.path().display().to_string(),
                 tracker: "files".to_string(),
                 runner: "fake".to_string(),
+                workflow: None,
             },
             control_tx,
             Arc::clone(&store),

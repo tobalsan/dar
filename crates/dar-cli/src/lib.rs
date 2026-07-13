@@ -23,7 +23,6 @@ use cli::{Cli, Command};
 use orchestrator::config;
 use orchestrator::dotenv;
 use orchestrator::hitl::{BurstHitlNotifier, HitlNotification, HitlNotify};
-use orchestrator::paths::AgentPaths;
 use orchestrator::prompt::PromptRenderer;
 use orchestrator::workflow_config::EffectiveLoopConfig;
 
@@ -52,7 +51,9 @@ async fn run_inner(plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
             // them both in the inherited self-check child and at runtime.
             dotenv::load_agent_env(&root)?;
             self_check::guard_boot(&root)?;
-            run_host(root, plugins).await
+            let (_workflow_file, workflow_root, is_default) =
+                cli::resolve_workflow(&root, args.workflow.as_deref())?;
+            run_host(root, workflow_root, !is_default, plugins).await
         }
         Command::Dash(args) => {
             dash::serve(dash::DashOptions::resolve(
@@ -71,18 +72,33 @@ async fn run_inner(plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
 }
 
 /// Boot the extension host for the long-running `run` loop.
-async fn run_host(root: std::path::PathBuf, plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
-    let (bind, port) = dashboard_addr_for_root(&root)?;
+///
+/// `workflow_root` is the resolved `--workflow` directory (equals `root` for
+/// the default workflow). `skip_agent_singletons` is set by the caller from
+/// `!is_default`: a non-default `--workflow` process shares the agent's
+/// identity but must not double-connect agent-singleton extensions
+/// (scheduler, chat backends) that the default-workflow process already owns.
+async fn run_host(
+    root: std::path::PathBuf,
+    workflow_root: std::path::PathBuf,
+    skip_agent_singletons: bool,
+    plugins: Vec<Arc<dyn Extension>>,
+) -> Result<()> {
+    let (bind, port) = dashboard_addr_for_root(&root, &workflow_root)?;
     let agent_config = config::load(&root)?;
     let foreground = agent_config.foreground.clone();
     let config = ConfigStore::from_values(agent_config.extension_configs()?);
     let hitl = startup_hitl(&root);
     let hitl_for_hook = Arc::clone(&hitl);
+    let artifact_root = artifact_root()?;
     let options = dar_host::HostOptions::new(root)
+        .artifact_root(artifact_root)
         .without_dotenv()
         .http_addr(bind, port)
         .config(config)
         .foreground(foreground)
+        .workflow_root(workflow_root)
+        .skip_agent_singletons(skip_agent_singletons)
         .on_startup_error(move |id, message| {
             hitl_for_hook.notify(HitlNotification::new(
                 "startup-error",
@@ -95,6 +111,18 @@ async fn run_host(root: std::path::PathBuf, plugins: Vec<Arc<dyn Extension>>) ->
     result
 }
 
+fn artifact_root() -> Result<std::path::PathBuf> {
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .map(|home| home.join(".local/share"))
+        })
+        .context("XDG_DATA_HOME or HOME is required for artifact storage")?;
+    Ok(data_home.join("dar/artifacts"))
+}
+
 fn startup_hitl(root: &std::path::Path) -> Arc<dyn HitlNotify> {
     config::load(root)
         .ok()
@@ -102,21 +130,19 @@ fn startup_hitl(root: &std::path::Path) -> Arc<dyn HitlNotify> {
         .unwrap_or_else(|| Arc::new(orchestrator::hitl::NoopHitlNotifier))
 }
 
-fn dashboard_addr_for_root(root: &std::path::Path) -> Result<(std::net::IpAddr, u16)> {
-    let paths = AgentPaths::new(root.to_path_buf());
-    let agent_cfg = config::load(&paths.root)?;
+/// `workflow_root` is the resolved `--workflow` directory (equals `root` for
+/// the default workflow); the `server:` override is read from *its*
+/// WORKFLOW.md, not always the agent root's.
+fn dashboard_addr_for_root(
+    root: &std::path::Path,
+    workflow_root: &std::path::Path,
+) -> Result<(std::net::IpAddr, u16)> {
+    let agent_cfg = config::load(root)?;
     agent_cfg.validate().context("invalid agent.yaml")?;
-    let frontmatter = if agent_cfg.loop_enabled() {
-        PromptRenderer::load(&paths.workflow_md())?
-            .snapshot()
-            .frontmatter
-            .clone()
-    } else {
-        PromptRenderer::load(&paths.workflow_md())
-            .map(|prompt| prompt.snapshot().frontmatter.clone())
-            .unwrap_or_default()
-    };
-    let effective_cfg = EffectiveLoopConfig::merge(&agent_cfg, &frontmatter);
+    let frontmatter = PromptRenderer::load(&workflow_root.join("WORKFLOW.md"))
+        .map(|prompt| prompt.snapshot().frontmatter.clone())
+        .unwrap_or_default();
+    let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &frontmatter);
     Ok((effective_cfg.dashboard_bind, effective_cfg.dashboard_port))
 }
 
@@ -127,6 +153,11 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
         Command::McpBridge(_) => unreachable!("mcp bridge is handled in run_inner()"),
         Command::Doctor(args) => {
             let root = args.resolve_root()?;
+            // Resolve `--workflow` so doctor validates exactly the workflow a
+            // subsequent `dar run --workflow …` would run (default = agent
+            // root); a malformed flag surfaces a clear error here.
+            let (_workflow_file, workflow_root, _is_default) =
+                cli::resolve_workflow(&root, args.workflow.as_deref())?;
             if args.static_ {
                 let target = args.target.clone().unwrap_or_else(|| {
                     if cfg!(target_arch = "aarch64") {
@@ -139,7 +170,7 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
             }
             let dotenv_report = dotenv::load_agent_env(&root)?;
             let services = plugin_services(&root, plugins).await?;
-            let code = doctor::run(&root, &dotenv_report, services)?;
+            let code = doctor::run(&root, &workflow_root, &dotenv_report, services)?;
             std::process::exit(code);
         }
         Command::Create(args) => {
@@ -211,26 +242,38 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
             let root = args.resolve_root()?;
             dotenv::load_agent_env(&root)?;
             let services = plugin_services(&root, plugins).await?;
-            resolve_tracker_command(&services, &root, "export")?
+            let (_workflow_file, workflow_root, _is_default) =
+                cli::resolve_workflow(&root, args.workflow.as_deref())?;
+            resolve_tracker_command(&services, &workflow_root, "export")?
                 .run(serde_json::json!({ "dir": root }))
         }
     }
 }
 
-/// Resolve a tracker-scoped `HostCommand`: prefer the `"<cmd>.<tracker.use>"`
+/// Resolve a tracker-scoped `HostCommand`: prefer the `"<cmd>.<tracker.kind>"`
 /// id (e.g. `export.plane`) so each tracker extension can ship its own
 /// `init-workflow` / `export`, and fall back to the bare `"<cmd>"` id when no
-/// tracker-specific command is registered. `tracker.use` is read from the
-/// agent's `agent.yaml`; a passive agent with no tracker uses the bare id, and
-/// the files/Linear trackers (which register the bare ids) are unaffected.
+/// tracker-specific command is registered. `tracker.kind` is read from the
+/// resolved workflow's `WORKFLOW.md` frontmatter (the sole home for tracker
+/// config now) — `workflow_root` is the resolved `--workflow` directory
+/// (equals the agent root for the default workflow). A passive agent, or one
+/// with no WORKFLOW.md yet, uses the bare id, and the files/Linear trackers
+/// (which register the bare ids) are unaffected.
 fn resolve_tracker_command(
     services: &ServiceRegistry,
-    root: &std::path::Path,
+    workflow_root: &std::path::Path,
     cmd: &str,
 ) -> Result<Arc<dyn HostCommand>> {
-    let tracker_use = config::load(root)?
-        .tracker
-        .map(|tracker| tracker.use_)
+    let tracker_use = PromptRenderer::load(&workflow_root.join("WORKFLOW.md"))
+        .ok()
+        .and_then(|prompt| {
+            prompt
+                .snapshot()
+                .frontmatter
+                .tracker
+                .as_ref()
+                .and_then(|t| t.kind.clone())
+        })
         .unwrap_or_default();
     if !tracker_use.trim().is_empty() {
         let scoped = format!("{cmd}.{tracker_use}");
@@ -263,7 +306,7 @@ pub(crate) async fn plugin_services(
         http: HttpRegistry::disabled(),
         foreground: ForegroundRegistry::default(),
         services: ServiceRegistry::default(),
-        paths: HostPaths::new(root)?,
+        paths: HostPaths::new(root)?.with_artifact_root(artifact_root()?)?,
         config,
         shutdown: ShutdownToken::new(shutdown_rx),
     };
@@ -378,8 +421,47 @@ mod tests {
                     args.resolve_root().unwrap(),
                     temp.path().canonicalize().unwrap()
                 );
+                assert_eq!(args.workflow, None);
             }
             _ => panic!("expected run command"),
+        }
+    }
+
+    /// End-to-end: `--workflow` parses on run/doctor/export and resolves via
+    /// `cli::resolve_workflow`, in both the directory and explicit-file forms.
+    #[test]
+    fn run_doctor_export_parse_workflow_flag_in_both_forms() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().canonicalize().unwrap();
+        let wf_root = dir.join("workflows/triage");
+        std::fs::create_dir_all(&wf_root).unwrap();
+        let wf_file = wf_root.join("WORKFLOW.md");
+        std::fs::write(&wf_file, "hi").unwrap();
+
+        for (subcommand, flag_value) in [
+            ("run", wf_root.as_os_str().to_os_string()),
+            ("doctor", wf_file.as_os_str().to_os_string()),
+            ("export", wf_root.as_os_str().to_os_string()),
+        ] {
+            let cli = Cli::try_parse_from([
+                "dar".into(),
+                subcommand.into(),
+                "--dir".into(),
+                dir.as_os_str().to_os_string(),
+                "--workflow".into(),
+                flag_value,
+            ])
+            .unwrap();
+            let (root, flag) = match cli.command {
+                Command::Run(args) => (args.resolve_root().unwrap(), args.workflow),
+                Command::Doctor(args) => (args.resolve_root().unwrap(), args.workflow),
+                Command::Export(args) => (args.resolve_root().unwrap(), args.workflow),
+                _ => panic!("expected run/doctor/export command"),
+            };
+            let (file, wf_dir, is_default) = cli::resolve_workflow(&root, flag.as_deref()).unwrap();
+            assert_eq!(file, wf_file);
+            assert_eq!(wf_dir, wf_root);
+            assert!(!is_default);
         }
     }
 
@@ -585,48 +667,23 @@ runner:
         let temp = tempfile::tempdir().unwrap();
         write_agent_yaml(temp.path(), false);
 
-        let (_bind, port) = dashboard_addr_for_root(temp.path()).unwrap();
+        let (_bind, port) = dashboard_addr_for_root(temp.path(), temp.path()).unwrap();
 
         assert_eq!(port, 0);
     }
 
+    /// Loop config (tracker/orchestrator/workspace) now lives solely in
+    /// WORKFLOW.md frontmatter; a stale trio in agent.yaml is inert (serde
+    /// ignores unknown keys), so an agent.yaml carrying it but no WORKFLOW.md
+    /// resolves the same as a passive agent — dashboard bind/port from
+    /// agent.yaml defaults, no error.
     #[test]
-    fn dashboard_addr_requires_workflow_for_active_agent() {
+    fn dashboard_addr_tolerates_missing_workflow_with_stale_trio_in_agent_yaml() {
         let temp = tempfile::tempdir().unwrap();
         write_agent_yaml(temp.path(), true);
 
-        let err = dashboard_addr_for_root(temp.path())
-            .unwrap_err()
-            .to_string();
+        let (_bind, port) = dashboard_addr_for_root(temp.path(), temp.path()).unwrap();
 
-        assert!(err.contains("WORKFLOW.md"));
-    }
-
-    #[test]
-    fn dashboard_addr_rejects_partial_loop_config() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            temp.path().join("agent.yaml"),
-            "\
-id: test-agent
-name: Test Agent
-runner:
-  use: fake
-tracker:
-  use: files
-  active_states:
-    - todo
-  terminal_states:
-    - done
-",
-        )
-        .unwrap();
-
-        let err = format!("{:#}", dashboard_addr_for_root(temp.path()).unwrap_err());
-
-        assert!(
-            err.contains("tracker, orchestrator, and workspace"),
-            "unexpected error: {err}"
-        );
+        assert_eq!(port, 0);
     }
 }

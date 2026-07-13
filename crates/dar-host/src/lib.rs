@@ -29,6 +29,17 @@ pub struct HostOptions {
     pub interactive: Option<bool>,
     pub on_startup_error: Option<StartupErrorHook>,
     pub config: ConfigStore,
+    /// The resolved WORKFLOW.md's directory, if it differs from `root`. Fed
+    /// to `HostPaths::with_workflow_root`; `None` keeps `workflow_root ==
+    /// root` (today's default-workflow layout).
+    pub workflow_root: Option<PathBuf>,
+    /// Skip extensions whose `Extension::agent_singleton()` returns `true`
+    /// (schedulers, chat surfaces) — set for non-default `--workflow`
+    /// processes so an agent identity's singleton external connections are
+    /// only opened by its default-workflow process.
+    pub skip_agent_singletons: bool,
+    /// Host-owned root for immutable artifact vaults. Never defaults to agent root.
+    pub artifact_root: Option<PathBuf>,
 }
 
 impl HostOptions {
@@ -43,7 +54,23 @@ impl HostOptions {
             interactive: None,
             on_startup_error: None,
             config: ConfigStore::default(),
+            workflow_root: None,
+            skip_agent_singletons: false,
+            artifact_root: None,
         }
+    }
+
+    /// Override the workflow root (see [`HostOptions::workflow_root`]).
+    pub fn workflow_root(mut self, workflow_root: impl Into<PathBuf>) -> Self {
+        self.workflow_root = Some(workflow_root.into());
+        self
+    }
+
+    /// Skip agent-singleton extensions at boot (see
+    /// [`HostOptions::skip_agent_singletons`]).
+    pub fn skip_agent_singletons(mut self, skip: bool) -> Self {
+        self.skip_agent_singletons = skip;
+        self
     }
 
     /// Provide the per-extension config store extensions read at register/start.
@@ -71,6 +98,12 @@ impl HostOptions {
 
     pub fn interactive(mut self, interactive: bool) -> Self {
         self.interactive = Some(interactive);
+        self
+    }
+
+    /// Configure host-owned immutable artifact storage.
+    pub fn artifact_root(mut self, artifact_root: impl Into<PathBuf>) -> Self {
+        self.artifact_root = Some(artifact_root.into());
         self
     }
 
@@ -129,6 +162,40 @@ async fn boot_inner(
         load_dotenv(&options.root).inspect_err(|e| report("-", e))?;
     }
     let paths = HostPaths::new(&options.root).inspect_err(|e| report("-", e))?;
+    let paths = if let Some(artifact_root) = &options.artifact_root {
+        paths
+            .with_artifact_root(artifact_root)
+            .inspect_err(|e| report("-", e))?
+    } else {
+        paths
+    };
+    let paths = if let Some(workflow_root) = &options.workflow_root {
+        paths
+            .with_workflow_root(workflow_root)
+            .inspect_err(|e| report("-", e))?
+    } else {
+        paths
+    };
+    // Filter once, before register, so register/start/foreground-select all
+    // see the same set of extensions.
+    let extensions: Vec<Arc<dyn Extension>> = if options.skip_agent_singletons {
+        extensions
+            .into_iter()
+            .filter(|extension| {
+                if extension.agent_singleton() {
+                    tracing::info!(
+                        extension = extension.id(),
+                        "skipping agent-singleton extension"
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect()
+    } else {
+        extensions
+    };
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let shutdown_on_signal = shutdown_tx.clone();
     tokio::spawn(async move {
@@ -617,6 +684,98 @@ mod tests {
         assert_eq!(
             *log.lock().unwrap(),
             vec!["foreground:logs interactive=false"]
+        );
+    }
+
+    struct SingletonExt {
+        id: &'static str,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Extension for SingletonExt {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn agent_singleton(&self) -> bool {
+            true
+        }
+
+        fn register<'a>(
+            &'a self,
+            _ctx: &'a mut RegisterCtx,
+        ) -> host_api::BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(format!("register:{}", self.id));
+                Ok(())
+            })
+        }
+
+        fn start<'a>(&'a self, _ctx: StartCtx) -> host_api::BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.log.lock().unwrap().push(format!("start:{}", self.id));
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn skip_agent_singletons_omits_singleton_extensions_from_register_and_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        boot(
+            vec![
+                Arc::new(RecordingExt {
+                    id: "regular",
+                    log: Arc::clone(&log),
+                }),
+                Arc::new(SingletonExt {
+                    id: "singleton",
+                    log: Arc::clone(&log),
+                }),
+            ],
+            test_options(temp.path()).skip_agent_singletons(true),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["register:regular", "start:regular"]
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_singletons_run_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        boot(
+            vec![
+                Arc::new(RecordingExt {
+                    id: "regular",
+                    log: Arc::clone(&log),
+                }),
+                Arc::new(SingletonExt {
+                    id: "singleton",
+                    log: Arc::clone(&log),
+                }),
+            ],
+            test_options(temp.path()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                "register:regular",
+                "register:singleton",
+                "start:regular",
+                "start:singleton"
+            ]
         );
     }
 

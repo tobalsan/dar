@@ -3,9 +3,10 @@
 //! WORKFLOW.md = optional YAML frontmatter + Markdown prompt body.
 //! Frontmatter sections: tracker / polling / workspace / agent / hooks / server / linear.
 //!
-//! The effective loop config is produced by merging agent.yaml (base) with the
-//! WORKFLOW.md frontmatter (override): every field present in WORKFLOW.md wins;
-//! absent fields fall back to the corresponding agent.yaml value.
+//! The effective loop config is resolved from WORKFLOW.md frontmatter alone
+//! (tracker/polling/workspace), with inline defaults for absent fields;
+//! agent.yaml contributes only runner/dashboard config. The frontmatter
+//! `agent:` section still overrides runner fields.
 //!
 //! Tracker state names support two forms:
 //!
@@ -27,13 +28,20 @@
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use cap_runner::DEFAULT_RUNNER_KIND;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{AgentConfig, StringOrVec, TrackerConfig};
+use crate::config::{AgentConfig, StringOrVec};
 
-const DEFAULT_NEEDS_HUMAN_STATE: &str = "Needs Human";
+/// Loop-config defaults, applied when the WORKFLOW.md frontmatter omits a field.
+const DEFAULT_POLL_INTERVAL_MS: u64 = 1000;
+const DEFAULT_MAX_CONCURRENT: usize = 3;
+const DEFAULT_MAX_ACTIVE_RUNS: u32 = 3;
+const DEFAULT_MAX_RETRIES: u32 = 3;
+const DEFAULT_RETRY_BACKOFF_MS: u64 = 30_000;
+const DEFAULT_WORKSPACE_ROOT: &str = "workspaces";
+const DEFAULT_LINEAR_ENDPOINT: &str = "https://api.linear.app/graphql";
 
 // ---------------------------------------------------------------------------
 // Frontmatter structs
@@ -65,12 +73,14 @@ pub struct WfTrackerConfig {
     // --- Legacy nested form ---
     pub states: Option<WfTrackerStates>,
     // --- Tracker kind + tracker-specific ---
-    /// `"files"`, `"linear"`, or `"plane"`. Overrides agent.yaml `tracker.use`.
+    /// `"files"`, `"linear"`, or `"plane"`. The tracker backend to run.
     pub kind: Option<String>,
-    /// Linear project slugId to scope issue polling.
-    pub project_slug: Option<String>,
-    /// Plane project UUID.
-    pub project: Option<String>,
+    /// Tracker-agnostic project scope (scalar or list): Linear slugIds, Plane
+    /// project UUIDs, etc. Empty/absent ⇒ unconstrained.
+    pub projects: Option<StringOrVec>,
+    /// Files-tracker issues directory, relative to the WORKFLOW.md dir
+    /// (default `issues`). Was agent.yaml-only `tracker.config.path`.
+    pub path: Option<PathBuf>,
     /// Plane workspace slug.
     pub workspace: Option<String>,
     /// Linear GraphQL endpoint override (default `https://api.linear.app/graphql`).
@@ -268,11 +278,11 @@ fn find_closing_delim(s: &str) -> Option<(&str, &str)> {
 // Effective loop config
 // ---------------------------------------------------------------------------
 
-/// The merged config the orchestrator uses for its loop logic.
+/// The resolved config the orchestrator uses for its loop logic.
 ///
 /// Derived at startup (and re-derived on every successful WORKFLOW.md reload)
-/// by layering WORKFLOW.md frontmatter over agent.yaml: frontmatter values win
-/// for every field they specify; absent fields fall back to agent.yaml.
+/// from WORKFLOW.md frontmatter, which is the sole source of tracker/polling/
+/// workspace config; agent.yaml contributes only runner/dashboard fields.
 #[derive(Debug, Clone)]
 pub struct EffectiveLoopConfig {
     // Tracker
@@ -283,10 +293,12 @@ pub struct EffectiveLoopConfig {
     /// is treated as active (not terminal) so the orchestrator won't re-dispatch
     /// it automatically.
     pub needs_human: Option<String>,
-    /// Linear project slugId (only relevant when tracker_kind == "linear").
-    pub tracker_project_slug: Option<String>,
-    /// Plane project UUID (only relevant when tracker_kind == "plane").
-    pub tracker_project: Option<String>,
+    /// Tracker-agnostic project scope (Linear slugIds, Plane project UUIDs).
+    /// Empty ⇒ unconstrained.
+    pub tracker_projects: Vec<String>,
+    /// Files-tracker issues dir (relative to the WORKFLOW.md dir); tracker
+    /// backends that ignore a config path leave this `None`.
+    pub tracker_config_path: Option<PathBuf>,
     /// Plane workspace slug (only relevant when tracker_kind == "plane").
     pub tracker_workspace: Option<String>,
     /// Linear GraphQL endpoint (only relevant when tracker_kind == "linear").
@@ -341,92 +353,106 @@ pub struct EffectiveLoopConfig {
     pub linear: WfLinearConfig,
 }
 
-impl EffectiveLoopConfig {
-    /// Build by layering WORKFLOW.md frontmatter over agent.yaml base config.
-    /// Every field present in `wf` wins; absent fields fall back to `base`.
-    pub fn merge(base: &AgentConfig, wf: &WorkflowFrontmatter) -> Self {
-        // The orchestrator trio may be absent for a passive agent; fall back to
-        // neutral defaults so merge stays total. A real loop always supplies the
-        // trio, so these defaults are never consumed by a running orchestrator.
-        let base_tracker = base.tracker_or_default();
-        let base_orchestrator = base.orchestrator_or_default();
-        let base_workspace = base.workspace_or_default();
+impl WfTrackerConfig {
+    /// Active states, flat form beating the legacy nested `states.active`.
+    fn resolved_active_states(&self) -> Vec<String> {
+        self.active_states
+            .clone()
+            .or_else(|| self.states.as_ref().and_then(|s| s.active.clone()))
+            .unwrap_or_default()
+    }
 
-        // --- Tracker states + kind ---
-        let (active_states, terminal_states, needs_human) = resolve_tracker(&base_tracker, wf);
-        let tracker_kind = wf
-            .tracker
-            .as_ref()
-            .and_then(|t| t.kind.as_deref())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| base_tracker.use_.clone());
-        let tracker_project_slug = wf
-            .tracker
-            .as_ref()
-            .and_then(|t| t.project_slug.clone())
-            .or_else(|| base_tracker.project_slug.clone());
-        let tracker_project = wf
-            .tracker
-            .as_ref()
-            .and_then(|t| t.project.clone())
-            .or_else(|| base_tracker.project.clone());
-        let tracker_workspace = wf
-            .tracker
-            .as_ref()
-            .and_then(|t| t.workspace.clone())
-            .or_else(|| base_tracker.workspace.clone());
-        let tracker_endpoint = wf
-            .tracker
-            .as_ref()
+    /// Terminal states, flat form beating the legacy nested `states.terminal`.
+    fn resolved_terminal_states(&self) -> Vec<String> {
+        self.terminal_states
+            .clone()
+            .or_else(|| self.states.as_ref().and_then(|s| s.terminal.clone()))
+            .unwrap_or_default()
+    }
+
+    /// needs-human state, flat form beating the legacy nested form. No default:
+    /// absent means the orchestrator has no dedicated parking state.
+    fn resolved_needs_human(&self) -> Option<String> {
+        self.needs_human
+            .clone()
+            .or_else(|| self.states.as_ref().and_then(|s| s.needs_human.clone()))
+    }
+}
+
+impl WorkflowFrontmatter {
+    /// Validate the frontmatter carries a runnable loop config: a tracker
+    /// `kind` plus non-empty active and terminal state lists. Called by the
+    /// orchestrator at boot and by `doctor`; the error names the missing
+    /// frontmatter key so operators can fix WORKFLOW.md directly.
+    pub fn validate_loop(&self) -> Result<()> {
+        let Some(t) = self.tracker.as_ref() else {
+            bail!("WORKFLOW.md frontmatter is missing the `tracker` section (needs `tracker.kind`, `tracker.active_states`, `tracker.terminal_states`)");
+        };
+        if t.kind.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            bail!("WORKFLOW.md frontmatter `tracker.kind` is required (e.g. files, linear, plane)");
+        }
+        if t.resolved_active_states().is_empty() {
+            bail!("WORKFLOW.md frontmatter `tracker.active_states` must be non-empty");
+        }
+        if t.resolved_terminal_states().is_empty() {
+            bail!("WORKFLOW.md frontmatter `tracker.terminal_states` must be non-empty");
+        }
+        Ok(())
+    }
+}
+
+impl EffectiveLoopConfig {
+    /// Resolve the loop config. WORKFLOW.md frontmatter is the SOLE source of
+    /// tracker/polling/workspace config (with the inline defaults documented on
+    /// each field). `agent` contributes only runner/dashboard config; the
+    /// frontmatter `agent:` section still overrides runner fields — that
+    /// precedence is unchanged.
+    pub fn resolve(agent: &AgentConfig, wf: &WorkflowFrontmatter) -> Self {
+        let t = wf.tracker.as_ref();
+
+        // --- Tracker (frontmatter is the sole source) ---
+        let tracker_kind = t.and_then(|t| t.kind.clone()).unwrap_or_default();
+        let active_states = t
+            .map(WfTrackerConfig::resolved_active_states)
+            .unwrap_or_default();
+        let terminal_states = t
+            .map(WfTrackerConfig::resolved_terminal_states)
+            .unwrap_or_default();
+        let needs_human = t.and_then(WfTrackerConfig::resolved_needs_human);
+        let tracker_projects = t
+            .and_then(|t| t.projects.as_ref().map(StringOrVec::to_vec))
+            .unwrap_or_default();
+        let tracker_config_path = t.and_then(|t| t.path.clone());
+        let tracker_workspace = t.and_then(|t| t.workspace.clone());
+        let tracker_endpoint = t
             .and_then(|t| t.endpoint.clone())
-            .or_else(|| base_tracker.endpoint.clone())
-            .unwrap_or_else(|| "https://api.linear.app/graphql".to_string());
-        let tracker_team = wf
-            .tracker
-            .as_ref()
-            .and_then(|t| t.team.clone())
-            .or_else(|| base_tracker.team.clone());
-        let tracker_assignee = wf
-            .tracker
-            .as_ref()
-            .and_then(|t| t.assignee.clone())
-            .or_else(|| base_tracker.assignee.clone());
-        let tracker_delegate = wf
-            .tracker
-            .as_ref()
-            .and_then(|t| t.delegate.clone())
-            .or_else(|| base_tracker.delegate.clone());
-        let tracker_mention = wf
-            .tracker
-            .as_ref()
-            .and_then(|t| t.mention.clone())
-            .or_else(|| base_tracker.mention.clone());
-        let tracker_labels = wf
-            .tracker
-            .as_ref()
+            .unwrap_or_else(|| DEFAULT_LINEAR_ENDPOINT.to_string());
+        let tracker_team = t.and_then(|t| t.team.clone());
+        let tracker_assignee = t.and_then(|t| t.assignee.clone());
+        let tracker_delegate = t.and_then(|t| t.delegate.clone());
+        let tracker_mention = t.and_then(|t| t.mention.clone());
+        let tracker_labels = t
             .and_then(|t| t.label.as_ref().map(StringOrVec::to_vec))
-            .unwrap_or_else(|| base_tracker.labels());
+            .unwrap_or_default();
 
         // --- Polling ---
         let p = wf.polling.as_ref();
         let poll_interval_ms = p
             .and_then(|p| p.interval_ms)
-            .unwrap_or(base_orchestrator.poll_interval_ms);
+            .unwrap_or(DEFAULT_POLL_INTERVAL_MS);
         let poll_jitter_ms = p.and_then(|p| p.jitter_ms).unwrap_or(0);
         let max_concurrent = p
             .and_then(|p| p.max_concurrent)
-            .unwrap_or(base_orchestrator.max_concurrent);
+            .unwrap_or(DEFAULT_MAX_CONCURRENT);
         let max_active_runs = wf
             .agent
             .as_ref()
             .and_then(|a| a.max_active_runs)
-            .unwrap_or(base_orchestrator.max_active_runs);
-        let max_retries = p
-            .and_then(|p| p.max_retries)
-            .unwrap_or(base_orchestrator.max_retries);
+            .unwrap_or(DEFAULT_MAX_ACTIVE_RUNS);
+        let max_retries = p.and_then(|p| p.max_retries).unwrap_or(DEFAULT_MAX_RETRIES);
         let retry_backoff_ms = p
             .and_then(|p| p.retry_backoff_ms)
-            .unwrap_or(base_orchestrator.retry_backoff_ms);
+            .unwrap_or(DEFAULT_RETRY_BACKOFF_MS);
         let allow_stale = p.and_then(|p| p.allow_stale).unwrap_or(true);
 
         // --- Workspace ---
@@ -434,7 +460,7 @@ impl EffectiveLoopConfig {
             .workspace
             .as_ref()
             .and_then(|w| w.root.clone())
-            .unwrap_or_else(|| base_workspace.root.clone());
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_WORKSPACE_ROOT));
         let workspace_reuse = wf.workspace.as_ref().and_then(|w| w.reuse).unwrap_or(true);
         let cleanup_on_terminal = wf
             .workspace
@@ -442,14 +468,14 @@ impl EffectiveLoopConfig {
             .and_then(|w| w.cleanup_on_terminal)
             .unwrap_or(false);
 
-        // --- Runner / model ---
+        // --- Runner / model (agent.yaml base + frontmatter `agent:` override) ---
         let a = wf.agent.as_ref();
         let runner_override = a.and_then(|a| a.effective_runner());
         let runner_kind = runner_override.map(str::to_string).unwrap_or_else(|| {
-            if base.runner.use_.trim().is_empty() {
+            if agent.runner.use_.trim().is_empty() {
                 DEFAULT_RUNNER_KIND.to_string()
             } else {
-                base.runner.use_.clone()
+                agent.runner.use_.clone()
             }
         });
         let runner_command = a
@@ -459,52 +485,54 @@ impl EffectiveLoopConfig {
                 if runner_override.is_some() {
                     String::new()
                 } else {
-                    base.runner.command.clone()
+                    agent.runner.command.clone()
                 }
             });
         let model = a
             .and_then(|a| a.model.clone())
-            .or_else(|| base.runner.model.clone());
+            .or_else(|| agent.runner.model.clone());
         let provider = a
             .and_then(|a| a.provider.clone())
-            .or_else(|| base.runner.provider.clone());
+            .or_else(|| agent.runner.provider.clone());
         // Canonical reasoning level: WORKFLOW.md `agent.thinking`/`agent.effort`
         // overrides agent.yaml `runner.thinking`/`runner.effort`.
         let thinking = a
             .and_then(|a| a.thinking.clone())
-            .or_else(|| base.runner.thinking.clone());
+            .or_else(|| agent.runner.thinking.clone());
         let max_run_timeout_ms = a
             .and_then(|a| a.turn_timeout_ms.or(a.max_run_timeout_ms))
-            .unwrap_or(base.runner.max_run_timeout_ms);
+            .unwrap_or(agent.runner.max_run_timeout_ms);
         let stall_timeout_ms = a
             .and_then(|a| a.stall_timeout_ms)
-            .unwrap_or(base.runner.stall_timeout_ms);
-        let max_turns = a.and_then(|a| a.max_turns).unwrap_or(base.runner.max_turns);
+            .unwrap_or(agent.runner.stall_timeout_ms);
+        let max_turns = a
+            .and_then(|a| a.max_turns)
+            .unwrap_or(agent.runner.max_turns);
 
         // --- Dashboard ---
         let dashboard_bind = wf
             .server
             .as_ref()
             .and_then(|s| s.bind)
-            .unwrap_or(base.dashboard.bind);
+            .unwrap_or(agent.dashboard.bind);
         let dashboard_port = wf
             .server
             .as_ref()
             .and_then(|s| s.port)
-            .unwrap_or(base.dashboard.port);
+            .unwrap_or(agent.dashboard.port);
         let webhook_secret = wf
             .linear
             .as_ref()
             .and_then(|l| l.webhook_secret.clone())
-            .or_else(|| base.dashboard.webhook_secret.clone());
+            .or_else(|| agent.dashboard.webhook_secret.clone());
 
         Self {
             tracker_kind,
             active_states,
             terminal_states,
             needs_human,
-            tracker_project_slug,
-            tracker_project,
+            tracker_projects,
+            tracker_config_path,
             tracker_workspace,
             tracker_endpoint,
             tracker_team,
@@ -539,46 +567,6 @@ impl EffectiveLoopConfig {
     }
 }
 
-/// Resolve tracker state lists from WORKFLOW.md (with flat→nested fallback) or
-/// fall back to agent.yaml values.
-fn resolve_tracker(
-    base: &TrackerConfig,
-    wf: &WorkflowFrontmatter,
-) -> (Vec<String>, Vec<String>, Option<String>) {
-    match &wf.tracker {
-        None => (
-            base.active_states.clone(),
-            base.terminal_states.clone(),
-            base.needs_human
-                .clone()
-                .or_else(|| Some(DEFAULT_NEEDS_HUMAN_STATE.to_string())),
-        ),
-        Some(tc) => {
-            // Flat fields beat the legacy nested form.
-            let active = tc
-                .active_states
-                .clone()
-                .or_else(|| tc.states.as_ref().and_then(|s| s.active.clone()))
-                .unwrap_or_else(|| base.active_states.clone());
-
-            let terminal = tc
-                .terminal_states
-                .clone()
-                .or_else(|| tc.states.as_ref().and_then(|s| s.terminal.clone()))
-                .unwrap_or_else(|| base.terminal_states.clone());
-
-            let needs_human = tc
-                .needs_human
-                .clone()
-                .or_else(|| tc.states.as_ref().and_then(|s| s.needs_human.clone()))
-                .or_else(|| base.needs_human.clone())
-                .or_else(|| Some(DEFAULT_NEEDS_HUMAN_STATE.to_string()));
-
-            (active, terminal, needs_human)
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -586,34 +574,15 @@ fn resolve_tracker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
-        AgentConfig, DashboardConfig, HitlConfig, OrchestratorConfig, RunnerConfig, TrackerConfig,
-        TrackerInner, WorkspaceConfig,
-    };
+    use crate::config::{AgentConfig, DashboardConfig, HitlConfig, RunnerConfig};
     use std::net::Ipv4Addr;
 
+    /// Identity + runner + dashboard only. Loop config now lives entirely in
+    /// WORKFLOW.md frontmatter, so the base agent config carries none of it.
     fn base_config() -> AgentConfig {
         AgentConfig {
             id: "test".into(),
             name: "Test".into(),
-            tracker: Some(TrackerConfig {
-                use_: "files".into(),
-                config: Some(TrackerInner {
-                    path: "./issues".into(),
-                }),
-                active_states: vec!["todo".into()],
-                terminal_states: vec!["done".into()],
-                project_slug: None,
-                project: None,
-                workspace: None,
-                endpoint: None,
-                needs_human: None,
-                team: None,
-                assignee: None,
-                delegate: None,
-                mention: None,
-                label: None,
-            }),
             runner: RunnerConfig {
                 use_: "fake".into(),
                 command: "fake".into(),
@@ -624,17 +593,7 @@ mod tests {
                 stall_timeout_ms: 300_000,
                 max_turns: 20,
             },
-            orchestrator: Some(OrchestratorConfig {
-                poll_interval_ms: 10_000,
-                max_concurrent: 1,
-                max_active_runs: 3,
-                max_retries: 3,
-                retry_backoff_ms: 10_000,
-            }),
             hitl: HitlConfig::default(),
-            workspace: Some(WorkspaceConfig {
-                root: "./workspaces".into(),
-            }),
             dashboard: DashboardConfig {
                 bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: 7878,
@@ -771,18 +730,25 @@ body"#;
         assert_eq!(snap.frontmatter.linear.unwrap().worker_tool, Some(true));
     }
 
-    // --- EffectiveLoopConfig::merge ---
+    // --- EffectiveLoopConfig::resolve ---
 
+    /// No frontmatter ⇒ loop config falls to the inline defaults (no agent.yaml
+    /// trio to fall back to), while runner/dashboard come from agent.yaml.
     #[test]
-    fn merge_no_frontmatter_uses_base() {
+    fn resolve_no_frontmatter_uses_defaults() {
         let base = base_config();
         let wf = WorkflowFrontmatter::default();
-        let eff = EffectiveLoopConfig::merge(&base, &wf);
-        assert_eq!(eff.active_states, vec!["todo"]);
-        assert_eq!(eff.terminal_states, vec!["done"]);
-        assert_eq!(eff.needs_human, Some("Needs Human".into()));
-        assert_eq!(eff.poll_interval_ms, 10_000);
+        let eff = EffectiveLoopConfig::resolve(&base, &wf);
+        assert!(eff.active_states.is_empty());
+        assert!(eff.terminal_states.is_empty());
+        assert_eq!(eff.needs_human, None);
+        assert_eq!(eff.poll_interval_ms, 1000);
+        assert_eq!(eff.max_concurrent, 3);
+        assert_eq!(eff.max_active_runs, 3);
+        assert_eq!(eff.max_retries, 3);
+        assert_eq!(eff.retry_backoff_ms, 30_000);
         assert_eq!(eff.poll_jitter_ms, 0);
+        assert_eq!(eff.workspace_root, PathBuf::from("workspaces"));
         assert_eq!(eff.runner_kind, "fake");
         assert_eq!(eff.runner_command, "fake");
         assert_eq!(eff.model, None);
@@ -792,12 +758,81 @@ body"#;
         assert_eq!(eff.webhook_secret, None);
     }
 
+    /// Tracker projects: a scalar `projects` yields a single-element list.
+    #[test]
+    fn resolve_tracker_projects_scalar() {
+        let base = base_config();
+        let snap = parse_workflow_md("---\ntracker:\n  projects: alpha\n---").unwrap();
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
+        assert_eq!(eff.tracker_projects, vec!["alpha"]);
+    }
+
+    /// Tracker projects: a list `projects` is preserved in order.
+    #[test]
+    fn resolve_tracker_projects_list() {
+        let base = base_config();
+        let snap = parse_workflow_md("---\ntracker:\n  projects: [alpha, beta]\n---").unwrap();
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
+        assert_eq!(eff.tracker_projects, vec!["alpha", "beta"]);
+    }
+
+    /// `tracker.path` (files-tracker issues dir) flows into the resolved config.
+    #[test]
+    fn resolve_tracker_path() {
+        let base = base_config();
+        let snap = parse_workflow_md("---\ntracker:\n  path: my-issues\n---").unwrap();
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
+        assert_eq!(eff.tracker_config_path, Some(PathBuf::from("my-issues")));
+    }
+
+    /// `validate_loop` accepts a complete tracker section and rejects each
+    /// missing piece with a message naming the frontmatter key.
+    #[test]
+    fn validate_loop_reports_missing_pieces() {
+        let ok = parse_workflow_md(
+            "---\ntracker:\n  kind: files\n  active_states: [todo]\n  terminal_states: [done]\n---",
+        )
+        .unwrap();
+        ok.frontmatter.validate_loop().unwrap();
+
+        let no_tracker = WorkflowFrontmatter::default();
+        let err = no_tracker.validate_loop().unwrap_err().to_string();
+        assert!(err.contains("tracker"), "{err}");
+
+        let no_kind = parse_workflow_md(
+            "---\ntracker:\n  active_states: [todo]\n  terminal_states: [done]\n---",
+        )
+        .unwrap();
+        let err = no_kind.frontmatter.validate_loop().unwrap_err().to_string();
+        assert!(err.contains("tracker.kind"), "{err}");
+
+        let no_active =
+            parse_workflow_md("---\ntracker:\n  kind: files\n  terminal_states: [done]\n---")
+                .unwrap();
+        let err = no_active
+            .frontmatter
+            .validate_loop()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tracker.active_states"), "{err}");
+
+        let no_terminal =
+            parse_workflow_md("---\ntracker:\n  kind: files\n  active_states: [todo]\n---")
+                .unwrap();
+        let err = no_terminal
+            .frontmatter
+            .validate_loop()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tracker.terminal_states"), "{err}");
+    }
+
     #[test]
     fn merge_webhook_secret_falls_back_to_agent_yaml() {
         let mut base = base_config();
         base.dashboard.webhook_secret = Some("agent-secret".to_string());
 
-        let eff = EffectiveLoopConfig::merge(&base, &WorkflowFrontmatter::default());
+        let eff = EffectiveLoopConfig::resolve(&base, &WorkflowFrontmatter::default());
 
         assert_eq!(eff.webhook_secret, Some("agent-secret".to_string()));
     }
@@ -809,7 +844,7 @@ body"#;
         let raw = "---\nlinear:\n  webhook_secret: workflow-secret\n---";
         let snap = parse_workflow_md(raw).unwrap();
 
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
 
         assert_eq!(eff.webhook_secret, Some("workflow-secret".to_string()));
     }
@@ -820,7 +855,7 @@ body"#;
         let raw =
             "---\nworkspace:\n  root: ./custom\n  reuse: false\n  cleanup_on_terminal: true\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.workspace_root, PathBuf::from("./custom"));
         assert!(!eff.workspace_reuse);
         assert!(eff.cleanup_on_terminal);
@@ -831,7 +866,7 @@ body"#;
         let base = base_config();
         let raw = "---\ntracker:\n  active_states: [wip]\n  terminal_states: [closed]\n  needs_human: blocked\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.active_states, vec!["wip"]);
         assert_eq!(eff.terminal_states, vec!["closed"]);
         assert_eq!(eff.needs_human, Some("blocked".into()));
@@ -843,7 +878,7 @@ body"#;
         let raw =
             "---\ntracker:\n  states:\n    active: [pending]\n    terminal: [resolved]\n    needs_human: waiting\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.active_states, vec!["pending"]);
         assert_eq!(eff.terminal_states, vec!["resolved"]);
         assert_eq!(eff.needs_human, Some("waiting".into()));
@@ -854,19 +889,20 @@ body"#;
         let base = base_config();
         let raw = "---\ntracker:\n  active_states: [flat]\n  states:\n    active: [nested]\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.active_states, vec!["flat"]);
     }
 
     #[test]
-    fn merge_partial_tracker_falls_back_to_base() {
+    fn resolve_partial_tracker_leaves_absent_states_empty() {
         let base = base_config();
-        // Only active_states overridden; terminal_states falls back.
+        // Only active_states present; terminal_states has no agent.yaml
+        // fallback anymore, so it stays empty (validate_loop would reject it).
         let raw = "---\ntracker:\n  active_states: [open]\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.active_states, vec!["open"]);
-        assert_eq!(eff.terminal_states, vec!["done"]); // from base
+        assert!(eff.terminal_states.is_empty());
     }
 
     #[test]
@@ -874,7 +910,7 @@ body"#;
         let base = base_config();
         let raw = "---\nagent:\n  sdk: gemini-code\n  command: gemini\n  model: gemini-2.0\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.runner_kind, "gemini-code");
         assert_eq!(eff.runner_command, "gemini");
         assert_eq!(eff.model, Some("gemini-2.0".into()));
@@ -887,7 +923,7 @@ body"#;
         let base = base_config(); // base.runner.command = "fake"
         let raw = "---\nagent:\n  sdk: gemini-code\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.runner_kind, "gemini-code");
         assert_eq!(eff.runner_command, "");
     }
@@ -898,7 +934,7 @@ body"#;
         // `runner` alias (no sdk) should be picked up.
         let raw = "---\nagent:\n  runner: cli\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.runner_kind, "cli");
         assert_eq!(eff.runner_command, "");
     }
@@ -908,7 +944,7 @@ body"#;
         let base = base_config();
         let raw = "---\nagent:\n  sdk: fake\n  kind: codex\n  turn_timeout_ms: 2500\n  max_run_timeout_ms: 9000\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.runner_kind, "codex");
         assert_eq!(eff.runner_command, "");
         assert_eq!(eff.max_run_timeout_ms, 2500);
@@ -920,7 +956,7 @@ body"#;
         let base = base_config();
         let raw = "---\nagent:\n  stall_timeout_ms: 12345\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.stall_timeout_ms, 12_345);
     }
 
@@ -929,7 +965,7 @@ body"#;
         let base = base_config();
         let raw = "---\npolling:\n  allow_stale: false\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert!(!eff.allow_stale);
     }
 
@@ -950,7 +986,7 @@ body"#;
         let base = base_config();
         let raw = "---\npolling:\n  allowStale: false\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert!(
             !eff.allow_stale,
             "allowStale camelCase should map to allow_stale=false"
@@ -962,7 +998,7 @@ body"#;
         let base = base_config();
         let raw = "---\ntracker:\n  needs_human: needs-review\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.needs_human, Some("needs-review".into()));
     }
 
@@ -971,16 +1007,16 @@ body"#;
         let base = base_config();
         let raw = "---\ntracker:\n  states:\n    needs_human: waiting-for-human\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.needs_human, Some("waiting-for-human".into()));
     }
 
     #[test]
-    fn merge_needs_human_absent_defaults_to_needs_human() {
+    fn resolve_needs_human_absent_is_none() {
         let base = base_config();
         let wf = WorkflowFrontmatter::default();
-        let eff = EffectiveLoopConfig::merge(&base, &wf);
-        assert_eq!(eff.needs_human, Some("Needs Human".into()));
+        let eff = EffectiveLoopConfig::resolve(&base, &wf);
+        assert_eq!(eff.needs_human, None);
     }
 
     #[test]
@@ -999,7 +1035,7 @@ body"#;
         };
         // sdk field in agent.yaml should map to runner kind via the `use_` alias
         let wf = WorkflowFrontmatter::default();
-        let eff = EffectiveLoopConfig::merge(&base, &wf);
+        let eff = EffectiveLoopConfig::resolve(&base, &wf);
         assert_eq!(eff.runner_kind, "pi");
         assert_eq!(eff.model, None);
         let _ = Ipv4Addr::LOCALHOST; // keep import used
@@ -1010,7 +1046,7 @@ body"#;
         let mut base = base_config();
         base.runner.model = Some("fake-model".into());
         let wf = WorkflowFrontmatter::default();
-        let eff = EffectiveLoopConfig::merge(&base, &wf);
+        let eff = EffectiveLoopConfig::resolve(&base, &wf);
         assert_eq!(eff.model, Some("fake-model".into()));
     }
 
@@ -1018,7 +1054,7 @@ body"#;
     fn thinking_falls_back_to_agent_yaml_runner_thinking() {
         let mut base = base_config();
         base.runner.thinking = Some("medium".into());
-        let eff = EffectiveLoopConfig::merge(&base, &WorkflowFrontmatter::default());
+        let eff = EffectiveLoopConfig::resolve(&base, &WorkflowFrontmatter::default());
         assert_eq!(eff.thinking, Some("medium".into()));
     }
 
@@ -1028,7 +1064,7 @@ body"#;
         base.runner.thinking = Some("low".into());
         let raw = "---\nagent:\n  thinking: high\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.thinking, Some("high".into()));
     }
 
@@ -1037,13 +1073,13 @@ body"#;
         let base = base_config();
         let raw = "---\nagent:\n  effort: medium\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.thinking, Some("medium".into()));
     }
 
     #[test]
     fn agent_yaml_effort_alias_parses_as_thinking() {
-        let raw = "id: a\nname: A\ntracker:\n  use: files\n  config:\n    path: ./issues\n  active_states: [todo]\n  terminal_states: [done]\nrunner:\n  use: pi\n  effort: high\norchestrator:\n  poll_interval_ms: 1000\n  max_retries: 3\nworkspace:\n  root: ./workspaces\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
+        let raw = "id: a\nname: A\nrunner:\n  use: pi\n  effort: high\ndashboard:\n  bind: 127.0.0.1\n  port: 7878\n";
         let cfg: AgentConfig = serde_yaml::from_str(raw).unwrap();
         assert_eq!(cfg.runner.thinking, Some("high".into()));
     }
@@ -1051,21 +1087,16 @@ body"#;
     #[test]
     fn thinking_absent_yields_none() {
         let base = base_config();
-        let eff = EffectiveLoopConfig::merge(&base, &WorkflowFrontmatter::default());
+        let eff = EffectiveLoopConfig::resolve(&base, &WorkflowFrontmatter::default());
         assert_eq!(eff.thinking, None);
     }
 
     #[test]
-    fn merge_tracker_dimensions_frontmatter_overrides_base() {
-        let mut base = base_config();
-        let bt = base.tracker.as_mut().unwrap();
-        bt.team = Some("BASE".into());
-        bt.assignee = Some("base-user".into());
-        bt.delegate = Some("base-delegate".into());
-        bt.label = Some(StringOrVec::Scalar("base-label".into()));
+    fn resolve_tracker_dimensions_from_frontmatter() {
+        let base = base_config();
         let raw = "---\ntracker:\n  team: ALG\n  assignee: \"@thinh\"\n  delegate: \"@workeragent\"\n  label: [bug, urgent]\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.tracker_team, Some("ALG".into()));
         assert_eq!(eff.tracker_assignee, Some("@thinh".into()));
         assert_eq!(eff.tracker_delegate, Some("@workeragent".into()));
@@ -1073,27 +1104,22 @@ body"#;
     }
 
     #[test]
-    fn merge_tracker_label_scalar_in_frontmatter() {
+    fn resolve_tracker_label_scalar_in_frontmatter() {
         let base = base_config();
         let raw = "---\ntracker:\n  label: bug\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.tracker_labels, vec!["bug"]);
     }
 
     #[test]
-    fn merge_tracker_dimensions_fall_back_to_base() {
-        let mut base = base_config();
-        let bt = base.tracker.as_mut().unwrap();
-        bt.team = Some("ALG".into());
-        bt.assignee = Some("base-user".into());
-        bt.delegate = Some("base-delegate".into());
-        bt.label = Some(StringOrVec::List(vec!["bug".into(), "urgent".into()]));
-        let eff = EffectiveLoopConfig::merge(&base, &WorkflowFrontmatter::default());
-        assert_eq!(eff.tracker_team, Some("ALG".into()));
-        assert_eq!(eff.tracker_assignee, Some("base-user".into()));
-        assert_eq!(eff.tracker_delegate, Some("base-delegate".into()));
-        assert_eq!(eff.tracker_labels, vec!["bug", "urgent"]);
+    fn resolve_tracker_dimensions_absent_are_empty_or_none() {
+        let base = base_config();
+        let eff = EffectiveLoopConfig::resolve(&base, &WorkflowFrontmatter::default());
+        assert_eq!(eff.tracker_team, None);
+        assert_eq!(eff.tracker_assignee, None);
+        assert_eq!(eff.tracker_delegate, None);
+        assert!(eff.tracker_labels.is_empty());
     }
 
     #[test]
@@ -1102,7 +1128,7 @@ body"#;
         base.runner.model = Some("base-model".into());
         let raw = "---\nagent:\n  model: override-model\n---";
         let snap = parse_workflow_md(raw).unwrap();
-        let eff = EffectiveLoopConfig::merge(&base, &snap.frontmatter);
+        let eff = EffectiveLoopConfig::resolve(&base, &snap.frontmatter);
         assert_eq!(eff.model, Some("override-model".into()));
     }
 }

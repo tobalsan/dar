@@ -34,28 +34,6 @@ struct Settings {
     orchestrator_loop: bool,
 }
 
-/// The orchestrator trio (tracker + orchestrator + workspace) emitted when the
-/// loop is enabled. Values mirror `OrchestratorConfig::default()` and
-/// `example-agent.yaml`. The trio is all-or-nothing (`AgentConfig::validate`).
-const TRIO: &str = "
-tracker:
-  use: files
-  config:
-    path: ./issues
-  active_states: [todo, in_progress]
-  terminal_states: [done, cancelled]
-
-orchestrator:
-  poll_interval_ms: 1000
-  max_concurrent: 3
-  max_active_runs: 3
-  max_retries: 3
-  retry_backoff_ms: 30000
-
-workspace:
-  root: ./workspaces
-";
-
 /// Scaffold the agent folder at `root`. Refuses if `agent.yaml` already exists.
 pub fn run(root: &Path, args: &CreateArgs) -> Result<CreateOutcome> {
     fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
@@ -153,11 +131,20 @@ fn render_agent_yaml(s: &Settings) -> String {
     if let Some(model) = &s.model {
         out.push_str(&format!("  model: {}\n", yaml_scalar(model)));
     }
+    // Loop config (states/polling/workspace) lives in WORKFLOW.md frontmatter,
+    // but the composer still needs a `tracker.use` here to link the tracker
+    // extension crate into a per-agent binary (build-time selection only). Emit
+    // it to match the tracker `init-workflow` scaffolds by default.
     if s.orchestrator_loop {
-        out.push_str(TRIO);
+        out.push_str("\ntracker:\n");
+        out.push_str(&format!("  use: {}\n", yaml_scalar(DEFAULT_TRACKER_USE)));
     }
     out
 }
+
+/// Tracker crate the composer links when `--orchestrator` scaffolds a loop.
+/// Matches the default (bare) `init-workflow` scaffold, which is Linear.
+const DEFAULT_TRACKER_USE: &str = "linear";
 
 /// Render a string as a single-line YAML scalar, quoting/escaping via `serde_yaml`
 /// so free-text (interactive) values can't produce a broken or misparsed file.
@@ -323,11 +310,19 @@ mod tests {
     }
 
     #[test]
-    fn render_includes_trio_when_loop_enabled() {
-        let yaml = render_agent_yaml(&settings("pi", None, None, true));
-        assert!(yaml.contains("\ntracker:\n"));
-        assert!(yaml.contains("\norchestrator:\n"));
-        assert!(yaml.contains("\nworkspace:\n"));
+    fn render_writes_only_tracker_use_selector_when_loop_enabled() {
+        // Loop config (states/polling/workspace) lives in WORKFLOW.md
+        // frontmatter, so it never appears in agent.yaml. The only tracker
+        // key here is the build-time `use` selector the composer needs to
+        // link the tracker crate.
+        let with_loop = render_agent_yaml(&settings("pi", None, None, true));
+        let without_loop = render_agent_yaml(&settings("pi", None, None, false));
+        assert_ne!(with_loop, without_loop);
+        assert!(with_loop.contains("tracker:\n  use: linear\n"));
+        assert!(!with_loop.contains("active_states"));
+        assert!(!with_loop.contains("orchestrator:"));
+        assert!(!with_loop.contains("workspace:"));
+        assert!(!without_loop.contains("tracker:"));
     }
 
     #[test]
@@ -355,7 +350,6 @@ mod tests {
         .unwrap();
         let cfg = orchestrator::config::load(root).unwrap();
         cfg.validate().unwrap();
-        assert!(!cfg.loop_enabled());
     }
 
     #[test]
@@ -369,7 +363,6 @@ mod tests {
         .unwrap();
         let cfg = orchestrator::config::load(root).unwrap();
         cfg.validate().unwrap();
-        assert!(cfg.loop_enabled());
     }
 
     #[test]
@@ -391,6 +384,31 @@ mod tests {
         assert!(yaml.contains("id: my-agent"));
         assert!(yaml.contains("  use: pi\n"));
         assert!(root.join(".gitignore").exists());
+        let cfg = orchestrator::config::load(&root).unwrap();
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn run_marks_loop_enabled_without_writing_trio() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("my-agent");
+        let args = CreateArgs {
+            path: Some(root.clone()),
+            runner: None,
+            provider: None,
+            model: None,
+            orchestrator: true,
+        };
+
+        let outcome = run(&root, &args).unwrap();
+
+        assert!(outcome.loop_enabled);
+        let yaml = std::fs::read_to_string(root.join("agent.yaml")).unwrap();
+        // Build-time tracker selector only; no loop config in agent.yaml.
+        assert!(yaml.contains("tracker:\n  use: linear\n"));
+        assert!(!yaml.contains("active_states"));
+        assert!(!yaml.contains("orchestrator:"));
+        assert!(!yaml.contains("workspace:"));
         let cfg = orchestrator::config::load(&root).unwrap();
         cfg.validate().unwrap();
     }

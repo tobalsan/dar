@@ -46,6 +46,10 @@ pub struct RunArgs {
     /// Agent folder to run in (defaults to the current directory).
     #[arg(long)]
     pub dir: Option<PathBuf>,
+    /// Workflow to run: a directory containing WORKFLOW.md, or an explicit
+    /// `.../WORKFLOW.md` path. Defaults to `<dir>/WORKFLOW.md`.
+    #[arg(long)]
+    pub workflow: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -66,6 +70,10 @@ pub struct DoctorArgs {
     /// Agent folder to validate (defaults to the current directory).
     #[arg(long)]
     pub dir: Option<PathBuf>,
+    /// Workflow to validate: a directory containing WORKFLOW.md, or an
+    /// explicit `.../WORKFLOW.md` path. Defaults to `<dir>/WORKFLOW.md`.
+    #[arg(long)]
+    pub workflow: Option<PathBuf>,
     /// Also preflight static Linux build prerequisites.
     #[arg(long = "static")]
     pub static_: bool,
@@ -181,6 +189,10 @@ pub struct ExportArgs {
     /// Agent folder to export from (defaults to the current directory).
     #[arg(long)]
     pub dir: Option<PathBuf>,
+    /// Workflow to export from: a directory containing WORKFLOW.md, or an
+    /// explicit `.../WORKFLOW.md` path. Defaults to `<dir>/WORKFLOW.md`.
+    #[arg(long)]
+    pub workflow: Option<PathBuf>,
 }
 
 impl RunArgs {
@@ -248,4 +260,137 @@ fn resolve_root(dir: Option<&std::path::Path>) -> Result<PathBuf> {
     };
     raw.canonicalize()
         .with_context(|| format!("resolving agent folder {}", raw.display()))
+}
+
+/// Resolve `--workflow` against a canonical agent `dir`.
+///
+/// - No flag: the default workflow, `<dir>/WORKFLOW.md` (need not exist yet —
+///   passive agents have none). Returns `is_default = true`.
+/// - Flag pointing at a directory: joins `WORKFLOW.md` onto it.
+/// - Flag pointing at a file: the file name MUST be exactly `WORKFLOW.md`
+///   (the one-file-per-workflow convention); anything else is a clear error.
+///
+/// A relative flag value resolves against the current directory (matching
+/// `--dir`'s own resolution), then is canonicalized so workflow identity is
+/// stable across re-runs (`Design decisions: Frontmatter schema` /
+/// `Path split`). Returns `(workflow_file, workflow_dir, is_default)`, where
+/// `is_default` reflects whether the *resolved* workflow file equals
+/// `<dir>/WORKFLOW.md` — true even if the flag was passed but happens to
+/// point at that same file.
+pub fn resolve_workflow(
+    dir: &std::path::Path,
+    flag: Option<&std::path::Path>,
+) -> Result<(PathBuf, PathBuf, bool)> {
+    let (workflow_file, workflow_dir) = match flag {
+        None => (dir.join("WORKFLOW.md"), dir.to_path_buf()),
+        Some(raw) => {
+            let raw = if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .context("resolving current directory")?
+                    .join(raw)
+            };
+            let canonical = raw
+                .canonicalize()
+                .with_context(|| format!("resolving --workflow {}", raw.display()))?;
+            if canonical.is_dir() {
+                (canonical.join("WORKFLOW.md"), canonical)
+            } else {
+                let name = canonical.file_name().and_then(|n| n.to_str());
+                if name != Some("WORKFLOW.md") {
+                    anyhow::bail!(
+                        "--workflow file must be named WORKFLOW.md, got `{}`",
+                        canonical.display()
+                    );
+                }
+                let workflow_dir = canonical
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(|| canonical.clone());
+                (canonical, workflow_dir)
+            }
+        }
+    };
+    let is_default = workflow_file == dir.join("WORKFLOW.md");
+    Ok((workflow_file, workflow_dir, is_default))
+}
+
+#[cfg(test)]
+mod resolve_workflow_tests {
+    use super::*;
+
+    #[test]
+    fn default_when_no_flag() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().canonicalize().unwrap();
+
+        let (file, wf_dir, is_default) = resolve_workflow(&dir, None).unwrap();
+
+        assert_eq!(file, dir.join("WORKFLOW.md"));
+        assert_eq!(wf_dir, dir);
+        assert!(is_default);
+    }
+
+    #[test]
+    fn flag_pointing_at_directory_joins_workflow_md() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().canonicalize().unwrap();
+        let wf_root = dir.join("workflows/triage");
+        std::fs::create_dir_all(&wf_root).unwrap();
+        std::fs::write(wf_root.join("WORKFLOW.md"), "hi").unwrap();
+
+        let (file, wf_dir, is_default) = resolve_workflow(&dir, Some(&wf_root)).unwrap();
+
+        assert_eq!(file, wf_root.canonicalize().unwrap().join("WORKFLOW.md"));
+        assert_eq!(wf_dir, wf_root.canonicalize().unwrap());
+        assert!(!is_default);
+    }
+
+    #[test]
+    fn flag_pointing_at_explicit_workflow_md_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().canonicalize().unwrap();
+        let wf_root = dir.join("workflows/triage");
+        std::fs::create_dir_all(&wf_root).unwrap();
+        let wf_file = wf_root.join("WORKFLOW.md");
+        std::fs::write(&wf_file, "hi").unwrap();
+
+        let (file, wf_dir, is_default) = resolve_workflow(&dir, Some(&wf_file)).unwrap();
+
+        assert_eq!(file, wf_file.canonicalize().unwrap());
+        assert_eq!(wf_dir, wf_root.canonicalize().unwrap());
+        assert!(!is_default);
+    }
+
+    #[test]
+    fn flag_pointing_at_default_workflow_file_is_still_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().canonicalize().unwrap();
+        let wf_file = dir.join("WORKFLOW.md");
+        std::fs::write(&wf_file, "hi").unwrap();
+
+        let (file, wf_dir, is_default) = resolve_workflow(&dir, Some(&wf_file)).unwrap();
+
+        assert_eq!(file, wf_file);
+        assert_eq!(wf_dir, dir);
+        assert!(is_default);
+    }
+
+    #[test]
+    fn flag_pointing_at_wrongly_named_file_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().canonicalize().unwrap();
+        let wf_root = dir.join("workflows/triage");
+        std::fs::create_dir_all(&wf_root).unwrap();
+        let bad_file = wf_root.join("workflow.md");
+        std::fs::write(&bad_file, "hi").unwrap();
+
+        let err = resolve_workflow(&dir, Some(&bad_file)).unwrap_err();
+
+        assert!(
+            err.to_string().contains("must be named WORKFLOW.md"),
+            "{err:#}"
+        );
+    }
 }

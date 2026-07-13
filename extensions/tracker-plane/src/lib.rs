@@ -69,15 +69,16 @@ fn default_app_url() -> String {
 // ---------------------------------------------------------------------------
 
 /// Per-extension config for `extensions.tracker-plane`. Holds the Plane scoping
-/// (`workspace` slug + `project` UUID) and the API/app base URLs. Captured by
+/// (`workspace` slug + `projects` UUIDs) and the API/app base URLs. Captured by
 /// [`PlaneTrackerFactory`] at register time and shared with the (part 2)
 /// `plane_api` host tool via the accessors below.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PlaneExtConfig {
     #[serde(default)]
     pub workspace: String,
+    /// Explicit Plane project UUIDs. Empty ⇒ whole-workspace fetch.
     #[serde(default)]
-    pub project: String,
+    pub projects: Vec<String>,
     #[serde(default = "default_api_url")]
     pub api_url: String,
     #[serde(default = "default_app_url")]
@@ -88,7 +89,7 @@ impl Default for PlaneExtConfig {
     fn default() -> Self {
         Self {
             workspace: String::new(),
-            project: String::new(),
+            projects: Vec::new(),
             api_url: default_api_url(),
             app_url: default_app_url(),
         }
@@ -100,9 +101,9 @@ impl PlaneExtConfig {
     pub fn workspace(&self) -> &str {
         &self.workspace
     }
-    /// Project UUID.
-    pub fn project(&self) -> &str {
-        &self.project
+    /// Explicit Plane project UUIDs (empty ⇒ whole-workspace fetch).
+    pub fn projects(&self) -> &[String] {
+        &self.projects
     }
     /// REST API base URL (default [`DEFAULT_API_URL`]).
     pub fn api_url(&self) -> &str {
@@ -367,27 +368,39 @@ fn ensure_gitignore_entry(root: &Path, entry: &str) -> Result<()> {
     std::fs::write(&path, next).with_context(|| format!("writing {}", path.display()))
 }
 
+/// Render full WORKFLOW.md frontmatter for the Plane tracker: `tracker.kind`,
+/// `tracker.workspace` (Plane workspace slug), `tracker.projects` (the
+/// tracker-agnostic scope key; only written when a project UUID is given,
+/// else the tracker fetches the whole workspace), default active/terminal/
+/// needs-human states, explicit polling, and a workspace block. WORKFLOW.md
+/// frontmatter is now the sole home for loop config, so this always emits a
+/// runnable config (unlike the old agent.yaml trio, which this replaces)
+/// rather than only when a project flag is passed.
 fn workflow_body_with_frontmatter(
     plane_workspace: Option<&str>,
     plane_project: Option<&str>,
     expose_api_tool: bool,
 ) -> String {
-    if plane_workspace.is_none() && plane_project.is_none() && !expose_api_tool {
-        return format!("{DEFAULT_WORKFLOW_MD_BODY}\n");
-    }
-
     let mut out = String::from("---\n");
-    if plane_workspace.is_some() || plane_project.is_some() {
-        out.push_str("tracker:\n");
-        out.push_str("  kind: plane\n");
-        if let Some(workspace) = plane_workspace {
-            out.push_str(&format!("  workspace: {}\n", yaml_string(workspace)));
-        }
-        if let Some(project) = plane_project {
-            out.push_str(&format!("  project: {}\n", yaml_string(project)));
-        }
+    out.push_str("tracker:\n");
+    out.push_str("  kind: plane\n");
+    if let Some(workspace) = plane_workspace {
+        out.push_str(&format!("  workspace: {}\n", yaml_string(workspace)));
     }
+    if let Some(project) = plane_project {
+        out.push_str(&format!("  projects: {}\n", yaml_string(project)));
+    }
+    out.push_str("  active_states: [Todo, \"In Progress\"]\n");
+    out.push_str("  terminal_states: [Done, Cancelled]\n");
+    out.push_str("  needs_human: \"Needs Human\"\n");
+    out.push('\n');
+    out.push_str("polling:\n");
+    out.push_str("  interval_ms: 1000\n");
+    out.push('\n');
+    out.push_str("workspace:\n");
+    out.push_str("  root: ./workspaces\n");
     if expose_api_tool {
+        out.push('\n');
         out.push_str("plane:\n");
         out.push_str("  exposeApiTool: true\n");
     }
@@ -436,7 +449,6 @@ pub struct ExportResult {
 struct ExportAgentConfig {
     id: String,
     name: String,
-    tracker: ExportTrackerConfig,
     #[serde(default)]
     extensions: ExportExtensions,
 }
@@ -454,76 +466,52 @@ struct ExportWorkflowFrontmatter {
     extensions: ExportExtensions,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct ExportWorkflowTracker {
-    #[serde(default, alias = "kind")]
-    use_: Option<String>,
-    #[serde(default)]
-    endpoint: Option<String>,
-    #[serde(default)]
-    workspace: Option<String>,
-    #[serde(default)]
-    project: Option<String>,
-    #[serde(default)]
-    needs_human: Option<String>,
-    #[serde(default)]
-    active_states: Option<Vec<String>>,
-    #[serde(default)]
-    terminal_states: Option<Vec<String>>,
+/// Scalar-or-list `tracker.projects`. Duplicated (rather than shared) from the
+/// orchestrator's `StringOrVec`: `tracker-plane` intentionally does not depend
+/// on the orchestrator crate.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ExportProjects {
+    Scalar(String),
+    List(Vec<String>),
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct ExportTrackerConfig {
-    #[serde(rename = "use")]
-    use_: String,
-    active_states: Vec<String>,
-    terminal_states: Vec<String>,
+impl ExportProjects {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            ExportProjects::Scalar(s) => vec![s],
+            ExportProjects::List(v) => v,
+        }
+    }
+}
+
+/// Tracker config read from WORKFLOW.md frontmatter only (section 8.2): the
+/// standalone export command no longer reads agent.yaml's `tracker` key,
+/// which the config-home flag day removed.
+#[derive(Debug, Default, Deserialize)]
+struct ExportWorkflowTracker {
+    #[serde(default)]
+    kind: Option<String>,
     #[serde(default)]
     endpoint: Option<String>,
     #[serde(default)]
     workspace: Option<String>,
     #[serde(default)]
-    project: Option<String>,
+    projects: Option<ExportProjects>,
     #[serde(default)]
     needs_human: Option<String>,
+    #[serde(default)]
+    active_states: Vec<String>,
+    #[serde(default)]
+    terminal_states: Vec<String>,
 }
 
 pub fn export_plane_project_from_root(root: &Path) -> Result<ExportResult> {
-    let mut agent_cfg: ExportAgentConfig =
+    let agent_cfg: ExportAgentConfig =
         serde_yaml::from_str(&std::fs::read_to_string(root.join("agent.yaml"))?)
             .context("parsing agent.yaml for Plane export")?;
     let workflow = load_workflow_frontmatter(&root.join("WORKFLOW.md"))?;
-    merge_export_workflow(&mut agent_cfg, workflow);
-    export_plane_project(root, &agent_cfg)
-}
-
-fn merge_export_workflow(agent_cfg: &mut ExportAgentConfig, workflow: ExportWorkflowFrontmatter) {
-    if let Some(tracker) = workflow.tracker {
-        if let Some(use_) = tracker.use_ {
-            agent_cfg.tracker.use_ = use_;
-        }
-        if tracker.endpoint.is_some() {
-            agent_cfg.tracker.endpoint = tracker.endpoint;
-        }
-        if tracker.workspace.is_some() {
-            agent_cfg.tracker.workspace = tracker.workspace;
-        }
-        if tracker.project.is_some() {
-            agent_cfg.tracker.project = tracker.project;
-        }
-        if tracker.needs_human.is_some() {
-            agent_cfg.tracker.needs_human = tracker.needs_human;
-        }
-        if let Some(active_states) = tracker.active_states {
-            agent_cfg.tracker.active_states = active_states;
-        }
-        if let Some(terminal_states) = tracker.terminal_states {
-            agent_cfg.tracker.terminal_states = terminal_states;
-        }
-    }
-    if workflow.extensions.tracker_plane.is_some() {
-        agent_cfg.extensions.tracker_plane = workflow.extensions.tracker_plane;
-    }
+    export_plane_project(root, &agent_cfg, &workflow)
 }
 
 fn load_workflow_frontmatter(path: &Path) -> Result<ExportWorkflowFrontmatter> {
@@ -562,20 +550,37 @@ fn split_frontmatter(src: &str) -> (Option<&str>, &str) {
     (None, src)
 }
 
-fn export_plane_project(root: &Path, agent_cfg: &ExportAgentConfig) -> Result<ExportResult> {
-    if agent_cfg.tracker.use_ != "plane" {
-        bail!(
-            "export requires tracker.use \"plane\" (got {:?})",
-            agent_cfg.tracker.use_
-        );
+fn export_plane_project(
+    root: &Path,
+    agent_cfg: &ExportAgentConfig,
+    workflow: &ExportWorkflowFrontmatter,
+) -> Result<ExportResult> {
+    let tracker = workflow.tracker.as_ref().ok_or_else(|| {
+        anyhow!(
+            "WORKFLOW.md has no tracker section; Plane export reads tracker config from WORKFLOW.md frontmatter only"
+        )
+    })?;
+    let kind = tracker.kind.as_deref().unwrap_or_default();
+    if kind != "plane" {
+        bail!("export requires tracker.kind \"plane\" (got {kind:?})");
     }
-    let ext = agent_cfg
+    if tracker.active_states.is_empty() {
+        bail!("tracker.active_states must not be empty for Plane export");
+    }
+    if tracker.terminal_states.is_empty() {
+        bail!("tracker.terminal_states must not be empty for Plane export");
+    }
+
+    // extensions.tracker-plane may live in WORKFLOW.md frontmatter or
+    // agent.yaml; frontmatter wins when both are present.
+    let ext = workflow
         .extensions
         .tracker_plane
         .clone()
+        .or_else(|| agent_cfg.extensions.tracker_plane.clone())
         .unwrap_or_default();
-    let workspace = agent_cfg
-        .tracker
+
+    let workspace = tracker
         .workspace
         .as_deref()
         .unwrap_or(&ext.workspace)
@@ -584,42 +589,43 @@ fn export_plane_project(root: &Path, agent_cfg: &ExportAgentConfig) -> Result<Ex
     if workspace.is_empty() {
         bail!("tracker.workspace is required for Plane export");
     }
-    let project = agent_cfg
-        .tracker
-        .project
-        .as_deref()
-        .unwrap_or(&ext.project)
-        .trim()
-        .to_string();
-    if project.is_empty() {
-        bail!("tracker.project is required for Plane export");
-    }
+
+    let projects = tracker
+        .projects
+        .clone()
+        .map(ExportProjects::into_vec)
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| ext.projects.clone());
+    let project = match projects.len() {
+        1 => projects.into_iter().next().expect("checked len == 1"),
+        n => bail!("Plane export requires exactly one tracker.projects entry (got {n})"),
+    };
+
     let auth = resolve_plane_auth();
     if auth.is_none() {
         bail!("{BOT_TOKEN_ENV}, {OAUTH_TOKEN_ENV}, or {API_KEY_ENV} is required for Plane export");
     }
 
-    let api_url = agent_cfg
-        .tracker
+    let api_url = tracker
         .endpoint
         .clone()
         .filter(|e| !e.is_empty())
         .filter(|e| e != "https://api.linear.app/graphql")
         .unwrap_or_else(|| ext.api_url.clone());
 
-    let mut tracker = PlaneTracker::new(PlaneTrackerConfig {
+    let mut plane_tracker = PlaneTracker::new(PlaneTrackerConfig {
         api_url,
         app_url: ext.app_url.clone(),
         workspace,
-        project,
+        projects: vec![project],
         auth,
-        active_states: agent_cfg.tracker.active_states.clone(),
-        terminal_states: agent_cfg.tracker.terminal_states.clone(),
-        needs_human: agent_cfg.tracker.needs_human.clone(),
+        active_states: tracker.active_states.clone(),
+        terminal_states: tracker.terminal_states.clone(),
+        needs_human: tracker.needs_human.clone(),
         mention: None,
     })?;
-    tracker.resolve_boot()?;
-    let snapshot = tracker.export_snapshot()?;
+    plane_tracker.resolve_boot()?;
+    let snapshot = plane_tracker.export_snapshot()?;
     write_snapshot(root, agent_cfg, snapshot)
 }
 
@@ -685,12 +691,11 @@ impl TrackerFactory for PlaneTrackerFactory {
         if workspace.is_empty() {
             bail!("tracker.workspace is required for Plane (workspace slug)");
         }
-        let project = cfg
-            .project
-            .as_deref()
-            .unwrap_or(&self.config.project)
-            .trim()
-            .to_string();
+        let projects = if cfg.projects.is_empty() {
+            self.config.projects.clone()
+        } else {
+            cfg.projects
+        };
         validate_states(
             &cfg.active_states,
             &cfg.terminal_states,
@@ -718,7 +723,7 @@ impl TrackerFactory for PlaneTrackerFactory {
             api_url,
             app_url: self.config.app_url.clone(),
             workspace,
-            project,
+            projects,
             auth,
             active_states: cfg.active_states,
             terminal_states: cfg.terminal_states,
@@ -767,7 +772,8 @@ pub struct PlaneTrackerConfig {
     pub api_url: String,
     pub app_url: String,
     pub workspace: String,
-    pub project: String,
+    /// Explicit Plane project UUIDs. Empty ⇒ whole-workspace fetch.
+    pub projects: Vec<String>,
     pub(crate) auth: Option<PlaneAuth>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
@@ -780,7 +786,8 @@ pub struct PlaneTracker {
     api_url: String,
     app_url: String,
     workspace: String,
-    project: String,
+    /// Explicit Plane project UUIDs. Empty ⇒ whole-workspace fetch.
+    projects: Vec<String>,
     auth: Option<PlaneAuth>,
     active: Vec<String>,
     terminal: Vec<String>,
@@ -817,7 +824,7 @@ impl PlaneTracker {
                 cfg.app_url
             },
             workspace: cfg.workspace,
-            project: cfg.project,
+            projects: cfg.projects,
             auth: cfg.auth,
             active: cfg.active_states,
             terminal: cfg.terminal_states,
@@ -842,10 +849,6 @@ impl PlaneTracker {
         )
     }
 
-    fn projects_base(&self) -> String {
-        self.project_base(&self.project)
-    }
-
     fn project_base(&self, project: &str) -> String {
         format!(
             "{}/api/v1/workspaces/{}/projects/{}",
@@ -853,6 +856,25 @@ impl PlaneTracker {
             self.workspace,
             project
         )
+    }
+
+    /// Map every fetched work item's UUID to its human identifier, resolving
+    /// each item's project prefix from its OWN project via `project_meta_by_id`
+    /// (falling back to the first-configured project's prefix only when the
+    /// project is unknown). Building the map with a single prefix would stamp
+    /// blockers that live in a second/third configured project with the wrong
+    /// project's identifier.
+    fn identifier_by_uuid(&self, raw: &[RawWorkItem]) -> HashMap<String, String> {
+        raw.iter()
+            .map(|r| {
+                let prefix = self
+                    .project_meta_by_id
+                    .get(&r.project_id)
+                    .map(|m| m.identifier.as_str())
+                    .unwrap_or(self.project_identifier.as_str());
+                (r.id.clone(), build_identifier(prefix, r.sequence_id))
+            })
+            .collect()
     }
 
     fn map_ctx(&self, identifier_by_uuid: &HashMap<String, String>) -> MapCtx<'_> {
@@ -1013,7 +1035,7 @@ impl PlaneTracker {
 
     fn resolve_boot(&mut self) -> Result<()> {
         self.run_async(async {
-            let project_ids = if self.project.trim().is_empty() {
+            let project_ids = if self.projects.is_empty() {
                 self.fetch_all_paginated(&format!("{}/projects/", self.workspace_base()))
                     .await
                     .context("fetching Plane workspace projects")?
@@ -1021,7 +1043,7 @@ impl PlaneTracker {
                     .filter_map(|p| p.get("id").and_then(Value::as_str).map(str::to_string))
                     .collect::<Vec<_>>()
             } else {
-                vec![self.project.clone()]
+                self.projects.clone()
             };
             if project_ids.is_empty() {
                 bail!(
@@ -1176,17 +1198,16 @@ impl PlaneTracker {
         self.fetch_all_work_items_with_mention_filter(false).await
     }
 
+    /// Fetches work items scoped by `self.projects`: whole-workspace when empty
+    /// (regression-critical, unchanged behavior), otherwise one paginated fetch
+    /// per configured project, merged and deduplicated by work-item id. Each
+    /// per-project fetch keeps its own pagination-warning behavior via
+    /// `fetch_all_paginated_query`.
     async fn fetch_all_work_items_with_mention_filter(
         &self,
         apply_mention_filter: bool,
     ) -> Result<Vec<RawWorkItem>> {
-        let url = if self.project.trim().is_empty() {
-            format!("{}/work-items/", self.workspace_base())
-        } else {
-            format!("{}/work-items/", self.projects_base())
-        };
-        let mut out = Vec::new();
-        let query = if apply_mention_filter {
+        let query: Vec<(&str, String)> = if apply_mention_filter {
             self.mention_user_id
                 .as_ref()
                 .map(|id| vec![("pql", format!("mention = {id:?}"))])
@@ -1194,7 +1215,39 @@ impl PlaneTracker {
         } else {
             Vec::new()
         };
-        for node in self.fetch_all_paginated_query(&url, query).await? {
+
+        let urls = self.work_item_urls(&self.projects);
+        let mut batches = Vec::with_capacity(urls.len());
+        for url in &urls {
+            batches.push(self.collect_work_items(url, query.clone()).await?);
+        }
+        Ok(merge_dedup_work_items(batches))
+    }
+
+    /// Decide the work-items URL(s) to fetch for a configured project list.
+    /// Empty `projects` ⇒ a single whole-workspace URL (regression-critical:
+    /// unchanged unconstrained-fetch behavior); otherwise one URL per
+    /// configured project.
+    fn work_item_urls(&self, projects: &[String]) -> Vec<String> {
+        if projects.is_empty() {
+            vec![format!("{}/work-items/", self.workspace_base())]
+        } else {
+            projects
+                .iter()
+                .map(|p| format!("{}/work-items/", self.project_base(p)))
+                .collect()
+        }
+    }
+
+    /// Fetch and parse every page of one work-items URL, logging (and skipping)
+    /// individually unparseable items rather than failing the whole fetch.
+    async fn collect_work_items(
+        &self,
+        url: &str,
+        query: Vec<(&str, String)>,
+    ) -> Result<Vec<RawWorkItem>> {
+        let mut out = Vec::new();
+        for node in self.fetch_all_paginated_query(url, query).await? {
             match serde_json::from_value::<RawWorkItem>(node) {
                 Ok(item) => out.push(item),
                 Err(e) => tracing::warn!("PlaneTracker: skipping unparseable work item: {e}"),
@@ -1233,15 +1286,7 @@ impl PlaneTracker {
             .iter()
             .map(|r| (r.id.clone(), self.state_name(&r.state_id)))
             .collect();
-        let identifier_by_uuid: HashMap<String, String> = raw
-            .iter()
-            .map(|r| {
-                (
-                    r.id.clone(),
-                    build_identifier(&self.project_identifier, r.sequence_id),
-                )
-            })
-            .collect();
+        let identifier_by_uuid = self.identifier_by_uuid(&raw);
         let ctx = self.map_ctx(&identifier_by_uuid);
 
         let mut out = Vec::new();
@@ -1291,15 +1336,7 @@ impl PlaneTracker {
             } else {
                 self.fetch_all_work_items_unfiltered().await?
             };
-            let identifier_by_uuid: HashMap<String, String> = raw
-                .iter()
-                .map(|r| {
-                    (
-                        r.id.clone(),
-                        build_identifier(&self.project_identifier, r.sequence_id),
-                    )
-                })
-                .collect();
+            let identifier_by_uuid = self.identifier_by_uuid(&raw);
             let ctx = self.map_ctx(&identifier_by_uuid);
             Ok(raw.iter().map(|r| raw_to_issue(r, &ctx, &[])).collect())
         })
@@ -1310,15 +1347,7 @@ impl PlaneTracker {
     pub fn export_snapshot(&self) -> Result<PlaneExport> {
         self.run_async(async {
             let raw = self.fetch_all_work_items().await?;
-            let identifier_by_uuid: HashMap<String, String> = raw
-                .iter()
-                .map(|r| {
-                    (
-                        r.id.clone(),
-                        build_identifier(&self.project_identifier, r.sequence_id),
-                    )
-                })
-                .collect();
+            let identifier_by_uuid = self.identifier_by_uuid(&raw);
             let ctx = self.map_ctx(&identifier_by_uuid);
             let issues: Vec<Issue> = raw.iter().map(|r| raw_to_issue(r, &ctx, &[])).collect();
             Ok(PlaneExport {
@@ -1346,12 +1375,19 @@ impl PlaneTracker {
             .get(needs_human)
             .cloned()
             .ok_or_else(|| anyhow!("Plane state {needs_human:?} not resolved at boot"))?;
+        // Fallback chain: the issue's own metadata (always present for issues
+        // this tracker fetched itself) wins; otherwise fall back to the first
+        // configured project; a fully-unscoped tracker (no projects configured
+        // and no metadata) falls back to an empty project id, matching prior
+        // behavior.
         let project_id = issue
             .metadata
             .get("plane_project_id")
             .and_then(Value::as_str)
-            .unwrap_or(&self.project);
-        self.run_async(self.do_park_issue_needs_human(&issue.id, &state_id, project_id, comment))
+            .map(str::to_string)
+            .or_else(|| self.projects.first().cloned())
+            .unwrap_or_default();
+        self.run_async(self.do_park_issue_needs_human(&issue.id, &state_id, &project_id, comment))
     }
 
     /// Section 3: PATCH the work item to the needs-human state, then POST a
@@ -1487,7 +1523,11 @@ fn extract_page(resp: &Value) -> (Vec<Value>, Option<String>, bool) {
 /// against a page that claims more results (`has_next`) but returns no advancing
 /// cursor (null/absent, or identical to the current one) — trusting the two
 /// fields to agree would re-request the same page forever.
-fn advance_cursor(has_next: bool, next_cursor: Option<String>, current: Option<&str>) -> Option<String> {
+fn advance_cursor(
+    has_next: bool,
+    next_cursor: Option<String>,
+    current: Option<&str>,
+) -> Option<String> {
     match next_cursor {
         Some(next) if has_next && Some(next.as_str()) != current => Some(next),
         _ => None,
@@ -1556,6 +1596,23 @@ fn is_blocked(
             .map(|s| !terminal.iter().any(|t| t == s))
             .unwrap_or(false)
     })
+}
+
+/// Merge per-project batches of already-fetched work items into one list,
+/// deduplicating by work-item id (a work item fetched from more than one
+/// per-project request keeps only its first occurrence). A single batch
+/// (the whole-workspace or single-project case) passes through unchanged.
+fn merge_dedup_work_items(batches: Vec<Vec<RawWorkItem>>) -> Vec<RawWorkItem> {
+    let mut out = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+    for batch in batches {
+        for item in batch {
+            if seen_ids.insert(item.id.clone()) {
+                out.push(item);
+            }
+        }
+    }
+    out
 }
 
 /// Constant context for mapping a [`RawWorkItem`] to a portable [`Issue`].
@@ -1758,19 +1815,19 @@ mod tests {
     fn parse_ext_config_reads_all_fields() {
         let cfg = parse_ext_config(Some(&json!({
             "workspace": "acme",
-            "project": "proj-uuid",
+            "projects": ["proj-uuid"],
             "api_url": "https://plane.internal",
             "app_url": "https://app.internal"
         })));
         assert_eq!(cfg.workspace(), "acme");
-        assert_eq!(cfg.project(), "proj-uuid");
+        assert_eq!(cfg.projects(), ["proj-uuid"]);
         assert_eq!(cfg.api_url(), "https://plane.internal");
         assert_eq!(cfg.app_url(), "https://app.internal");
     }
 
     #[test]
     fn parse_ext_config_defaults_urls() {
-        let cfg = parse_ext_config(Some(&json!({ "workspace": "acme", "project": "p" })));
+        let cfg = parse_ext_config(Some(&json!({ "workspace": "acme", "projects": ["p"] })));
         assert_eq!(cfg.api_url(), DEFAULT_API_URL);
         assert_eq!(cfg.app_url(), DEFAULT_APP_URL);
     }
@@ -1779,7 +1836,7 @@ mod tests {
     fn parse_ext_config_none_is_default() {
         let cfg = parse_ext_config(None);
         assert_eq!(cfg.workspace(), "");
-        assert_eq!(cfg.project(), "");
+        assert!(cfg.projects().is_empty());
         assert_eq!(cfg.api_url(), DEFAULT_API_URL);
         assert_eq!(cfg.app_url(), DEFAULT_APP_URL);
     }
@@ -1791,7 +1848,7 @@ mod tests {
             api_url: "http://localhost".to_string(),
             app_url: "https://app.plane.so".to_string(),
             workspace: "ws".to_string(),
-            project: "proj".to_string(),
+            projects: vec!["proj".to_string()],
             auth: None,
             active_states: vec![],
             terminal_states: vec![],
@@ -2026,6 +2083,54 @@ mod tests {
     }
 
     #[test]
+    fn identifier_by_uuid_uses_each_items_own_project_prefix() {
+        // Two configured projects with different identifier prefixes. A blocker
+        // living in the second project must map to that project's prefix, not
+        // the first-configured one.
+        let mut tracker = make_tracker();
+        tracker.project_identifier = "PROJA".to_string();
+        tracker.project_meta_by_id.insert(
+            "proj-a".to_string(),
+            ProjectMeta {
+                identifier: "PROJA".to_string(),
+                name: Some("Alpha".to_string()),
+            },
+        );
+        tracker.project_meta_by_id.insert(
+            "proj-b".to_string(),
+            ProjectMeta {
+                identifier: "PROJB".to_string(),
+                name: Some("Bravo".to_string()),
+            },
+        );
+        let raw = vec![
+            work_item_in_project("wi-a", "proj-a", 10),
+            work_item_in_project("wi-b", "proj-b", 15),
+        ];
+        let map = tracker.identifier_by_uuid(&raw);
+        assert_eq!(map.get("wi-a").map(String::as_str), Some("PROJA-10"));
+        assert_eq!(map.get("wi-b").map(String::as_str), Some("PROJB-15"));
+    }
+
+    fn work_item_in_project(id: &str, project_id: &str, sequence_id: i64) -> RawWorkItem {
+        serde_json::from_value(json!({
+            "id": id,
+            "name": "item",
+            "description_html": null,
+            "priority": null,
+            "state_id": "state-todo",
+            "sequence_id": sequence_id,
+            "label_ids": [],
+            "assignee_ids": [],
+            "parent_id": null,
+            "project_id": project_id,
+            "created_at": "2026-06-11T10:00:00Z",
+            "updated_at": "2026-06-11T11:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[test]
     fn raw_to_issue_resolves_blocked_by_to_identifiers() {
         let states = HashMap::new();
         let labels = HashMap::new();
@@ -2092,7 +2197,82 @@ mod tests {
             None
         );
         // Last page.
-        assert_eq!(super::advance_cursor(false, Some("c2".to_string()), Some("c1")), None);
+        assert_eq!(
+            super::advance_cursor(false, Some("c2".to_string()), Some("c1")),
+            None
+        );
+    }
+
+    // --- multi-project fetch (P3 step 8: tracker.projects) ---
+
+    fn work_item_json(id: &str) -> RawWorkItem {
+        serde_json::from_str(&format!(
+            r#"{{ "id": "{id}", "name": "wi", "state_id": "s", "sequence_id": 1 }}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn work_item_urls_empty_projects_is_whole_workspace() {
+        // Regression-critical: empty `projects` must still hit the single
+        // whole-workspace endpoint, exactly as before `tracker.projects` existed.
+        let tracker = make_tracker();
+        let urls = tracker.work_item_urls(&[]);
+        assert_eq!(
+            urls,
+            vec!["http://localhost/api/v1/workspaces/ws/work-items/".to_string()]
+        );
+    }
+
+    #[test]
+    fn work_item_urls_explicit_projects_one_url_each() {
+        let tracker = make_tracker();
+        let urls = tracker.work_item_urls(&["p1".to_string(), "p2".to_string()]);
+        assert_eq!(
+            urls,
+            vec![
+                "http://localhost/api/v1/workspaces/ws/projects/p1/work-items/".to_string(),
+                "http://localhost/api/v1/workspaces/ws/projects/p2/work-items/".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_dedup_work_items_merges_across_projects() {
+        let batches = vec![
+            vec![work_item_json("wi-1"), work_item_json("wi-2")],
+            vec![work_item_json("wi-3")],
+        ];
+        let ids: Vec<String> = super::merge_dedup_work_items(batches)
+            .into_iter()
+            .map(|w| w.id)
+            .collect();
+        assert_eq!(ids, vec!["wi-1", "wi-2", "wi-3"]);
+    }
+
+    #[test]
+    fn merge_dedup_work_items_dedups_by_id_keeping_first() {
+        // A work item fetched from more than one per-project request (e.g. a
+        // shared/duplicated id) must appear once in the merged result.
+        let batches = vec![
+            vec![work_item_json("wi-1")],
+            vec![work_item_json("wi-1"), work_item_json("wi-2")],
+        ];
+        let ids: Vec<String> = super::merge_dedup_work_items(batches)
+            .into_iter()
+            .map(|w| w.id)
+            .collect();
+        assert_eq!(ids, vec!["wi-1", "wi-2"]);
+    }
+
+    #[test]
+    fn merge_dedup_work_items_single_batch_passes_through_unchanged() {
+        let batches = vec![vec![work_item_json("wi-1"), work_item_json("wi-2")]];
+        let ids: Vec<String> = super::merge_dedup_work_items(batches)
+            .into_iter()
+            .map(|w| w.id)
+            .collect();
+        assert_eq!(ids, vec!["wi-1", "wi-2"]);
     }
 
     fn state_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -2176,8 +2356,7 @@ mod tests {
             config_path: None,
             active_states: active,
             terminal_states: terminal,
-            project_slug: None,
-            project: None,
+            projects: vec![],
             workspace: None,
             endpoint: None,
             needs_human: None,
@@ -2193,7 +2372,7 @@ mod tests {
     fn factory_rejects_empty_workspace() {
         let factory = PlaneTrackerFactory::new(PlaneExtConfig {
             workspace: String::new(),
-            project: "p".into(),
+            projects: vec!["p".into()],
             ..Default::default()
         });
         let err = build_err(
@@ -2207,7 +2386,7 @@ mod tests {
     fn factory_rejects_invalid_states_before_network() {
         let factory = PlaneTrackerFactory::new(PlaneExtConfig {
             workspace: "acme".into(),
-            project: "p".into(),
+            projects: vec!["p".into()],
             ..Default::default()
         });
         // Empty active_states fails validation before any Plane request.
@@ -2268,7 +2447,14 @@ mod tests {
         super::init_workflow(dir.path(), false).unwrap();
 
         let body = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
-        assert_eq!(body, format!("{}\n", super::DEFAULT_WORKFLOW_MD_BODY));
+        assert!(body.starts_with("---\n"));
+        assert!(body.contains("  kind: plane\n"));
+        assert!(!body.contains("projects:"));
+        assert!(body.contains("  active_states: [Todo, \"In Progress\"]\n"));
+        assert!(body.contains("  terminal_states: [Done, Cancelled]\n"));
+        assert!(body.contains("interval_ms: 1000\n"));
+        assert!(body.contains("workspace:\n  root: ./workspaces\n"));
+        assert!(body.ends_with(&format!("{}\n", super::DEFAULT_WORKFLOW_MD_BODY)));
         assert_eq!(
             std::fs::read_to_string(dir.path().join(".gitignore")).unwrap(),
             ".env\n"
@@ -2293,7 +2479,7 @@ mod tests {
         std::fs::write(dir.path().join("WORKFLOW.md"), "existing").unwrap();
         super::init_workflow(dir.path(), true).unwrap();
         let body = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
-        assert_eq!(body, format!("{}\n", super::DEFAULT_WORKFLOW_MD_BODY));
+        assert!(body.contains("  kind: plane\n"));
     }
 
     #[test]
@@ -2306,8 +2492,26 @@ mod tests {
         assert!(body.starts_with("---\n"));
         assert!(body.contains("  kind: plane\n"));
         assert!(body.contains("  workspace: acme\n"));
-        assert!(body.contains("  project: proj-uuid\n"));
+        assert!(body.contains("  projects: proj-uuid\n"));
         assert!(body.contains("  exposeApiTool: true\n"));
+    }
+
+    #[test]
+    fn init_workflow_default_frontmatter_is_runnable_without_project_flags() {
+        // The scaffold written for a plain `dar create --orchestrator` (no
+        // project flags) must still parse as a runnable loop config: a
+        // tracker.kind plus non-empty active/terminal states (mirrors
+        // `WorkflowFrontmatter::validate_loop`'s requirements).
+        let dir = tempfile::tempdir().unwrap();
+        super::init_workflow(dir.path(), false).unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("WORKFLOW.md")).unwrap();
+        let (frontmatter, _) = super::split_frontmatter(&raw);
+        let frontmatter: super::ExportWorkflowFrontmatter =
+            serde_yaml::from_str(frontmatter.unwrap()).unwrap();
+        let tracker = frontmatter.tracker.expect("tracker section present");
+        assert_eq!(tracker.kind.as_deref(), Some("plane"));
+        assert!(!tracker.active_states.is_empty());
+        assert!(!tracker.terminal_states.is_empty());
     }
 
     #[test]
@@ -2332,15 +2536,6 @@ mod tests {
         let agent_cfg = super::ExportAgentConfig {
             id: "agent-1".to_string(),
             name: "Agent One".to_string(),
-            tracker: super::ExportTrackerConfig {
-                use_: "plane".to_string(),
-                active_states: vec!["Todo".to_string()],
-                terminal_states: vec!["Done".to_string()],
-                endpoint: None,
-                workspace: None,
-                project: None,
-                needs_human: None,
-            },
             extensions: super::ExportExtensions::default(),
         };
         let issue = Issue::builder(
@@ -2385,5 +2580,76 @@ mod tests {
         assert_eq!(issues[0]["identifier"], "PROJ-7");
         assert_eq!(issues[0]["title"], "Move tracker");
         assert_eq!(issues[0]["state"], "Todo");
+    }
+
+    // --- export: frontmatter-only, exactly-one-project guard ---
+
+    fn export_agent_cfg() -> super::ExportAgentConfig {
+        super::ExportAgentConfig {
+            id: "agent-1".to_string(),
+            name: "Agent One".to_string(),
+            extensions: super::ExportExtensions::default(),
+        }
+    }
+
+    fn export_workflow(
+        projects: Option<super::ExportProjects>,
+    ) -> super::ExportWorkflowFrontmatter {
+        super::ExportWorkflowFrontmatter {
+            tracker: Some(super::ExportWorkflowTracker {
+                kind: Some("plane".to_string()),
+                endpoint: None,
+                workspace: Some("acme".to_string()),
+                projects,
+                needs_human: None,
+                active_states: vec!["Todo".to_string()],
+                terminal_states: vec!["Done".to_string()],
+            }),
+            extensions: super::ExportExtensions::default(),
+        }
+    }
+
+    #[test]
+    fn export_rejects_zero_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let err =
+            super::export_plane_project(dir.path(), &export_agent_cfg(), &export_workflow(None))
+                .unwrap_err();
+        assert!(err.to_string().contains("exactly one"));
+    }
+
+    #[test]
+    fn export_rejects_multiple_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow = export_workflow(Some(super::ExportProjects::List(vec![
+            "p1".to_string(),
+            "p2".to_string(),
+        ])));
+        let err =
+            super::export_plane_project(dir.path(), &export_agent_cfg(), &workflow).unwrap_err();
+        assert!(err.to_string().contains("exactly one"));
+    }
+
+    #[test]
+    fn export_projects_scalar_and_list_both_resolve_to_a_vec() {
+        // `tracker.projects` accepts either a bare scalar or a list; both forms
+        // must feed the same exactly-one-project guard identically.
+        assert_eq!(
+            super::ExportProjects::Scalar("p1".to_string()).into_vec(),
+            vec!["p1".to_string()]
+        );
+        assert_eq!(
+            super::ExportProjects::List(vec!["p1".to_string(), "p2".to_string()]).into_vec(),
+            vec!["p1".to_string(), "p2".to_string()]
+        );
+    }
+
+    #[test]
+    fn export_requires_tracker_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflow = super::ExportWorkflowFrontmatter::default();
+        let err =
+            super::export_plane_project(dir.path(), &export_agent_cfg(), &workflow).unwrap_err();
+        assert!(err.to_string().contains("tracker section"));
     }
 }

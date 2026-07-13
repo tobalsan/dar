@@ -204,8 +204,9 @@ pub struct TrackerBuildConfig {
     pub config_path: Option<PathBuf>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
-    pub project_slug: Option<String>,
-    pub project: Option<String>,
+    /// Tracker-agnostic project scope: Linear slugIds, Plane project UUIDs, etc.
+    /// Empty means unconstrained (whole team/workspace).
+    pub projects: Vec<String>,
     pub workspace: Option<String>,
     pub endpoint: Option<String>,
     pub needs_human: Option<String>,
