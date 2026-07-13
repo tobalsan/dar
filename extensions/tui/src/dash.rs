@@ -156,6 +156,9 @@ fn header(snapshot: &RunSnapshot, now: DateTime<Utc>) -> String {
         "agent {} | tracker {} | runner {}",
         agent.id, agent.tracker, agent.runner
     );
+    if let Some(workflow) = &agent.workflow {
+        header.push_str(&format!(" | workflow {workflow}"));
+    }
     if snapshot.paused {
         header.push_str(" | PAUSED");
     }
@@ -379,6 +382,19 @@ mod tests {
         assert_eq!(
             rows[0],
             "agent demo | tracker files | runner fake | last tick never"
+        );
+    }
+
+    #[test]
+    fn header_appends_workflow_label_when_non_default() {
+        let now = Utc::now();
+        let mut snapshot = populated_snapshot(now);
+        snapshot.agent.workflow = Some("triage".to_string());
+        let rows = lines(&snapshot, now);
+        assert_eq!(
+            rows[0],
+            "agent demo | tracker files | runner fake | workflow triage | PAUSED \
+             | last tick 3s ago | rate limit 42min remaining"
         );
     }
 

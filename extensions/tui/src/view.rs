@@ -196,6 +196,9 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     if app.dash.snapshot.version > 0 && !agent.id.is_empty() {
         parts.push(agent.id.clone());
     }
+    if let Some(workflow) = &agent.workflow {
+        parts.push(workflow.clone());
+    }
     match (&agent.provider, &agent.model) {
         (Some(provider), Some(model)) => parts.push(format!("{provider}/{model}")),
         (None, Some(model)) => parts.push(model.clone()),
@@ -688,6 +691,17 @@ mod tests {
         // No usage reported yet: no token readout on the status line.
         assert!(!screen.contains("k/"));
         assert!(!screen.contains("%"));
+    }
+
+    #[test]
+    fn status_line_appends_workflow_label_when_non_default() {
+        let mut app = App::new();
+        app.dash.snapshot.version = 1;
+        app.dash.snapshot.agent.id = "demo".to_string();
+        app.dash.snapshot.agent.workflow = Some("triage".to_string());
+        let screen = rendered(&app);
+        assert!(screen.contains("demo"));
+        assert!(screen.contains("triage"));
     }
 
     #[test]

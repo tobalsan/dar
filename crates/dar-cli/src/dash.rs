@@ -23,7 +23,7 @@
 //! aggregator (the request `Host` header), keeping only the agent's port.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use axum::extract::State;
@@ -179,6 +179,27 @@ fn dialable_host(addr: &str) -> String {
     }
 }
 
+/// `id · <workflow-dir basename>`, or plain `id` when the workflow's
+/// directory is the agent folder (the default workflow).
+fn agent_label(entry: &PresenceEntry) -> String {
+    let folder = Path::new(&entry.folder);
+    let wf_dir = Path::new(&entry.workflow).parent();
+    match wf_dir {
+        Some(dir) if dir != folder => {
+            let base = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if base.is_empty() {
+                entry.id.clone()
+            } else {
+                format!("{} \u{b7} {}", entry.id, base)
+            }
+        }
+        _ => entry.id.clone(),
+    }
+}
+
 fn render_shell(agents: &[PresenceEntry], request_host: Option<&str>) -> Result<String> {
     let mut items = String::new();
     let mut first_url = String::new();
@@ -196,7 +217,7 @@ fn render_shell(agents: &[PresenceEntry], request_host: Option<&str>) -> Result<
              <span class=\"aid\">{id}</span>\
              <span class=\"afolder\">{folder}</span></button></li>",
             url = he(&url),
-            id = he(&a.id),
+            id = he(&agent_label(a)),
             folder = he(folder),
         ));
     }
@@ -276,8 +297,16 @@ fn render_shell(agents: &[PresenceEntry], request_host: Option<&str>) -> Result<
         b.dataset.src = url;
         b.onclick = function () {{ pick(b); }};
         var folder = (a.folder || '').split('/').pop();
+        var wfParts = (a.workflow || '').split('/');
+        wfParts.pop();
+        var wfDir = wfParts.join('/');
+        var label = a.id;
+        if (wfDir && wfDir !== a.folder) {{
+          var wfBase = wfDir.split('/').pop();
+          if (wfBase) label = a.id + ' · ' + wfBase;
+        }}
         b.innerHTML = '<span class="aid"></span><span class="afolder"></span>';
-        b.querySelector('.aid').textContent = a.id;
+        b.querySelector('.aid').textContent = label;
         b.querySelector('.afolder').textContent = folder;
         if (url === currentSrc) b.classList.add('active');
         li.appendChild(b);
@@ -312,9 +341,14 @@ mod tests {
     use super::*;
 
     fn entry(id: &str, folder: &str, addr: &str, pid: u32) -> PresenceEntry {
+        entry_wf(id, folder, &format!("{folder}/WORKFLOW.md"), addr, pid)
+    }
+
+    fn entry_wf(id: &str, folder: &str, workflow: &str, addr: &str, pid: u32) -> PresenceEntry {
         PresenceEntry {
             id: id.to_string(),
             folder: folder.to_string(),
+            workflow: workflow.to_string(),
             addr: addr.to_string(),
             pid,
             started_at: 0,
@@ -355,6 +389,24 @@ mod tests {
     }
 
     #[test]
+    fn agent_label_is_plain_id_for_default_workflow() {
+        let e = entry("ALG-1", "/agents/one", "0.0.0.0:1", 1);
+        assert_eq!(agent_label(&e), "ALG-1");
+    }
+
+    #[test]
+    fn agent_label_appends_workflow_dir_basename_for_external_workflow() {
+        let e = entry_wf(
+            "ALG-1",
+            "/agents/one",
+            "/tmp/wf-a/WORKFLOW.md",
+            "0.0.0.0:1",
+            1,
+        );
+        assert_eq!(agent_label(&e), "ALG-1 \u{b7} wf-a");
+    }
+
+    #[test]
     fn render_lists_live_agents() {
         let agents = vec![
             entry("ALG-1", "/agents/one", "0.0.0.0:50001", 1),
@@ -367,6 +419,19 @@ mod tests {
         assert!(html.contains("http://studio.ts.net:50002/"));
         // First agent's dashboard is loaded by default.
         assert!(html.contains("src=\"http://studio.ts.net:50001/\""));
+    }
+
+    #[test]
+    fn render_labels_external_workflow_entry() {
+        let agents = vec![entry_wf(
+            "ALG-1",
+            "/agents/one",
+            "/tmp/wf-a/WORKFLOW.md",
+            "0.0.0.0:50001",
+            1,
+        )];
+        let html = render_shell(&agents, Some("studio.ts.net")).unwrap();
+        assert!(html.contains("ALG-1 \u{b7} wf-a"));
     }
 
     #[test]

@@ -163,9 +163,16 @@ fn register_presence(
     let root = ctx.paths.root();
     let id = read_agent_id(root)?;
     let folder = root.to_string_lossy().to_string();
+    let workflow = ctx
+        .paths
+        .workflow_root()
+        .join("WORKFLOW.md")
+        .to_string_lossy()
+        .to_string();
     let entry = dar_presence::PresenceEntry {
         id,
         folder,
+        workflow,
         addr: advertised_addr(addr),
         pid: std::process::id(),
         started_at: std::time::SystemTime::now()
@@ -185,7 +192,10 @@ struct PresenceGuard {
 
 impl PresenceGuard {
     fn unlink(&self) {
-        if let Err(e) = self.registry.remove(&self.entry.id, &self.entry.folder) {
+        if let Err(e) =
+            self.registry
+                .remove(&self.entry.id, &self.entry.folder, &self.entry.workflow)
+        {
             tracing::warn!("dashboard presence unlink failed: {e:#}");
         }
     }

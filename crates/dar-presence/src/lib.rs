@@ -11,9 +11,11 @@
 //!
 //! ## File layout
 //!
-//! One file per agent, named `<id-slug>-<folder-hash>.json`. Keying on both id
-//! and a hash of the folder means one operator can run the same agent id from
-//! two different folders without the presence files colliding.
+//! One file per agent+workflow, named `<id-slug>-<hash>.json`, where `hash`
+//! digests both the agent folder and the canonical `WORKFLOW.md` path.
+//! Keying on all three means one operator can run the same agent id from two
+//! different folders, or run several workflows concurrently against one
+//! agent folder, without the presence files colliding.
 //!
 //! ## Liveness
 //!
@@ -47,6 +49,10 @@ pub struct PresenceEntry {
     pub id: String,
     /// Absolute agent folder the dashboard is serving.
     pub folder: String,
+    /// Canonical path to the resolved `WORKFLOW.md` this run is driving.
+    /// Distinguishes concurrent `--workflow <path>` runs of one agent so
+    /// their presence files never clobber each other.
+    pub workflow: String,
     /// Host:port the dashboard's HTTP server bound, as seen on the LAN/tailnet
     /// (e.g. `0.0.0.0:53124`). The aggregator substitutes the host portion with
     /// the browser's request host so the iframe resolves from the client side.
@@ -59,10 +65,11 @@ pub struct PresenceEntry {
 
 impl PresenceEntry {
     /// Filename (no directory) this entry is stored under: `<id>-<hash>.json`.
-    /// `id` is slugified to keep the name filesystem-safe; the folder hash
-    /// disambiguates same-id agents in different folders.
+    /// `id` is slugified to keep the name filesystem-safe; the hash of
+    /// folder + workflow disambiguates same-id agents in different folders
+    /// and concurrent workflows within one folder.
     pub fn file_name(&self) -> String {
-        file_name_for(&self.id, &self.folder)
+        file_name_for(&self.id, &self.folder, &self.workflow)
     }
 
     /// The port portion of [`PresenceEntry::addr`], if parseable.
@@ -71,10 +78,12 @@ impl PresenceEntry {
     }
 }
 
-/// Compute the storage filename for an id + folder pair.
-pub fn file_name_for(id: &str, folder: &str) -> String {
+/// Compute the storage filename for an id + folder + workflow triple.
+pub fn file_name_for(id: &str, folder: &str, workflow: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(folder.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(workflow.as_bytes());
     let digest = hasher.finalize();
     let hash = hex::encode(&digest[..6]);
     format!("{}-{}.json", slugify(id), hash)
@@ -132,8 +141,8 @@ impl Registry {
 
     /// Remove this entry's presence file. Missing file is not an error
     /// (clean-shutdown unlink is idempotent across restarts).
-    pub fn remove(&self, id: &str, folder: &str) -> Result<()> {
-        let path = self.dir.join(file_name_for(id, folder));
+    pub fn remove(&self, id: &str, folder: &str, workflow: &str) -> Result<()> {
+        let path = self.dir.join(file_name_for(id, folder, workflow));
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -215,9 +224,14 @@ mod tests {
     use super::*;
 
     fn entry(id: &str, folder: &str, pid: u32) -> PresenceEntry {
+        entry_wf(id, folder, &format!("{folder}/WORKFLOW.md"), pid)
+    }
+
+    fn entry_wf(id: &str, folder: &str, workflow: &str, pid: u32) -> PresenceEntry {
         PresenceEntry {
             id: id.to_string(),
             folder: folder.to_string(),
+            workflow: workflow.to_string(),
             addr: "0.0.0.0:50000".to_string(),
             pid,
             started_at: 1_700_000_000,
@@ -254,10 +268,10 @@ mod tests {
         let reg = Registry::new(dir.path());
         let e = entry("ALG-3", "/agents/c", std::process::id());
         reg.write(&e).unwrap();
-        reg.remove(&e.id, &e.folder).unwrap();
+        reg.remove(&e.id, &e.folder, &e.workflow).unwrap();
         assert!(reg.read_live().is_empty());
         // Idempotent: removing again is not an error.
-        reg.remove(&e.id, &e.folder).unwrap();
+        reg.remove(&e.id, &e.folder, &e.workflow).unwrap();
     }
 
     #[test]
@@ -267,6 +281,22 @@ mod tests {
         let pid = std::process::id();
         let a = entry("ALG-9", "/agents/one", pid);
         let b = entry("ALG-9", "/agents/two", pid);
+        assert_ne!(a.file_name(), b.file_name());
+        reg.write(&a).unwrap();
+        reg.write(&b).unwrap();
+        let live = reg.read_live();
+        assert_eq!(live.len(), 2);
+        assert!(live.contains(&a));
+        assert!(live.contains(&b));
+    }
+
+    #[test]
+    fn same_folder_different_workflow_does_not_collide() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path());
+        let pid = std::process::id();
+        let a = entry_wf("ALG-10", "/agents/one", "/agents/one/WORKFLOW.md", pid);
+        let b = entry_wf("ALG-10", "/agents/one", "/tmp/wf-a/WORKFLOW.md", pid);
         assert_ne!(a.file_name(), b.file_name());
         reg.write(&a).unwrap();
         reg.write(&b).unwrap();
