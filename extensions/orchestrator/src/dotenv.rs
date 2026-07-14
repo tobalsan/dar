@@ -88,15 +88,13 @@ impl ReloadReport {
 /// parsed content, not mtimes, and samples twice before accepting a replacement.
 pub struct EnvReloader {
     root: PathBuf,
-    fingerprint: u64,
+    fingerprint: Option<u64>,
     last_rejected: Option<String>,
 }
 
 impl EnvReloader {
     pub fn new(root: &Path) -> Self {
-        let fingerprint = read_stable(root)
-            .map(|v| fingerprint(&v))
-            .unwrap_or_else(|_| fingerprint(&BTreeMap::new()));
+        let fingerprint = read_stable(root).ok().map(|v| fingerprint(&v));
         Self {
             root: root.to_path_buf(),
             fingerprint,
@@ -119,11 +117,11 @@ impl EnvReloader {
             }
         };
         let next = fingerprint(&values);
-        if next == self.fingerprint {
+        if Some(next) == self.fingerprint {
             return Ok(None);
         }
         let report = reload_agent_env_values(&self.root, values)?;
-        self.fingerprint = next;
+        self.fingerprint = Some(next);
         Ok(Some(report))
     }
 }
@@ -136,6 +134,13 @@ fn fingerprint(values: &BTreeMap<String, String>) -> u64 {
 }
 
 fn read_stable(root: &Path) -> Result<BTreeMap<String, String>> {
+    read_stable_with(root, || {})
+}
+
+fn read_stable_with(
+    root: &Path,
+    between_samples: impl FnOnce(),
+) -> Result<BTreeMap<String, String>> {
     let path = root.join(".env");
     let read = || -> Result<BTreeMap<String, String>> {
         let Ok(contents) = std::fs::read_to_string(&path) else {
@@ -147,6 +152,7 @@ fn read_stable(root: &Path) -> Result<BTreeMap<String, String>> {
         parse_contents(&contents)
     };
     let first = read()?;
+    between_samples();
     let second = read()?;
     if first != second {
         bail!("agent environment file changed while being read");
@@ -351,7 +357,10 @@ fn parse_value(raw: &str) -> Result<String> {
 mod tests {
     use std::sync::{Mutex, OnceLock};
 
-    use super::{load_agent_env, parse_line, reload_agent_env, scrub_loaded_env, EnvReloader};
+    use super::{
+        load_agent_env, parse_line, read_stable_with, reload_agent_env, scrub_loaded_env,
+        EnvReloader,
+    };
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -507,6 +516,54 @@ mod tests {
         let mut watcher = EnvReloader::new(dir.path());
         assert!(watcher.maybe_reload().is_err());
         assert!(watcher.maybe_reload().unwrap().is_none());
+    }
+
+    #[test]
+    fn watcher_keeps_last_known_good_value_when_env_becomes_unreadable() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::env::remove_var("DOTENV_LAST_GOOD");
+        std::fs::write(&path, "DOTENV_LAST_GOOD=known\n").unwrap();
+        load_agent_env(dir.path()).unwrap();
+        let mut watcher = EnvReloader::new(dir.path());
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let error = watcher.maybe_reload().unwrap_err().to_string();
+
+        assert_eq!(std::env::var("DOTENV_LAST_GOOD").unwrap(), "known");
+        assert!(!error.contains("known"));
+        assert!(watcher.maybe_reload().unwrap().is_none());
+
+        std::fs::remove_dir(path).unwrap();
+        std::env::remove_var("DOTENV_LAST_GOOD");
+    }
+
+    #[test]
+    fn stable_read_rejects_replacements_that_change_between_samples() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "DOTENV_UNSTABLE=one\n").unwrap();
+        let result = read_stable_with(dir.path(), || {
+            std::fs::write(&path, "DOTENV_UNSTABLE=two\n").unwrap();
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn watcher_accepts_first_valid_replacement_after_invalid_boot_file() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "DOTENV_BAD\n").unwrap();
+        let mut watcher = EnvReloader::new(dir.path());
+
+        std::fs::write(&path, "").unwrap();
+
+        assert!(watcher.maybe_reload().unwrap().is_some());
     }
 
     #[test]
