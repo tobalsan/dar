@@ -533,6 +533,15 @@ children receive their inherited environment with file-loaded keys removed plus
 the documented `AGENT_*` variables below. `dar init-workflow` ensures
 `.env` is listed in the agent folder's `.gitignore`.
 
+While `dar run` is active, the orchestrator checks the parsed `.env` content at
+each poll interval. A complete valid replacement updates file-owned values and
+removes file-owned values no longer present; real process environment values
+remain authoritative. Reload consumers opt in (the configured tracker does), so
+this is not universal cache invalidation or immediate credential revocation.
+Already-running children and sibling MCP bridge processes retain their own
+environment until they exit. The `reload_secrets` MCP tool refreshes only its
+bridge-local process; the live host converges on its next poll.
+
 Every runner receives the following `AGENT_*` variables. Hook scripts receive
 the subset applicable to their lifecycle point.
 

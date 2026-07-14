@@ -44,6 +44,17 @@ pub struct Redactor {
 }
 
 impl Redactor {
+    /// Add values without dropping previously known secrets. Bridge processes
+    /// retain old values too: an extension may still have cached them.
+    pub fn extend_secret_values<I, S>(&mut self, values: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut next = self.secrets.clone();
+        next.extend(values.into_iter().map(Into::into));
+        *self = Self::from_secret_values(next);
+    }
     /// A redactor that only applies token-shape heuristics (no known secret
     /// values). Useful where the `.env` scrub set is unavailable.
     pub fn token_shapes_only() -> Self {
@@ -303,6 +314,14 @@ mod tests {
         let masked = r.redact("token=abcd-secret");
         assert!(!masked.contains("abcd-secret"));
         assert!(masked.contains(REDACTED));
+    }
+
+    #[test]
+    fn redactor_refresh_keeps_old_and_new_values() {
+        let mut r = Redactor::from_secret_values(["old-bridge-secret"]);
+        r.extend_secret_values(["new-bridge-secret"]);
+        assert_eq!(r.redact("old-bridge-secret"), REDACTED);
+        assert_eq!(r.redact("new-bridge-secret"), REDACTED);
     }
 
     #[test]

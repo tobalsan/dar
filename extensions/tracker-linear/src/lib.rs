@@ -1444,6 +1444,9 @@ struct RawRef {
 
 #[cfg(test)]
 mod tests {
+    use cap_tracker::Tracker;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::atomic::Ordering;
 
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -1527,6 +1530,47 @@ mod tests {
         assert_eq!(tracker.auth_header(), "Bearer oauth_tok");
 
         std::env::remove_var(OAUTH_TOKEN_ENV);
+        std::env::remove_var(API_KEY_ENV);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reload_secrets_changes_authorization_on_next_tracker_request() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(OAUTH_TOKEN_ENV);
+        std::env::set_var(API_KEY_ENV, "linear-old-token");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut headers = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let len = stream.read(&mut request).unwrap();
+                headers.push(String::from_utf8_lossy(&request[..len]).to_string());
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"data\":{\"issues\":{\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null},\"nodes\":[]}}}").unwrap();
+            }
+            headers
+        });
+        let tracker = LinearTracker::new(LinearTrackerConfig {
+            endpoint,
+            api_key: resolve_linear_auth_header().unwrap(),
+            projects: vec![],
+            team: None,
+            assignee_id: None,
+            delegate_id: None,
+            labels: vec![],
+            active_states: vec![],
+            terminal_states: vec![],
+            needs_human: None,
+        })
+        .unwrap();
+        tracker.poll_candidates().unwrap();
+        std::env::set_var(API_KEY_ENV, "linear-new-token");
+        assert!(tracker.reload_secrets());
+        tracker.poll_candidates().unwrap();
+        let headers = server.join().unwrap();
+        assert!(headers[0].contains("authorization: linear-old-token"));
+        assert!(headers[1].contains("authorization: linear-new-token"));
         std::env::remove_var(API_KEY_ENV);
     }
 

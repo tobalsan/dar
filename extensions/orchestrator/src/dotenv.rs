@@ -1,6 +1,6 @@
 //! Minimal `.env` loader for agent-folder scoped runtime configuration.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -14,23 +14,27 @@ pub use runner_core::scrub_loaded_env;
 /// is copied from the file into the process env (initial load). Reloads then
 /// override *only* these keys, never genuine process-env values that merely
 /// happen to share a name with a `.env` entry.
-fn file_loaded_keys() -> &'static Mutex<HashSet<String>> {
-    static KEYS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    KEYS.get_or_init(|| Mutex::new(HashSet::new()))
+fn file_loaded_keys() -> &'static Mutex<std::collections::HashMap<PathBuf, HashSet<String>>> {
+    static KEYS: OnceLock<Mutex<std::collections::HashMap<PathBuf, HashSet<String>>>> =
+        OnceLock::new();
+    KEYS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-fn record_file_loaded_key(key: &str) {
+fn record_file_loaded_key(root: &Path, key: &str) {
     file_loaded_keys()
         .lock()
         .expect("file-loaded env key registry poisoned")
+        .entry(root.to_path_buf())
+        .or_default()
         .insert(key.to_string());
 }
 
-fn is_file_loaded_key(key: &str) -> bool {
+fn is_file_loaded_key(root: &Path, key: &str) -> bool {
     file_loaded_keys()
         .lock()
         .expect("file-loaded env key registry poisoned")
-        .contains(key)
+        .get(root)
+        .is_some_and(|keys| keys.contains(key))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +67,9 @@ pub struct ReloadReport {
     /// Keys present in `.env` that were left untouched because a genuine
     /// process-env value (not from `.env`) owns them.
     pub skipped_external: Vec<String>,
+    /// Formerly file-owned keys removed from the process because they are absent
+    /// from the replacement (including a deleted `.env`).
+    pub removed: Vec<String>,
 }
 
 impl ReloadReport {
@@ -72,8 +79,108 @@ impl ReloadReport {
             found: false,
             reloaded: Vec::new(),
             skipped_external: Vec::new(),
+            removed: Vec::new(),
         }
     }
+}
+
+/// Parsed-content watcher for the agent-root `.env`. It deliberately compares
+/// parsed content, not mtimes, and samples twice before accepting a replacement.
+pub struct EnvReloader {
+    root: PathBuf,
+    fingerprint: Option<u64>,
+    last_rejected: Option<String>,
+}
+
+impl EnvReloader {
+    pub fn new(root: &Path) -> Self {
+        let fingerprint = read_stable(root).ok().map(|v| fingerprint(&v));
+        Self {
+            root: root.to_path_buf(),
+            fingerprint,
+            last_rejected: None,
+        }
+    }
+    pub fn maybe_reload(&mut self) -> Result<Option<ReloadReport>> {
+        let values = match read_stable(&self.root) {
+            Ok(values) => {
+                self.last_rejected = None;
+                values
+            }
+            Err(error) => {
+                let marker = error.to_string();
+                if self.last_rejected.as_deref() == Some(&marker) {
+                    return Ok(None);
+                }
+                self.last_rejected = Some(marker);
+                return Err(error);
+            }
+        };
+        let next = fingerprint(&values);
+        if Some(next) == self.fingerprint {
+            return Ok(None);
+        }
+        let report = reload_agent_env_values(&self.root, values)?;
+        self.fingerprint = Some(next);
+        Ok(Some(report))
+    }
+}
+
+fn fingerprint(values: &BTreeMap<String, String>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    values.hash(&mut h);
+    h.finish()
+}
+
+fn read_stable(root: &Path) -> Result<BTreeMap<String, String>> {
+    read_stable_with(root, || {})
+}
+
+fn read_stable_with(
+    root: &Path,
+    between_samples: impl FnOnce(),
+) -> Result<BTreeMap<String, String>> {
+    let path = root.join(".env");
+    let read = || -> Result<BTreeMap<String, String>> {
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            if !path.exists() {
+                return Ok(BTreeMap::new());
+            }
+            bail!("unable to read agent environment file");
+        };
+        parse_contents(&contents)
+    };
+    let first = read()?;
+    between_samples();
+    let second = read()?;
+    if first != second {
+        bail!("agent environment file changed while being read");
+    }
+    Ok(first)
+}
+
+fn parse_contents(contents: &str) -> Result<BTreeMap<String, String>> {
+    let mut values = BTreeMap::new();
+    for line in contents.lines() {
+        if let Some((key, value)) = parse_line(line)? {
+            values.insert(key, value);
+        }
+    }
+    Ok(values)
+}
+
+/// Current valid agent-file values for bridge redaction. Callers must retain
+/// prior values themselves when a cache could still expose them.
+pub fn loaded_agent_env_values(root: &Path) -> Vec<String> {
+    file_loaded_keys()
+        .lock()
+        .expect("file-loaded env key registry poisoned")
+        .get(root)
+        .into_iter()
+        .flatten()
+        .filter_map(|key| std::env::var(key).ok())
+        .collect()
 }
 
 /// Load `<root>/.env` into the current process without overriding existing env.
@@ -99,7 +206,7 @@ pub fn load_agent_env(root: &Path) -> Result<LoadReport> {
         } else {
             std::env::set_var(&key, value);
             runner_core::register_scrubbed_env_key(key.clone());
-            record_file_loaded_key(&key);
+            record_file_loaded_key(root, &key);
             loaded.push(key);
         }
     }
@@ -122,23 +229,31 @@ pub fn load_agent_env(root: &Path) -> Result<LoadReport> {
 /// secret is picked up too. Newly-tracked keys are registered for child
 /// scrubbing exactly like the initial load.
 pub fn reload_agent_env(root: &Path) -> Result<ReloadReport> {
-    let path = root.join(".env");
-    if !path.exists() {
-        return Ok(ReloadReport::absent(path));
-    }
+    let values = read_stable(root)?;
+    reload_agent_env_values(root, values)
+}
 
-    let contents =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+fn reload_agent_env_values(root: &Path, values: BTreeMap<String, String>) -> Result<ReloadReport> {
+    let path = root.join(".env");
     let mut reloaded = Vec::new();
     let mut skipped_external = Vec::new();
-
-    for (idx, line) in contents.lines().enumerate() {
-        let Some((key, value)) = parse_line(line)
-            .with_context(|| format!("parsing {} line {}", path.display(), idx + 1))?
-        else {
-            continue;
-        };
-        if is_file_loaded_key(&key) {
+    let mut removed = Vec::new();
+    let owned: Vec<_> = file_loaded_keys()
+        .lock()
+        .expect("file-loaded env key registry poisoned")
+        .get(root)
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+    for key in owned {
+        if !values.contains_key(&key) {
+            std::env::remove_var(&key);
+            removed.push(key);
+        }
+    }
+    for (key, value) in values {
+        if is_file_loaded_key(root, &key) {
             // We own this key — always refresh it from the file.
             std::env::set_var(&key, value);
             reloaded.push(key);
@@ -149,16 +264,17 @@ pub fn reload_agent_env(root: &Path) -> Result<ReloadReport> {
             // A key added to `.env` after initial load and not set elsewhere.
             std::env::set_var(&key, value);
             runner_core::register_scrubbed_env_key(key.clone());
-            record_file_loaded_key(&key);
+            record_file_loaded_key(root, &key);
             reloaded.push(key);
         }
     }
 
     Ok(ReloadReport {
         path,
-        found: true,
+        found: root.join(".env").exists(),
         reloaded,
         skipped_external,
+        removed,
     })
 }
 
@@ -179,7 +295,7 @@ fn parse_line(line: &str) -> Result<Option<(String, String)>> {
         || !key.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
         || key.as_bytes()[0].is_ascii_digit()
     {
-        bail!("invalid env key {key:?}");
+        bail!("invalid environment key");
     }
 
     let value = parse_value(s[eq + 1..].trim_start())?;
@@ -204,7 +320,11 @@ fn parse_value(raw: &str) -> Result<String> {
             } else if c == '\\' {
                 escaped = true;
             } else if c == '"' {
-                return Ok(out);
+                let suffix = &rest[idx + c.len_utf8()..];
+                if suffix.trim().is_empty() || suffix.trim_start().starts_with('#') {
+                    return Ok(out);
+                }
+                bail!("unexpected content after quoted value");
             } else {
                 out.push(c);
             }
@@ -217,7 +337,11 @@ fn parse_value(raw: &str) -> Result<String> {
 
     if let Some(rest) = raw.strip_prefix('\'') {
         if let Some(end) = rest.find('\'') {
-            return Ok(rest[..end].to_string());
+            let suffix = &rest[end + 1..];
+            if suffix.trim().is_empty() || suffix.trim_start().starts_with('#') {
+                return Ok(rest[..end].to_string());
+            }
+            bail!("unexpected content after quoted value");
         }
         bail!("unterminated single-quoted value");
     }
@@ -233,7 +357,10 @@ fn parse_value(raw: &str) -> Result<String> {
 mod tests {
     use std::sync::{Mutex, OnceLock};
 
-    use super::{load_agent_env, parse_line, reload_agent_env, scrub_loaded_env};
+    use super::{
+        load_agent_env, parse_line, read_stable_with, reload_agent_env, scrub_loaded_env,
+        EnvReloader,
+    };
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -252,6 +379,8 @@ mod tests {
             Some(("B".into(), "two # kept".into()))
         );
         assert_eq!(parse_line("# ignored").unwrap(), None);
+        assert!(parse_line("A=\"value\" trailing").is_err());
+        assert!(parse_line("A='value' trailing").is_err());
     }
 
     #[test]
@@ -344,6 +473,97 @@ mod tests {
         assert!(!report.found);
         assert!(report.reloaded.is_empty());
         assert!(report.skipped_external.is_empty());
+    }
+
+    #[test]
+    fn reload_removes_file_owned_keys_when_file_is_deleted() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::env::remove_var("DOTENV_REMOVED");
+        std::fs::write(&path, "DOTENV_REMOVED=present\n").unwrap();
+        load_agent_env(dir.path()).unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        let report = reload_agent_env(dir.path()).unwrap();
+        assert!(!report.found);
+        assert!(report.removed.contains(&"DOTENV_REMOVED".to_string()));
+        assert!(std::env::var_os("DOTENV_REMOVED").is_none());
+    }
+
+    #[test]
+    fn watcher_applies_each_parsed_change_once() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::env::remove_var("DOTENV_WATCHED");
+        std::fs::write(&path, "DOTENV_WATCHED=one\n").unwrap();
+        load_agent_env(dir.path()).unwrap();
+        let mut watcher = EnvReloader::new(dir.path());
+        assert!(watcher.maybe_reload().unwrap().is_none());
+        std::fs::write(&path, "DOTENV_WATCHED=two\n").unwrap();
+        assert!(watcher.maybe_reload().unwrap().is_some());
+        assert!(watcher.maybe_reload().unwrap().is_none());
+        assert_eq!(std::env::var("DOTENV_WATCHED").unwrap(), "two");
+        std::env::remove_var("DOTENV_WATCHED");
+    }
+
+    #[test]
+    fn watcher_rejects_unchanged_invalid_file_once() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "DOTENV_BAD\n").unwrap();
+        let mut watcher = EnvReloader::new(dir.path());
+        assert!(watcher.maybe_reload().is_err());
+        assert!(watcher.maybe_reload().unwrap().is_none());
+    }
+
+    #[test]
+    fn watcher_keeps_last_known_good_value_when_env_becomes_unreadable() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::env::remove_var("DOTENV_LAST_GOOD");
+        std::fs::write(&path, "DOTENV_LAST_GOOD=known\n").unwrap();
+        load_agent_env(dir.path()).unwrap();
+        let mut watcher = EnvReloader::new(dir.path());
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let error = watcher.maybe_reload().unwrap_err().to_string();
+
+        assert_eq!(std::env::var("DOTENV_LAST_GOOD").unwrap(), "known");
+        assert!(!error.contains("known"));
+        assert!(watcher.maybe_reload().unwrap().is_none());
+
+        std::fs::remove_dir(path).unwrap();
+        std::env::remove_var("DOTENV_LAST_GOOD");
+    }
+
+    #[test]
+    fn stable_read_rejects_replacements_that_change_between_samples() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "DOTENV_UNSTABLE=one\n").unwrap();
+        let result = read_stable_with(dir.path(), || {
+            std::fs::write(&path, "DOTENV_UNSTABLE=two\n").unwrap();
+        });
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn watcher_accepts_first_valid_replacement_after_invalid_boot_file() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "DOTENV_BAD\n").unwrap();
+        let mut watcher = EnvReloader::new(dir.path());
+
+        std::fs::write(&path, "").unwrap();
+
+        assert!(watcher.maybe_reload().unwrap().is_some());
     }
 
     #[test]

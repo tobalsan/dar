@@ -64,10 +64,9 @@ pub fn spec() -> ToolSpec {
         TOOL_NAME,
         "Reload secrets from the agent's .env without restarting the host. \
          Call this after rotating LINEAR_API_KEY / LINEAR_OAUTH_TOKEN (or any \
-         other .env secret) so the next Linear request uses the new token. \
-         Re-reads .env (overriding only keys loaded from the file) and swaps \
-         the Linear client's cached token in place. Secret values are never \
-         returned.",
+         other .env secret) to refresh this bridge's local environment only. \
+         The live host reloads independently on its next poll tick. Secret values \
+         are never returned.",
         json!({
             "type": "object",
             "properties": {},
@@ -118,13 +117,14 @@ impl ToolExecutor for ReloadSecretsTool {
                     Err(err) => format!("tracker refresh not delivered: {err}"),
                 }
             }
-            None => "no live tracker in this process".to_string(),
+            None => "bridge-local refresh only; no live-host tracker was refreshed".to_string(),
         };
 
         let summary = if report.found {
             format!(
-                "reloaded {} key(s) from .env ({} left as external process env); {tracker_status}",
+                "reloaded {} key(s) from .env ({} removed, {} left as external process env); {tracker_status}",
                 report.reloaded.len(),
+                report.removed.len(),
                 report.skipped_external.len(),
             )
         } else {

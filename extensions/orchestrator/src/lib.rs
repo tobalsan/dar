@@ -73,6 +73,7 @@ pub mod state;
 pub mod store;
 pub mod thinking;
 pub mod tracker;
+
 pub mod workflow_config;
 
 /// Max backoff cap for dispatch/abnormal-exit retries (30 minutes).
@@ -187,7 +188,6 @@ impl Extension for OrchestratorExtension {
             );
             ctx.services
                 .service::<dyn orchestrator_api::RunQuery>("orchestrator", run_query)?;
-
             // Agent-facing `reload_secrets` tool. Registered here (register
             // pass) so it is reachable in every process that builds the tool
             // registry — including the host `__mcp-bridge` subprocess the
@@ -303,6 +303,9 @@ impl Extension for OrchestratorExtension {
             // Tracker dimensions come entirely from the resolved (frontmatter)
             // loop config.
             let services = ctx.host.services.clone();
+            let env_reload_consumers = services.get_named::<host_api::EnvReloadConsumers>(
+                host_api::ENV_RELOAD_CONSUMERS_SERVICE,
+            )?;
             let tracker =
                 tracker::build_configured(&services, &effective_cfg, paths.workflow_root.clone())?;
             let runner_id = runner_service_id(&effective_cfg.runner_kind);
@@ -383,6 +386,7 @@ impl Extension for OrchestratorExtension {
                 control_rx,
                 hitl,
             )
+            .with_env_reload_consumers(env_reload_consumers)
             .with_snapshot_bus(ctx.host.bus.clone())
             .with_system_context(system_context)
             .with_startup_banner(dashboard_banner(bind, port, ctx.host.http_addr()));
@@ -600,6 +604,8 @@ pub struct Orchestrator {
     /// a field. Live-safe fields are refreshed from agent.yaml on mtime change.
     agent_cfg: AgentConfig,
     agent_config_reloader: AgentConfigReloader,
+    env_reloader: dotenv::EnvReloader,
+    env_reload_consumers: Option<Arc<host_api::EnvReloadConsumers>>,
     paths: AgentPaths,
     tracker: Arc<dyn crate::tracker::Tracker>,
     runner: Arc<dyn cap_runner::Runner>,
@@ -667,6 +673,8 @@ impl Orchestrator {
         Self {
             agent_cfg,
             agent_config_reloader: AgentConfigReloader::new(&paths.root),
+            env_reloader: dotenv::EnvReloader::new(&paths.root),
+            env_reload_consumers: None,
             paths,
             tracker,
             runner,
@@ -687,6 +695,14 @@ impl Orchestrator {
 
     pub fn with_snapshot_bus(mut self, bus: Arc<host_api::EventBus>) -> Self {
         self.snapshot_bus = Some(bus);
+        self
+    }
+
+    pub fn with_env_reload_consumers(
+        mut self,
+        consumers: Arc<host_api::EnvReloadConsumers>,
+    ) -> Self {
+        self.env_reload_consumers = Some(consumers);
         self
     }
 
@@ -771,6 +787,7 @@ impl Orchestrator {
 
     /// PRD steps 1-9 for one tick, prefixed with a WORKFLOW.md reload check.
     async fn tick(&mut self) {
+        self.maybe_reload_agent_env();
         // Step 1: heartbeat / lastTickAt for currently-live runs.
         self.heartbeat_active_runs();
 
@@ -807,6 +824,26 @@ impl Orchestrator {
 
         // Refresh dashboard snapshots last so they reflect post-tick reality.
         self.publish_snapshots(&candidates).await;
+    }
+
+    fn maybe_reload_agent_env(&mut self) {
+        match self.env_reloader.maybe_reload() {
+            Ok(Some(report)) => {
+                let changed = self.tracker.reload_secrets();
+                let consumers = self
+                    .env_reload_consumers
+                    .as_ref()
+                    .map(|consumers| consumers.reload_all())
+                    .unwrap_or_default();
+                logging::ev("-", "env_reload", &format!("agent environment reloaded ({} refreshed, {} removed, {} external); tracker token {}; {} opted-in consumers refreshed", report.reloaded.len(), report.removed.len(), report.skipped_external.len(), if changed { "updated" } else { "unchanged" }, consumers));
+            }
+            Ok(None) => {}
+            Err(_) => logging::ev(
+                "-",
+                "env_reload",
+                "agent environment reload rejected; last known-good state retained",
+            ),
+        }
     }
 
     fn next_poll_delay(&self) -> Duration {
@@ -2069,8 +2106,9 @@ impl Orchestrator {
         let token_changed = self.tracker.reload_secrets();
         // Never log secret values — only key names and counts.
         let msg = format!(
-            "reloaded {} key(s) from .env ({} skipped as external); tracker token {}",
+            "reloaded {} key(s) from .env ({} removed, {} skipped as external); tracker token {}",
             report.reloaded.len(),
+            report.removed.len(),
             report.skipped_external.len(),
             if token_changed {
                 "updated"
@@ -3143,6 +3181,15 @@ mod tests {
         reloads: Option<Arc<std::sync::atomic::AtomicUsize>>,
     }
 
+    struct CachedEnvConsumer(Mutex<String>);
+
+    impl host_api::EnvReloadConsumer for CachedEnvConsumer {
+        fn reload_env(&self) -> bool {
+            *self.0.lock().unwrap() = std::env::var("WATCHED_ACTIVE_SECRET").unwrap();
+            true
+        }
+    }
+
     impl Tracker for StaticTracker {
         fn poll_candidates(&self) -> Result<Vec<Issue>> {
             Ok(Vec::new())
@@ -3460,6 +3507,67 @@ dashboard:
         assert!(!reply.message.contains("second"));
 
         std::env::remove_var("RELOAD_CTRL_KEY");
+    }
+
+    #[tokio::test]
+    async fn watched_env_reload_keeps_active_run_state() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+        std::env::remove_var("WATCHED_ACTIVE_SECRET");
+        std::fs::write(temp.path().join(".env"), "WATCHED_ACTIVE_SECRET=old\n").unwrap();
+        crate::dotenv::load_agent_env(temp.path()).unwrap();
+        let agent_cfg = test_agent_config();
+        write_agent_yaml(temp.path(), &agent_cfg);
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let (state, control_rx) = test_state(Arc::clone(&store));
+        let reloads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let active_issue = issue("ISSUE-1", None, None);
+        let tracker = Arc::new(StaticTracker {
+            issue: active_issue.clone(),
+            parks: None,
+            reloads: Some(Arc::clone(&reloads)),
+        });
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
+        let consumers = Arc::new(host_api::EnvReloadConsumers::default());
+        let cached = Arc::new(CachedEnvConsumer(Mutex::new("old".to_string())));
+        consumers.register(cached.clone());
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state.clone(),
+            control_rx,
+        )
+        .with_env_reload_consumers(consumers);
+        let started_at = Utc::now();
+        orchestrator.slots.push(RunSlot {
+            identifier: active_issue.identifier.clone(),
+            issue: active_issue,
+            workspace: "workspace".to_string(),
+            handle: Some(pending_handle_for_test(42, ExitKind::Normal)),
+            attempt: 2,
+            turns_used: 0,
+            run_id: "active-run".to_string(),
+            started_at,
+            claim_id: None,
+            last_event_at: Arc::new(Mutex::new(started_at)),
+        });
+        std::fs::write(temp.path().join(".env"), "WATCHED_ACTIVE_SECRET=new\n").unwrap();
+
+        orchestrator.tick().await;
+
+        assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(*cached.0.lock().unwrap(), "new");
+        assert_eq!(orchestrator.slots.len(), 1);
+        assert_eq!(orchestrator.slots[0].run_id, "active-run");
+        assert_eq!(orchestrator.slots[0].attempt, 2);
+        assert!(!orchestrator.slots[0].handle.as_ref().unwrap().is_finished());
+        assert!(orchestrator.retries.is_empty());
+        assert!(state.history.snapshot().is_empty());
+        std::env::remove_var("WATCHED_ACTIVE_SECRET");
     }
 
     #[tokio::test]
