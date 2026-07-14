@@ -600,6 +600,7 @@ pub struct Orchestrator {
     /// a field. Live-safe fields are refreshed from agent.yaml on mtime change.
     agent_cfg: AgentConfig,
     agent_config_reloader: AgentConfigReloader,
+    env_reloader: dotenv::EnvReloader,
     paths: AgentPaths,
     tracker: Arc<dyn crate::tracker::Tracker>,
     runner: Arc<dyn cap_runner::Runner>,
@@ -667,6 +668,7 @@ impl Orchestrator {
         Self {
             agent_cfg,
             agent_config_reloader: AgentConfigReloader::new(&paths.root),
+            env_reloader: dotenv::EnvReloader::new(&paths.root),
             paths,
             tracker,
             runner,
@@ -771,6 +773,7 @@ impl Orchestrator {
 
     /// PRD steps 1-9 for one tick, prefixed with a WORKFLOW.md reload check.
     async fn tick(&mut self) {
+        self.maybe_reload_agent_env();
         // Step 1: heartbeat / lastTickAt for currently-live runs.
         self.heartbeat_active_runs();
 
@@ -807,6 +810,21 @@ impl Orchestrator {
 
         // Refresh dashboard snapshots last so they reflect post-tick reality.
         self.publish_snapshots(&candidates).await;
+    }
+
+    fn maybe_reload_agent_env(&mut self) {
+        match self.env_reloader.maybe_reload() {
+            Ok(Some(report)) => {
+                let changed = self.tracker.reload_secrets();
+                logging::ev("-", "env_reload", &format!("agent environment reloaded ({} refreshed, {} removed, {} external); tracker token {}", report.reloaded.len(), report.removed.len(), report.skipped_external.len(), if changed { "updated" } else { "unchanged" }));
+            }
+            Ok(None) => {}
+            Err(_) => logging::ev(
+                "-",
+                "env_reload",
+                "agent environment reload rejected; last known-good state retained",
+            ),
+        }
     }
 
     fn next_poll_delay(&self) -> Duration {
@@ -2069,8 +2087,9 @@ impl Orchestrator {
         let token_changed = self.tracker.reload_secrets();
         // Never log secret values — only key names and counts.
         let msg = format!(
-            "reloaded {} key(s) from .env ({} skipped as external); tracker token {}",
+            "reloaded {} key(s) from .env ({} removed, {} skipped as external); tracker token {}",
             report.reloaded.len(),
+            report.removed.len(),
             report.skipped_external.len(),
             if token_changed {
                 "updated"

@@ -47,6 +47,10 @@ Breaking changes are marked **⚠ BREAKING**.
   parity.
 
 ### Fixed
+- Secrets: `dar run` now detects valid agent `.env` content changes on its poll
+  tick, including removals and file deletion, and refreshes opted-in consumers
+  without disrupting active work. MCP bridge `reload_secrets` now accurately
+  reports its bridge-local scope.
 - CLI: agent builds now link only the tracker selected by `tracker.use`, keeping
   unused stock trackers out of generated agent binaries.
 - tracker-plane: treat Plane's `X-RateLimit-Reset` as a Unix epoch timestamp

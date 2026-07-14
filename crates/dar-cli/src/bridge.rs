@@ -56,7 +56,14 @@ pub async fn build_registry(
 /// MCP over stdin/stdout until EOF.
 pub async fn serve(root: &Path, plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
     let (registry, redactor) = build_registry(root, plugins).await?;
-    serve_stdio(registry, redactor, tokio::io::stdin(), tokio::io::stdout()).await
+    serve_stdio_with_root(
+        registry,
+        redactor,
+        Some(root),
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+    )
+    .await
 }
 
 /// Drive the MCP request loop over arbitrary async byte streams (factored out so
@@ -64,6 +71,20 @@ pub async fn serve(root: &Path, plugins: Vec<Arc<dyn Extension>>) -> Result<()> 
 pub async fn serve_stdio<R, W>(
     registry: Arc<dyn ToolRegistryHandle>,
     redactor: Redactor,
+    input: R,
+    output: W,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    serve_stdio_with_root(registry, redactor, None, input, output).await
+}
+
+async fn serve_stdio_with_root<R, W>(
+    registry: Arc<dyn ToolRegistryHandle>,
+    mut redactor: Redactor,
+    root: Option<&Path>,
     input: R,
     mut output: W,
 ) -> Result<()>
@@ -86,6 +107,14 @@ where
         };
         if let Some(response) = handle_message(&registry, &redactor, &request).await {
             write_message(&mut output, &response).await?;
+        }
+        if request.pointer("/method").and_then(Value::as_str) == Some("tools/call")
+            && request.pointer("/params/name").and_then(Value::as_str)
+                == Some(orchestrator::reload_secrets::TOOL_NAME)
+        {
+            if let Some(root) = root {
+                redactor.extend_secret_values(orchestrator::dotenv::loaded_agent_env_values(root));
+            }
         }
     }
     Ok(())
