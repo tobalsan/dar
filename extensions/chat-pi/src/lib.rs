@@ -358,7 +358,18 @@ fn map_stdout_line(line: &str, context_window: Option<u64>) -> Mapped {
 /// total (or a missing usage block) yields `Ignore` so the status line keeps
 /// its last good reading instead of flashing 0.
 fn map_usage(value: &Value, context_window: Option<u64>) -> Mapped {
-    let Some(usage) = value.get("message").and_then(|m| m.get("usage")) else {
+    let message = value.get("message");
+    if let Some(error) = message
+        .and_then(|message| message.get("errorMessage"))
+        .and_then(Value::as_str)
+        .filter(|error| !error.is_empty())
+    {
+        return Mapped::Emit(ChatEvent::TurnFinished {
+            ok: false,
+            error: Some(error.to_owned()),
+        });
+    }
+    let Some(usage) = message.and_then(|message| message.get("usage")) else {
         return Mapped::Ignore;
     };
     let field = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
@@ -538,7 +549,7 @@ fn spawn_stdout_pump(
             match map_stdout_line(&clean, context_window) {
                 Mapped::Emit(event) => {
                     if let ChatEvent::ToolCall { id, name, .. } = &event {
-                        if name == "artifact.publish" {
+                        if name == "artifact_publish" {
                             artifact_calls.insert(id.clone());
                         }
                     }
@@ -643,7 +654,7 @@ fn artifact_ready_from_pi(line: &str) -> Option<ArtifactReady> {
     let content = result.get("content")?.as_array()?;
     content
         .iter()
-        .find_map(|resource| ArtifactReady::from_publish_resource("artifact.publish", resource))
+        .find_map(|resource| ArtifactReady::from_publish_resource("artifact_publish", resource))
 }
 
 fn spawn_stderr_pump(stderr: ChildStderr, tx: Sender<ChatEvent>) {
@@ -1043,6 +1054,18 @@ mod tests {
         );
         // No usage block at all.
         assert_ignored(r#"{"type":"message_end","message":{"role":"user"}}"#);
+    }
+
+    #[test]
+    fn message_end_error_maps_to_failed_turn() {
+        let line = r#"{"type":"message_end","message":{"errorMessage":"invalid tool schema"}}"#;
+        match mapped_event(line) {
+            ChatEvent::TurnFinished { ok, error } => {
+                assert!(!ok);
+                assert_eq!(error.as_deref(), Some("invalid tool schema"));
+            }
+            other => panic!("expected TurnFinished, got {other:?}"),
+        }
     }
 
     #[test]

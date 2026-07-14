@@ -51,7 +51,7 @@ impl Extension for ToolRegistryHostExtension {
 
 fn artifact_publish_spec() -> ToolSpec {
     ToolSpec::new(
-        "artifact.publish",
+        "artifact_publish",
         "Publish a file up to 25 MiB from data/artifact-exports into host-private immutable storage.",
         json!({
             "type": "object",

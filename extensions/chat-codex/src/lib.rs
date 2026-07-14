@@ -603,14 +603,14 @@ fn tool_events(item: &Value) -> Vec<ChatEvent> {
 fn artifact_ready_from_codex(line: &str) -> Option<ArtifactReady> {
     let value: Value = serde_json::from_str(line).ok()?;
     let item = value.get("params")?.get("item")?;
-    if item.get("tool").and_then(Value::as_str) != Some("artifact.publish") || tool_is_error(item) {
+    if item.get("tool").and_then(Value::as_str) != Some("artifact_publish") || tool_is_error(item) {
         return None;
     }
     let output = item.get("output").or_else(|| item.get("result"))?;
     let content = output.get("content")?.as_array()?;
     content
         .iter()
-        .find_map(|resource| ArtifactReady::from_publish_resource("artifact.publish", resource))
+        .find_map(|resource| ArtifactReady::from_publish_resource("artifact_publish", resource))
 }
 
 fn is_server_request(value: &Value) -> bool {
@@ -900,7 +900,7 @@ mod tests {
 
     #[test]
     fn artifact_ready_requires_exact_publish_resource() {
-        let line = r#"{"params":{"item":{"tool":"artifact.publish","output":{"content":[{"type":"resource_link","uri":"dar-artifact://550e8400-e29b-41d4-a716-446655440000","name":"report.txt","bytes":5,"sha256":"abc"}]}}}}"#;
+        let line = r#"{"params":{"item":{"tool":"artifact_publish","output":{"content":[{"type":"resource_link","uri":"dar-artifact://550e8400-e29b-41d4-a716-446655440000","name":"report.txt","bytes":5,"sha256":"abc"}]}}}}"#;
         assert_eq!(artifact_ready_from_codex(line).unwrap().name, "report.txt");
         assert!(artifact_ready_from_codex(r#"{"params":{"item":{"tool":"other"}}}"#).is_none());
     }

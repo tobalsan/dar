@@ -28,7 +28,7 @@ pub struct ArtifactReady {
 }
 
 impl ArtifactReady {
-    /// Parse only exact successful `artifact.publish` resource-link output.
+    /// Parse only exact successful `artifact_publish` resource-link output.
     /// All assistant text, raw tool text, malformed links, and other tools fail
     /// closed as `None`.
     /// Return canonical vault metadata only when every link field matches.
@@ -47,7 +47,7 @@ impl ArtifactReady {
     }
 
     pub fn from_publish_resource(tool_name: &str, value: &serde_json::Value) -> Option<Self> {
-        if tool_name != "artifact.publish" || value.get("type")?.as_str()? != "resource_link" {
+        if tool_name != "artifact_publish" || value.get("type")?.as_str()? != "resource_link" {
             return None;
         }
         let uri = value.get("uri")?.as_str()?.to_string();
@@ -183,7 +183,7 @@ pub struct ChatSessionParams {
     /// responsible for honoring the fall-back-to-fresh contract when no prior
     /// session is resolvable.
     pub resume_session_id: Option<String>,
-    /// Optional side-channel for exact `artifact.publish` resource links.
+    /// Optional side-channel for exact `artifact_publish` resource links.
     pub artifact_ready: Option<Sender<ArtifactReady>>,
 }
 

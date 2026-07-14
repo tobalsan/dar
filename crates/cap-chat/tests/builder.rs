@@ -60,13 +60,13 @@ fn artifact_ready_accepts_only_exact_publish_resource() {
         "sha256": "abc",
     });
     assert_eq!(
-        ArtifactReady::from_publish_resource("artifact.publish", &resource)
+        ArtifactReady::from_publish_resource("artifact_publish", &resource)
             .unwrap()
             .name,
         "report.txt"
     );
     assert!(ArtifactReady::from_publish_resource("other", &resource).is_none());
-    assert!(ArtifactReady::from_publish_resource("artifact.publish", &json!("raw text")).is_none());
+    assert!(ArtifactReady::from_publish_resource("artifact_publish", &json!("raw text")).is_none());
 }
 
 #[test]

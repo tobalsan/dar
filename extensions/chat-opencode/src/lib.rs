@@ -268,14 +268,14 @@ fn artifact_ready_from_opencode(event: &OpenCodeEvent) -> Option<ArtifactReady> 
     let part = value.get("properties")?.get("part")?;
     let name = part.get("tool").or_else(|| part.get("name"))?.as_str()?;
     let state = part.get("state").unwrap_or(part);
-    if name != "artifact.publish" || state.get("error").is_some() {
+    if name != "artifact_publish" || state.get("error").is_some() {
         return None;
     }
     let output = state.get("output")?;
     let content = output.get("content")?.as_array()?;
     content
         .iter()
-        .find_map(|resource| ArtifactReady::from_publish_resource("artifact.publish", resource))
+        .find_map(|resource| ArtifactReady::from_publish_resource("artifact_publish", resource))
 }
 
 fn map_event(event: &OpenCodeEvent) -> Option<ChatEvent> {
@@ -439,7 +439,7 @@ mod tests {
     fn artifact_ready_requires_exact_publish_resource() {
         let event = OpenCodeEvent {
             event: None,
-            data: r#"{"type":"message.part.updated","properties":{"part":{"tool":"artifact.publish","state":{"output":{"content":[{"type":"resource_link","uri":"dar-artifact://550e8400-e29b-41d4-a716-446655440000","name":"report.txt","bytes":5,"sha256":"abc"}]}}}}}"#.to_string(),
+            data: r#"{"type":"message.part.updated","properties":{"part":{"tool":"artifact_publish","state":{"output":{"content":[{"type":"resource_link","uri":"dar-artifact://550e8400-e29b-41d4-a716-446655440000","name":"report.txt","bytes":5,"sha256":"abc"}]}}}}}"#.to_string(),
         };
         assert_eq!(
             artifact_ready_from_opencode(&event).unwrap().name,
