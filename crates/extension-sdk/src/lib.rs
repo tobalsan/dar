@@ -14,8 +14,8 @@ use std::sync::{Mutex, OnceLock};
 pub use dar_artifacts as artifacts;
 
 pub use host_api::{
-    BoxFuture, ConfigStore, EventBus, Extension, HostPaths, RegisterCtx, ServiceRegistry,
-    ShutdownToken, StartCtx,
+    BoxFuture, ConfigStore, EnvReloadConsumer, EnvReloadConsumers, EventBus, Extension, HostPaths,
+    RegisterCtx, ServiceRegistry, ShutdownToken, StartCtx, ENV_RELOAD_CONSUMERS_SERVICE,
 };
 
 pub mod chat {

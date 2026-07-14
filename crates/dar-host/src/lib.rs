@@ -204,6 +204,11 @@ async fn boot_inner(
         }
     });
     let shutdown = ShutdownToken::new(shutdown_rx);
+    let mut services = ServiceRegistry::default();
+    services.service(
+        host_api::ENV_RELOAD_CONSUMERS_SERVICE,
+        Arc::new(host_api::EnvReloadConsumers::default()),
+    )?;
     let mut register_ctx = RegisterCtx {
         bus: host_api::EventBus::new(),
         http: if options.http_enabled {
@@ -212,7 +217,7 @@ async fn boot_inner(
             HttpRegistry::disabled()
         },
         foreground: host_api::ForegroundRegistry::default(),
-        services: ServiceRegistry::default(),
+        services,
         paths: paths.clone(),
         config: options.config.clone(),
         shutdown: shutdown.clone(),

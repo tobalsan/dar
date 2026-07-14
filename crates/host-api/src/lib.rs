@@ -58,6 +58,35 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, watch};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub const ENV_RELOAD_CONSUMERS_SERVICE: &str = "host.env-reload-consumers";
+/// An explicitly opted-in cache that can reload agent-root environment values.
+pub trait EnvReloadConsumer: Send + Sync {
+    fn reload_env(&self) -> bool;
+}
+
+#[derive(Default)]
+pub struct EnvReloadConsumers(Mutex<Vec<Arc<dyn EnvReloadConsumer>>>);
+
+impl EnvReloadConsumers {
+    pub fn register(&self, consumer: Arc<dyn EnvReloadConsumer>) {
+        self.0
+            .lock()
+            .expect("env reload consumers poisoned")
+            .push(consumer);
+    }
+
+    pub fn reload_all(&self) -> usize {
+        let consumers = self
+            .0
+            .lock()
+            .expect("env reload consumers poisoned")
+            .clone();
+        consumers
+            .iter()
+            .filter(|consumer| consumer.reload_env())
+            .count()
+    }
+}
 pub const APP_DONE_TOPIC: &str = "host.app-done";
 pub const LOG_EVENTS_TOPIC: &str = "host.log-events";
 /// Retained `Option<LogEvent>` holding the one-shot startup banner. Retained
@@ -758,7 +787,28 @@ impl StartServices {
 
 #[cfg(test)]
 mod tests {
-    use super::HostPaths;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use super::{EnvReloadConsumer, EnvReloadConsumers, HostPaths};
+
+    struct CachedSecret(AtomicUsize);
+
+    impl EnvReloadConsumer for CachedSecret {
+        fn reload_env(&self) -> bool {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+    }
+
+    #[test]
+    fn opted_in_consumer_is_refreshed() {
+        let consumers = EnvReloadConsumers::default();
+        let cache = Arc::new(CachedSecret(AtomicUsize::new(0)));
+        consumers.register(cache.clone());
+        assert_eq!(consumers.reload_all(), 1);
+        assert_eq!(cache.0.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn artifact_root_must_be_host_private() {

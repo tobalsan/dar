@@ -73,6 +73,7 @@ pub mod state;
 pub mod store;
 pub mod thinking;
 pub mod tracker;
+
 pub mod workflow_config;
 
 /// Max backoff cap for dispatch/abnormal-exit retries (30 minutes).
@@ -187,7 +188,6 @@ impl Extension for OrchestratorExtension {
             );
             ctx.services
                 .service::<dyn orchestrator_api::RunQuery>("orchestrator", run_query)?;
-
             // Agent-facing `reload_secrets` tool. Registered here (register
             // pass) so it is reachable in every process that builds the tool
             // registry — including the host `__mcp-bridge` subprocess the
@@ -303,6 +303,9 @@ impl Extension for OrchestratorExtension {
             // Tracker dimensions come entirely from the resolved (frontmatter)
             // loop config.
             let services = ctx.host.services.clone();
+            let env_reload_consumers = services.get_named::<host_api::EnvReloadConsumers>(
+                host_api::ENV_RELOAD_CONSUMERS_SERVICE,
+            )?;
             let tracker =
                 tracker::build_configured(&services, &effective_cfg, paths.workflow_root.clone())?;
             let runner_id = runner_service_id(&effective_cfg.runner_kind);
@@ -383,6 +386,7 @@ impl Extension for OrchestratorExtension {
                 control_rx,
                 hitl,
             )
+            .with_env_reload_consumers(env_reload_consumers)
             .with_snapshot_bus(ctx.host.bus.clone())
             .with_system_context(system_context)
             .with_startup_banner(dashboard_banner(bind, port, ctx.host.http_addr()));
@@ -601,6 +605,7 @@ pub struct Orchestrator {
     agent_cfg: AgentConfig,
     agent_config_reloader: AgentConfigReloader,
     env_reloader: dotenv::EnvReloader,
+    env_reload_consumers: Option<Arc<host_api::EnvReloadConsumers>>,
     paths: AgentPaths,
     tracker: Arc<dyn crate::tracker::Tracker>,
     runner: Arc<dyn cap_runner::Runner>,
@@ -669,6 +674,7 @@ impl Orchestrator {
             agent_cfg,
             agent_config_reloader: AgentConfigReloader::new(&paths.root),
             env_reloader: dotenv::EnvReloader::new(&paths.root),
+            env_reload_consumers: None,
             paths,
             tracker,
             runner,
@@ -689,6 +695,14 @@ impl Orchestrator {
 
     pub fn with_snapshot_bus(mut self, bus: Arc<host_api::EventBus>) -> Self {
         self.snapshot_bus = Some(bus);
+        self
+    }
+
+    pub fn with_env_reload_consumers(
+        mut self,
+        consumers: Arc<host_api::EnvReloadConsumers>,
+    ) -> Self {
+        self.env_reload_consumers = Some(consumers);
         self
     }
 
@@ -816,7 +830,12 @@ impl Orchestrator {
         match self.env_reloader.maybe_reload() {
             Ok(Some(report)) => {
                 let changed = self.tracker.reload_secrets();
-                logging::ev("-", "env_reload", &format!("agent environment reloaded ({} refreshed, {} removed, {} external); tracker token {}", report.reloaded.len(), report.removed.len(), report.skipped_external.len(), if changed { "updated" } else { "unchanged" }));
+                let consumers = self
+                    .env_reload_consumers
+                    .as_ref()
+                    .map(|consumers| consumers.reload_all())
+                    .unwrap_or_default();
+                logging::ev("-", "env_reload", &format!("agent environment reloaded ({} refreshed, {} removed, {} external); tracker token {}; {} opted-in consumers refreshed", report.reloaded.len(), report.removed.len(), report.skipped_external.len(), if changed { "updated" } else { "unchanged" }, consumers));
             }
             Ok(None) => {}
             Err(_) => logging::ev(

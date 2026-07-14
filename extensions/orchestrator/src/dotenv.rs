@@ -89,6 +89,7 @@ impl ReloadReport {
 pub struct EnvReloader {
     root: PathBuf,
     fingerprint: u64,
+    last_rejected: Option<String>,
 }
 
 impl EnvReloader {
@@ -99,10 +100,24 @@ impl EnvReloader {
         Self {
             root: root.to_path_buf(),
             fingerprint,
+            last_rejected: None,
         }
     }
     pub fn maybe_reload(&mut self) -> Result<Option<ReloadReport>> {
-        let values = read_stable(&self.root)?;
+        let values = match read_stable(&self.root) {
+            Ok(values) => {
+                self.last_rejected = None;
+                values
+            }
+            Err(error) => {
+                let marker = error.to_string();
+                if self.last_rejected.as_deref() == Some(&marker) {
+                    return Ok(None);
+                }
+                self.last_rejected = Some(marker);
+                return Err(error);
+            }
+        };
         let next = fingerprint(&values);
         if next == self.fingerprint {
             return Ok(None);
@@ -299,7 +314,11 @@ fn parse_value(raw: &str) -> Result<String> {
             } else if c == '\\' {
                 escaped = true;
             } else if c == '"' {
-                return Ok(out);
+                let suffix = &rest[idx + c.len_utf8()..];
+                if suffix.trim().is_empty() || suffix.trim_start().starts_with('#') {
+                    return Ok(out);
+                }
+                bail!("unexpected content after quoted value");
             } else {
                 out.push(c);
             }
@@ -312,7 +331,11 @@ fn parse_value(raw: &str) -> Result<String> {
 
     if let Some(rest) = raw.strip_prefix('\'') {
         if let Some(end) = rest.find('\'') {
-            return Ok(rest[..end].to_string());
+            let suffix = &rest[end + 1..];
+            if suffix.trim().is_empty() || suffix.trim_start().starts_with('#') {
+                return Ok(rest[..end].to_string());
+            }
+            bail!("unexpected content after quoted value");
         }
         bail!("unterminated single-quoted value");
     }
@@ -347,6 +370,8 @@ mod tests {
             Some(("B".into(), "two # kept".into()))
         );
         assert_eq!(parse_line("# ignored").unwrap(), None);
+        assert!(parse_line("A=\"value\" trailing").is_err());
+        assert!(parse_line("A='value' trailing").is_err());
     }
 
     #[test]
@@ -472,6 +497,16 @@ mod tests {
         assert!(watcher.maybe_reload().unwrap().is_none());
         assert_eq!(std::env::var("DOTENV_WATCHED").unwrap(), "two");
         std::env::remove_var("DOTENV_WATCHED");
+    }
+
+    #[test]
+    fn watcher_rejects_unchanged_invalid_file_once() {
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "DOTENV_BAD\n").unwrap();
+        let mut watcher = EnvReloader::new(dir.path());
+        assert!(watcher.maybe_reload().is_err());
+        assert!(watcher.maybe_reload().unwrap().is_none());
     }
 
     #[test]

@@ -15,13 +15,10 @@ Breaking changes are marked **⚠ BREAKING**.
   (the WORKFLOW.md path itself), alongside the existing `{{ issue.* }}` and
   `{{ attempt }}` variables.
 - Artifacts: `artifact.publish` now copies exports into host-private immutable storage under OS data home, instead of agent-writable `data/`. Publishing is limited to 25 MiB for cross-surface compatibility (including Slack). Delivery APIs validate canonical vault metadata and atomically claim each surface/origin destination before upload.
-- Secrets: `reload_secrets` host tool — agents can rotate `LINEAR_API_KEY` /
-  `LINEAR_OAUTH_TOKEN` (or any `.env` secret) and refresh the running host
-  without a restart. It re-reads `.env` (overriding only keys originally loaded
-  from the file, never genuine process env) and, inside `dar run`, swaps the
-  Linear client's cached token in place via a new `ReloadSecrets` control
-  message. Reachable through the host MCP bridge; the next Linear request uses
-  the new token. Secret values stay scrubbed from logs and child env.
+- Secrets: `reload_secrets` host tool refreshes only the invoking MCP bridge's
+  local `.env` state. The live host independently applies valid `.env` changes
+  on its next poll, refreshing opted-in caches such as the tracker without a
+  restart. Secret values stay scrubbed from logs and child env.
 - tracker-plane: new Plane issue tracker extension (`tracker.kind: plane` in
   `WORKFLOW.md`), scoped to a workspace + project(s) via `tracker.workspace` /
   `tracker.projects` (or the `extensions.tracker-plane` fallback:
