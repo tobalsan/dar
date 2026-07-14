@@ -211,6 +211,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
     use tool_registry::{ToolExecutor, ToolOutcome, ToolRegistry, ToolSpec};
 
     struct EchoUpper;
@@ -386,6 +387,69 @@ mod tests {
         )
         .unwrap();
         Arc::new(reg)
+    }
+
+    #[tokio::test]
+    async fn bridge_reload_reports_local_scope_and_redacts_old_and_new_values() {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let old = "bridge-old-secret-value";
+        let new = "bridge-new-secret-value";
+        std::env::remove_var("BRIDGE_RELOAD_SECRET");
+        std::fs::write(
+            root.path().join(".env"),
+            format!("BRIDGE_RELOAD_SECRET={old}\n"),
+        )
+        .unwrap();
+        orchestrator::dotenv::load_agent_env(root.path()).unwrap();
+
+        let registry = ToolRegistry::new();
+        orchestrator::reload_secrets::register_into(&registry, root.path().to_path_buf()).unwrap();
+        registry
+            .register_tool(
+                ToolSpec::new("leak", "desc", json!({ "type": "object" })),
+                Arc::new(LeaksSecret(format!("{old} {new}"))),
+            )
+            .unwrap();
+        std::fs::write(
+            root.path().join(".env"),
+            format!("BRIDGE_RELOAD_SECRET={new}\n"),
+        )
+        .unwrap();
+
+        let input = format!(
+            "{}\n{}\n",
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "reload_secrets", "arguments": {} } }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "leak", "arguments": {} } }),
+        );
+        let mut output = Vec::new();
+        serve_stdio_with_root(
+            Arc::new(registry),
+            Redactor::from_secret_values([old]),
+            Some(root.path()),
+            input.as_bytes(),
+            &mut output,
+        )
+        .await
+        .unwrap();
+        let responses: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let reload = responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(reload.contains("bridge-local refresh only; no live-host tracker was refreshed"));
+        assert!(!reload.contains("tracker refreshed"));
+        let leaked = responses[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(!leaked.contains(old));
+        assert!(!leaked.contains(new));
+        assert!(leaked.contains("[REDACTED]"));
+        std::env::remove_var("BRIDGE_RELOAD_SECRET");
     }
 
     #[tokio::test]

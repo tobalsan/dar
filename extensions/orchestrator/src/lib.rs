@@ -3181,6 +3181,15 @@ mod tests {
         reloads: Option<Arc<std::sync::atomic::AtomicUsize>>,
     }
 
+    struct CachedEnvConsumer(Mutex<String>);
+
+    impl host_api::EnvReloadConsumer for CachedEnvConsumer {
+        fn reload_env(&self) -> bool {
+            *self.0.lock().unwrap() = std::env::var("WATCHED_ACTIVE_SECRET").unwrap();
+            true
+        }
+    }
+
     impl Tracker for StaticTracker {
         fn poll_candidates(&self) -> Result<Vec<Issue>> {
             Ok(Vec::new())
@@ -3498,6 +3507,67 @@ dashboard:
         assert!(!reply.message.contains("second"));
 
         std::env::remove_var("RELOAD_CTRL_KEY");
+    }
+
+    #[tokio::test]
+    async fn watched_env_reload_keeps_active_run_state() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("WORKFLOW.md"), "Do {{ issue.title }}").unwrap();
+        std::env::remove_var("WATCHED_ACTIVE_SECRET");
+        std::fs::write(temp.path().join(".env"), "WATCHED_ACTIVE_SECRET=old\n").unwrap();
+        crate::dotenv::load_agent_env(temp.path()).unwrap();
+        let agent_cfg = test_agent_config();
+        write_agent_yaml(temp.path(), &agent_cfg);
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let (state, control_rx) = test_state(Arc::clone(&store));
+        let reloads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let active_issue = issue("ISSUE-1", None, None);
+        let tracker = Arc::new(StaticTracker {
+            issue: active_issue.clone(),
+            parks: None,
+            reloads: Some(Arc::clone(&reloads)),
+        });
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
+        let consumers = Arc::new(host_api::EnvReloadConsumers::default());
+        let cached = Arc::new(CachedEnvConsumer(Mutex::new("old".to_string())));
+        consumers.register(cached.clone());
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state.clone(),
+            control_rx,
+        )
+        .with_env_reload_consumers(consumers);
+        let started_at = Utc::now();
+        orchestrator.slots.push(RunSlot {
+            identifier: active_issue.identifier.clone(),
+            issue: active_issue,
+            workspace: "workspace".to_string(),
+            handle: Some(pending_handle_for_test(42, ExitKind::Normal)),
+            attempt: 2,
+            turns_used: 0,
+            run_id: "active-run".to_string(),
+            started_at,
+            claim_id: None,
+            last_event_at: Arc::new(Mutex::new(started_at)),
+        });
+        std::fs::write(temp.path().join(".env"), "WATCHED_ACTIVE_SECRET=new\n").unwrap();
+
+        orchestrator.tick().await;
+
+        assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(*cached.0.lock().unwrap(), "new");
+        assert_eq!(orchestrator.slots.len(), 1);
+        assert_eq!(orchestrator.slots[0].run_id, "active-run");
+        assert_eq!(orchestrator.slots[0].attempt, 2);
+        assert!(!orchestrator.slots[0].handle.as_ref().unwrap().is_finished());
+        assert!(orchestrator.retries.is_empty());
+        assert!(state.history.snapshot().is_empty());
+        std::env::remove_var("WATCHED_ACTIVE_SECRET");
     }
 
     #[tokio::test]

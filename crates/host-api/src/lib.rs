@@ -792,22 +792,33 @@ mod tests {
 
     use super::{EnvReloadConsumer, EnvReloadConsumers, HostPaths};
 
-    struct CachedSecret(AtomicUsize);
+    struct CachedSecret {
+        value: std::sync::Mutex<String>,
+        reloads: AtomicUsize,
+    }
 
     impl EnvReloadConsumer for CachedSecret {
         fn reload_env(&self) -> bool {
-            self.0.fetch_add(1, Ordering::SeqCst);
+            *self.value.lock().unwrap() = std::env::var("HOST_API_RELOAD_SECRET").unwrap();
+            self.reloads.fetch_add(1, Ordering::SeqCst);
             true
         }
     }
 
     #[test]
     fn opted_in_consumer_is_refreshed() {
+        std::env::set_var("HOST_API_RELOAD_SECRET", "before");
         let consumers = EnvReloadConsumers::default();
-        let cache = Arc::new(CachedSecret(AtomicUsize::new(0)));
+        let cache = Arc::new(CachedSecret {
+            value: std::sync::Mutex::new(std::env::var("HOST_API_RELOAD_SECRET").unwrap()),
+            reloads: AtomicUsize::new(0),
+        });
         consumers.register(cache.clone());
+        std::env::set_var("HOST_API_RELOAD_SECRET", "after");
         assert_eq!(consumers.reload_all(), 1);
-        assert_eq!(cache.0.load(Ordering::SeqCst), 1);
+        assert_eq!(*cache.value.lock().unwrap(), "after");
+        assert_eq!(cache.reloads.load(Ordering::SeqCst), 1);
+        std::env::remove_var("HOST_API_RELOAD_SECRET");
     }
 
     #[test]
