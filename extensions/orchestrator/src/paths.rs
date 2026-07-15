@@ -96,9 +96,10 @@ impl AgentPaths {
     }
 
     /// Workspace root, resolved against the configured `workspace.root` raw
-    /// value (relative paths are relative to the WORKFLOW.md dir).
+    /// value. Relative paths use the WORKFLOW.md dir; `$AGENT_HOME` uses the
+    /// agent identity root.
     pub fn workspace_root(&self, raw: &Path) -> PathBuf {
-        resolve_workspace_root(&self.workflow_root, raw)
+        resolve_workspace_root(&self.root, &self.workflow_root, raw)
     }
 
     /// Display label for a non-default workflow (the workflow dir's
@@ -133,16 +134,17 @@ pub fn workflow_key(canonical_wf_path: &Path) -> String {
     format!("{basename}-{shorthash}")
 }
 
-/// Resolve `workspace.root`: relative values are relative to `base` (the
-/// WORKFLOW.md dir), `~` expands to HOME, and `$AGENT_HOME` expands to `base`.
-pub fn resolve_workspace_root(base: &Path, raw: &Path) -> PathBuf {
+/// Resolve `workspace.root`: relative values are relative to the WORKFLOW.md
+/// dir, `~` expands to HOME, and `$AGENT_HOME` expands to the agent identity
+/// root regardless of where WORKFLOW.md lives.
+pub fn resolve_workspace_root(agent_root: &Path, workflow_root: &Path, raw: &Path) -> PathBuf {
     let raw = raw.to_string_lossy();
-    let expanded = expand_workspace_root_vars(&raw, base);
+    let expanded = expand_workspace_root_vars(&raw, agent_root);
     let path = PathBuf::from(expanded);
     if path.is_absolute() {
         path
     } else {
-        base.join(path)
+        workflow_root.join(path)
     }
 }
 
@@ -234,23 +236,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolves_relative_workspace_root_against_agent_root() {
-        let root = Path::new("/tmp/agent");
+    fn resolves_relative_workspace_root_against_workflow_root() {
         assert_eq!(
-            resolve_workspace_root(root, Path::new("workspaces")),
-            PathBuf::from("/tmp/agent/workspaces")
+            resolve_workspace_root(
+                Path::new("/tmp/agent"),
+                Path::new("/tmp/workflow"),
+                Path::new("workspaces"),
+            ),
+            PathBuf::from("/tmp/workflow/workspaces")
         );
     }
 
     #[test]
     fn resolves_agent_home_workspace_root_against_agent_root() {
-        let root = Path::new("/tmp/agent");
+        let agent_root = Path::new("/tmp/agent");
+        let workflow_root = Path::new("/tmp/workflow");
         assert_eq!(
-            resolve_workspace_root(root, Path::new("$AGENT_HOME/ws")),
+            resolve_workspace_root(agent_root, workflow_root, Path::new("$AGENT_HOME/ws"),),
             PathBuf::from("/tmp/agent/ws")
         );
         assert_eq!(
-            resolve_workspace_root(root, Path::new("${AGENT_HOME}/ws")),
+            resolve_workspace_root(agent_root, workflow_root, Path::new("${AGENT_HOME}/ws"),),
             PathBuf::from("/tmp/agent/ws")
         );
     }
@@ -261,7 +267,11 @@ mod tests {
             return;
         };
         assert_eq!(
-            resolve_workspace_root(Path::new("/tmp/agent"), Path::new("~/ws")),
+            resolve_workspace_root(
+                Path::new("/tmp/agent"),
+                Path::new("/tmp/workflow"),
+                Path::new("~/ws"),
+            ),
             PathBuf::from(home).join("ws")
         );
     }
@@ -320,11 +330,16 @@ mod tests {
         );
         // Identity paths stay on the agent root regardless of workflow.
         assert_eq!(paths.agent_yaml(), root.join("agent.yaml"));
-        // Default workspace root lands beside the external WORKFLOW.md, not
-        // under the agent root.
+        // Relative workspace roots land beside the external WORKFLOW.md.
         assert_eq!(
             paths.workspace_root(&default_workspace_root()),
             workflow_root.join("workspaces")
+        );
+        // `$AGENT_HOME` remains the agent identity root even for an external
+        // workflow.
+        assert_eq!(
+            paths.workspace_root(Path::new("$AGENT_HOME/workspaces")),
+            root.join("workspaces")
         );
     }
 

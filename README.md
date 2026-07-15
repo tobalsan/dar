@@ -468,9 +468,9 @@ Everything still lives under the agent folder:
 - **Identity** — `agent.yaml`, `.env`, system files, extension data dirs
   (`cron/`, `pi-sessions/`, …) — always resolves against the agent root, never
   the workflow dir.
-- **Workspaces** resolve `workspace.root` relative to the WORKFLOW.md's own
-  directory, not the agent root (default `workspaces`, so the default
-  workflow's `workspaces/` is unchanged).
+- **Workspaces** resolve relative `workspace.root` values against the
+  WORKFLOW.md's own directory. `$AGENT_HOME` explicitly targets the agent
+  identity root (default `workspaces`, so the default layout is unchanged).
 
 A non-default `--workflow` process skips **agent-singleton extensions** — the
 scheduler, and any future extension that connects the agent to an external
@@ -560,9 +560,9 @@ the subset applicable to their lifecycle point.
 | `AGENT_LINEAR_GRAPHQL_TOOL` | `1` when the Linear GraphQL tool is enabled |
 | `AGENT_SESSION_DIR` | Per-issue session directory (Pi runner only) |
 
-`workspace.root` in `agent.yaml`/WORKFLOW.md supports `$AGENT_HOME` (expands
-to the agent folder) and `~` (expands to `$HOME`) in addition to relative paths
-(resolved against the agent folder) and absolute paths.
+`workspace.root` in WORKFLOW.md supports `$AGENT_HOME` (expands to the agent
+identity folder) and `~` (expands to `$HOME`) in addition to relative paths
+(resolved against the WORKFLOW.md folder) and absolute paths.
 
 ## Issue files (local tracker)
 

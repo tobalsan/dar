@@ -314,14 +314,21 @@ mod tests {
     }
 
     #[test]
-    fn render_workflow_variable() {
-        use std::io::Write;
-        let mut f = NamedTempFile::new().unwrap();
-        writeln!(f, "dir={{{{ workflow.dir }}}} file={{{{ workflow.file }}}}").unwrap();
-        let renderer = PromptRenderer::load(f.path()).unwrap();
+    fn render_workflow_variable_uses_canonical_external_workflow_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = temp.path().join("workflows/triage");
+        std::fs::create_dir_all(&workflow_dir).unwrap();
+        let workflow_file = workflow_dir.join("WORKFLOW.md");
+        std::fs::write(
+            &workflow_file,
+            "dir={{ workflow.dir }} file={{ workflow.file }}",
+        )
+        .unwrap();
+
+        let renderer = PromptRenderer::load(&workflow_file.canonicalize().unwrap()).unwrap();
         let out = renderer.render(&make_issue("W-1"), 0, 3).unwrap();
-        let expected_dir = f.path().parent().unwrap().display().to_string();
-        let expected_file = f.path().display().to_string();
+        let expected_dir = workflow_dir.canonicalize().unwrap().display().to_string();
+        let expected_file = workflow_file.canonicalize().unwrap().display().to_string();
         assert!(out.contains(&format!("dir={expected_dir}")), "got: {out}");
         assert!(out.contains(&format!("file={expected_file}")), "got: {out}");
     }
