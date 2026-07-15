@@ -317,23 +317,13 @@ mod tests {
     fn render_workflow_variable() {
         use std::io::Write;
         let mut f = NamedTempFile::new().unwrap();
-        writeln!(
-            f,
-            "dir={{{{ workflow.dir }}}} file={{{{ workflow.file }}}}"
-        )
-        .unwrap();
+        writeln!(f, "dir={{{{ workflow.dir }}}} file={{{{ workflow.file }}}}").unwrap();
         let renderer = PromptRenderer::load(f.path()).unwrap();
         let out = renderer.render(&make_issue("W-1"), 0, 3).unwrap();
         let expected_dir = f.path().parent().unwrap().display().to_string();
         let expected_file = f.path().display().to_string();
-        assert!(
-            out.contains(&format!("dir={expected_dir}")),
-            "got: {out}"
-        );
-        assert!(
-            out.contains(&format!("file={expected_file}")),
-            "got: {out}"
-        );
+        assert!(out.contains(&format!("dir={expected_dir}")), "got: {out}");
+        assert!(out.contains(&format!("file={expected_file}")), "got: {out}");
     }
 
     #[test]
