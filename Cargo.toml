@@ -5,6 +5,7 @@ members = [
     "crates/dar-host",
     "crates/dar-presence",
     "crates/artifacts",
+    "crates/agent-env",
     "crates/cap-chat",
     "crates/cap-dashboard-tab",
     "crates/cap-tracker",

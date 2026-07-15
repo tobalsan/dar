@@ -20,7 +20,7 @@ use std::{path::Path, path::PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use cap_tracker::{Issue, Tracker, TrackerBuildConfig, TrackerFactory};
 use chrono::Utc;
-use host_api::{Extension, HostCommand, RegisterCtx};
+use host_api::{AgentEnv, Extension, HostCommand, RegisterCtx, AGENT_ENV_SERVICE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tool_registry::{ToolRegistryHandle, TOOL_REGISTRY_SERVICE};
@@ -33,6 +33,8 @@ pub(crate) const API_KEY_ENV: &str = "LINEAR_API_KEY";
 /// Env var holding a Linear OAuth app access token (`actor=app`). Sent with a
 /// `Bearer ` prefix. Takes precedence over `LINEAR_API_KEY` when both are set.
 pub(crate) const OAUTH_TOKEN_ENV: &str = "LINEAR_OAUTH_TOKEN";
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Resolve the Linear `Authorization` header value from the environment.
 ///
@@ -43,13 +45,18 @@ pub(crate) const OAUTH_TOKEN_ENV: &str = "LINEAR_OAUTH_TOKEN";
 /// `LINEAR_OAUTH_TOKEN` takes precedence over `LINEAR_API_KEY` when both are
 /// set. Returns `None` when neither is set (or both are empty).
 pub(crate) fn resolve_linear_auth_header() -> Option<String> {
-    if let Some(token) = std::env::var(OAUTH_TOKEN_ENV)
-        .ok()
-        .filter(|t| !t.is_empty())
-    {
+    resolve_linear_auth_header_with(|key| std::env::var(key).ok())
+}
+
+pub(crate) fn resolve_linear_auth_header_from(env: &dyn AgentEnv) -> Option<String> {
+    resolve_linear_auth_header_with(|key| env.get(key))
+}
+
+fn resolve_linear_auth_header_with(get: impl Fn(&str) -> Option<String>) -> Option<String> {
+    if let Some(token) = get(OAUTH_TOKEN_ENV).filter(|token| !token.is_empty()) {
         return Some(format!("Bearer {token}"));
     }
-    std::env::var(API_KEY_ENV).ok().filter(|k| !k.is_empty())
+    get(API_KEY_ENV).filter(|key| !key.is_empty())
 }
 /// Initial sentinel: no real observation yet.
 const UNSET_MIN: i64 = i64::MAX;
@@ -80,7 +87,13 @@ impl Extension for TrackerLinearExtension {
 
     fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let factory: Arc<dyn TrackerFactory> = Arc::new(LinearTrackerFactory);
+            let agent_env = ctx
+                .services
+                .get_named::<dyn AgentEnv>(AGENT_ENV_SERVICE)
+                .ok();
+            let factory: Arc<dyn TrackerFactory> = Arc::new(LinearTrackerFactory {
+                agent_env: agent_env.clone(),
+            });
             ctx.services
                 .service::<dyn TrackerFactory>("linear", factory)?;
             ctx.services
@@ -98,7 +111,7 @@ impl Extension for TrackerLinearExtension {
                 .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
             {
                 let endpoint = linear_graphql::linear_graphql_endpoint(ctx.config.get(self.id()));
-                linear_graphql::register_into(registry.as_ref(), endpoint)?;
+                linear_graphql::register_into(registry.as_ref(), endpoint, agent_env)?;
             }
             Ok(())
         })
@@ -151,11 +164,18 @@ impl HostCommand for ExportCommand {
     }
 }
 
-struct LinearTrackerFactory;
+struct LinearTrackerFactory {
+    agent_env: Option<Arc<dyn AgentEnv>>,
+}
 
 impl TrackerFactory for LinearTrackerFactory {
     fn build(&self, cfg: TrackerBuildConfig) -> Result<Arc<dyn Tracker>> {
-        let api_key = match resolve_linear_auth_header() {
+        let api_key = match self
+            .agent_env
+            .as_deref()
+            .and_then(resolve_linear_auth_header_from)
+            .or_else(resolve_linear_auth_header)
+        {
             Some(header) => header,
             None => {
                 tracing::warn!(
@@ -203,6 +223,7 @@ impl TrackerFactory for LinearTrackerFactory {
             terminal_states: cfg.terminal_states,
             needs_human: cfg.needs_human,
         })?;
+        tracker.agent_env = self.agent_env.clone();
 
         let users = if assignee_raw.is_some() || delegate_raw.is_some() {
             Some(
@@ -580,10 +601,9 @@ fn yaml_string(value: &str) -> String {
 pub struct LinearTracker {
     client: reqwest::Client,
     endpoint: String,
-    /// The `Authorization` header value. Wrapped in an `RwLock` so
-    /// [`LinearTracker::reload_secrets`] can swap in a rotated token at runtime
-    /// without rebuilding the tracker (read on every request).
+    /// Construction-time fallback used only when host AgentEnv service is absent.
     api_key: RwLock<String>,
+    agent_env: Option<Arc<dyn AgentEnv>>,
     projects: Vec<String>,
     team: Option<String>,
     assignee_id: Option<String>,
@@ -610,6 +630,7 @@ impl LinearTracker {
                 cfg.endpoint
             },
             api_key: RwLock::new(cfg.api_key),
+            agent_env: None,
             projects: cfg.projects,
             team: cfg.team,
             assignee_id: cfg.assignee_id,
@@ -624,10 +645,14 @@ impl LinearTracker {
 
     /// Current `Authorization` header value (cloned for a single request).
     fn auth_header(&self) -> String {
-        self.api_key
-            .read()
-            .expect("LinearTracker api_key lock poisoned")
-            .clone()
+        match self.agent_env.as_deref() {
+            Some(env) => resolve_linear_auth_header_from(env).unwrap_or_default(),
+            None => self
+                .api_key
+                .read()
+                .expect("LinearTracker api_key lock poisoned")
+                .clone(),
+        }
     }
 
     /// Re-resolve the Linear auth header from the environment and swap the
@@ -638,15 +663,18 @@ impl LinearTracker {
     /// A now-missing token resolves to an empty header (same as construction),
     /// surfacing as a 401 rather than silently keeping the stale value.
     pub fn reload_secrets(&self) -> bool {
+        if self.agent_env.is_some() {
+            return false;
+        }
         let next = resolve_linear_auth_header().unwrap_or_default();
-        let mut guard = self
+        let mut current = self
             .api_key
             .write()
             .expect("LinearTracker api_key lock poisoned");
-        if *guard == next {
+        if *current == next {
             return false;
         }
-        *guard = next;
+        *current = next;
         true
     }
 
@@ -1456,12 +1484,9 @@ mod tests {
         OAUTH_TOKEN_ENV, UNSET_MIN,
     };
 
-    /// Serializes the env-var mutation tests below: they share process env.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn auth_header_prefers_oauth_token_with_bearer_prefix() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::TEST_ENV_LOCK.lock().unwrap();
         std::env::set_var(OAUTH_TOKEN_ENV, "oauth-abc");
         std::env::set_var(API_KEY_ENV, "lin_api_xyz");
         assert_eq!(
@@ -1474,7 +1499,7 @@ mod tests {
 
     #[test]
     fn auth_header_uses_raw_api_key_when_no_oauth_token() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::TEST_ENV_LOCK.lock().unwrap();
         std::env::remove_var(OAUTH_TOKEN_ENV);
         std::env::set_var(API_KEY_ENV, "lin_api_xyz");
         assert_eq!(resolve_linear_auth_header().as_deref(), Some("lin_api_xyz"));
@@ -1483,7 +1508,7 @@ mod tests {
 
     #[test]
     fn auth_header_none_when_unset_or_empty() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::TEST_ENV_LOCK.lock().unwrap();
         std::env::remove_var(OAUTH_TOKEN_ENV);
         std::env::remove_var(API_KEY_ENV);
         assert_eq!(resolve_linear_auth_header(), None);
@@ -1496,7 +1521,7 @@ mod tests {
 
     #[test]
     fn reload_secrets_swaps_cached_token_from_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::TEST_ENV_LOCK.lock().unwrap();
         std::env::remove_var(OAUTH_TOKEN_ENV);
         std::env::set_var(API_KEY_ENV, "lin_old");
 
@@ -1533,11 +1558,33 @@ mod tests {
         std::env::remove_var(API_KEY_ENV);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn reload_secrets_changes_authorization_on_next_tracker_request() {
-        let _guard = ENV_LOCK.lock().unwrap();
+    #[test]
+    fn agent_env_deletion_does_not_fall_back_to_construction_token() {
+        let _guard = super::TEST_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
         std::env::remove_var(OAUTH_TOKEN_ENV);
-        std::env::set_var(API_KEY_ENV, "linear-old-token");
+        std::env::remove_var(API_KEY_ENV);
+        std::fs::write(&path, format!("{API_KEY_ENV}=current\n")).unwrap();
+        agent_env::load_agent_env(dir.path()).unwrap();
+        let mut tracker = make_tracker();
+        tracker.api_key = std::sync::RwLock::new("construction-token".to_string());
+        tracker.agent_env = Some(agent_env::provider(dir.path()));
+        assert_eq!(tracker.auth_header(), "current");
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(tracker.auth_header(), "");
+        std::env::remove_var(API_KEY_ENV);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_env_rotation_changes_authorization_on_next_tracker_request() {
+        let _guard = super::TEST_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+        std::env::remove_var(OAUTH_TOKEN_ENV);
+        std::env::remove_var(API_KEY_ENV);
+        std::fs::write(&env_path, format!("{API_KEY_ENV}=linear-old-token\n")).unwrap();
+        agent_env::load_agent_env(dir.path()).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
@@ -1551,7 +1598,7 @@ mod tests {
             }
             headers
         });
-        let tracker = LinearTracker::new(LinearTrackerConfig {
+        let mut tracker = LinearTracker::new(LinearTrackerConfig {
             endpoint,
             api_key: resolve_linear_auth_header().unwrap(),
             projects: vec![],
@@ -1564,9 +1611,9 @@ mod tests {
             needs_human: None,
         })
         .unwrap();
+        tracker.agent_env = Some(agent_env::provider(dir.path()));
         tracker.poll_candidates().unwrap();
-        std::env::set_var(API_KEY_ENV, "linear-new-token");
-        assert!(tracker.reload_secrets());
+        std::fs::write(&env_path, format!("{API_KEY_ENV}=linear-new-token\n")).unwrap();
         tracker.poll_candidates().unwrap();
         let headers = server.join().unwrap();
         assert!(headers[0].contains("authorization: linear-old-token"));
@@ -2205,7 +2252,10 @@ mod tests {
             mention: None,
             labels: vec![],
         };
-        let err = super::LinearTrackerFactory.build(cfg).err().unwrap();
+        let err = super::LinearTrackerFactory { agent_env: None }
+            .build(cfg)
+            .err()
+            .unwrap();
         assert!(err.to_string().contains("tracker.projects"));
     }
 

@@ -1,0 +1,17 @@
+[package]
+name = "dar-agent-env"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Agent-root dotenv provider"
+rust-version = "1.83"
+publish = false
+
+[dependencies]
+anyhow = "1"
+host-api = { package = "dar-host-api", path = "../host-api", version = "0.3" }
+runner-core = { package = "dar-runner-core", path = "../runner-core", version = "0.3" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -13,6 +13,7 @@ name = "orchestrator"
 
 [dependencies]
 anyhow = "1"
+agent-env = { package = "dar-agent-env", path = "../../crates/agent-env", version = "0.3" }
 async-trait = "0.1"
 cap-runner = { package = "dar-cap-runner", path = "../../crates/cap-runner", version = "0.3" }
 cap-tracker = { package = "dar-cap-tracker", path = "../../crates/cap-tracker", version = "0.3" }

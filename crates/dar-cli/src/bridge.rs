@@ -98,6 +98,9 @@ where
         if trimmed.is_empty() {
             continue;
         }
+        if let Some(root) = root {
+            redactor.extend_secret_values(agent_env::provider(root).secret_values());
+        }
         let request: Value = match serde_json::from_str(trimmed) {
             Ok(value) => value,
             Err(_) => {
@@ -390,7 +393,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridge_reload_reports_local_scope_and_redacts_old_and_new_values() {
+    async fn bridge_read_through_refresh_redacts_old_and_new_values_without_reload_tool() {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let root = tempfile::tempdir().unwrap();
@@ -405,7 +408,6 @@ mod tests {
         orchestrator::dotenv::load_agent_env(root.path()).unwrap();
 
         let registry = ToolRegistry::new();
-        orchestrator::reload_secrets::register_into(&registry, root.path().to_path_buf()).unwrap();
         registry
             .register_tool(
                 ToolSpec::new("leak", "desc", json!({ "type": "object" })),
@@ -419,9 +421,8 @@ mod tests {
         .unwrap();
 
         let input = format!(
-            "{}\n{}\n",
-            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "reload_secrets", "arguments": {} } }),
-            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "leak", "arguments": {} } }),
+            "{}\n",
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "leak", "arguments": {} } }),
         );
         let mut output = Vec::new();
         serve_stdio_with_root(
@@ -438,12 +439,7 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        let reload = responses[0]["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap();
-        assert!(reload.contains("bridge-local refresh only; no live-host tracker was refreshed"));
-        assert!(!reload.contains("tracker refreshed"));
-        let leaked = responses[1]["result"]["content"][0]["text"]
+        let leaked = responses[0]["result"]["content"][0]["text"]
             .as_str()
             .unwrap();
         assert!(!leaked.contains(old));

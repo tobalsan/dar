@@ -15,6 +15,7 @@ name = "dar_host"
 anyhow = "1"
 axum = "0.8"
 host-api = { package = "dar-host-api", path = "../host-api", version = "0.3" }
+agent-env = { package = "dar-agent-env", path = "../agent-env", version = "0.3" }
 tokio = { version = "1.43", features = ["macros", "rt-multi-thread", "signal", "sync"] }
 crossterm = "0.28"
 tracing = "0.1"

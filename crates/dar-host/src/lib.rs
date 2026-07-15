@@ -126,21 +126,7 @@ pub async fn run_with_extensions(
 }
 
 fn load_dotenv(root: &Path) -> Result<()> {
-    let path = root.join(".env");
-    if path.exists() {
-        for line in std::fs::read_to_string(path)?.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((key, value)) = line.split_once('=') {
-                if std::env::var_os(key).is_none() {
-                    std::env::set_var(key.trim(), value.trim().trim_matches('"'));
-                }
-            }
-        }
-    }
-    Ok(())
+    agent_env::load_agent_env(root).map(|_| ())
 }
 
 pub async fn boot(extensions: Vec<Arc<dyn Extension>>, options: HostOptions) -> Result<()> {
@@ -205,6 +191,10 @@ async fn boot_inner(
     });
     let shutdown = ShutdownToken::new(shutdown_rx);
     let mut services = ServiceRegistry::default();
+    services.service::<dyn host_api::AgentEnv>(
+        host_api::AGENT_ENV_SERVICE,
+        agent_env::provider(&options.root),
+    )?;
     services.service(
         host_api::ENV_RELOAD_CONSUMERS_SERVICE,
         Arc::new(host_api::EnvReloadConsumers::default()),

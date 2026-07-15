@@ -9,6 +9,8 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Secrets: Plane and Linear requests now read agent-root credentials through a shared provider, so running host and MCP bridge processes observe valid `.env` rotations without `reload_secrets` while preserving process-env precedence, last-known-good fallback, child scrubbing, and redaction.
+
 ### Added
 - WORKFLOW.md prompt templates can now reference `{{ workflow.dir }}`
   (directory containing the resolved WORKFLOW.md) and `{{ workflow.file }}`

@@ -532,6 +532,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dar-agent-env"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "dar-host-api",
+ "dar-runner-core",
+ "tempfile",
+]
+
+[[package]]
 name = "dar-artifacts"
 version = "0.3.1"
 dependencies = [
@@ -669,6 +679,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "clap",
+ "dar-agent-env",
  "dar-cap-runner",
  "dar-host",
  "dar-host-api",
@@ -753,6 +764,7 @@ dependencies = [
  "anyhow",
  "axum 0.8.9",
  "crossterm",
+ "dar-agent-env",
  "dar-host-api",
  "serde_json",
  "tempfile",
@@ -796,6 +808,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "dar-agent-env",
  "dar-cap-runner",
  "dar-cap-tracker",
  "dar-extension-sdk",
@@ -1066,6 +1079,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "dar-agent-env",
  "dar-cap-tracker",
  "dar-host-api",
  "dar-tool-registry",
@@ -1085,6 +1099,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "dar-agent-env",
  "dar-cap-tracker",
  "dar-host-api",
  "dar-tool-registry",

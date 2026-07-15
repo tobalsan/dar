@@ -29,9 +29,11 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use tool_registry::{Redactor, ToolExecutor, ToolOutcome, ToolRegistryHandle, ToolSpec};
 
+use host_api::AgentEnv;
+
 use crate::{
-    parse_ext_config, resolve_plane_auth, PlaneAuth, API_KEY_ENV, BOT_TOKEN_ENV, DEFAULT_API_URL,
-    OAUTH_TOKEN_ENV,
+    parse_ext_config, resolve_plane_auth, resolve_plane_auth_from, PlaneAuth, API_KEY_ENV,
+    BOT_TOKEN_ENV, DEFAULT_API_URL, OAUTH_TOKEN_ENV,
 };
 
 /// The tool name agents call by.
@@ -56,7 +58,7 @@ pub(crate) fn plane_api_base(config: Option<&Value>) -> String {
 pub enum AuthSource {
     /// Resolve the credential from `PLANE_BOT_TOKEN` / `PLANE_OAUTH_TOKEN`
     /// (Bearer) or `PLANE_API_KEY` (`X-API-Key`) at call time.
-    Env,
+    Env(Option<Arc<dyn AgentEnv>>),
     /// A fixed credential, for tests.
     #[cfg(test)]
     Static(PlaneAuth),
@@ -69,7 +71,8 @@ impl AuthSource {
     /// Resolve the credential, or `None` when unset/empty.
     fn resolve(&self) -> Option<PlaneAuth> {
         match self {
-            AuthSource::Env => resolve_plane_auth(),
+            AuthSource::Env(Some(env)) => resolve_plane_auth_from(env.as_ref()),
+            AuthSource::Env(None) => resolve_plane_auth(),
             #[cfg(test)]
             AuthSource::Static(a) => Some(a.clone()),
             #[cfg(test)]
@@ -217,7 +220,14 @@ impl ToolExecutor for PlaneApiTool {
             ));
         };
         let (header_name, header_value) = auth.header();
-        let redactor = auth_redactor(&auth);
+        let mut redactor = auth_redactor(&auth);
+        if let AuthSource::Env(Some(env)) = &self.auth {
+            redactor = Redactor::from_secret_values(
+                env.secret_values()
+                    .into_iter()
+                    .chain([header_value.clone()]),
+            );
+        }
 
         // --- execute in-host; the token only leaves as the credential header ---
         let url = self.url_for(path);
@@ -305,8 +315,12 @@ impl ToolExecutor for PlaneApiTool {
 /// Register the `plane_api` tool against the shared registry, reading the host's
 /// Plane credential from the environment at call time. Called from the
 /// extension's `register()` pass (section 7.3).
-pub fn register_into(registry: &dyn ToolRegistryHandle, base: String) -> Result<()> {
-    let tool = PlaneApiTool::new(base, AuthSource::Env)?;
+pub fn register_into(
+    registry: &dyn ToolRegistryHandle,
+    base: String,
+    agent_env: Option<Arc<dyn AgentEnv>>,
+) -> Result<()> {
+    let tool = PlaneApiTool::new(base, AuthSource::Env(agent_env))?;
     registry.register_tool(PlaneApiTool::spec(), Arc::new(tool))
 }
 
@@ -520,6 +534,59 @@ mod tests {
         // The host did send the token upstream, but it never reaches the agent.
         assert_eq!(*sent_auth.lock().unwrap(), "test-key");
         assert!(!out.text.contains("test-key"));
+    }
+
+    #[tokio::test]
+    async fn read_through_auth_rotates_between_tool_calls() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::env::remove_var(BOT_TOKEN_ENV);
+        std::env::remove_var(OAUTH_TOKEN_ENV);
+        std::env::remove_var(API_KEY_ENV);
+        std::fs::write(&path, format!("{BOT_TOKEN_ENV}=old-token\n")).unwrap();
+        agent_env::load_agent_env(dir.path()).unwrap();
+        let env = agent_env::provider(dir.path());
+
+        let assert_old = mock_server(
+            "200 OK",
+            r#"{"ok":true}"#,
+            StdArc::new(|req| {
+                assert!(req
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer old-token"));
+            }),
+        )
+        .await;
+        let old_tool = PlaneApiTool::new(assert_old, AuthSource::Env(Some(env.clone()))).unwrap();
+        assert!(
+            !old_tool
+                .execute(json!({"path":"work-items/"}))
+                .await
+                .unwrap()
+                .is_error
+        );
+
+        std::fs::write(&path, format!("{BOT_TOKEN_ENV}=new-token\n")).unwrap();
+        let assert_new = mock_server(
+            "401 Unauthorized",
+            r#"{"echo":"old-token new-token"}"#,
+            StdArc::new(|req| {
+                assert!(req
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer new-token"));
+            }),
+        )
+        .await;
+        let new_tool = PlaneApiTool::new(assert_new, AuthSource::Env(Some(env))).unwrap();
+        let out = new_tool
+            .execute(json!({"path":"work-items/"}))
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert!(!out.text.contains("old-token"));
+        assert!(!out.text.contains("new-token"));
+        std::env::remove_var(BOT_TOKEN_ENV);
     }
 
     #[tokio::test]

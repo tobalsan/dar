@@ -30,7 +30,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use cap_tracker::{Issue, Tracker, TrackerBuildConfig, TrackerFactory};
 use chrono::Utc;
-use host_api::{Extension, HostCommand, RegisterCtx};
+use host_api::{AgentEnv, Extension, HostCommand, RegisterCtx, AGENT_ENV_SERVICE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tool_registry::{ToolRegistryHandle, TOOL_REGISTRY_SERVICE};
@@ -50,6 +50,8 @@ pub(crate) const BOT_TOKEN_ENV: &str = "PLANE_BOT_TOKEN";
 pub(crate) const OAUTH_TOKEN_ENV: &str = "PLANE_OAUTH_TOKEN";
 /// Env var holding a Plane personal API key. Sent as the `X-API-Key` header.
 pub(crate) const API_KEY_ENV: &str = "PLANE_API_KEY";
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Initial sentinel: no real rate-limit observation yet.
 const UNSET_MIN: i64 = i64::MAX;
@@ -152,14 +154,21 @@ impl PlaneAuth {
 /// take precedence over `PLANE_API_KEY` (`X-API-Key`). Returns `None` when no
 /// supported env var is set (or all are empty).
 pub(crate) fn resolve_plane_auth() -> Option<PlaneAuth> {
-    for env in [BOT_TOKEN_ENV, OAUTH_TOKEN_ENV] {
-        if let Some(token) = std::env::var(env).ok().filter(|t| !t.is_empty()) {
+    resolve_plane_auth_with(|key| std::env::var(key).ok())
+}
+
+pub(crate) fn resolve_plane_auth_from(env: &dyn AgentEnv) -> Option<PlaneAuth> {
+    resolve_plane_auth_with(|key| env.get(key))
+}
+
+fn resolve_plane_auth_with(get: impl Fn(&str) -> Option<String>) -> Option<PlaneAuth> {
+    for key in [BOT_TOKEN_ENV, OAUTH_TOKEN_ENV] {
+        if let Some(token) = get(key).filter(|token| !token.is_empty()) {
             return Some(PlaneAuth::Bearer(token));
         }
     }
-    std::env::var(API_KEY_ENV)
-        .ok()
-        .filter(|k| !k.is_empty())
+    get(API_KEY_ENV)
+        .filter(|key| !key.is_empty())
         .map(PlaneAuth::ApiKey)
 }
 
@@ -177,7 +186,12 @@ impl Extension for TrackerPlaneExtension {
     fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let config = parse_ext_config(ctx.config.get(self.id()));
-            let factory: Arc<dyn TrackerFactory> = Arc::new(PlaneTrackerFactory::new(config));
+            let agent_env = ctx
+                .services
+                .get_named::<dyn AgentEnv>(AGENT_ENV_SERVICE)
+                .ok();
+            let factory: Arc<dyn TrackerFactory> =
+                Arc::new(PlaneTrackerFactory::new(config).with_agent_env(agent_env.clone()));
             ctx.services
                 .service::<dyn TrackerFactory>("plane", factory)?;
 
@@ -199,7 +213,7 @@ impl Extension for TrackerPlaneExtension {
                 .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
             {
                 let base = plane_api::plane_api_base(ctx.config.get(self.id()));
-                plane_api::register_into(registry.as_ref(), base)?;
+                plane_api::register_into(registry.as_ref(), base, agent_env)?;
             }
             Ok(())
         })
@@ -671,11 +685,20 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 /// register time.
 pub struct PlaneTrackerFactory {
     config: PlaneExtConfig,
+    agent_env: Option<Arc<dyn AgentEnv>>,
 }
 
 impl PlaneTrackerFactory {
     pub fn new(config: PlaneExtConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            agent_env: None,
+        }
+    }
+
+    fn with_agent_env(mut self, agent_env: Option<Arc<dyn AgentEnv>>) -> Self {
+        self.agent_env = agent_env;
+        self
     }
 }
 
@@ -703,7 +726,11 @@ impl TrackerFactory for PlaneTrackerFactory {
         )?;
 
         // --- auth (section 6) ---
-        let auth = resolve_plane_auth();
+        let auth = self
+            .agent_env
+            .as_deref()
+            .and_then(resolve_plane_auth_from)
+            .or_else(resolve_plane_auth);
         if auth.is_none() {
             tracing::warn!(
                 "none of {BOT_TOKEN_ENV}, {OAUTH_TOKEN_ENV}, or {API_KEY_ENV} is set; Plane API requests will fail with 401"
@@ -730,6 +757,7 @@ impl TrackerFactory for PlaneTrackerFactory {
             needs_human: cfg.needs_human,
             mention: cfg.mention,
         })?;
+        tracker.agent_env = self.agent_env.clone();
 
         // --- boot resolution (section 2.4): fetch project identifier + state
         // and label tables, then fail fast if a configured state name is unknown.
@@ -789,6 +817,7 @@ pub struct PlaneTracker {
     /// Explicit Plane project UUIDs. Empty ⇒ whole-workspace fetch.
     projects: Vec<String>,
     auth: Option<PlaneAuth>,
+    agent_env: Option<Arc<dyn AgentEnv>>,
     active: Vec<String>,
     terminal: Vec<String>,
     needs_human: Option<String>,
@@ -826,6 +855,7 @@ impl PlaneTracker {
             workspace: cfg.workspace,
             projects: cfg.projects,
             auth: cfg.auth,
+            agent_env: None,
             active: cfg.active_states,
             terminal: cfg.terminal_states,
             needs_human: cfg.needs_human,
@@ -896,7 +926,11 @@ impl PlaneTracker {
         let rb = rb
             .header(reqwest::header::ACCEPT, "application/json")
             .header(reqwest::header::CONTENT_TYPE, "application/json");
-        match &self.auth {
+        let auth = match self.agent_env.as_deref() {
+            Some(env) => resolve_plane_auth_from(env),
+            None => self.auth.clone(),
+        };
+        match auth {
             Some(auth) => {
                 let (name, value) = auth.header();
                 rb.header(name, value)
@@ -1749,14 +1783,11 @@ mod tests {
 
     use super::*;
 
-    /// Serializes the env-var mutation tests: they share process env.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     // --- auth (section 6) ---
 
     #[test]
     fn auth_prefers_bot_token_as_bearer() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = super::TEST_ENV_LOCK.lock().unwrap();
         std::env::set_var(BOT_TOKEN_ENV, "bot-abc");
         std::env::set_var(OAUTH_TOKEN_ENV, "oauth-abc");
         std::env::set_var(API_KEY_ENV, "plane_key_xyz");
@@ -1770,7 +1801,7 @@ mod tests {
 
     #[test]
     fn auth_falls_back_to_oauth_token_as_bearer() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = super::TEST_ENV_LOCK.lock().unwrap();
         std::env::remove_var(BOT_TOKEN_ENV);
         std::env::set_var(OAUTH_TOKEN_ENV, "oauth-abc");
         std::env::set_var(API_KEY_ENV, "plane_key_xyz");
@@ -1783,7 +1814,7 @@ mod tests {
 
     #[test]
     fn auth_falls_back_to_api_key_header() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = super::TEST_ENV_LOCK.lock().unwrap();
         std::env::remove_var(BOT_TOKEN_ENV);
         std::env::remove_var(OAUTH_TOKEN_ENV);
         std::env::set_var(API_KEY_ENV, "plane_key_xyz");
@@ -1795,7 +1826,7 @@ mod tests {
 
     #[test]
     fn auth_none_when_unset_or_empty() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = super::TEST_ENV_LOCK.lock().unwrap();
         std::env::remove_var(BOT_TOKEN_ENV);
         std::env::remove_var(OAUTH_TOKEN_ENV);
         std::env::remove_var(API_KEY_ENV);
@@ -1856,6 +1887,33 @@ mod tests {
             mention: None,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn agent_env_deletion_does_not_fall_back_to_construction_token() {
+        let _guard = super::TEST_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::env::remove_var(BOT_TOKEN_ENV);
+        std::env::remove_var(OAUTH_TOKEN_ENV);
+        std::env::remove_var(API_KEY_ENV);
+        std::fs::write(&path, format!("{BOT_TOKEN_ENV}=current\n")).unwrap();
+        agent_env::load_agent_env(dir.path()).unwrap();
+        let mut tracker = make_tracker();
+        tracker.auth = Some(PlaneAuth::Bearer("construction-token".to_string()));
+        tracker.agent_env = Some(agent_env::provider(dir.path()));
+        let request = tracker
+            .authed(tracker.client.get("http://localhost"))
+            .build()
+            .unwrap();
+        assert_eq!(request.headers()["authorization"], "Bearer current");
+        std::fs::remove_file(path).unwrap();
+        let request = tracker
+            .authed(tracker.client.get("http://localhost"))
+            .build()
+            .unwrap();
+        assert!(!request.headers().contains_key("authorization"));
+        std::env::remove_var(BOT_TOKEN_ENV);
     }
 
     fn header_map(pairs: &[(&str, &str)]) -> HeaderMap {

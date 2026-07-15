@@ -24,6 +24,7 @@ semver = "1"
 toml = "0.8"
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal", "io-std", "io-util"] }
 host-api = { package = "dar-host-api", path = "../host-api", version = "0.3" }
+agent-env = { package = "dar-agent-env", path = "../agent-env", version = "0.3" }
 dar-host = { path = "../dar-host", version = "0.3" }
 dar-presence = { path = "../dar-presence", version = "0.3" }
 cap-runner = { package = "dar-cap-runner", path = "../cap-runner", version = "0.3" }

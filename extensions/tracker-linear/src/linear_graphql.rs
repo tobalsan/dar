@@ -23,11 +23,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use host_api::AgentEnv;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tool_registry::{Redactor, ToolExecutor, ToolOutcome, ToolRegistryHandle, ToolSpec};
 
-use crate::{resolve_linear_auth_header, API_KEY_ENV, DEFAULT_ENDPOINT, OAUTH_TOKEN_ENV};
+use crate::{
+    resolve_linear_auth_header, resolve_linear_auth_header_from, API_KEY_ENV, DEFAULT_ENDPOINT,
+    OAUTH_TOKEN_ENV,
+};
 
 /// Per-extension config for `extensions.tracker-linear` relevant to the tool.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -56,7 +60,7 @@ pub const TOOL_NAME: &str = "linear_graphql";
 pub enum AuthSource {
     /// Resolve the `Authorization` header value from `LINEAR_OAUTH_TOKEN`
     /// (sent as `Bearer <token>`) or `LINEAR_API_KEY` (sent raw) at call time.
-    Env,
+    Env(Option<Arc<dyn AgentEnv>>),
     /// A fixed `Authorization` header value, for tests.
     #[cfg(test)]
     Static(String),
@@ -66,7 +70,8 @@ impl AuthSource {
     /// Resolve the `Authorization` header value, or `None` when unset/empty.
     fn resolve(&self) -> Option<String> {
         match self {
-            AuthSource::Env => resolve_linear_auth_header(),
+            AuthSource::Env(Some(env)) => resolve_linear_auth_header_from(env.as_ref()),
+            AuthSource::Env(None) => resolve_linear_auth_header(),
             #[cfg(test)]
             AuthSource::Static(k) => Some(k.clone()).filter(|k| !k.is_empty()),
         }
@@ -170,7 +175,12 @@ impl ToolExecutor for LinearGraphqlTool {
             ));
         };
 
-        let redactor = auth_redactor(&auth_header);
+        let redactor = match &self.auth {
+            AuthSource::Env(Some(env)) => Redactor::from_secret_values(
+                env.secret_values().into_iter().chain([auth_header.clone()]),
+            ),
+            _ => auth_redactor(&auth_header),
+        };
 
         // --- execute in-host; the token only leaves as the Authorization header ---
         let body = json!({ "query": query, "variables": variables });
@@ -255,8 +265,12 @@ impl ToolExecutor for LinearGraphqlTool {
 /// Register the `linear_graphql` tool against the shared registry, reading the
 /// host's Linear API key from the environment at call time. Called from the
 /// extension's `register()` pass.
-pub fn register_into(registry: &dyn ToolRegistryHandle, endpoint: String) -> Result<()> {
-    let tool = LinearGraphqlTool::new(endpoint, AuthSource::Env)?;
+pub fn register_into(
+    registry: &dyn ToolRegistryHandle,
+    endpoint: String,
+    agent_env: Option<Arc<dyn AgentEnv>>,
+) -> Result<()> {
+    let tool = LinearGraphqlTool::new(endpoint, AuthSource::Env(agent_env))?;
     registry.register_tool(LinearGraphqlTool::spec(), Arc::new(tool))
 }
 
@@ -434,6 +448,58 @@ mod tests {
         // (the outcome carries only `data`).
         assert_eq!(*sent_auth.lock().unwrap(), "test-key");
         assert!(!out.text.contains("test-key"));
+    }
+
+    #[tokio::test]
+    async fn read_through_auth_rotates_between_tool_calls() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::env::remove_var(OAUTH_TOKEN_ENV);
+        std::env::remove_var(API_KEY_ENV);
+        std::fs::write(&path, format!("{API_KEY_ENV}=linear-old\n")).unwrap();
+        agent_env::load_agent_env(dir.path()).unwrap();
+        let env = agent_env::provider(dir.path());
+
+        let old_url = mock_server(
+            "200 OK",
+            r#"{"data":{"ok":true}}"#,
+            StdArc::new(|req| {
+                assert!(req
+                    .to_ascii_lowercase()
+                    .contains("authorization: linear-old"));
+            }),
+        )
+        .await;
+        let old_tool = LinearGraphqlTool::new(old_url, AuthSource::Env(Some(env.clone()))).unwrap();
+        assert!(
+            !old_tool
+                .execute(json!({"query":"{ viewer { id } }"}))
+                .await
+                .unwrap()
+                .is_error
+        );
+
+        std::fs::write(&path, format!("{API_KEY_ENV}=linear-new\n")).unwrap();
+        let new_url = mock_server(
+            "401 Unauthorized",
+            r#"{"echo":"linear-old linear-new"}"#,
+            StdArc::new(|req| {
+                assert!(req
+                    .to_ascii_lowercase()
+                    .contains("authorization: linear-new"));
+            }),
+        )
+        .await;
+        let new_tool = LinearGraphqlTool::new(new_url, AuthSource::Env(Some(env))).unwrap();
+        let out = new_tool
+            .execute(json!({"query":"{ viewer { id } }"}))
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert!(!out.text.contains("linear-old"));
+        assert!(!out.text.contains("linear-new"));
+        std::env::remove_var(API_KEY_ENV);
     }
 
     #[tokio::test]

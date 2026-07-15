@@ -301,11 +301,16 @@ pub(crate) async fn plugin_services(
 ) -> Result<ServiceRegistry> {
     let config = ConfigStore::from_values(config::load(root)?.extension_configs()?);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut services = ServiceRegistry::default();
+    services.service::<dyn host_api::AgentEnv>(
+        host_api::AGENT_ENV_SERVICE,
+        agent_env::provider(root),
+    )?;
     let mut ctx = RegisterCtx {
         bus: EventBus::new(),
         http: HttpRegistry::disabled(),
         foreground: ForegroundRegistry::default(),
-        services: ServiceRegistry::default(),
+        services,
         paths: HostPaths::new(root)?.with_artifact_root(artifact_root()?)?,
         config,
         shutdown: ShutdownToken::new(shutdown_rx),
@@ -346,6 +351,8 @@ mod tests {
         }
         fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
             Box::pin(async move {
+                ctx.services
+                    .get_named::<dyn host_api::AgentEnv>(host_api::AGENT_ENV_SERVICE)?;
                 let registry: Arc<ToolRegistry> = Arc::new(ToolRegistry::new());
                 let handle: Arc<dyn ToolRegistryHandle> = registry.clone();
                 // Publish + register so the test can read it back.

@@ -58,6 +58,15 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, watch};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub const AGENT_ENV_SERVICE: &str = "host.agent-env";
+/// Root-scoped environment view. Implementations preserve process-env
+/// precedence while refreshing agent `.env` values on demand.
+pub trait AgentEnv: Send + Sync {
+    fn get(&self, key: &str) -> Option<String>;
+    fn secret_values(&self) -> Vec<String>;
+}
+
 pub const ENV_RELOAD_CONSUMERS_SERVICE: &str = "host.env-reload-consumers";
 /// An explicitly opted-in cache that can reload agent-root environment values.
 pub trait EnvReloadConsumer: Send + Sync {
