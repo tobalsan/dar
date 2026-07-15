@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Fleet dashboard: same-named workers using different workflow paths now get distinct, stable labels.
 - Secrets: Plane and Linear requests now read agent-root credentials through a shared provider, so running host and MCP bridge processes observe valid `.env` rotations without `reload_secrets` while preserving process-env precedence, last-known-good fallback, child scrubbing, and redaction.
 
 ### Added

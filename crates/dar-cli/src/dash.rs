@@ -98,6 +98,20 @@ fn display_host(ip: IpAddr) -> String {
 /// `GET /api/agents` — JSON list of live agents (dead pids pruned on read).
 async fn api_agents(State(state): State<DashState>) -> Response {
     let agents = state.registry.read_live();
+    let agents: Vec<_> = agents
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "id": entry.id,
+                "label": agent_label(entry),
+                "folder": entry.folder,
+                "workflow": entry.workflow,
+                "addr": entry.addr,
+                "pid": entry.pid,
+                "started_at": entry.started_at,
+            })
+        })
+        .collect();
     let body = serde_json::json!({ "agents": agents });
     (
         [(header::CONTENT_TYPE, "application/json")],
@@ -179,8 +193,8 @@ fn dialable_host(addr: &str) -> String {
     }
 }
 
-/// `id · <workflow-dir basename>`, or plain `id` when the workflow's
-/// directory is the agent folder (the default workflow).
+/// `id · <workflow-dir basename>-<path hash>`, or plain `id` when the
+/// workflow's directory is the agent folder (the default workflow).
 fn agent_label(entry: &PresenceEntry) -> String {
     let folder = Path::new(&entry.folder);
     let wf_dir = Path::new(&entry.workflow).parent();
@@ -193,7 +207,13 @@ fn agent_label(entry: &PresenceEntry) -> String {
             if base.is_empty() {
                 entry.id.clone()
             } else {
-                format!("{} \u{b7} {}", entry.id, base)
+                let file_name = entry.file_name();
+                let hash = file_name
+                    .strip_suffix(".json")
+                    .and_then(|name| name.rsplit_once('-'))
+                    .map(|(_, hash)| hash)
+                    .unwrap_or("workflow");
+                format!("{} \u{b7} {}-{hash}", entry.id, base)
             }
         }
         _ => entry.id.clone(),
@@ -297,16 +317,8 @@ fn render_shell(agents: &[PresenceEntry], request_host: Option<&str>) -> Result<
         b.dataset.src = url;
         b.onclick = function () {{ pick(b); }};
         var folder = (a.folder || '').split('/').pop();
-        var wfParts = (a.workflow || '').split('/');
-        wfParts.pop();
-        var wfDir = wfParts.join('/');
-        var label = a.id;
-        if (wfDir && wfDir !== a.folder) {{
-          var wfBase = wfDir.split('/').pop();
-          if (wfBase) label = a.id + ' · ' + wfBase;
-        }}
         b.innerHTML = '<span class="aid"></span><span class="afolder"></span>';
-        b.querySelector('.aid').textContent = label;
+        b.querySelector('.aid').textContent = a.label;
         b.querySelector('.afolder').textContent = folder;
         if (url === currentSrc) b.classList.add('active');
         li.appendChild(b);
@@ -403,7 +415,7 @@ mod tests {
             "0.0.0.0:1",
             1,
         );
-        assert_eq!(agent_label(&e), "ALG-1 \u{b7} wf-a");
+        assert!(agent_label(&e).starts_with("ALG-1 \u{b7} wf-a-"));
     }
 
     #[test]
@@ -431,7 +443,32 @@ mod tests {
             1,
         )];
         let html = render_shell(&agents, Some("studio.ts.net")).unwrap();
-        assert!(html.contains("ALG-1 \u{b7} wf-a"));
+        assert!(html.contains("ALG-1 \u{b7} wf-a-"));
+    }
+
+    #[test]
+    fn labels_distinguish_workflow_dirs_with_same_basename() {
+        let a = entry_wf(
+            "worker",
+            "/agents/worker",
+            "/projects/one/worker/WORKFLOW.md",
+            "0.0.0.0:50001",
+            1,
+        );
+        let b = entry_wf(
+            "worker",
+            "/agents/worker",
+            "/projects/two/worker/WORKFLOW.md",
+            "0.0.0.0:50002",
+            2,
+        );
+        let a_label = agent_label(&a);
+        let b_label = agent_label(&b);
+        assert_ne!(a_label, b_label);
+
+        let html = render_shell(&[a, b], Some("studio.ts.net")).unwrap();
+        assert!(html.contains(&a_label));
+        assert!(html.contains(&b_label));
     }
 
     #[test]
@@ -472,6 +509,34 @@ mod tests {
         let agents = json["agents"].as_array().unwrap();
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0]["id"], "ALG-LIVE");
+        assert_eq!(agents[0]["label"], "ALG-LIVE");
+    }
+
+    #[tokio::test]
+    async fn api_agents_labels_same_named_workflows_distinctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path());
+        for (workflow, port) in [
+            ("/projects/one/worker/WORKFLOW.md", 51000),
+            ("/projects/two/worker/WORKFLOW.md", 51001),
+        ] {
+            reg.write(&entry_wf(
+                "worker",
+                "/agents/worker",
+                workflow,
+                &format!("0.0.0.0:{port}"),
+                std::process::id(),
+            ))
+            .unwrap();
+        }
+        let resp = api_agents(State(DashState { registry: reg })).await;
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let agents = json["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 2);
+        assert_ne!(agents[0]["label"], agents[1]["label"]);
     }
 
     #[tokio::test]
