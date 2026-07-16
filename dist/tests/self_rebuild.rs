@@ -12,12 +12,16 @@ fn standalone_self_rebuild_swaps_once_and_exits() {
         .tempdir_in(repo)
         .unwrap();
     copy_dir(&repo.join("example-agent"), agent.path());
+    let agent_yaml = agent.path().join("agent.yaml");
+    let config = fs::read_to_string(&agent_yaml).unwrap();
+    fs::write(&agent_yaml, format!("{config}\ntracker:\n  use: files\n")).unwrap();
 
     run_dar(&["init-build", "--dir", agent.path().to_str().unwrap()]);
     run_dar(&["build", "--dir", agent.path().to_str().unwrap()]);
     let old = fs::read(agent.path().join("bin/dar")).unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_dar"))
+        .env("DAR_SRC", repo)
         .args(["self", "rebuild", "--dir", agent.path().to_str().unwrap()])
         .spawn()
         .unwrap();
@@ -40,6 +44,10 @@ fn standalone_self_rebuild_swaps_once_and_exits() {
 
 fn run_dar(args: &[&str]) {
     let status = Command::new(env!("CARGO_BIN_EXE_dar"))
+        .env(
+            "DAR_SRC",
+            Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap(),
+        )
         .args(args)
         .status()
         .unwrap();
@@ -49,6 +57,9 @@ fn run_dar(args: &[&str]) {
 fn copy_dir(from: &Path, to: &Path) {
     for entry in fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();
+        if entry.file_name() == ".dar" || entry.file_name() == "bin" {
+            continue;
+        }
         let destination = to.join(entry.file_name());
         if entry.file_type().unwrap().is_dir() {
             fs::create_dir(&destination).unwrap();
