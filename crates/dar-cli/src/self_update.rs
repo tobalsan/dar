@@ -494,12 +494,22 @@ fn trigger_live_entry(
             .into_iter()
             .find(|e| e.id == entry.id && e.folder == entry.folder && e.workflow == entry.workflow)
         {
-            if current.started_at != entry.started_at && get_ok(&current.addr, "/health") {
+            if restart_identity_changed(entry, &current) && get_ok(&current.addr, "/health") {
                 return Ok(());
             }
         }
     }
     bail!("live rebuild accepted but restart was not confirmed within 60 seconds")
+}
+
+fn restart_identity_changed(
+    before: &dar_presence::PresenceEntry,
+    current: &dar_presence::PresenceEntry,
+) -> bool {
+    before.id == current.id
+        && before.folder == current.folder
+        && before.workflow == current.workflow
+        && before.started_at != current.started_at
 }
 
 fn dial_addr(addr: &str) -> String {
@@ -772,6 +782,27 @@ mod tests {
     }
 
     #[test]
+    fn relay_maps_non_success_response_to_rejected() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            stream
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+
+        assert_eq!(
+            post_request(&addr.to_string(), "/self-update/rebuild"),
+            RelayOutcome::Rejected(503)
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
     fn relay_treats_eof_after_complete_request_as_delivery_unknown() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -808,6 +839,110 @@ mod tests {
         let response = http_rebuild(State(coordinator)).await.into_response();
 
         assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    #[test]
+    fn live_name_resolution_requires_exactly_one_workflow() {
+        let one = presence("agent", "/agent", "/agent/WORKFLOW.md", 1);
+        assert_eq!(select_live_entry("agent", vec![one.clone()]).unwrap(), one);
+
+        let none = select_live_entry("agent", vec![]).unwrap_err();
+        assert!(none.to_string().contains("no live dashboard presence"));
+
+        let many = select_live_entry(
+            "agent",
+            vec![
+                presence("agent", "/agent", "/agent/WORKFLOW.md", 1),
+                presence("agent", "/agent", "/agent/workflows/other/WORKFLOW.md", 1),
+            ],
+        )
+        .unwrap_err();
+        assert!(many.to_string().contains("pass --workflow"));
+    }
+
+    #[test]
+    fn restart_confirmation_uses_boot_identity_not_pid() {
+        let before = presence("agent", "/agent", "/agent/WORKFLOW.md", 10);
+        let mut restarted = before.clone();
+        restarted.started_at = 11;
+        assert_eq!(before.pid, restarted.pid);
+        assert!(restart_identity_changed(&before, &restarted));
+    }
+
+    #[test]
+    fn workflow_selector_targets_one_live_presence() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path().join("agent");
+        let selected = agent.join("workflows/selected");
+        let other = agent.join("workflows/other");
+        fs::create_dir_all(&selected).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        fs::write(selected.join("WORKFLOW.md"), "").unwrap();
+        fs::write(other.join("WORKFLOW.md"), "").unwrap();
+        let registry = dar_presence::Registry::new(temp.path().join("registry"));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let selected_entry = presence(
+            "agent",
+            &agent.display().to_string(),
+            &selected
+                .join("WORKFLOW.md")
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string(),
+            1,
+        );
+        let other_entry = presence(
+            "agent",
+            &agent.display().to_string(),
+            &other
+                .join("WORKFLOW.md")
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string(),
+            1,
+        );
+        let mut selected_entry = selected_entry;
+        selected_entry.addr = addr.clone();
+        let mut other_entry = other_entry;
+        other_entry.addr = "127.0.0.1:9".into();
+        registry.write(&selected_entry).unwrap();
+        registry.write(&other_entry).unwrap();
+        let updated = dar_presence::PresenceEntry {
+            started_at: 2,
+            ..selected_entry.clone()
+        };
+        let registry_for_server = registry.clone();
+        let server = thread::spawn(move || {
+            serve_rebuild_then_health(listener, registry_for_server, updated, true)
+        });
+
+        trigger_live_by_name("agent", Some(&selected), Some(registry.dir())).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn delivery_unknown_still_verifies_changed_boot_and_health() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = dar_presence::Registry::new(temp.path().join("registry"));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let mut entry = presence("agent", "/agent", "/agent/WORKFLOW.md", 1);
+        entry.addr = addr;
+        registry.write(&entry).unwrap();
+        let updated = dar_presence::PresenceEntry {
+            started_at: 2,
+            ..entry.clone()
+        };
+        let registry_for_server = registry.clone();
+        let server = thread::spawn(move || {
+            serve_rebuild_then_health(listener, registry_for_server, updated, false)
+        });
+
+        trigger_live_entry(&registry, &entry).unwrap();
+        server.join().unwrap();
     }
 
     struct PartialWriter {
@@ -850,5 +985,44 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, content).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn presence(
+        id: &str,
+        folder: &str,
+        workflow: &str,
+        started_at: i64,
+    ) -> dar_presence::PresenceEntry {
+        dar_presence::PresenceEntry {
+            id: id.into(),
+            folder: folder.into(),
+            workflow: workflow.into(),
+            addr: "127.0.0.1:1".into(),
+            pid: std::process::id(),
+            started_at,
+        }
+    }
+
+    fn serve_rebuild_then_health(
+        listener: std::net::TcpListener,
+        registry: dar_presence::Registry,
+        updated: dar_presence::PresenceEntry,
+        reply_to_post: bool,
+    ) {
+        use std::io::{Read, Write};
+        let (mut post, _) = listener.accept().unwrap();
+        let mut request = [0; 1024];
+        assert!(post.read(&mut request).unwrap() > 0);
+        registry.write(&updated).unwrap();
+        if reply_to_post {
+            post.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        }
+        drop(post);
+        let (mut health, _) = listener.accept().unwrap();
+        assert!(health.read(&mut request).unwrap() > 0);
+        health
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .unwrap();
     }
 }
