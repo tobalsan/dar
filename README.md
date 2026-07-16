@@ -248,6 +248,8 @@ dar lock-refresh --dir ./my-agent
 # Self-update: recompose, build, doctor-gate, atomic swap, execv.
 dar self rebuild --dir ./my-agent
 dar self rebuild --dir ./my-agent --vendor --offline
+dar self rebuild my-agent
+dar self rebuild my-agent --workflow ./my-agent/workflows/release
 
 # Scaffold the default WORKFLOW.md prompt in an agent folder.
 dar init-workflow --dir ./my-agent
@@ -701,6 +703,7 @@ queue, retry queue, run history (persisted in SQLite across restarts).
 
 ```bash
 # Controls
+curl -X POST http://127.0.0.1:7878/self-update/rebuild # returns 202
 curl -X POST http://127.0.0.1:7878/control/stop
 curl -X POST http://127.0.0.1:7878/control/pause
 curl -X POST http://127.0.0.1:7878/control/resume
@@ -730,6 +733,14 @@ curl -X POST http://127.0.0.1:7878/webhook \
   -H 'Linear-Signature: sha256=<sig>' \
   -d '<linear-payload>'
 ```
+
+`/self-update/rebuild` is intentionally unauthenticated in v1: the dashboard
+port is a trusted control plane and must be limited to localhost or a trusted
+network. It returns `202` before rebuild/restart; concurrent requests return
+`409`. A fast exec can interrupt delivery, so clients confirm success through
+the changed dashboard boot identity and `/health`; `dar self rebuild <agent>`
+does this automatically. Name lookup requires dashboard presence and
+`--workflow` disambiguates multiple live workflows.
 
 ## Terminal UI (`foreground: tui`)
 

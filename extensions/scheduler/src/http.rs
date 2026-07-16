@@ -451,6 +451,8 @@ mod tests {
     fn test_config(root: std::path::PathBuf) -> SchedulerConfig {
         SchedulerConfig {
             root,
+            workflow_root: std::path::PathBuf::new(),
+            host_http_addr: Arc::new(std::sync::Mutex::new(None)),
             runner_kind: "fake".to_string(),
             runner_command: String::new(),
             runner_model: None,

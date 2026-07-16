@@ -175,9 +175,11 @@ fn register_presence(
         workflow,
         addr: advertised_addr(addr),
         pid: std::process::id(),
+        // Millisecond boot identity: execv keeps PID, and seconds are too
+        // coarse to prove an immediate in-place restart.
         started_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
+            .map(|d| d.as_millis() as i64)
             .unwrap_or(0),
     };
     let registry = dar_presence::Registry::new(registry_dir(ctx));

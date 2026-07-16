@@ -944,6 +944,8 @@ mod tests {
             .unwrap();
         let config = SchedulerConfig {
             root: dir.path().to_path_buf(),
+            workflow_root: dir.path().to_path_buf(),
+            host_http_addr: Arc::new(std::sync::Mutex::new(None)),
             runner_kind: "fake".to_string(),
             runner_command: String::new(),
             runner_model: None,

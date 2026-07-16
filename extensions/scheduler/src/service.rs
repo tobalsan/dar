@@ -59,6 +59,8 @@ const MIN_POLL_INTERVAL_MS: u64 = 250;
 #[derive(Clone)]
 pub struct SchedulerConfig {
     pub root: PathBuf,
+    pub workflow_root: PathBuf,
+    pub host_http_addr: Arc<std::sync::Mutex<Option<std::net::SocketAddr>>>,
     pub runner_kind: String,
     pub runner_command: String,
     pub runner_model: Option<String>,
@@ -510,6 +512,10 @@ async fn execute_job(
     };
 
     let timeout = config.timeout_for(job);
+    let host_http_addr = *config
+        .host_http_addr
+        .lock()
+        .expect("scheduler host address mutex poisoned");
     let outcome = fire_runner(
         FireRunnerRequest {
             runner_kind: &config.runner_kind,
@@ -521,6 +527,8 @@ async fn execute_job(
             workspace: &workspace,
             workspace_root: &config.root,
             agent_root: &config.root,
+            workflow_root: &config.workflow_root,
+            host_http_addr,
             prompt: job.payload.message.clone(),
             job_id: &job.id,
             max_run_timeout_ms: config.max_run_timeout_ms,
@@ -755,6 +763,8 @@ mod tests {
     fn test_config(root: PathBuf, job_timeout_ms: u64) -> SchedulerConfig {
         SchedulerConfig {
             root,
+            workflow_root: std::path::PathBuf::new(),
+            host_http_addr: Arc::new(std::sync::Mutex::new(None)),
             runner_kind: "fake".to_string(),
             runner_command: String::new(),
             runner_model: None,
