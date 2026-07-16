@@ -528,9 +528,13 @@ fn post_request(addr: &str, path: &str) -> RelayOutcome {
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     );
-    // A write error can follow a partial write; once write_all was attempted,
-    // the host may have received the request and restart verification is needed.
-    if stream.write_all(request.as_bytes()).is_err() || stream.flush().is_err() {
+    // Only a fully written request can have reached the host. A failed partial
+    // write must not cause callers to wait for a restart that was never asked
+    // for. Once every byte is written, a flush/read failure is delivery-unknown.
+    if !write_request(&mut stream, request.as_bytes()) {
+        return RelayOutcome::NotSent;
+    }
+    if stream.flush().is_err() {
         return RelayOutcome::DeliveryUnknown;
     }
     let mut response = vec![0; 8192];
@@ -547,6 +551,17 @@ fn post_request(addr: &str, path: &str) -> RelayOutcome {
             }
         }
     }
+}
+
+fn write_request(writer: &mut impl std::io::Write, request: &[u8]) -> bool {
+    let mut written = 0;
+    while written < request.len() {
+        match writer.write(&request[written..]) {
+            Ok(0) | Err(_) => return false,
+            Ok(count) => written += count,
+        }
+    }
+    true
 }
 fn get_ok(addr: &str, path: &str) -> bool {
     use std::io::{Read, Write};
@@ -718,6 +733,103 @@ mod tests {
             ..composer::BuildOptions::default()
         })
         .unwrap();
+    }
+
+    #[test]
+    fn incomplete_request_write_is_not_sent() {
+        let mut writer = PartialWriter { remaining: 3 };
+
+        assert!(!write_request(&mut writer, b"POST /self-update/rebuild"));
+    }
+
+    #[test]
+    fn complete_request_write_finishes_before_response_read() {
+        let mut writer = Vec::new();
+
+        assert!(write_request(&mut writer, b"POST /self-update/rebuild"));
+        assert_eq!(writer, b"POST /self-update/rebuild");
+    }
+
+    #[test]
+    fn relay_maps_busy_response_after_complete_request() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            stream
+                .write_all(b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+
+        assert_eq!(
+            post_request(&addr.to_string(), "/self-update/rebuild"),
+            RelayOutcome::Busy
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn relay_treats_eof_after_complete_request_as_delivery_unknown() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            use std::io::Read;
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            assert!(stream.read(&mut request).unwrap() > 0);
+        });
+
+        assert_eq!(
+            post_request(&addr.to_string(), "/self-update/rebuild"),
+            RelayOutcome::DeliveryUnknown
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn rebuild_route_returns_conflict_when_coordinator_is_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let coordinator = RebuildCoordinator::new(temp.path().to_path_buf(), vec![]);
+        coordinator.busy.store(true, Ordering::Release);
+
+        let response = http_rebuild(State(coordinator)).await.into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn rebuild_route_accepts_before_background_rebuild_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let coordinator = RebuildCoordinator::new(temp.path().to_path_buf(), vec![]);
+
+        let response = http_rebuild(State(coordinator)).await.into_response();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    struct PartialWriter {
+        remaining: usize,
+    }
+
+    impl std::io::Write for PartialWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "closed",
+                ));
+            }
+            let count = self.remaining.min(bytes.len());
+            self.remaining -= count;
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     struct FakeDoctor {
