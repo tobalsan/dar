@@ -1,8 +1,8 @@
 pub mod bridge;
 pub use bridge::{
-    codex_mcp_bridge_args, host_tool_bridge, make_initialize, make_initialized, make_thread_start,
-    make_turn_start, opencode_config, opencode_mcp_block, pi_mcp_config_args,
-    write_opencode_config, BridgeInvocation, BRIDGE_SERVER_NAME,
+    codex_mcp_bridge_args, host_tool_bridge, host_tool_bridge_with_identity, make_initialize,
+    make_initialized, make_thread_start, make_turn_start, opencode_config, opencode_mcp_block,
+    pi_mcp_config_args, write_opencode_config, BridgeInvocation, BRIDGE_SERVER_NAME,
 };
 
 /// Classified output from one protocol line.

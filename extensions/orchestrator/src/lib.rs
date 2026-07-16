@@ -389,6 +389,7 @@ impl Extension for OrchestratorExtension {
             .with_env_reload_consumers(env_reload_consumers)
             .with_snapshot_bus(ctx.host.bus.clone())
             .with_system_context(system_context)
+            .with_host_http_addr(ctx.host.http_addr())
             .with_startup_banner(dashboard_banner(bind, port, ctx.host.http_addr()));
             tokio::spawn(async move {
                 let _guard = log_guard;
@@ -630,6 +631,9 @@ pub struct Orchestrator {
     snapshot_bus: Option<Arc<host_api::EventBus>>,
     /// One-shot startup banner, emitted after the first tick completes.
     startup_banner: Option<String>,
+    /// Actual listener address, passed to bridge children so ephemeral ports
+    /// target this exact live host rather than the configured port `0`.
+    host_http_addr: Option<std::net::SocketAddr>,
 }
 
 impl Orchestrator {
@@ -690,11 +694,17 @@ impl Orchestrator {
             retries: Vec::new(),
             snapshot_bus: None,
             startup_banner: None,
+            host_http_addr: None,
         }
     }
 
     pub fn with_snapshot_bus(mut self, bus: Arc<host_api::EventBus>) -> Self {
         self.snapshot_bus = Some(bus);
+        self
+    }
+
+    pub fn with_host_http_addr(mut self, addr: Option<std::net::SocketAddr>) -> Self {
+        self.host_http_addr = addr;
         self
     }
 
@@ -1638,16 +1648,20 @@ impl Orchestrator {
             return None;
         }
         let command = std::env::current_exe().ok()?.to_string_lossy().into_owned();
-        Some(cap_runner::HostToolBridge {
-            command,
-            args: vec![
-                "__mcp-bridge".to_string(),
-                "--dir".to_string(),
-                self.paths.root.display().to_string(),
-                "--workflow".to_string(),
-                self.paths.workflow_root.display().to_string(),
-            ],
-        })
+        let mut args = vec![
+            "__mcp-bridge".to_string(),
+            "--dir".to_string(),
+            self.paths.root.display().to_string(),
+            "--workflow".to_string(),
+            self.paths.workflow_root.display().to_string(),
+        ];
+        if let Some(addr) = self.host_http_addr {
+            args.extend([
+                "--host-addr".to_string(),
+                bridge_dial_addr(addr).to_string(),
+            ]);
+        }
+        Some(cap_runner::HostToolBridge { command, args })
     }
 
     /// Render the prompt and spawn a child for one issue, creating a run slot.
@@ -2738,6 +2752,32 @@ impl Orchestrator {
             .into_iter()
             .rev()
             .find(|l| l.starts_with(&prefix))
+    }
+}
+
+fn bridge_dial_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
+    match addr {
+        std::net::SocketAddr::V4(addr) if addr.ip().is_unspecified() => {
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, addr.port()))
+        }
+        std::net::SocketAddr::V6(addr) if addr.ip().is_unspecified() => {
+            std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, addr.port()))
+        }
+        addr => addr,
+    }
+}
+
+#[cfg(test)]
+mod bridge_address_tests {
+    use super::bridge_dial_addr;
+
+    #[test]
+    fn bridge_dials_loopback_for_default_ephemeral_bind() {
+        let bound = std::net::SocketAddr::from(([0, 0, 0, 0], 53124));
+        assert_eq!(
+            bridge_dial_addr(bound),
+            std::net::SocketAddr::from(([127, 0, 0, 1], 53124))
+        );
     }
 }
 

@@ -152,6 +152,9 @@ pub struct McpBridgeArgs {
     /// Workflow identity of the live host this bridge serves.
     #[arg(long)]
     pub workflow: Option<PathBuf>,
+    /// Actual bound HTTP address of the live host this bridge relays to.
+    #[arg(long)]
+    pub host_addr: Option<std::net::SocketAddr>,
 }
 
 impl McpBridgeArgs {

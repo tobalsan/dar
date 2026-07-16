@@ -137,11 +137,20 @@ async fn http_rebuild(State(coordinator): State<RebuildCoordinator>) -> impl Int
 pub struct BridgeSelfUpdateExtension {
     agent: std::path::PathBuf,
     workflow: Option<std::path::PathBuf>,
+    host_addr: Option<std::net::SocketAddr>,
 }
 
 impl BridgeSelfUpdateExtension {
-    pub fn new(agent: std::path::PathBuf, workflow: Option<std::path::PathBuf>) -> Self {
-        Self { agent, workflow }
+    pub fn new(
+        agent: std::path::PathBuf,
+        workflow: Option<std::path::PathBuf>,
+        host_addr: Option<std::net::SocketAddr>,
+    ) -> Self {
+        Self {
+            agent,
+            workflow,
+            host_addr,
+        }
     }
 }
 
@@ -165,7 +174,11 @@ impl Extension for BridgeSelfUpdateExtension {
                     "Request a rebuild of this live agent host. The tool response is best-effort; confirm restart through host health and logs.",
                     json!({"type":"object","additionalProperties":false}),
                 ).writes(),
-                Arc::new(SelfUpdateTool { agent: self.agent.clone(), workflow: self.workflow.clone() }),
+                Arc::new(SelfUpdateTool {
+                    agent: self.agent.clone(),
+                    workflow: self.workflow.clone(),
+                    host_addr: self.host_addr,
+                }),
             )
         })
     }
@@ -174,40 +187,42 @@ impl Extension for BridgeSelfUpdateExtension {
 struct SelfUpdateTool {
     agent: std::path::PathBuf,
     workflow: Option<std::path::PathBuf>,
+    host_addr: Option<std::net::SocketAddr>,
 }
 #[async_trait::async_trait]
 impl ToolExecutor for SelfUpdateTool {
     async fn execute(&self, _args: serde_json::Value) -> Result<ToolOutcome> {
         let agent = self.agent.clone();
         let workflow = self.workflow.clone();
-        tokio::task::spawn_blocking(move || trigger_live_by_identity(&agent, workflow.as_deref()))
-            .await
-            .context("self_update relay task failed")?
-            .map(|outcome| match outcome {
-                RelayOutcome::Accepted => {
-                    ToolOutcome::ok("Self-update accepted; restart confirmation is best-effort.")
-                }
-                RelayOutcome::Busy => ToolOutcome::error_code(
-                    "busy",
-                    "Self-update already in progress.",
-                    None::<String>,
-                ),
-                RelayOutcome::DeliveryUnknown => ToolOutcome::error_code(
-                    "delivery_unknown",
-                    "Request was written but the host restarted before replying.",
-                    None::<String>,
-                ),
-                RelayOutcome::NotSent => ToolOutcome::error_code(
-                    "not_sent",
-                    "Could not deliver self-update request.",
-                    None::<String>,
-                ),
-                RelayOutcome::Rejected(status) => ToolOutcome::error_code(
-                    "rejected",
-                    format!("Self-update rejected with HTTP {status}."),
-                    None::<String>,
-                ),
-            })
+        let host_addr = self.host_addr;
+        tokio::task::spawn_blocking(move || {
+            trigger_live_by_identity(&agent, workflow.as_deref(), host_addr)
+        })
+        .await
+        .context("self_update relay task failed")?
+        .map(|outcome| match outcome {
+            RelayOutcome::Accepted => {
+                ToolOutcome::ok("Self-update accepted; restart confirmation is best-effort.")
+            }
+            RelayOutcome::Busy => {
+                ToolOutcome::error_code("busy", "Self-update already in progress.", None::<String>)
+            }
+            RelayOutcome::DeliveryUnknown => ToolOutcome::error_code(
+                "delivery_unknown",
+                "Request was written but the host restarted before replying.",
+                None::<String>,
+            ),
+            RelayOutcome::NotSent => ToolOutcome::error_code(
+                "not_sent",
+                "Could not deliver self-update request.",
+                None::<String>,
+            ),
+            RelayOutcome::Rejected(status) => ToolOutcome::error_code(
+                "rejected",
+                format!("Self-update rejected with HTTP {status}."),
+                None::<String>,
+            ),
+        })
     }
 }
 
@@ -445,17 +460,32 @@ fn trigger_live_by_name(
     trigger_live_entry(&registry, &entry)
 }
 
-fn trigger_live_by_identity(agent: &Path, workflow: Option<&Path>) -> Result<RelayOutcome> {
+fn trigger_live_by_identity(
+    agent: &Path,
+    workflow: Option<&Path>,
+    host_addr: Option<std::net::SocketAddr>,
+) -> Result<RelayOutcome> {
     let agent = agent
         .canonicalize()
         .with_context(|| format!("resolving agent folder {}", agent.display()))?;
     let workflow = workflow.map(Path::canonicalize).transpose()?;
     let workflow = workflow.ok_or_else(|| anyhow::anyhow!("bridge missing workflow identity"))?;
-    let (bind, port) = crate::dashboard_addr_for_root(&agent, &workflow)?;
-    Ok(post_request(
-        &format!("{bind}:{port}"),
-        "/self-update/rebuild",
-    ))
+    let addr = bridge_addr(&agent, &workflow, host_addr)?;
+    Ok(post_request(&addr, "/self-update/rebuild"))
+}
+
+fn bridge_addr(
+    agent: &Path,
+    workflow: &Path,
+    host_addr: Option<std::net::SocketAddr>,
+) -> Result<String> {
+    match host_addr {
+        Some(addr) => Ok(addr.to_string()),
+        None => {
+            let (bind, port) = crate::dashboard_addr_for_root(agent, workflow)?;
+            Ok(format!("{bind}:{port}"))
+        }
+    }
 }
 
 fn select_live_entry(
@@ -921,6 +951,19 @@ mod tests {
 
         trigger_live_by_name("agent", Some(&selected), Some(registry.dir())).unwrap();
         server.join().unwrap();
+    }
+
+    #[test]
+    fn bridge_uses_actual_ephemeral_host_address() {
+        let agent = tempfile::tempdir().unwrap();
+        let workflow = agent.path().join("WORKFLOW.md");
+        std::fs::write(&workflow, "---\n---\n").unwrap();
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 53124));
+
+        assert_eq!(
+            bridge_addr(agent.path(), &workflow, Some(addr)).unwrap(),
+            "127.0.0.1:53124"
+        );
     }
 
     #[test]

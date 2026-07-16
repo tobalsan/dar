@@ -33,7 +33,7 @@ mod store;
 mod tab;
 mod tools;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{bail, Result};
 use cap_dashboard_tab::DashboardTabs;
@@ -61,6 +61,7 @@ pub struct SchedulerExtension {
     /// enabled, so a disabled/absent extension mounts no routes and spawns no
     /// loop.
     state: OnceLock<Arc<SchedulerState>>,
+    host_http_addr: Arc<Mutex<Option<std::net::SocketAddr>>>,
 }
 
 pub fn extension() -> Box<dyn Extension> {
@@ -171,7 +172,12 @@ impl Extension for SchedulerExtension {
 
             // run-now fires a job through the same path as a scheduled fire, so
             // the HTTP handlers need the static runner config + typed services.
-            let config = build_scheduler_config(&root, &settings);
+            let config = build_scheduler_config(
+                &root,
+                ctx.paths.workflow_root(),
+                &settings,
+                Arc::clone(&self.host_http_addr),
+            );
             let services = ctx.services.clone();
 
             // Register the model-facing scheduler management tools against the
@@ -241,7 +247,16 @@ impl Extension for SchedulerExtension {
             );
 
             let root = ctx.paths.root().to_path_buf();
-            let config = build_scheduler_config(&root, &settings);
+            *self
+                .host_http_addr
+                .lock()
+                .expect("scheduler host address mutex poisoned") = ctx.host.http_addr();
+            let config = build_scheduler_config(
+                &root,
+                ctx.paths.workflow_root(),
+                &settings,
+                Arc::clone(&self.host_http_addr),
+            );
 
             let services = ctx.host.services.clone();
             let shutdown = ctx.shutdown.clone();
@@ -255,7 +270,12 @@ impl Extension for SchedulerExtension {
 
 /// Build the static [`SchedulerConfig`] shared by the timer loop and the
 /// run-now HTTP handler from the agent root + validated scheduler settings.
-fn build_scheduler_config(root: &std::path::Path, settings: &SchedulerSettings) -> SchedulerConfig {
+fn build_scheduler_config(
+    root: &std::path::Path,
+    workflow_root: &std::path::Path,
+    settings: &SchedulerSettings,
+    host_http_addr: Arc<Mutex<Option<std::net::SocketAddr>>>,
+) -> SchedulerConfig {
     let (
         runner_kind,
         runner_command,
@@ -271,6 +291,8 @@ fn build_scheduler_config(root: &std::path::Path, settings: &SchedulerSettings) 
     };
     SchedulerConfig {
         root: root.to_path_buf(),
+        workflow_root: workflow_root.to_path_buf(),
+        host_http_addr,
         runner_kind,
         runner_command,
         runner_model,

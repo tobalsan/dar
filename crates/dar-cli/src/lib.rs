@@ -80,6 +80,7 @@ async fn run_inner(plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
             plugins.push(Arc::new(self_update::BridgeSelfUpdateExtension::new(
                 root.clone(),
                 workflow,
+                args.host_addr,
             )));
             bridge::serve(&root, plugins).await
         }

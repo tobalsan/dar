@@ -109,6 +109,8 @@ pub struct FireRunnerRequest<'a> {
     pub workspace: &'a std::path::Path,
     pub workspace_root: &'a std::path::Path,
     pub agent_root: &'a std::path::Path,
+    pub workflow_root: &'a std::path::Path,
+    pub host_http_addr: Option<std::net::SocketAddr>,
     pub prompt: String,
     pub job_id: &'a str,
     pub max_run_timeout_ms: u64,
@@ -153,6 +155,8 @@ pub async fn fire_runner(
         workspace,
         workspace_root,
         agent_root,
+        workflow_root,
+        host_http_addr,
         prompt,
         job_id,
         max_run_timeout_ms,
@@ -193,7 +197,12 @@ pub async fn fire_runner(
     .provider(runner_provider)
     .thinking(runner_thinking)
     .system_prompt(system_prompt)
-    .host_tool_bridge(runner_core::host_tool_bridge(services, agent_root))
+    .host_tool_bridge(runner_core::host_tool_bridge_with_identity(
+        services,
+        agent_root,
+        workflow_root,
+        host_http_addr,
+    ))
     .build();
 
     let mut handle = tokio::select! {
@@ -422,6 +431,8 @@ mod tests {
                 workspace: dir.path(),
                 workspace_root: dir.path(),
                 agent_root: dir.path(),
+                workflow_root: dir.path(),
+                host_http_addr: Some(std::net::SocketAddr::from(([0, 0, 0, 0], 53124))),
                 prompt: "prompt".to_string(),
                 job_id: "job",
                 max_run_timeout_ms: 60_000,
@@ -442,6 +453,14 @@ mod tests {
         let bridge = bridge.expect("host tool bridge passed to runner");
         assert_eq!(bridge.args[0], "__mcp-bridge");
         assert_eq!(bridge.args[1], "--dir");
+        assert!(bridge
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--workflow", dir.path().to_string_lossy().as_ref()]));
+        assert!(bridge
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--host-addr", "127.0.0.1:53124"]));
         assert_eq!(bridge.args[2], dir.path().display().to_string());
         assert_eq!(
             runner_opts
@@ -471,6 +490,8 @@ mod tests {
                 workspace: dir.path(),
                 workspace_root: dir.path(),
                 agent_root: dir.path(),
+                workflow_root: dir.path(),
+                host_http_addr: None,
                 prompt: "job prompt".to_string(),
                 job_id: "job",
                 max_run_timeout_ms: 60_000,
@@ -510,6 +531,8 @@ mod tests {
                 workspace: dir.path(),
                 workspace_root: dir.path(),
                 agent_root: dir.path(),
+                workflow_root: dir.path(),
+                host_http_addr: None,
                 prompt: "job prompt".to_string(),
                 job_id: "job",
                 max_run_timeout_ms: 60_000,
@@ -549,6 +572,8 @@ mod tests {
                 workspace: dir.path(),
                 workspace_root: dir.path(),
                 agent_root: dir.path(),
+                workflow_root: dir.path(),
+                host_http_addr: None,
                 prompt: "prompt".to_string(),
                 job_id: "job",
                 max_run_timeout_ms: 60_000,
@@ -586,6 +611,8 @@ mod tests {
                 workspace: dir.path(),
                 workspace_root: dir.path(),
                 agent_root: dir.path(),
+                workflow_root: dir.path(),
+                host_http_addr: None,
                 prompt: "prompt".to_string(),
                 job_id: "job",
                 max_run_timeout_ms: 60_000,
@@ -666,6 +693,8 @@ mod tests {
                     workspace: &root,
                     workspace_root: &root,
                     agent_root: &root,
+                    workflow_root: &root,
+                    host_http_addr: None,
                     prompt: "prompt".to_string(),
                     job_id: "job",
                     max_run_timeout_ms: 60_000,
@@ -758,6 +787,8 @@ mod tests {
                 workspace: dir.path(),
                 workspace_root: dir.path(),
                 agent_root: dir.path(),
+                workflow_root: dir.path(),
+                host_http_addr: None,
                 prompt: "prompt".to_string(),
                 job_id: "job",
                 max_run_timeout_ms: 60_000,

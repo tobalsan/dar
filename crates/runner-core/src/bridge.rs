@@ -49,6 +49,36 @@ pub fn host_tool_bridge(services: &ServiceRegistry, agent_root: &Path) -> Option
     })
 }
 
+pub fn host_tool_bridge_with_identity(
+    services: &ServiceRegistry,
+    agent_root: &Path,
+    workflow_root: &Path,
+    host_addr: Option<std::net::SocketAddr>,
+) -> Option<HostToolBridge> {
+    let mut bridge = host_tool_bridge(services, agent_root)?;
+    bridge
+        .args
+        .extend(["--workflow".into(), workflow_root.display().to_string()]);
+    if let Some(addr) = host_addr {
+        bridge
+            .args
+            .extend(["--host-addr".into(), bridge_dial_addr(addr).to_string()]);
+    }
+    Some(bridge)
+}
+
+fn bridge_dial_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
+    match addr {
+        std::net::SocketAddr::V4(addr) if addr.ip().is_unspecified() => {
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, addr.port()))
+        }
+        std::net::SocketAddr::V6(addr) if addr.ip().is_unspecified() => {
+            std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, addr.port()))
+        }
+        addr => addr,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // pi (--mcp-config)
 // ---------------------------------------------------------------------------
