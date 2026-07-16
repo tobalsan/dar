@@ -48,6 +48,8 @@ Breaking changes are marked **⚠ BREAKING**.
   parity.
 
 ### Fixed
+- CLI: standalone `dar self rebuild` now swaps the rebuilt binary and exits
+  instead of re-executing itself indefinitely.
 - Secrets: `dar run` now detects valid agent `.env` content changes on its poll
   tick, including removals and file deletion, and refreshes opted-in consumers
   without disrupting active work. MCP bridge `reload_secrets` now accurately

@@ -40,3 +40,6 @@ chat-opencode = { package = "dar-chat-opencode", path = "../extensions/chat-open
 chat-pi = { package = "dar-chat-pi", path = "../extensions/chat-pi", version = "0.3" }
 chat-codex = { package = "dar-chat-codex", path = "../extensions/chat-codex", version = "0.3" }
 tui = { package = "dar-tui", path = "../extensions/tui", version = "0.3" }
+
+[dev-dependencies]
+tempfile = "3"

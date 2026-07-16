@@ -220,7 +220,7 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
                     static_: args.static_,
                     universal: args.universal,
                 },
-                self_update::RestartMode::Execv,
+                self_update::RestartMode::Skip,
             ),
         },
         Command::InitWorkflow(args) => {
