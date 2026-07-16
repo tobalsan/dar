@@ -245,9 +245,12 @@ dar build --dir ./my-agent --vendor --offline   # air-gapped build
 # Refresh the per-agent Cargo.lock (deliberate dep bump; commit result).
 dar lock-refresh --dir ./my-agent
 
-# Self-update: recompose, build, doctor-gate, atomic swap, execv.
+# Offline self-rebuild: recompose, build, doctor-gate, and atomic swap.
+# Does not restart a running agent.
 dar self rebuild --dir ./my-agent
 dar self rebuild --dir ./my-agent --vendor --offline
+
+# Live self-rebuild: find a running agent by agent.yaml id, rebuild, and restart it.
 dar self rebuild my-agent
 dar self rebuild my-agent --workflow ./my-agent/workflows/release
 
@@ -703,7 +706,8 @@ queue, retry queue, run history (persisted in SQLite across restarts).
 
 ```bash
 # Controls
-curl -X POST http://127.0.0.1:7878/self-update/rebuild # returns 202
+# Replace 7878 if this workflow uses a configured or ephemeral port.
+curl -X POST http://127.0.0.1:7878/self-update/rebuild # 202 means accepted
 curl -X POST http://127.0.0.1:7878/control/stop
 curl -X POST http://127.0.0.1:7878/control/pause
 curl -X POST http://127.0.0.1:7878/control/resume
@@ -906,16 +910,38 @@ unrelated stock extensions are not linked.
 
 ### Self-update loop
 
-An agent can rebuild its own binary from inside the folder and hot-swap itself:
+Offline rebuild recompiles and atomically swaps the agent binary, but does not
+restart a running process:
 
 ```bash
 dar self rebuild --dir ./my-agent
 dar self rebuild --dir ./my-agent --vendor --offline   # air-gapped
 ```
 
-Sequence: recompose `.dar/` → `dar build` → `dar doctor` gate
-→ atomic binary swap → `execv` into the new binary. The running process is
-replaced in place; no external orchestration needed.
+Live rebuild finds a running agent by its `agent.yaml` `id`, then recompiles,
+swaps, and restarts it in place:
+
+```bash
+dar self rebuild my-agent
+
+# Required when several workflows for this agent are live.
+dar self rebuild my-agent --workflow ./my-agent/workflows/release
+
+# Required when dashboard presence uses a non-default registry directory.
+dar self rebuild my-agent --registry-dir /path/to/registry
+```
+
+Live rebuild requires the dashboard extension, matching presence registry, a
+Rust toolchain, and a running DAR-27-capable agent. The host recomposes `.dar/`,
+builds, applies the `dar doctor` gate, atomically swaps `bin/dar`, then `execv`s
+that explicit binary with the original `dar run` arguments. The CLI reports
+success only after observing a changed boot identity and healthy endpoint; it
+times out after 60 seconds otherwise. Build flags such as `--vendor` and
+`--offline` are supported only with offline `--dir` rebuilds.
+
+A host running a pre-DAR-27 binary needs one manual bootstrap: run the offline
+`--dir` rebuild, then restart that agent once. Later updates can use live
+name-based rebuilds.
 
 To bump dependencies deliberately (then commit the updated lock):
 
