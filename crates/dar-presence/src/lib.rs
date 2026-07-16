@@ -59,7 +59,8 @@ pub struct PresenceEntry {
     pub addr: String,
     /// PID of the agent process owning this dashboard. Used for liveness.
     pub pid: u32,
-    /// Unix-epoch seconds the dashboard booted.
+    /// Unix-epoch milliseconds the dashboard booted. This is a boot identity,
+    /// not a PID substitute: execv preserves the PID during self-update.
     pub started_at: i64,
 }
 

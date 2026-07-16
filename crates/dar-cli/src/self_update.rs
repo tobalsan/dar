@@ -3,16 +3,212 @@ use std::fs::{self, File, OpenOptions};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Router,
+};
 use fs2::FileExt;
+use host_api::{Extension, HttpMount, RegisterCtx};
+use serde_json::json;
+use tool_registry::{
+    ToolExecutor, ToolOutcome, ToolRegistryHandle, ToolSpec, TOOL_REGISTRY_SERVICE,
+};
 
 use crate::composer;
 
 pub enum RestartMode {
     Execv,
     Skip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayOutcome {
+    Accepted,
+    Busy,
+    NotSent,
+    DeliveryUnknown,
+    Rejected(u16),
+}
+
+/// CLI-owned lifecycle controller injected into a running host. The host only
+/// sees its HTTP/tool adapters; compose/build/doctor/swap remain CLI concerns.
+#[derive(Clone)]
+pub struct RebuildCoordinator {
+    agent: std::path::PathBuf,
+    run_args: Vec<OsString>,
+    busy: Arc<AtomicBool>,
+}
+
+impl RebuildCoordinator {
+    pub fn new(agent: std::path::PathBuf, run_args: Vec<OsString>) -> Self {
+        Self {
+            agent,
+            run_args,
+            busy: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn trigger(&self) -> bool {
+        if self
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        let this = self.clone();
+        let busy = Arc::clone(&self.busy);
+        tokio::spawn(async move {
+            match tokio::task::spawn_blocking(move || this.rebuild_and_exec()).await {
+                Ok(Err(error)) => eprintln!(
+                    "dar: live self-update failed; current host remains running: {error:#}"
+                ),
+                Err(error) => eprintln!(
+                    "dar: live self-update task failed; current host remains running: {error}"
+                ),
+                Ok(Ok(())) => {}
+            }
+            // exec never returns. Every other pipeline/task failure must permit
+            // a later request instead of leaving the host permanently busy.
+            busy.store(false, Ordering::Release);
+        });
+        true
+    }
+
+    fn rebuild_and_exec(&self) -> Result<()> {
+        rebuild_with_options(
+            &self.agent,
+            composer::BuildOptions::default(),
+            RestartMode::Skip,
+        )?;
+        exec_agent_run(&self.agent, &self.run_args)
+    }
+}
+
+pub struct LiveRebuildExtension {
+    coordinator: RebuildCoordinator,
+}
+impl LiveRebuildExtension {
+    pub fn new(agent: std::path::PathBuf, run_args: Vec<OsString>) -> Self {
+        Self {
+            coordinator: RebuildCoordinator::new(agent, run_args),
+        }
+    }
+}
+
+impl Extension for LiveRebuildExtension {
+    fn id(&self) -> &'static str {
+        "live-self-update"
+    }
+    fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let coordinator = self.coordinator.clone();
+            let app = Router::new()
+                .route("/self-update/rebuild", post(http_rebuild))
+                .route("/health", get(|| async { "ok" }))
+                .with_state(coordinator.clone());
+            ctx.http.mount(HttpMount {
+                namespace: "/".into(),
+                router: app,
+                routes: vec!["/self-update/rebuild".into(), "/health".into()],
+                claim_root: false,
+            })?;
+            Ok(())
+        })
+    }
+}
+
+async fn http_rebuild(State(coordinator): State<RebuildCoordinator>) -> impl IntoResponse {
+    if coordinator.trigger() {
+        (StatusCode::ACCEPTED, "self-update accepted")
+    } else {
+        (StatusCode::CONFLICT, "self-update already in progress")
+    }
+}
+
+pub struct BridgeSelfUpdateExtension {
+    agent: std::path::PathBuf,
+    workflow: Option<std::path::PathBuf>,
+}
+
+impl BridgeSelfUpdateExtension {
+    pub fn new(agent: std::path::PathBuf, workflow: Option<std::path::PathBuf>) -> Self {
+        Self { agent, workflow }
+    }
+}
+
+impl Extension for BridgeSelfUpdateExtension {
+    fn id(&self) -> &'static str {
+        "bridge-self-update"
+    }
+
+    fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let registry = match ctx
+                .services
+                .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
+            {
+                Ok(registry) => registry,
+                Err(_) => return Ok(()),
+            };
+            registry.register_tool(
+                ToolSpec::new(
+                    "self_update",
+                    "Request a rebuild of this live agent host. The tool response is best-effort; confirm restart through host health and logs.",
+                    json!({"type":"object","additionalProperties":false}),
+                ).writes(),
+                Arc::new(SelfUpdateTool { agent: self.agent.clone(), workflow: self.workflow.clone() }),
+            )
+        })
+    }
+}
+
+struct SelfUpdateTool {
+    agent: std::path::PathBuf,
+    workflow: Option<std::path::PathBuf>,
+}
+#[async_trait::async_trait]
+impl ToolExecutor for SelfUpdateTool {
+    async fn execute(&self, _args: serde_json::Value) -> Result<ToolOutcome> {
+        let agent = self.agent.clone();
+        let workflow = self.workflow.clone();
+        tokio::task::spawn_blocking(move || trigger_live_by_identity(&agent, workflow.as_deref()))
+            .await
+            .context("self_update relay task failed")?
+            .map(|outcome| match outcome {
+                RelayOutcome::Accepted => {
+                    ToolOutcome::ok("Self-update accepted; restart confirmation is best-effort.")
+                }
+                RelayOutcome::Busy => ToolOutcome::error_code(
+                    "busy",
+                    "Self-update already in progress.",
+                    None::<String>,
+                ),
+                RelayOutcome::DeliveryUnknown => ToolOutcome::error_code(
+                    "delivery_unknown",
+                    "Request was written but the host restarted before replying.",
+                    None::<String>,
+                ),
+                RelayOutcome::NotSent => ToolOutcome::error_code(
+                    "not_sent",
+                    "Could not deliver self-update request.",
+                    None::<String>,
+                ),
+                RelayOutcome::Rejected(status) => ToolOutcome::error_code(
+                    "rejected",
+                    format!("Self-update rejected with HTTP {status}."),
+                    None::<String>,
+                ),
+            })
+    }
 }
 
 pub fn rebuild(_agent: &Path, _restart: RestartMode) -> Result<()> {
@@ -179,6 +375,206 @@ fn exec_current_process() -> Result<()> {
     let args = std::env::args_os().skip(1).collect::<Vec<OsString>>();
     let err = Command::new(&argv0).args(args).exec();
     Err(err).with_context(|| format!("execv failed for {}", Path::new(&argv0).display()))
+}
+
+fn exec_agent_run(agent: &Path, args: &[OsString]) -> Result<()> {
+    let executable = agent.join("bin/dar");
+    let err = Command::new(&executable).args(args).exec();
+    Err(err).with_context(|| format!("execv failed for {}", executable.display()))
+}
+
+pub fn run_rebuild_command(
+    args: crate::cli::SelfRebuildArgs,
+    options: composer::BuildOptions,
+) -> Result<()> {
+    match (args.agent, args.dir) {
+        (None, Some(dir)) => rebuild_with_options(
+            &dir.canonicalize()
+                .with_context(|| format!("resolving agent folder {}", dir.display()))?,
+            options,
+            RestartMode::Skip,
+        ),
+        (Some(name), None) => {
+            if options.vendor
+                || options.offline
+                || options.target.is_some()
+                || options.static_
+                || options.universal
+            {
+                bail!("build flags are unsupported for live rebuilds; use --dir for an offline rebuild")
+            }
+            trigger_live_by_name(
+                &name,
+                args.workflow.as_deref(),
+                args.registry_dir.as_deref(),
+            )
+        }
+        (None, None) => {
+            bail!("pass an agent name for a live rebuild or --dir for an offline rebuild")
+        }
+        (Some(_), Some(_)) => bail!("agent name and --dir cannot be used together"),
+    }
+}
+
+fn trigger_live_by_name(
+    name: &str,
+    workflow: Option<&Path>,
+    registry_dir: Option<&Path>,
+) -> Result<()> {
+    let registry = dar_presence::Registry::new(
+        registry_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(dar_presence::default_registry_dir),
+    );
+    let mut matches: Vec<_> = registry
+        .read_live()
+        .into_iter()
+        .filter(|entry| entry.id == name)
+        .collect();
+    if let Some(workflow) = workflow {
+        let workflow = if workflow.is_dir() {
+            workflow.join("WORKFLOW.md")
+        } else {
+            workflow.to_path_buf()
+        }
+        .canonicalize()
+        .with_context(|| format!("resolving --workflow {}", workflow.display()))?;
+        matches.retain(|entry| Path::new(&entry.workflow) == workflow);
+    }
+    let entry = select_live_entry(name, matches)?;
+    trigger_live_entry(&registry, &entry)
+}
+
+fn trigger_live_by_identity(agent: &Path, workflow: Option<&Path>) -> Result<RelayOutcome> {
+    let agent = agent
+        .canonicalize()
+        .with_context(|| format!("resolving agent folder {}", agent.display()))?;
+    let workflow = workflow.map(Path::canonicalize).transpose()?;
+    let workflow = workflow.ok_or_else(|| anyhow::anyhow!("bridge missing workflow identity"))?;
+    let (bind, port) = crate::dashboard_addr_for_root(&agent, &workflow)?;
+    Ok(post_request(
+        &format!("{bind}:{port}"),
+        "/self-update/rebuild",
+    ))
+}
+
+fn select_live_entry(
+    name: &str,
+    matches: Vec<dar_presence::PresenceEntry>,
+) -> Result<dar_presence::PresenceEntry> {
+    match matches.as_slice() {
+        [] => bail!("no live dashboard presence found for agent `{name}`"),
+        [entry] => Ok(entry.clone()),
+        many => bail!(
+            "agent `{name}` has {} live workflows; pass --workflow: {}",
+            many.len(),
+            many.iter()
+                .map(|e| e.workflow.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn trigger_live_entry(
+    registry: &dar_presence::Registry,
+    entry: &dar_presence::PresenceEntry,
+) -> Result<()> {
+    match post_request(&entry.addr, "/self-update/rebuild") {
+        RelayOutcome::Accepted | RelayOutcome::DeliveryUnknown => {}
+        RelayOutcome::Busy => bail!("live rebuild already in progress"),
+        RelayOutcome::NotSent => bail!("live rebuild request was not sent"),
+        RelayOutcome::Rejected(status) => bail!("live rebuild request rejected with HTTP {status}"),
+    }
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(250));
+        if let Some(current) = registry
+            .read_live()
+            .into_iter()
+            .find(|e| e.id == entry.id && e.folder == entry.folder && e.workflow == entry.workflow)
+        {
+            if current.started_at != entry.started_at && get_ok(&current.addr, "/health") {
+                return Ok(());
+            }
+        }
+    }
+    bail!("live rebuild accepted but restart was not confirmed within 60 seconds")
+}
+
+fn dial_addr(addr: &str) -> String {
+    if let Some(port) = addr.strip_prefix("0.0.0.0:") {
+        return format!("127.0.0.1:{port}");
+    }
+    addr.to_string()
+}
+fn post_request(addr: &str, path: &str) -> RelayOutcome {
+    use std::io::{Read, Write};
+    let addr = dial_addr(addr);
+    let timeout = Duration::from_secs(3);
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+        &addr
+            .parse()
+            .unwrap_or_else(|_| "127.0.0.1:9".parse().unwrap()),
+        timeout,
+    ) else {
+        return RelayOutcome::NotSent;
+    };
+    if stream.set_write_timeout(Some(timeout)).is_err()
+        || stream.set_read_timeout(Some(timeout)).is_err()
+    {
+        return RelayOutcome::NotSent;
+    }
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    // A write error can follow a partial write; once write_all was attempted,
+    // the host may have received the request and restart verification is needed.
+    if stream.write_all(request.as_bytes()).is_err() || stream.flush().is_err() {
+        return RelayOutcome::DeliveryUnknown;
+    }
+    let mut response = vec![0; 8192];
+    match stream.read(&mut response) {
+        Ok(0) | Err(_) => RelayOutcome::DeliveryUnknown,
+        Ok(n) => {
+            let response = String::from_utf8_lossy(&response[..n]);
+            let line = response.lines().next().unwrap_or("");
+            match line.split_whitespace().nth(1).and_then(|s| s.parse().ok()) {
+                Some(202) => RelayOutcome::Accepted,
+                Some(409) => RelayOutcome::Busy,
+                Some(status) => RelayOutcome::Rejected(status),
+                None => RelayOutcome::DeliveryUnknown,
+            }
+        }
+    }
+}
+fn get_ok(addr: &str, path: &str) -> bool {
+    use std::io::{Read, Write};
+    let addr = dial_addr(addr);
+    let timeout = Duration::from_secs(3);
+    let Ok(socket) = addr.parse() else {
+        return false;
+    };
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&socket, timeout) else {
+        return false;
+    };
+    if stream.set_write_timeout(Some(timeout)).is_err()
+        || stream.set_read_timeout(Some(timeout)).is_err()
+    {
+        return false;
+    }
+    if stream
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+        .is_err()
+    {
+        return false;
+    }
+    let mut response = [0; 8192];
+    stream
+        .read(&mut response)
+        .is_ok_and(|n| String::from_utf8_lossy(&response[..n]).starts_with("HTTP/1.1 200"))
 }
 
 #[cfg(test)]

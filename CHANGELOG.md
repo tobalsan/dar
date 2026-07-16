@@ -9,6 +9,9 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Added: live `dar self rebuild <agent>` triggers a trusted dashboard-host
+  rebuild and confirms the restarted boot identity.
+
 - External workflows now expand `$AGENT_HOME` in `workspace.root` to the agent identity folder while relative roots and `{{ workflow.dir }}` resolve to the canonical WORKFLOW.md folder.
 - Fleet dashboard: same-named workers using different workflow paths now get distinct, stable labels.
 - Secrets: Plane and Linear requests now read agent-root credentials through a shared provider, so running host and MCP bridge processes observe valid `.env` rotations without `reload_secrets` while preserving process-env precedence, last-known-good fallback, child scrubbing, and redaction.

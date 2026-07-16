@@ -38,7 +38,7 @@ pub enum Command {
     Export(ExportArgs),
     /// Host-owned MCP bridge over stdio (spawned by runners; not for direct use).
     #[command(name = "__mcp-bridge", hide = true)]
-    McpBridge(DirArgs),
+    McpBridge(McpBridgeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -145,15 +145,56 @@ pub struct DirArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct McpBridgeArgs {
+    /// Agent folder (defaults to the current directory).
+    #[arg(long)]
+    pub dir: Option<PathBuf>,
+    /// Workflow identity of the live host this bridge serves.
+    #[arg(long)]
+    pub workflow: Option<PathBuf>,
+}
+
+impl McpBridgeArgs {
+    pub fn resolve_root(&self) -> Result<PathBuf> {
+        resolve_root(self.dir.as_deref())
+    }
+}
+
+#[derive(Debug, Args)]
 pub struct SelfArgs {
     #[command(subcommand)]
     pub command: SelfCommand,
 }
 
+#[derive(Debug, Args)]
+pub struct SelfRebuildArgs {
+    /// Live agent id to rebuild. Requires dashboard presence.
+    pub agent: Option<String>,
+    /// Agent folder for an offline one-pass rebuild.
+    #[arg(long)]
+    pub dir: Option<PathBuf>,
+    /// Select a workflow when more than one live process has this agent id.
+    #[arg(long)]
+    pub workflow: Option<PathBuf>,
+    /// Registry directory to read live dashboard presence from.
+    #[arg(long)]
+    pub registry_dir: Option<PathBuf>,
+    #[arg(long)]
+    pub vendor: bool,
+    #[arg(long)]
+    pub offline: bool,
+    #[arg(long)]
+    pub target: Option<String>,
+    #[arg(long = "static")]
+    pub static_: bool,
+    #[arg(long)]
+    pub universal: bool,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum SelfCommand {
-    /// Rebuild, doctor, swap, and restart this agent binary.
-    Rebuild(BuildArgs),
+    /// Rebuild a live agent, or rebuild --dir once without restarting.
+    Rebuild(SelfRebuildArgs),
 }
 
 #[derive(Debug, Args)]
@@ -208,6 +249,12 @@ impl DoctorArgs {
 }
 
 impl BuildArgs {
+    pub fn resolve_root(&self) -> Result<PathBuf> {
+        resolve_root(self.dir.as_deref())
+    }
+}
+
+impl SelfRebuildArgs {
     pub fn resolve_root(&self) -> Result<PathBuf> {
         resolve_root(self.dir.as_deref())
     }

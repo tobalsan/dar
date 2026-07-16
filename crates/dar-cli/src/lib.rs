@@ -9,6 +9,7 @@ mod doctor;
 pub mod self_check;
 pub mod self_update;
 
+use std::ffi::OsString;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -41,6 +42,9 @@ async fn run_inner(plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
         let code = self_check::run(&root, plugins).await?;
         std::process::exit(code);
     }
+    // Preserve the exact OS arguments before clap normalizes paths/values. A
+    // live rebuild must re-exec `run` with precisely the invocation it booted.
+    let original_args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let cli = Cli::parse();
     match cli.command {
         Command::Run(args) => {
@@ -53,7 +57,7 @@ async fn run_inner(plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
             self_check::guard_boot(&root)?;
             let (_workflow_file, workflow_root, is_default) =
                 cli::resolve_workflow(&root, args.workflow.as_deref())?;
-            run_host(root, workflow_root, !is_default, plugins).await
+            run_host(root, workflow_root, !is_default, original_args, plugins).await
         }
         Command::Dash(args) => {
             dash::serve(dash::DashOptions::resolve(
@@ -65,6 +69,18 @@ async fn run_inner(plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
         }
         Command::McpBridge(args) => {
             let root = args.resolve_root()?;
+            let workflow = args
+                .workflow
+                .map(|path| {
+                    path.canonicalize()
+                        .with_context(|| format!("resolving workflow {}", path.display()))
+                })
+                .transpose()?;
+            let mut plugins = plugins;
+            plugins.push(Arc::new(self_update::BridgeSelfUpdateExtension::new(
+                root.clone(),
+                workflow,
+            )));
             bridge::serve(&root, plugins).await
         }
         other => run_non_run_command(other, plugins).await,
@@ -82,7 +98,8 @@ async fn run_host(
     root: std::path::PathBuf,
     workflow_root: std::path::PathBuf,
     skip_agent_singletons: bool,
-    plugins: Vec<Arc<dyn Extension>>,
+    run_args: Vec<OsString>,
+    mut plugins: Vec<Arc<dyn Extension>>,
 ) -> Result<()> {
     let (bind, port) = dashboard_addr_for_root(&root, &workflow_root)?;
     let agent_config = config::load(&root)?;
@@ -91,6 +108,10 @@ async fn run_host(
     let hitl = startup_hitl(&root);
     let hitl_for_hook = Arc::clone(&hitl);
     let artifact_root = artifact_root()?;
+    plugins.push(Arc::new(self_update::LiveRebuildExtension::new(
+        root.clone(),
+        run_args,
+    )));
     let options = dar_host::HostOptions::new(root)
         .artifact_root(artifact_root)
         .without_dotenv()
@@ -133,7 +154,7 @@ fn startup_hitl(root: &std::path::Path) -> Arc<dyn HitlNotify> {
 /// `workflow_root` is the resolved `--workflow` directory (equals `root` for
 /// the default workflow); the `server:` override is read from *its*
 /// WORKFLOW.md, not always the agent root's.
-fn dashboard_addr_for_root(
+pub(crate) fn dashboard_addr_for_root(
     root: &std::path::Path,
     workflow_root: &std::path::Path,
 ) -> Result<(std::net::IpAddr, u16)> {
@@ -211,17 +232,16 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
         ),
         Command::LockRefresh(args) => composer::lock_refresh(&args.resolve_root()?),
         Command::Self_(args) => match args.command {
-            cli::SelfCommand::Rebuild(args) => self_update::rebuild_with_options(
-                &args.resolve_root()?,
-                composer::BuildOptions {
+            cli::SelfCommand::Rebuild(args) => {
+                let options = composer::BuildOptions {
                     vendor: args.vendor,
                     offline: args.offline,
-                    target: args.target,
+                    target: args.target.clone(),
                     static_: args.static_,
                     universal: args.universal,
-                },
-                self_update::RestartMode::Skip,
-            ),
+                };
+                self_update::run_rebuild_command(args, options)
+            }
         },
         Command::InitWorkflow(args) => {
             let root = args.resolve_root()?;

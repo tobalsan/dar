@@ -1644,6 +1644,8 @@ impl Orchestrator {
                 "__mcp-bridge".to_string(),
                 "--dir".to_string(),
                 self.paths.root.display().to_string(),
+                "--workflow".to_string(),
+                self.paths.workflow_root.display().to_string(),
             ],
         })
     }
