@@ -668,6 +668,7 @@ dependencies = [
  "dar-tracker-linear",
  "dar-tracker-plane",
  "dar-tui",
+ "tempfile",
  "tokio",
 ]
 
