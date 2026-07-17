@@ -103,7 +103,10 @@ impl DashboardTab for ChatTab {
         "Chat"
     }
     fn render(&self) -> Result<String> {
-        Ok(r#"<section class="chat-web"><div id="chat-transcript"></div><form id="chat-composer"><input id="chat-input" autocomplete="off" placeholder="Message"><button>Send</button><button type="button" id="chat-abort">Abort</button></form><script>(function(){const id=sessionStorage.chatSession||(sessionStorage.chatSession=crypto.randomUUID());let es=new EventSource('/chat/'+id+'/stream');es.onmessage=e=>{let x=JSON.parse(e.data),d=document.getElementById('chat-transcript');d.insertAdjacentHTML('beforeend','<div>'+((x.text||x.error||x.type).replaceAll('&','&amp;').replaceAll('<','&lt;'))+'</div>')};document.getElementById('chat-composer').onsubmit=async e=>{e.preventDefault();let i=document.getElementById('chat-input');if(!i.value)return;await fetch('/chat/'+id+'/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({command_id:crypto.randomUUID(),message:i.value})});i.value=''};document.getElementById('chat-abort').onclick=()=>fetch('/chat/'+id+'/abort',{method:'POST'});})();</script></section>"#.into())
+        Ok(format!(
+            r#"<section class="chat-web"><div id="chat-transcript"></div><form id="chat-composer"><input id="chat-input" autocomplete="off" placeholder="Message"><button>Send</button><button type="button" id="chat-abort">Abort</button></form><script>{}</script></section>"#,
+            include_str!("renderer.js")
+        ))
     }
 }
 
@@ -147,6 +150,16 @@ struct WireEvent {
     kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    args: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_error: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    done: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -243,20 +256,54 @@ impl Session {
     }
 
     fn publish(&self, event: ChatEvent) {
-        let (kind, text, error) = match event {
+        let (kind, text, error, id, name, args, is_error, done) = match event {
             ChatEvent::Delta {
                 role: ChatRole::Assistant,
                 text,
-            } => ("delta", Some(text), None),
+            } => ("delta", Some(text), None, None, None, None, None, None),
             ChatEvent::Delta {
                 role: ChatRole::Thinking,
                 text,
-            } => ("thinking", Some(text), None),
-            ChatEvent::Error(error) => ("error", None, Some(error)),
-            ChatEvent::TurnFinished { ok, error } => {
-                (if ok { "finished" } else { "aborted" }, None, error)
+            } => ("thinking", Some(text), None, None, None, None, None, None),
+            ChatEvent::ToolCall { id, name, args } => (
+                "tool_call",
+                None,
+                None,
+                Some(id),
+                Some(name),
+                Some(args),
+                None,
+                None,
+            ),
+            ChatEvent::ToolOutput {
+                id,
+                text,
+                is_error,
+                done,
+            } => (
+                "tool_output",
+                Some(text),
+                None,
+                Some(id),
+                None,
+                None,
+                Some(is_error),
+                Some(done),
+            ),
+            ChatEvent::Error(error) => ("error", None, Some(error), None, None, None, None, None),
+            ChatEvent::TurnFinished { ok, error } => (
+                if ok { "finished" } else { "aborted" },
+                None,
+                error,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            ChatEvent::SessionClosed { error } => {
+                ("closed", None, error, None, None, None, None, None)
             }
-            ChatEvent::SessionClosed { error } => ("closed", None, error),
             _ => return,
         };
         if matches!(kind, "finished" | "aborted" | "closed") {
@@ -285,6 +332,11 @@ impl Session {
             seq,
             kind,
             text,
+            id,
+            name,
+            args,
+            is_error,
+            done,
             error,
         };
         let mut history = self
@@ -701,6 +753,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn renderer_sequence_preserves_roles_tools_errors_and_abort() {
+        let s = session(Box::new(FakeSession {
+            aborted: Arc::new(AtomicBool::new(false)),
+            sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            abort_fails: false,
+        }));
+        let mut events = s.tx.subscribe();
+        s.active_turns.store(1, Ordering::SeqCst);
+        for event in [
+            ChatEvent::Delta {
+                role: ChatRole::Thinking,
+                text: "considering ".into(),
+            },
+            ChatEvent::Delta {
+                role: ChatRole::Thinking,
+                text: "options".into(),
+            },
+            ChatEvent::Delta {
+                role: ChatRole::Assistant,
+                text: "* answer".into(),
+            },
+            ChatEvent::ToolCall {
+                id: "call-1".into(),
+                name: "shell".into(),
+                args: r#"{\"command\":\"pwd\"}"#.into(),
+            },
+            ChatEvent::ToolOutput {
+                id: "call-1".into(),
+                text: "partial".into(),
+                is_error: false,
+                done: false,
+            },
+            ChatEvent::ToolOutput {
+                id: "call-1".into(),
+                text: "complete".into(),
+                is_error: true,
+                done: true,
+            },
+            ChatEvent::Error("backend warning".into()),
+            ChatEvent::TurnFinished {
+                ok: false,
+                error: Some("aborted".into()),
+            },
+        ] {
+            s.publish(event);
+        }
+        let events: Vec<_> = (0..8).map(|_| events.try_recv().unwrap()).collect();
+        assert_eq!(
+            events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            (1..=8).collect::<Vec<_>>()
+        );
+        assert_eq!(events[0].kind, "thinking");
+        assert_eq!(events[2].kind, "delta");
+        assert_eq!(events[3].name.as_deref(), Some("shell"));
+        assert_eq!(events[4].text.as_deref(), Some("partial"));
+        assert_eq!(events[5].text.as_deref(), Some("complete"));
+        assert_eq!(events[5].is_error, Some(true));
+        assert_eq!(events[5].done, Some(true));
+        assert_eq!(events[6].error.as_deref(), Some("backend warning"));
+        assert_eq!(events[7].kind, "aborted");
+        assert_eq!(events[7].error.as_deref(), Some("aborted"));
+    }
+
+    #[tokio::test]
     async fn stale_backend_terminal_event_cannot_finish_a_new_turn() {
         let s = session(Box::new(FakeSession {
             aborted: Arc::new(AtomicBool::new(false)),
@@ -916,11 +1032,19 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(
-            app.clone().oneshot(send_request("one")).await.unwrap().status(),
+            app.clone()
+                .oneshot(send_request("one"))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::ACCEPTED
         );
         assert_eq!(
-            app.clone().oneshot(send_request("one")).await.unwrap().status(),
+            app.clone()
+                .oneshot(send_request("one"))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::CONFLICT
         );
 
@@ -1024,7 +1148,7 @@ mod tests {
                             .unwrap(),
                     )
                     .await
-                .unwrap()
+                    .unwrap()
             })
         });
         subscribed_rx.recv().unwrap();
@@ -1053,5 +1177,27 @@ mod tests {
         let html = ChatTab.render().unwrap();
         assert!(html.contains("id=\"chat-composer\""));
         assert!(!html.contains("\\\"chat-composer\\\""));
+        for marker in [
+            "case 'thinking'",
+            "case 'tool_call'",
+            "case 'tool_output'",
+            "case 'aborted'",
+            "<strong>",
+            "<pre><code",
+            "<ul>",
+        ] {
+            assert!(html.contains(marker), "renderer contains {marker}");
+        }
+    }
+
+    #[test]
+    fn browser_renderer_handles_the_representative_event_sequence() {
+        let renderer = format!("{}/src/renderer.js", env!("CARGO_MANIFEST_DIR"));
+        let script = r#"const r=require(process.argv[1]);let b=[];for(const e of [{type:'thinking',text:'plan '},{type:'thinking',text:'it'},{type:'delta',text:'* **answer**\n```txt\n**code**\n```'},{type:'tool_call',id:'x',name:'shell',args:'{}'},{type:'tool_output',id:'x',text:'partial'},{type:'tool_output',id:'x',text:'failed',is_error:true,done:true},{type:'error',error:'warning'},{type:'aborted',error:'aborted'}])b=r.reduce(b,e);let h=r.html(b);if(b.length!==5||b[0].text!=='plan it'||(h.match(/data-tool-id=/g)||[]).length!==1||!h.includes('failed')||!h.includes('is-error is-done')||!h.includes('<ul><li><strong>answer</strong></li></ul>')||!h.includes('<pre><code data-language="txt">**code**\n</code></pre>')||!h.includes('warning')||!h.includes('turn aborted'))process.exit(1);"#;
+        let status = std::process::Command::new("node")
+            .args(["-e", script, &renderer])
+            .status()
+            .expect("node is available for browser renderer tests");
+        assert!(status.success());
     }
 }
