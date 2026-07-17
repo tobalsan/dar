@@ -768,7 +768,6 @@ extensions:
     chat:
       backend: pi       # optional; default: follow runner.use, then pi
       command: pi       # optional binary override
-      model: gpt-5      # optional, forwarded to the backend
 ```
 
 **Chat.** Backed by a long-lived `pi --mode rpc` child (cwd = the agent
