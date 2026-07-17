@@ -12,7 +12,9 @@
 //! ## File layout
 //!
 //! One file per agent+workflow, named `<id-slug>-<hash>.json`, where `hash`
-//! digests both the agent folder and the canonical `WORKFLOW.md` path.
+//! digests both the agent folder and the canonical `WORKFLOW.md` path. A
+//! workflow-less process keeps the legacy default-workflow hash so upgrades
+//! replace its existing presence file in place.
 //! Keying on all three means one operator can run the same agent id from two
 //! different folders, or run several workflows concurrently against one
 //! agent folder, without the presence files colliding.
@@ -49,10 +51,12 @@ pub struct PresenceEntry {
     pub id: String,
     /// Absolute agent folder the dashboard is serving.
     pub folder: String,
-    /// Canonical path to the resolved `WORKFLOW.md` this run is driving.
+    /// Canonical path to the `WORKFLOW.md` this run is driving, or `None` for
+    /// a passive process started without a workflow file.
     /// Distinguishes concurrent `--workflow <path>` runs of one agent so
     /// their presence files never clobber each other.
-    pub workflow: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<String>,
     /// Host:port the dashboard's HTTP server bound, as seen on the LAN/tailnet
     /// (e.g. `0.0.0.0:53124`). The aggregator substitutes the host portion with
     /// the browser's request host so the iframe resolves from the client side.
@@ -70,7 +74,7 @@ impl PresenceEntry {
     /// folder + workflow disambiguates same-id agents in different folders
     /// and concurrent workflows within one folder.
     pub fn file_name(&self) -> String {
-        file_name_for(&self.id, &self.folder, &self.workflow)
+        file_name_for(&self.id, &self.folder, self.workflow.as_deref())
     }
 
     /// The port portion of [`PresenceEntry::addr`], if parseable.
@@ -80,7 +84,13 @@ impl PresenceEntry {
 }
 
 /// Compute the storage filename for an id + folder + workflow triple.
-pub fn file_name_for(id: &str, folder: &str, workflow: &str) -> String {
+pub fn file_name_for(id: &str, folder: &str, workflow: Option<&str>) -> String {
+    let workflow = workflow.map(str::to_owned).unwrap_or_else(|| {
+        Path::new(folder)
+            .join("WORKFLOW.md")
+            .to_string_lossy()
+            .into_owned()
+    });
     let mut hasher = Sha256::new();
     hasher.update(folder.as_bytes());
     hasher.update(b"\0");
@@ -142,7 +152,7 @@ impl Registry {
 
     /// Remove this entry's presence file. Missing file is not an error
     /// (clean-shutdown unlink is idempotent across restarts).
-    pub fn remove(&self, id: &str, folder: &str, workflow: &str) -> Result<()> {
+    pub fn remove(&self, id: &str, folder: &str, workflow: Option<&str>) -> Result<()> {
         let path = self.dir.join(file_name_for(id, folder, workflow));
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -228,11 +238,22 @@ mod tests {
         entry_wf(id, folder, &format!("{folder}/WORKFLOW.md"), pid)
     }
 
+    fn passive_entry(id: &str, folder: &str, pid: u32) -> PresenceEntry {
+        PresenceEntry {
+            id: id.to_string(),
+            folder: folder.to_string(),
+            workflow: None,
+            addr: "0.0.0.0:50000".to_string(),
+            pid,
+            started_at: 1_700_000_000,
+        }
+    }
+
     fn entry_wf(id: &str, folder: &str, workflow: &str, pid: u32) -> PresenceEntry {
         PresenceEntry {
             id: id.to_string(),
             folder: folder.to_string(),
-            workflow: workflow.to_string(),
+            workflow: Some(workflow.to_string()),
             addr: "0.0.0.0:50000".to_string(),
             pid,
             started_at: 1_700_000_000,
@@ -269,10 +290,26 @@ mod tests {
         let reg = Registry::new(dir.path());
         let e = entry("ALG-3", "/agents/c", std::process::id());
         reg.write(&e).unwrap();
-        reg.remove(&e.id, &e.folder, &e.workflow).unwrap();
+        reg.remove(&e.id, &e.folder, e.workflow.as_deref()).unwrap();
         assert!(reg.read_live().is_empty());
         // Idempotent: removing again is not an error.
-        reg.remove(&e.id, &e.folder, &e.workflow).unwrap();
+        reg.remove(&e.id, &e.folder, e.workflow.as_deref()).unwrap();
+    }
+
+    #[test]
+    fn passive_entry_omits_workflow_but_keeps_legacy_filename() {
+        let passive = passive_entry("ALG-8", "/agents/one", std::process::id());
+        let legacy = entry("ALG-8", "/agents/one", std::process::id());
+
+        assert_eq!(passive.file_name(), legacy.file_name());
+        let json = serde_json::to_string(&passive).unwrap();
+        assert!(!json.contains("workflow"));
+        assert_eq!(
+            serde_json::from_str::<PresenceEntry>(&json)
+                .unwrap()
+                .workflow,
+            None
+        );
     }
 
     #[test]

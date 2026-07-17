@@ -446,7 +446,7 @@ fn trigger_live_by_name(
         .into_iter()
         .filter(|entry| entry.id == name)
         .collect();
-    if let Some(workflow) = workflow {
+    let entry = if let Some(workflow) = workflow {
         let workflow = if workflow.is_dir() {
             workflow.join("WORKFLOW.md")
         } else {
@@ -454,9 +454,16 @@ fn trigger_live_by_name(
         }
         .canonicalize()
         .with_context(|| format!("resolving --workflow {}", workflow.display()))?;
-        matches.retain(|entry| Path::new(&entry.workflow) == workflow);
-    }
-    let entry = select_live_entry(name, matches)?;
+        matches.retain(|entry| {
+            entry
+                .workflow
+                .as_deref()
+                .is_some_and(|candidate| Path::new(candidate) == workflow)
+        });
+        select_live_entry(name, matches)?
+    } else {
+        select_default_live_entry(name, matches)?
+    };
     trigger_live_entry(&registry, &entry)
 }
 
@@ -469,8 +476,11 @@ fn trigger_live_by_identity(
         .canonicalize()
         .with_context(|| format!("resolving agent folder {}", agent.display()))?;
     let workflow = workflow.map(Path::canonicalize).transpose()?;
-    let workflow = workflow.ok_or_else(|| anyhow::anyhow!("bridge missing workflow identity"))?;
-    let addr = bridge_addr(&agent, &workflow, host_addr)?;
+    let addr = match (host_addr, workflow.as_deref()) {
+        (Some(addr), _) => addr.to_string(),
+        (None, Some(workflow)) => bridge_addr(&agent, workflow, None)?,
+        (None, None) => bail!("bridge missing workflow identity and host address"),
+    };
     Ok(post_request(&addr, "/self-update/rebuild"))
 }
 
@@ -488,6 +498,35 @@ fn bridge_addr(
     }
 }
 
+fn select_default_live_entry(
+    name: &str,
+    matches: Vec<dar_presence::PresenceEntry>,
+) -> Result<dar_presence::PresenceEntry> {
+    let defaults: Vec<_> = matches
+        .iter()
+        .filter(|entry| is_default_entry(entry))
+        .cloned()
+        .collect();
+    if defaults.is_empty() && !matches.is_empty() {
+        bail!(
+            "agent `{name}` has no default live process; pass --workflow: {}",
+            matches
+                .iter()
+                .filter_map(|entry| entry.workflow.as_deref())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    select_live_entry(name, defaults)
+}
+
+fn is_default_entry(entry: &dar_presence::PresenceEntry) -> bool {
+    match entry.workflow.as_deref() {
+        None => true,
+        Some(workflow) => Path::new(workflow) == Path::new(&entry.folder).join("WORKFLOW.md"),
+    }
+}
+
 fn select_live_entry(
     name: &str,
     matches: Vec<dar_presence::PresenceEntry>,
@@ -495,14 +534,7 @@ fn select_live_entry(
     match matches.as_slice() {
         [] => bail!("no live dashboard presence found for agent `{name}`"),
         [entry] => Ok(entry.clone()),
-        many => bail!(
-            "agent `{name}` has {} live workflows; pass --workflow: {}",
-            many.len(),
-            many.iter()
-                .map(|e| e.workflow.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        many => bail!("agent `{name}` has {} matching live processes", many.len()),
     }
 }
 
@@ -522,7 +554,7 @@ fn trigger_live_entry(
         if let Some(current) = registry
             .read_live()
             .into_iter()
-            .find(|e| e.id == entry.id && e.folder == entry.folder && e.workflow == entry.workflow)
+            .find(|current| same_presence_identity(entry, current))
         {
             if restart_identity_changed(entry, &current) && get_ok(&current.addr, "/health") {
                 return Ok(());
@@ -532,14 +564,21 @@ fn trigger_live_entry(
     bail!("live rebuild accepted but restart was not confirmed within 60 seconds")
 }
 
-fn restart_identity_changed(
+fn same_presence_identity(
     before: &dar_presence::PresenceEntry,
     current: &dar_presence::PresenceEntry,
 ) -> bool {
     before.id == current.id
         && before.folder == current.folder
-        && before.workflow == current.workflow
-        && before.started_at != current.started_at
+        && (before.workflow == current.workflow
+            || (is_default_entry(before) && is_default_entry(current)))
+}
+
+fn restart_identity_changed(
+    before: &dar_presence::PresenceEntry,
+    current: &dar_presence::PresenceEntry,
+) -> bool {
+    same_presence_identity(before, current) && before.started_at != current.started_at
 }
 
 fn dial_addr(addr: &str) -> String {
@@ -872,22 +911,35 @@ mod tests {
     }
 
     #[test]
-    fn live_name_resolution_requires_exactly_one_workflow() {
-        let one = presence("agent", "/agent", "/agent/WORKFLOW.md", 1);
-        assert_eq!(select_live_entry("agent", vec![one.clone()]).unwrap(), one);
+    fn live_name_resolution_without_selector_targets_default_process() {
+        let default = passive_presence("agent", "/agent", 1);
+        let external = presence("agent", "/agent", "/agent/workflows/other/WORKFLOW.md", 1);
 
-        let none = select_live_entry("agent", vec![]).unwrap_err();
+        assert_eq!(
+            select_default_live_entry("agent", vec![default.clone(), external]).unwrap(),
+            default
+        );
+
+        let none = select_default_live_entry("agent", vec![]).unwrap_err();
         assert!(none.to_string().contains("no live dashboard presence"));
+    }
 
-        let many = select_live_entry(
-            "agent",
-            vec![
-                presence("agent", "/agent", "/agent/WORKFLOW.md", 1),
-                presence("agent", "/agent", "/agent/workflows/other/WORKFLOW.md", 1),
-            ],
-        )
-        .unwrap_err();
-        assert!(many.to_string().contains("pass --workflow"));
+    #[test]
+    fn live_name_resolution_without_default_lists_workflow_choices() {
+        let external = presence("agent", "/agent", "/agent/workflows/other/WORKFLOW.md", 1);
+
+        let error = select_default_live_entry("agent", vec![external]).unwrap_err();
+
+        assert!(error.to_string().contains("no default live process"));
+        assert!(error.to_string().contains("pass --workflow"));
+    }
+
+    #[test]
+    fn legacy_synthetic_workflow_matches_passive_restart_identity() {
+        let legacy = presence("agent", "/agent", "/agent/WORKFLOW.md", 1);
+        let passive = passive_presence("agent", "/agent", 2);
+
+        assert!(restart_identity_changed(&legacy, &passive));
     }
 
     #[test]
@@ -988,6 +1040,26 @@ mod tests {
         server.join().unwrap();
     }
 
+    #[test]
+    fn restart_confirmation_accepts_legacy_default_becoming_passive() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = dar_presence::Registry::new(temp.path().join("registry"));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let mut legacy = presence("agent", "/agent", "/agent/WORKFLOW.md", 1);
+        legacy.addr = addr.clone();
+        registry.write(&legacy).unwrap();
+        let mut updated = passive_presence("agent", "/agent", 2);
+        updated.addr = addr;
+        let registry_for_server = registry.clone();
+        let server = thread::spawn(move || {
+            serve_rebuild_then_health(listener, registry_for_server, updated, true)
+        });
+
+        trigger_live_entry(&registry, &legacy).unwrap();
+        server.join().unwrap();
+    }
+
     struct PartialWriter {
         remaining: usize,
     }
@@ -1039,7 +1111,18 @@ mod tests {
         dar_presence::PresenceEntry {
             id: id.into(),
             folder: folder.into(),
-            workflow: workflow.into(),
+            workflow: Some(workflow.into()),
+            addr: "127.0.0.1:1".into(),
+            pid: std::process::id(),
+            started_at,
+        }
+    }
+
+    fn passive_presence(id: &str, folder: &str, started_at: i64) -> dar_presence::PresenceEntry {
+        dar_presence::PresenceEntry {
+            id: id.into(),
+            folder: folder.into(),
+            workflow: None,
             addr: "127.0.0.1:1".into(),
             pid: std::process::id(),
             started_at,

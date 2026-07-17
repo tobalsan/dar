@@ -176,7 +176,8 @@ pub struct SelfRebuildArgs {
     /// Agent folder for an offline one-pass rebuild.
     #[arg(long)]
     pub dir: Option<PathBuf>,
-    /// Select a workflow when more than one live process has this agent id.
+    /// Select an exact workflow process. Without this flag, targets the default
+    /// process, including a passive agent with no WORKFLOW.md.
     #[arg(long)]
     pub workflow: Option<PathBuf>,
     /// Registry directory to read live dashboard presence from.

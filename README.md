@@ -491,8 +491,8 @@ normally in every `--workflow` process.
 
 `dar dash` tracks one live presence entry per agent **+ workflow**, so
 concurrent `dar run --workflow` processes for the same agent both show up
-without clobbering each other; a workflow's own dashboard header shows
-`id · folder · workflow`.
+without clobbering each other. Passive agents publish no workflow path; a
+workflow's own dashboard header shows `id · folder · workflow`.
 
 ## Runners
 
@@ -928,14 +928,18 @@ Live rebuild finds a running agent by its `agent.yaml` `id`, then recompiles,
 swaps, and restarts it in place:
 
 ```bash
-dar self rebuild my-agent
+dar self rebuild my-agent  # targets the default process, with or without WORKFLOW.md
 
-# Required when several workflows for this agent are live.
+# Select an exact workflow process.
 dar self rebuild my-agent --workflow ./my-agent/workflows/release
 
 # Required when dashboard presence uses a non-default registry directory.
 dar self rebuild my-agent --registry-dir /path/to/registry
 ```
+
+Without `--workflow`, live rebuild targets the agent's default process even
+when other workflow processes are live. `--workflow` selects a process by its
+canonical `WORKFLOW.md` path.
 
 Live rebuild requires the dashboard extension, matching presence registry, a
 Rust toolchain, and a running DAR-27-capable agent. The host recomposes `.dar/`,

@@ -163,12 +163,7 @@ fn register_presence(
     let root = ctx.paths.root();
     let id = read_agent_id(root)?;
     let folder = root.to_string_lossy().to_string();
-    let workflow = ctx
-        .paths
-        .workflow_root()
-        .join("WORKFLOW.md")
-        .to_string_lossy()
-        .to_string();
+    let workflow = presence_workflow(&ctx.paths);
     let entry = dar_presence::PresenceEntry {
         id,
         folder,
@@ -187,6 +182,13 @@ fn register_presence(
     Ok((registry, entry))
 }
 
+fn presence_workflow(paths: &host_api::HostPaths) -> Option<String> {
+    let workflow = paths.workflow_root().join("WORKFLOW.md");
+    workflow
+        .is_file()
+        .then(|| workflow.to_string_lossy().into_owned())
+}
+
 struct PresenceGuard {
     registry: dar_presence::Registry,
     entry: dar_presence::PresenceEntry,
@@ -194,10 +196,11 @@ struct PresenceGuard {
 
 impl PresenceGuard {
     fn unlink(&self) {
-        if let Err(e) =
-            self.registry
-                .remove(&self.entry.id, &self.entry.folder, &self.entry.workflow)
-        {
+        if let Err(e) = self.registry.remove(
+            &self.entry.id,
+            &self.entry.folder,
+            self.entry.workflow.as_deref(),
+        ) {
             tracing::warn!("dashboard presence unlink failed: {e:#}");
         }
     }
@@ -533,6 +536,29 @@ async fn asset(Path(path): Path<String>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passive_agent_has_no_presence_workflow() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = host_api::HostPaths::new(root.path()).unwrap();
+
+        assert_eq!(presence_workflow(&paths), None);
+    }
+
+    #[test]
+    fn presence_reports_existing_workflow() {
+        let root = tempfile::tempdir().unwrap();
+        let workflow = root.path().join("WORKFLOW.md");
+        std::fs::write(&workflow, "").unwrap();
+        let paths = host_api::HostPaths::new(root.path()).unwrap();
+        let expected = paths
+            .workflow_root()
+            .join("WORKFLOW.md")
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(presence_workflow(&paths), Some(expected));
+    }
 
     fn make_state() -> BusApiState {
         BusApiState {

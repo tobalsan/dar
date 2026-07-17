@@ -196,8 +196,11 @@ fn dialable_host(addr: &str) -> String {
 /// `id · <workflow-dir basename>-<path hash>`, or plain `id` when the
 /// workflow's directory is the agent folder (the default workflow).
 fn agent_label(entry: &PresenceEntry) -> String {
+    let Some(workflow) = entry.workflow.as_deref() else {
+        return entry.id.clone();
+    };
     let folder = Path::new(&entry.folder);
-    let wf_dir = Path::new(&entry.workflow).parent();
+    let wf_dir = Path::new(workflow).parent();
     match wf_dir {
         Some(dir) if dir != folder => {
             let base = dir
@@ -360,7 +363,7 @@ mod tests {
         PresenceEntry {
             id: id.to_string(),
             folder: folder.to_string(),
-            workflow: workflow.to_string(),
+            workflow: Some(workflow.to_string()),
             addr: addr.to_string(),
             pid,
             started_at: 0,
@@ -403,6 +406,13 @@ mod tests {
     #[test]
     fn agent_label_is_plain_id_for_default_workflow() {
         let e = entry("ALG-1", "/agents/one", "0.0.0.0:1", 1);
+        assert_eq!(agent_label(&e), "ALG-1");
+    }
+
+    #[test]
+    fn agent_label_is_plain_id_without_workflow() {
+        let mut e = entry("ALG-1", "/agents/one", "0.0.0.0:1", 1);
+        e.workflow = None;
         assert_eq!(agent_label(&e), "ALG-1");
     }
 
@@ -490,13 +500,14 @@ mod tests {
     async fn api_agents_returns_only_live() {
         let dir = tempfile::tempdir().unwrap();
         let reg = Registry::new(dir.path());
-        reg.write(&entry(
+        let mut live = entry(
             "ALG-LIVE",
             "/agents/live",
             "0.0.0.0:51000",
             std::process::id(),
-        ))
-        .unwrap();
+        );
+        live.workflow = None;
+        reg.write(&live).unwrap();
         reg.write(&entry("ALG-DEAD", "/agents/dead", "0.0.0.0:51001", 999_999))
             .unwrap();
         let state = DashState { registry: reg };
@@ -510,6 +521,7 @@ mod tests {
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0]["id"], "ALG-LIVE");
         assert_eq!(agents[0]["label"], "ALG-LIVE");
+        assert!(agents[0]["workflow"].is_null());
     }
 
     #[tokio::test]

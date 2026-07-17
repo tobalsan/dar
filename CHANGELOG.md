@@ -13,6 +13,8 @@ Breaking changes are marked **⚠ BREAKING**.
   rebuild and confirms the restarted boot identity.
 - Fixed: worker `self_update` relays target the live host's actual ephemeral
   dashboard port.
+- Fixed: live rebuilds without `--workflow` now target the default process,
+  and passive-agent presence no longer reports a nonexistent `WORKFLOW.md`.
 - Fixed: Codex and OpenCode TUI chats now receive the configured agent system
   files instead of silently dropping their identity context.
 
