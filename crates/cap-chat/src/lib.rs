@@ -11,6 +11,25 @@ pub use dar_artifacts::ArtifactId;
 use dar_artifacts::{ArtifactMetadata, ArtifactStore};
 use tokio::sync::mpsc::Sender;
 
+/// Named service used by chat surfaces that join the agent-wide live session.
+pub const CHAT_COORDINATOR_SERVICE: &str = "chat-coordinator";
+
+/// The one live agent chat session, shared by every interactive surface.
+///
+/// A coordinator owns backend lifetime and distributes backend events.  The
+/// concrete implementation remains an extension concern: this contract keeps
+/// the TUI independent of the web extension that currently provides it.
+pub trait ChatCoordinator: Send + Sync {
+    fn send_turn<'a>(
+        &'a self,
+        prompt: String,
+        display: String,
+    ) -> BoxFuture<'a, anyhow::Result<()>>;
+    fn abort<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>>;
+    fn new_session<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>>;
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ChatEvent>;
+}
+
 /// Backend id used when no configured/followed backend is available.
 pub const CHAT_FALLBACK_BACKEND: &str = "pi";
 
@@ -123,6 +142,10 @@ pub enum ChatRole {
 
 #[derive(Clone, Debug)]
 pub enum ChatEvent {
+    /// A user turn accepted by another attached surface.
+    User { text: String },
+    /// The shared session was reset by another attached surface.
+    SessionReset,
     /// Streamed text; UI appends to current block of this role (new block on role change).
     Delta { role: ChatRole, text: String },
     /// Completed tool call (name + rendered args).

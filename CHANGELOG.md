@@ -11,6 +11,8 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Added
 
+- Chat tabs and the TUI now join one live agent-wide chat session, with shared
+  transcript storage and browser stream fan-out.
 - Web chat transcripts persist per session and reconnecting clients replay missed events.
 - Opt-in web chat dashboard tab with streaming replies and turn abort.
 - Web chat now renders streamed thinking, tool calls and updating tool output,
