@@ -113,6 +113,17 @@ struct AppState {
     start: std::sync::OnceLock<StartCtx>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
 }
+#[cfg(test)]
+struct PublishPause {
+    sent: std::sync::mpsc::Sender<()>,
+    proceed: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+#[cfg(test)]
+struct StreamPause {
+    subscribed: std::sync::mpsc::Sender<()>,
+    snapshot_done: std::sync::mpsc::Sender<()>,
+    proceed: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
 struct Session {
     inner: Mutex<Option<Box<dyn ChatSession>>>,
     tx: broadcast::Sender<WireEvent>,
@@ -124,6 +135,10 @@ struct Session {
     publish_lock: std::sync::Mutex<()>,
     command_ids: Mutex<HashSet<String>>,
     history: std::sync::Mutex<VecDeque<WireEvent>>,
+    #[cfg(test)]
+    pause_after_send: std::sync::Mutex<Option<Arc<PublishPause>>>,
+    #[cfg(test)]
+    pause_after_subscribe: std::sync::Mutex<Option<Arc<StreamPause>>>,
 }
 #[derive(Clone, Serialize)]
 struct WireEvent {
@@ -172,6 +187,10 @@ impl AppState {
             publish_lock: std::sync::Mutex::new(()),
             command_ids: Mutex::new(HashSet::new()),
             history: std::sync::Mutex::new(VecDeque::new()),
+            #[cfg(test)]
+            pause_after_send: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            pause_after_subscribe: std::sync::Mutex::new(None),
         });
         sessions.insert(id.to_owned(), Arc::clone(&session));
         Ok(session)
@@ -262,12 +281,12 @@ impl Session {
             .next_seq
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        let _ = self.tx.send(WireEvent {
+        let event = WireEvent {
             seq,
             kind,
-            text: text.clone(),
-            error: error.clone(),
-        });
+            text,
+            error,
+        };
         let mut history = self
             .history
             .lock()
@@ -275,12 +294,18 @@ impl Session {
         if history.len() == 256 {
             history.pop_front();
         }
-        history.push_back(WireEvent {
-            seq,
-            kind,
-            text,
-            error,
-        });
+        history.push_back(event.clone());
+        let _ = self.tx.send(event);
+        #[cfg(test)]
+        {
+            drop(history);
+            drop(_publish);
+        }
+        #[cfg(test)]
+        if let Some(pause) = self.pause_after_send.lock().unwrap().as_ref() {
+            let _ = pause.sent.send(());
+            let _ = pause.proceed.lock().unwrap().recv();
+        }
     }
 }
 async fn stream(
@@ -295,15 +320,31 @@ async fn stream(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(0);
-            let live = s.tx.subscribe();
-            let replay: Vec<_> = s
-                .history
-                .lock()
-                .expect("chat-web history mutex poisoned")
-                .iter()
-                .filter(|event| event.seq > last)
-                .cloned()
-                .collect();
+            let (live, replay) = {
+                let _publish = s
+                    .publish_lock
+                    .lock()
+                    .expect("chat-web publish mutex poisoned");
+                let live = s.tx.subscribe();
+                #[cfg(test)]
+                if let Some(pause) = s.pause_after_subscribe.lock().unwrap().as_ref() {
+                    let _ = pause.subscribed.send(());
+                    let _ = pause.proceed.lock().unwrap().recv();
+                }
+                let replay: Vec<_> = s
+                    .history
+                    .lock()
+                    .expect("chat-web history mutex poisoned")
+                    .iter()
+                    .filter(|event| event.seq > last)
+                    .cloned()
+                    .collect();
+                #[cfg(test)]
+                if let Some(pause) = s.pause_after_subscribe.lock().unwrap().as_ref() {
+                    let _ = pause.snapshot_done.send(());
+                }
+                (live, replay)
+            };
             let cutoff = replay.last().map(|event| event.seq).unwrap_or(last);
             let replay = futures_util::stream::iter(
                 replay.into_iter().map(Ok::<_, std::convert::Infallible>),
@@ -435,7 +476,10 @@ async fn abort(Path(id): Path<String>, State(state): State<Arc<AppState>>) -> im
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use http_body_util::BodyExt;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use tower::ServiceExt;
 
     struct FakeSession {
         aborted: Arc<AtomicBool>,
@@ -487,11 +531,53 @@ mod tests {
             publish_lock: std::sync::Mutex::new(()),
             command_ids: Mutex::new(HashSet::new()),
             history: std::sync::Mutex::new(VecDeque::new()),
+            pause_after_send: std::sync::Mutex::new(None),
+            pause_after_subscribe: std::sync::Mutex::new(None),
         })
     }
 
     struct FakeBackend {
         opens: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct StreamingSession {
+        events: mpsc::Sender<ChatEvent>,
+    }
+    impl ChatSession for StreamingSession {
+        fn send_turn(&mut self, _prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
+            let events = self.events.clone();
+            Box::pin(async move {
+                events
+                    .send(ChatEvent::Delta {
+                        role: ChatRole::Assistant,
+                        text: "reply".into(),
+                    })
+                    .await?;
+                Ok(())
+            })
+        }
+        fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn close(self: Box<Self>) -> cap_chat::BoxFuture<'static, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+    struct StreamingBackend {
+        opens: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl ChatBackend for StreamingBackend {
+        fn open<'a>(
+            &'a self,
+            _params: cap_chat::ChatSessionParams,
+            events: mpsc::Sender<ChatEvent>,
+        ) -> cap_chat::BoxFuture<'a, Result<Box<dyn ChatSession>>> {
+            let opens = Arc::clone(&self.opens);
+            Box::pin(async move {
+                opens.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(StreamingSession { events }) as Box<dyn ChatSession>)
+            })
+        }
     }
     impl ChatBackend for FakeBackend {
         fn open<'a>(
@@ -772,6 +858,194 @@ mod tests {
             "aborted"
         );
         assert_eq!(s.active_turns.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn http_stream_fans_out_sequences_and_reuses_after_abort() {
+        let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut services = dar_extension_sdk::ServiceRegistry::default();
+        services
+            .register::<dyn ChatBackend>(
+                "fake",
+                Arc::new(StreamingBackend {
+                    opens: Arc::clone(&opens),
+                }),
+            )
+            .unwrap();
+        let state = Arc::new(AppState {
+            config: Config {
+                backend: Some("fake".into()),
+                ..Config::default()
+            },
+            root: std::env::temp_dir(),
+            start: std::sync::OnceLock::from(start_ctx(services)),
+            sessions: Mutex::new(HashMap::new()),
+        });
+        let app = router(Arc::clone(&state));
+        let stream_a = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/test/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let stream_b = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/test/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stream_a.status(), StatusCode::OK);
+        assert_eq!(stream_b.status(), StatusCode::OK);
+
+        let send_request = |command_id: &str| {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/test/send")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"command_id":"{command_id}","message":"hello"}}"#
+                )))
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone().oneshot(send_request("one")).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            app.clone().oneshot(send_request("one")).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+
+        let mut body_a = stream_a.into_body();
+        let mut body_b = stream_b.into_body();
+        for body in [&mut body_a, &mut body_b] {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(1), body.frame())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .into_data()
+                .unwrap();
+            let event = String::from_utf8(frame.to_vec()).unwrap();
+            assert!(event.contains("id: 1"));
+            assert!(event.contains("reply"));
+        }
+
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/test/abort")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(1), body_a.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        let terminal = String::from_utf8(terminal.to_vec()).unwrap();
+        assert!(terminal.contains("id: 2"));
+        assert!(terminal.contains("aborted"));
+        assert_eq!(
+            app.oneshot(send_request("two")).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        let reused = tokio::time::timeout(std::time::Duration::from_secs(1), body_a.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        let reused = String::from_utf8(reused.to_vec()).unwrap();
+        assert!(reused.contains("id: 3"));
+        assert!(reused.contains("reply"));
+        assert_eq!(opens.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn http_stream_cannot_miss_an_event_during_subscription() {
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: std::env::temp_dir(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::new()),
+        });
+        let session = state.session("test").await.unwrap();
+        let (sent_tx, sent_rx) = std::sync::mpsc::channel();
+        let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+        let (subscribed_tx, subscribed_rx) = std::sync::mpsc::channel();
+        let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+        let (stream_proceed_tx, stream_proceed_rx) = std::sync::mpsc::channel();
+        *session.pause_after_send.lock().unwrap() = Some(Arc::new(PublishPause {
+            sent: sent_tx,
+            proceed: std::sync::Mutex::new(proceed_rx),
+        }));
+        *session.pause_after_subscribe.lock().unwrap() = Some(Arc::new(StreamPause {
+            subscribed: subscribed_tx,
+            snapshot_done: snapshot_tx,
+            proceed: std::sync::Mutex::new(stream_proceed_rx),
+        }));
+        let publisher = {
+            let session = Arc::clone(&session);
+            tokio::task::spawn_blocking(move || {
+                session.publish(ChatEvent::Delta {
+                    role: ChatRole::Assistant,
+                    text: "during subscribe".into(),
+                });
+            })
+        };
+        sent_rx.recv().unwrap();
+        let runtime = tokio::runtime::Handle::current();
+        let subscriber = tokio::task::spawn_blocking(move || {
+            runtime.block_on(async move {
+                router(state)
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri("/test/stream")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                .unwrap()
+            })
+        });
+        subscribed_rx.recv().unwrap();
+        stream_proceed_tx.send(()).unwrap();
+        snapshot_rx.recv().unwrap();
+        proceed_tx.send(()).unwrap();
+        publisher.await.unwrap();
+        let response = subscriber.await.unwrap();
+        let frame = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            response.into_body().frame(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .into_data()
+        .unwrap();
+        let event = String::from_utf8(frame.to_vec()).unwrap();
+        assert!(event.contains("id: 1"));
+        assert!(event.contains("during subscribe"));
     }
 
     #[test]
