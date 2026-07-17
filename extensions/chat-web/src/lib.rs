@@ -401,9 +401,8 @@ async fn abort(Path(id): Path<String>, State(state): State<Arc<AppState>>) -> im
             let _ = s.abort_signal.send(true);
             tokio::spawn(async move {
                 let mut guard = s.inner.lock().await;
-                if s.active_turns.load(std::sync::atomic::Ordering::SeqCst) > 0
-                    && guard.as_mut().expect("session open").abort().await.is_ok()
-                {
+                if s.active_turns.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                    let _ = guard.as_mut().expect("session open").abort().await;
                     s.publish(ChatEvent::TurnFinished {
                         ok: false,
                         error: Some("aborted".into()),
@@ -424,6 +423,7 @@ mod tests {
     struct FakeSession {
         aborted: Arc<AtomicBool>,
         sends: Arc<std::sync::atomic::AtomicUsize>,
+        abort_fails: bool,
     }
     impl ChatSession for FakeSession {
         fn send_turn(&mut self, _prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
@@ -432,8 +432,12 @@ mod tests {
         }
         fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
             let flag = Arc::clone(&self.aborted);
+            let fail = self.abort_fails;
             Box::pin(async move {
                 flag.store(true, Ordering::SeqCst);
+                if fail {
+                    anyhow::bail!("backend abort failed")
+                }
                 Ok(())
             })
         }
@@ -461,6 +465,7 @@ mod tests {
         let s = session(Box::new(FakeSession {
             aborted: Arc::new(AtomicBool::new(false)),
             sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            abort_fails: false,
         }));
         let mut a = s.tx.subscribe();
         let mut b = s.tx.subscribe();
@@ -489,6 +494,7 @@ mod tests {
         let s = session(Box::new(FakeSession {
             aborted: Arc::clone(&flag),
             sends: Arc::clone(&sends),
+            abort_fails: false,
         }));
         let state = Arc::new(AppState {
             config: Config::default(),
@@ -522,6 +528,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sends.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn abort_still_terminates_when_backend_abort_fails() {
+        let s = session(Box::new(FakeSession {
+            aborted: Arc::new(AtomicBool::new(false)),
+            sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            abort_fails: true,
+        }));
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: std::env::temp_dir(),
+            services: dar_extension_sdk::ServiceRegistry::default(),
+            bus: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+        });
+        let mut events = s.tx.subscribe();
+        s.active_turns.store(1, Ordering::SeqCst);
+
+        assert_eq!(
+            abort(Path("test".into()), State(state))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.kind, "aborted");
+        assert_eq!(s.active_turns.load(Ordering::SeqCst), 0);
     }
 
     #[test]
