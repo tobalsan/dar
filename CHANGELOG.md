@@ -9,6 +9,10 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in web chat dashboard tab with streaming replies and turn abort.
+
 - Added: live `dar self rebuild <agent>` triggers a trusted dashboard-host
   rebuild and confirms the restarted boot identity.
 - Fixed: worker `self_update` relays target the live host's actual ephemeral
