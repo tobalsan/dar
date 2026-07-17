@@ -36,7 +36,9 @@ const TAB_ID: &str = "chat";
 struct Config {
     backend: Option<String>,
     command: Option<String>,
+    // Retained for backwards-compatible config parsing; sessions are shared.
     sessions_dir: Option<String>,
+    idle_minutes: Option<u64>,
 }
 
 #[derive(Default)]
@@ -145,6 +147,7 @@ struct Session {
     next_seq: std::sync::atomic::AtomicU64,
     active_turns: std::sync::atomic::AtomicUsize,
     abort_requested: std::sync::atomic::AtomicBool,
+    suppress_resume: std::sync::atomic::AtomicBool,
     abort_signal: watch::Sender<bool>,
     publish_lock: std::sync::Mutex<()>,
     command_ids: Mutex<HashSet<String>>,
@@ -217,6 +220,7 @@ impl AppState {
             next_seq: std::sync::atomic::AtomicU64::new(next_seq),
             active_turns: std::sync::atomic::AtomicUsize::new(0),
             abort_requested: std::sync::atomic::AtomicBool::new(false),
+            suppress_resume: std::sync::atomic::AtomicBool::new(false),
             abort_signal,
             publish_lock: std::sync::Mutex::new(()),
             command_ids: Mutex::new(HashSet::new()),
@@ -247,8 +251,16 @@ impl AppState {
             .with_context(|| format!("chat backend {backend_id:?} is not registered"))?;
         let session_dir = self.root.join("data/chat/sessions");
         std::fs::create_dir_all(&session_dir)?;
+        let resume_session_id = (!session
+            .suppress_resume
+            .swap(false, std::sync::atomic::Ordering::SeqCst))
+        .then(|| newest_session(&session_dir))
+        .flatten()
+        .filter(|session| !self.session_is_idle(session))
+        .map(|session| session.id);
         let params = chat::agent_session_params(start, &session_dir)
             .command(self.config.command.as_deref().unwrap_or(""))
+            .resume_session_id(resume_session_id)
             .build();
         let generation = session
             .generation
@@ -264,16 +276,63 @@ impl AppState {
         });
         backend.open(params, event_tx).await
     }
+
+    fn session_is_idle(&self, session: &PersistedSession) -> bool {
+        let idle_minutes = self.config.idle_minutes.unwrap_or(360);
+        session.modified.elapsed().is_ok_and(|idle| {
+            idle > std::time::Duration::from_secs(idle_minutes.saturating_mul(60))
+        })
+    }
 }
 
 fn migrate_tui_sessions(root: &std::path::Path) -> Result<()> {
     let shared = root.join("data/chat/sessions");
-    if shared.exists() || !root.join("data/tui/sessions").exists() {
+    if !shared_is_empty(&shared)? || !root.join("data/tui/sessions").exists() {
         return Ok(());
+    }
+    if shared.exists() {
+        fs::remove_dir(&shared)?;
     }
     std::fs::create_dir_all(shared.parent().expect("shared sessions has parent"))?;
     std::fs::rename(root.join("data/tui/sessions"), shared)?;
     Ok(())
+}
+
+fn shared_is_empty(path: &std::path::Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(true);
+    }
+    Ok(fs::read_dir(path)?.next().is_none())
+}
+
+struct PersistedSession {
+    id: String,
+    modified: std::time::SystemTime,
+}
+
+fn newest_session(dir: &std::path::Path) -> Option<PersistedSession> {
+    fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.file_stem().is_some_and(|stem| stem != "main")
+                && path.extension().is_some_and(|ext| ext == "jsonl"))
+            .then(|| {
+                let header = BufReader::new(fs::File::open(&path).ok()?)
+                    .lines()
+                    .find(|line| line.as_ref().is_ok_and(|line| !line.trim().is_empty()))
+                    .and_then(Result::ok)
+                    .and_then(|line| serde_json::from_str::<serde_json::Value>(&line).ok())?;
+                (header.get("type")?.as_str()? == "session").then_some(())?;
+                let id = header.get("id")?.as_str()?.to_owned();
+                Some(PersistedSession {
+                    id,
+                    modified: entry.metadata().ok()?.modified().ok()?,
+                })
+            })?
+        })
+        .max_by_key(|session| session.modified)
 }
 
 impl chat::ChatCoordinator for AppState {
@@ -323,6 +382,9 @@ impl chat::ChatCoordinator for AppState {
             session
                 .abort_requested
                 .store(false, std::sync::atomic::Ordering::SeqCst);
+            session
+                .suppress_resume
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = session.abort_signal.send(false);
             {
                 let _publish = session
@@ -820,6 +882,7 @@ mod tests {
             next_seq: std::sync::atomic::AtomicU64::new(0),
             active_turns: std::sync::atomic::AtomicUsize::new(0),
             abort_requested: std::sync::atomic::AtomicBool::new(false),
+            suppress_resume: std::sync::atomic::AtomicBool::new(false),
             abort_signal: watch::channel(false).0,
             publish_lock: std::sync::Mutex::new(()),
             command_ids: Mutex::new(HashSet::new()),
@@ -914,6 +977,46 @@ mod tests {
 
     fn test_root() -> PathBuf {
         std::env::temp_dir().join(uuid::Uuid::new_v4().to_string())
+    }
+
+    #[test]
+    fn newest_session_resumes_and_idle_sessions_expire() {
+        let root = test_root();
+        let sessions = root.join("data/chat/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(
+            sessions.join("2026-01-01_a.jsonl"),
+            r#"{"type":"session","id":"resume-me"}"#,
+        )
+        .unwrap();
+        let mut persisted = newest_session(&sessions).unwrap();
+        assert_eq!(persisted.id, "resume-me");
+        persisted.modified = std::time::SystemTime::UNIX_EPOCH;
+        let state = AppState {
+            config: Config {
+                idle_minutes: Some(0),
+                ..Config::default()
+            },
+            root,
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::new()),
+        };
+        assert!(state.session_is_idle(&persisted));
+    }
+
+    #[test]
+    fn migration_uses_an_existing_empty_shared_directory() {
+        let root = test_root();
+        fs::create_dir_all(root.join("data/chat/sessions")).unwrap();
+        let tui = root.join("data/tui/sessions");
+        fs::create_dir_all(&tui).unwrap();
+        fs::write(
+            tui.join("2026-01-01_a.jsonl"),
+            r#"{"type":"session","id":"legacy"}"#,
+        )
+        .unwrap();
+        migrate_tui_sessions(&root).unwrap();
+        assert!(root.join("data/chat/sessions/2026-01-01_a.jsonl").exists());
     }
 
     #[tokio::test]
