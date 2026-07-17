@@ -11,6 +11,11 @@
 //! - `POST   /scheduler/jobs`        \u2192 create (201, server-generated id)
 //! - `PATCH  /scheduler/jobs/{id}`   \u2192 update name/enabled/schedule/payload/timeout
 //! - `DELETE /scheduler/jobs/{id}`   \u2192 delete (204)
+//! - `GET    /scheduler/jobs/{id}/outputs/{name}` \u2192 one output file, rendered as
+//!   an HTML drawer fragment for the dashboard's Cron tab (see [`output_detail`])
+//! - `GET    /scheduler/jobs/{id}/detail`          \u2192 full job detail (schedule,
+//!   next/last fire, full prompt, complete output history), also an HTML
+//!   drawer fragment (see [`job_detail`])
 
 use std::sync::Arc;
 
@@ -19,6 +24,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use cap_dashboard_tab::escape_html;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -52,6 +58,8 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/jobs/{id}/run-now", axum::routing::post(run_now))
         .route("/jobs/{id}/tail", get(tail))
+        .route("/jobs/{id}/outputs/{name}", get(output_detail))
+        .route("/jobs/{id}/detail", get(job_detail))
         .with_state(state)
 }
 
@@ -62,6 +70,8 @@ pub fn routes() -> Vec<String> {
         "/jobs/{id}".to_string(),
         "/jobs/{id}/run-now".to_string(),
         "/jobs/{id}/tail".to_string(),
+        "/jobs/{id}/outputs/{name}".to_string(),
+        "/jobs/{id}/detail".to_string(),
     ]
 }
 
@@ -315,6 +325,265 @@ async fn tail(State(api): State<ApiState>, Path(id): Path<String>) -> Response {
         ),
         Err(e) => server_error(&format!("reading output {}: {e}", path.display())),
     }
+}
+
+/// `GET /scheduler/jobs/{id}/outputs/{name}` — read one job's output file and
+/// render it as an HTML drawer fragment matching the dashboard's `#run-detail`
+/// pattern (`.drawer-head` + `.drawer-meta` + a scrollable `<pre>` body). The
+/// Cron tab's output rows `hx-get` this into `#run-detail`.
+///
+/// `name` is validated against a strict charset ([`is_safe_output_name`])
+/// before it ever touches the filesystem, so a malicious id/name pair can
+/// never escape `cron/output/{id}/`: unknown job, invalid name, and missing
+/// file all render a 404 drawer; an fs read error renders a 500 drawer. Both
+/// carry the error message so the failure is visible in the UI, not just logs.
+async fn output_detail(State(api): State<ApiState>, Path((id, name)): Path<(String, String)>) -> Response {
+    let jobs = api.state.jobs();
+    let Some(job) = jobs.iter().find(|j| j.id == id) else {
+        return error_drawer(
+            StatusCode::NOT_FOUND,
+            "Output not found",
+            &format!("unknown job id {id:?}"),
+        );
+    };
+    if !is_safe_output_name(&name) {
+        return error_drawer(
+            StatusCode::NOT_FOUND,
+            "Output not found",
+            "invalid output filename",
+        );
+    }
+    let path = api.root.join("cron").join("output").join(&id).join(&name);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return error_drawer(
+                StatusCode::NOT_FOUND,
+                "Output not found",
+                &format!("no such output file {name:?}"),
+            );
+        }
+        Err(e) => {
+            return error_drawer(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Output unavailable",
+                &format!("reading {}: {e}", path.display()),
+            );
+        }
+    };
+    let title = crate::tab::humanize_output_name(&name).unwrap_or_else(|| name.clone());
+    let job_label = if job.name.trim().is_empty() {
+        job.id.clone()
+    } else {
+        job.name.clone()
+    };
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html")],
+        render_output_drawer(&id, &title, &job_label, &name, &path, &content),
+    )
+        .into_response()
+}
+
+/// `name` must be a single path component: only ASCII alphanumerics, `.`,
+/// `_`, `-`; must end with `.md`; must not contain a path separator or `..`.
+fn is_safe_output_name(name: &str) -> bool {
+    name.ends_with(".md")
+        && !name.contains("..")
+        && !name.contains('/')
+        && !name.contains('\\')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Render the happy-path output drawer: head (a `‹ job` back button to
+/// [`job_detail`], title, close), a meta block (job / file / full path), and
+/// the file content HTML-escaped inside a scrollable `<pre>`.
+fn render_output_drawer(
+    job_id: &str,
+    title: &str,
+    job_label: &str,
+    filename: &str,
+    path: &std::path::Path,
+    content: &str,
+) -> String {
+    format!(
+        "<aside class=\"drawer\" id=\"run-detail-inner\">\
+<div class=\"drawer-head\">{back}<h2>{title}</h2><button class=\"drawer-close\" onclick=\"closeDrawer()\">Close</button></div>\
+<div class=\"drawer-meta\">\
+<div class=\"kv\"><span class=\"k\">Job</span><span class=\"v\">{job}</span></div>\
+<div class=\"kv\"><span class=\"k\">File</span><span class=\"v\">{file}</span></div>\
+<div class=\"kv\"><span class=\"k\">Path</span><span class=\"v\" style=\"color:var(--muted)\">{path}</span></div>\
+</div>\
+<pre style=\"white-space: pre-wrap; overflow-wrap: anywhere; overflow-y: auto; flex: 1; margin: 0; font: inherit; color: var(--fg);\">{content}</pre>\
+</aside>",
+        back = job_back_button(job_id),
+        title = escape_html(title),
+        job = escape_html(job_label),
+        file = escape_html(filename),
+        path = escape_html(&path.display().to_string()),
+        content = escape_html(content),
+    )
+}
+
+/// A small `‹ job` back-link that returns to [`job_detail`]. Shared by the
+/// output drawer's `.drawer-head`. `job_id` is escaped defensively even though
+/// only already-validated ids ever reach here.
+fn job_back_button(job_id: &str) -> String {
+    format!(
+        "<button class=\"cron-btn\" hx-get=\"/scheduler/jobs/{id}/detail\" hx-target=\"#run-detail\" hx-swap=\"innerHTML\">&lsaquo; job</button>",
+        id = escape_html(job_id),
+    )
+}
+
+/// Render a 404/500-style drawer carrying just an error message, for output
+/// and job-detail lookups that fail validation or hit the filesystem.
+fn error_drawer(status: StatusCode, title: &str, message: &str) -> Response {
+    let html = format!(
+        "<aside class=\"drawer\" id=\"run-detail-inner\">\
+<div class=\"drawer-head\"><h2>{title}</h2><button class=\"drawer-close\" onclick=\"closeDrawer()\">Close</button></div>\
+<p class=\"empty\">{message}</p>\
+</aside>",
+        title = escape_html(title),
+        message = escape_html(message),
+    );
+    (status, [(header::CONTENT_TYPE, "text/html")], html).into_response()
+}
+
+/// `GET /scheduler/jobs/{id}/detail` — the full job-detail drawer: schedule
+/// (humanized + raw), timezone, enabled flag, next fire (relative + absolute
+/// UTC), last run (status + relative + absolute UTC), the last error (if any),
+/// the complete prompt in a scrollable `<pre>`, and the complete output
+/// history (newest first, each row opening [`output_detail`]). This is what
+/// the Cron tab's clickable job name and "all N outputs" overflow line both
+/// open — kept out of the row itself so every row stays the same height.
+///
+/// Unknown job id → 404 error drawer. Everything user-controlled (job name,
+/// prompt, output filenames) is HTML-escaped.
+async fn job_detail(State(api): State<ApiState>, Path(id): Path<String>) -> Response {
+    let jobs = api.state.jobs();
+    let Some(job) = jobs.iter().find(|j| j.id == id) else {
+        return error_drawer(
+            StatusCode::NOT_FOUND,
+            "Job not found",
+            &format!("unknown job id {id:?}"),
+        );
+    };
+    let rt = api.state.runtime(&id);
+    let now_ms = Utc::now().timestamp_millis();
+    let outputs = crate::tab::list_output_files(&api.root, &id);
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html")],
+        render_job_detail_drawer(job, &rt, now_ms, &outputs),
+    )
+        .into_response()
+}
+
+/// Build the job-detail drawer body. All user-controlled strings (job name,
+/// prompt, output filenames) pass through `escape_html`; the formatted
+/// schedule/relative-time/status words are computed, not user input, so they
+/// are interpolated as-is (matching the tab row's convention).
+fn render_job_detail_drawer(
+    job: &ScheduleJob,
+    rt: &crate::state::JobRuntime,
+    now_ms: i64,
+    outputs: &[String],
+) -> String {
+    let (status_label, _) = crate::tab::status_label_and_class(rt.last_status);
+    let display_name = if job.name.trim().is_empty() {
+        &job.id
+    } else {
+        &job.name
+    };
+    let schedule_human = crate::tab::humanize_cron(&job.schedule.cron)
+        .unwrap_or_else(|| format!("{} · {}", job.schedule.cron, job.schedule.tz));
+    let raw_schedule = format!("{} · {}", job.schedule.cron, job.schedule.tz);
+
+    let next_fire = match rt.next_run_at_ms {
+        Some(ms) => format!(
+            "{} ({})",
+            crate::tab::fmt_relative(now_ms, ms),
+            crate::tab::fmt_instant(Some(ms))
+        ),
+        None => "\u{2014}".to_string(),
+    };
+    let last_run = match rt.last_run_at_ms {
+        Some(ms) => format!(
+            "{} {} ({})",
+            status_label,
+            crate::tab::fmt_relative(now_ms, ms),
+            crate::tab::fmt_instant(Some(ms))
+        ),
+        None => status_label.to_string(),
+    };
+
+    let mut html = String::new();
+    html.push_str("<aside class=\"drawer\" id=\"run-detail-inner\">");
+    html.push_str(&format!(
+        "<div class=\"drawer-head\"><h2>{}</h2><button class=\"drawer-close\" onclick=\"closeDrawer()\">Close</button></div>",
+        escape_html(display_name),
+    ));
+
+    html.push_str("<div class=\"drawer-meta\">");
+    html.push_str(&format!(
+        "<div class=\"kv\"><span class=\"k\">Schedule</span><span class=\"v\">{} ({})</span></div>",
+        escape_html(&schedule_human),
+        escape_html(&raw_schedule),
+    ));
+    html.push_str(&format!(
+        "<div class=\"kv\"><span class=\"k\">Timezone</span><span class=\"v\">{}</span></div>",
+        escape_html(&job.schedule.tz),
+    ));
+    html.push_str(&format!(
+        "<div class=\"kv\"><span class=\"k\">Enabled</span><span class=\"v\">{}</span></div>",
+        if job.enabled { "yes" } else { "no" },
+    ));
+    html.push_str(&format!(
+        "<div class=\"kv\"><span class=\"k\">Next fire</span><span class=\"v\">{}</span></div>",
+        escape_html(&next_fire),
+    ));
+    html.push_str(&format!(
+        "<div class=\"kv\"><span class=\"k\">Last run</span><span class=\"v\">{}</span></div>",
+        escape_html(&last_run),
+    ));
+    if let Some(err) = rt.last_error.as_deref().filter(|e| !e.trim().is_empty()) {
+        html.push_str(&format!(
+            "<div class=\"kv\"><span class=\"k\">Last error</span><span class=\"v\" style=\"color:var(--bad)\">{}</span></div>",
+            escape_html(err),
+        ));
+    }
+    html.push_str("</div>"); // drawer-meta
+
+    html.push_str("<div class=\"cron-outputs-head\">Prompt</div>");
+    html.push_str(&format!(
+        "<pre style=\"white-space: pre-wrap; overflow-wrap: anywhere; overflow-y: auto; max-height: 10rem; margin: 0; padding: .5rem; background: var(--panel-2); border-radius: 6px; font: inherit; color: var(--fg);\">{}</pre>",
+        escape_html(&job.payload.message),
+    ));
+
+    html.push_str(&format!(
+        "<div class=\"cron-outputs-head\">Outputs ({})</div>",
+        outputs.len(),
+    ));
+    html.push_str("<div class=\"drawer-events\">");
+    if outputs.is_empty() {
+        html.push_str("<p class=\"empty\">No outputs yet.</p>");
+    } else {
+        for name in outputs {
+            let entry = crate::tab::OutputEntry::build(name);
+            html.push_str(&format!(
+                "<div class=\"cron-output-row\" hx-get=\"/scheduler/jobs/{id}/outputs/{file}\" hx-target=\"#run-detail\" hx-swap=\"innerHTML\"><span class=\"cron-output-label\">{label}</span><span class=\"cron-output-file\">{file}</span></div>",
+                id = escape_html(&job.id),
+                file = entry.filename,
+                label = entry.label,
+            ));
+        }
+    }
+    html.push_str("</div>"); // drawer-events
+
+    html.push_str("</aside>");
+    html
 }
 
 fn output_sort_key(name: &str) -> Option<(String, u32)> {
@@ -907,6 +1176,134 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("2026-06-01_12-00-00.md"));
+    }
+
+    // ---- output_detail ------------------------------------------------------
+
+    #[tokio::test]
+    async fn output_detail_unknown_job_is_404() {
+        let (api, _dir) = api();
+        let resp = output_detail(
+            State(api),
+            Path(("nope".to_string(), "2026-01-01_00-00-00.md".to_string())),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn output_detail_rejects_unsafe_names() {
+        let (api, _dir) = api();
+        let id = create_one(&api).await;
+        for bad in ["../../etc/passwd", "sub/dir.md", "..md", "a/b.md", "no-md-suffix"] {
+            let resp = output_detail(State(api.clone()), Path((id.clone(), bad.to_string()))).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "rejected: {bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn output_detail_missing_file_is_404() {
+        let (api, _dir) = api();
+        let id = create_one(&api).await;
+        let resp = output_detail(
+            State(api),
+            Path((id, "2026-01-01_00-00-00.md".to_string())),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn output_detail_returns_escaped_content() {
+        let (api, dir) = api();
+        let id = create_one(&api).await;
+        let out_dir = dir.path().join("cron/output").join(&id);
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(
+            out_dir.join("2026-01-01_00-00-00.md"),
+            "<script>alert(1)</script>",
+        )
+        .unwrap();
+        let resp = output_detail(
+            State(api),
+            Path((id, "2026-01-01_00-00-00.md".to_string())),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(html.contains("&lt;script&gt;"), "content escaped: {html}");
+        assert!(!html.contains("<script>alert"), "raw script not injected: {html}");
+    }
+
+    #[tokio::test]
+    async fn output_detail_includes_back_button_to_job_detail() {
+        let (api, dir) = api();
+        let id = create_one(&api).await;
+        let out_dir = dir.path().join("cron/output").join(&id);
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(out_dir.join("2026-01-01_00-00-00.md"), "x").unwrap();
+        let resp = output_detail(
+            State(api),
+            Path((id.clone(), "2026-01-01_00-00-00.md".to_string())),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            html.contains(&format!("hx-get=\"/scheduler/jobs/{id}/detail\"")),
+            "back button links to job detail: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn job_detail_unknown_job_is_404() {
+        let (api, _dir) = api();
+        let resp = job_detail(State(api), Path("nope".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn job_detail_returns_full_prompt_escaped_and_all_outputs() {
+        let (api, dir) = api();
+        let created = body_json(
+            create_job(
+                State(api.clone()),
+                Ok(create_body(
+                    "0 8 * * *",
+                    "UTC",
+                    "<script>alert(1)</script> full prompt text",
+                )),
+            )
+            .await,
+        )
+        .await;
+        let id = created["id"].as_str().unwrap().to_string();
+        let out_dir = dir.path().join("cron/output").join(&id);
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let timestamps = [
+            "2026-01-01_00-00-00",
+            "2026-01-02_00-00-00",
+            "2026-01-03_00-00-00",
+            "2026-01-04_00-00-00",
+        ];
+        for ts in timestamps {
+            std::fs::write(out_dir.join(format!("{ts}.md")), "x").unwrap();
+        }
+        let resp = job_detail(State(api), Path(id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            html.contains("&lt;script&gt;alert(1)&lt;/script&gt; full prompt text"),
+            "full prompt escaped: {html}"
+        );
+        assert!(!html.contains("<script>alert"), "raw script not injected: {html}");
+        assert!(html.contains("Outputs (4)"), "total output count shown: {html}");
+        for ts in timestamps {
+            assert!(html.contains(ts), "output {ts} listed in full history: {html}");
+        }
     }
 
     #[tokio::test]

@@ -32,7 +32,8 @@
     .runner { margin-top: .4rem; display: flex; align-items: center; gap: .45rem; font-size: .85rem; }
     .runner-pill { background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: .1rem .55rem; color: var(--accent); font-weight: 600; }
     .runner-model { color: var(--muted); }
-    main { padding: 1rem 1.25rem; display: grid; grid-template-columns: minmax(18rem, .8fr) 1.2fr; gap: 1rem; }
+    main { padding: 1rem 1.25rem; }
+    main.runs-grid { display: grid; grid-template-columns: minmax(18rem, .8fr) 1.2fr; gap: 1rem; }
     section { min-width: 0; }
     h2 { font-size: .76rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin: 0 0 .65rem; }
     .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: .9rem; }
@@ -100,7 +101,7 @@
     .dash-tab.active { color: var(--fg); background: var(--panel); border-color: var(--accent); }
     @media (max-width: 760px) {
       header, main { padding-left: .8rem; padding-right: .8rem; }
-      main { grid-template-columns: 1fr; }
+      main.runs-grid { grid-template-columns: 1fr; }
       .drawer { width: 100%; }
       .dash-tabs { padding-left: .8rem; padding-right: .8rem; flex-wrap: wrap; }
     }
@@ -156,7 +157,7 @@
       var drawer = document.getElementById('run-detail');
       if (!drawer.firstElementChild) return;
       if (ev.target.closest('#run-detail')) return;
-      if (ev.target.closest('.run-row')) return;
+      if (ev.target.closest('[hx-target="#run-detail"]')) return;
       closeDrawer();
     });
     document.addEventListener('keydown', function(ev) {

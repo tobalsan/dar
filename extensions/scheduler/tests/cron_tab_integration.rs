@@ -170,10 +170,28 @@ async fn cron_tab_present_when_scheduler_enabled_and_shows_job() {
     assert!(!frag.contains("<body"), "fragment is not a full page");
     assert!(frag.contains("Morning digest"), "job name shown: {frag}");
     assert!(
-        frag.contains("0 8 * * * Europe/Paris"),
+        frag.contains("0 8 * * * · Europe/Paris"),
         "schedule + tz shown"
     );
-    assert!(frag.contains(">enabled<"), "enabled flag shown");
+    assert!(frag.contains("daily at 08:00"), "humanized schedule shown");
+    assert!(!frag.contains(">disabled<"), "no disabled pill for enabled job");
+    assert!(frag.contains(">Disable<"), "disable control offered for enabled job");
+    assert!(
+        frag.contains("hx-get=\"/scheduler/jobs/digest/detail\""),
+        "job name opens the job-detail drawer: {frag}"
+    );
+
+    // The job-detail endpoint is reachable through the same merged router.
+    let (status, detail) = get(&router, "/scheduler/jobs/digest/detail").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        detail.contains("Morning digest"),
+        "job detail shows the job name: {detail}"
+    );
+    assert!(
+        detail.contains("Summarize."),
+        "job detail shows the full prompt: {detail}"
+    );
 
     // The index shell keeps the #content innerHTML self-poll that drives the
     // active tab's refresh.

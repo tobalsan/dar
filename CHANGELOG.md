@@ -24,6 +24,13 @@ Breaking changes are marked **⚠ BREAKING**.
 - Secrets: Plane and Linear requests now read agent-root credentials through a shared provider, so running host and MCP bridge processes observe valid `.env` rotations without `reload_secrets` while preserving process-env precedence, last-known-good fallback, child scrubbing, and redaction.
 
 ### Added
+- Dashboard Cron tab: full-width redesign with humanized schedules ("daily at
+  08:00", "every 15 min") and a relative next/last run summary, inline
+  "Run now" / "Disable"/"Enable" controls per job, and a uniform-height row
+  layout (each row shows only its 3 most recent outputs). Clicking a job's
+  name, or its "all N outputs" line, opens a job-detail drawer with the full
+  prompt and complete output history; clicking any output opens its full
+  content in the same drawer.
 - WORKFLOW.md prompt templates can now reference `{{ workflow.dir }}`
   (directory containing the resolved WORKFLOW.md) and `{{ workflow.file }}`
   (the WORKFLOW.md path itself), alongside the existing `{{ issue.* }}` and
