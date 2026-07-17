@@ -13,6 +13,8 @@ Breaking changes are marked **⚠ BREAKING**.
   rebuild and confirms the restarted boot identity.
 - Fixed: worker `self_update` relays target the live host's actual ephemeral
   dashboard port.
+- Fixed: Codex and OpenCode TUI chats now receive the configured agent system
+  files instead of silently dropping their identity context.
 
 - External workflows now expand `$AGENT_HOME` in `workspace.root` to the agent identity folder while relative roots and `{{ workflow.dir }}` resolve to the canonical WORKFLOW.md folder.
 - Fleet dashboard: same-named workers using different workflow paths now get distinct, stable labels.

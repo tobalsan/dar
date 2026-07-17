@@ -174,11 +174,25 @@ impl OpenCodeClient {
         prompt: &str,
         model: Option<&str>,
     ) -> Result<()> {
+        self.send_prompt_with_system(session_id, prompt, model, None)
+            .await
+    }
+
+    pub async fn send_prompt_with_system(
+        &self,
+        session_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+        system_prompt: Option<&str>,
+    ) -> Result<()> {
         let mut body = serde_json::json!({
             "parts": [{ "type": "text", "text": prompt }]
         });
         if let Some(model) = model.and_then(parse_model) {
             body["model"] = model;
+        }
+        if let Some(system_prompt) = system_prompt.filter(|prompt| !prompt.is_empty()) {
+            body["system"] = serde_json::Value::String(system_prompt.to_string());
         }
         self.client
             .post(self.url(&format!("/session/{session_id}/prompt_async")))
@@ -379,6 +393,7 @@ mod tests {
         }
         async fn prompt(Json(body): Json<Value>) -> Json<Value> {
             assert_eq!(body["parts"][0]["text"], "hello");
+            assert!(body.get("system").is_none());
             Json(serde_json::json!({ "ok": true }))
         }
         async fn events(
@@ -410,6 +425,10 @@ mod tests {
         let session = client.create_session("ISSUE-1").await.unwrap();
         assert_eq!(session, "sess-1");
         client.send_prompt(&session, "hello", None).await.unwrap();
+        client
+            .send_prompt_with_system(&session, "hello", None, Some(""))
+            .await
+            .unwrap();
         let mut events = client.events().await.unwrap();
         let event = events.next_event().await.unwrap().unwrap();
         assert_eq!(event.event.as_deref(), Some("session.idle"));

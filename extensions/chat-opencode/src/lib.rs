@@ -50,6 +50,7 @@ pub struct OpenCodeChatSession {
     client: opencode_client::OpenCodeClient,
     session_id: String,
     model: Option<String>,
+    system_prompt: Option<String>,
     server: Option<OpenCodeServer>,
     pump: JoinHandle<()>,
 }
@@ -127,6 +128,7 @@ impl OpenCodeChatSession {
             client,
             session_id,
             model: model.clone(),
+            system_prompt: params.system_prompt.clone(),
             server: Some(server),
             pump,
         })
@@ -137,7 +139,12 @@ impl ChatSession for OpenCodeChatSession {
     fn send_turn(&mut self, prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             self.client
-                .send_prompt(&self.session_id, &prompt, self.model.as_deref())
+                .send_prompt_with_system(
+                    &self.session_id,
+                    &prompt,
+                    self.model.as_deref(),
+                    self.system_prompt.as_deref(),
+                )
                 .await
         })
     }
@@ -774,6 +781,7 @@ PY"#;
         let sessions = temp.path().join("data").join("tui").join("sessions");
         let params = ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions)
             .model(Some("anthropic/claude-sonnet".to_string()))
+            .system_prompt(Some("exact identity context\n".to_string()))
             .build();
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let mut session = OpenCodeChatBackend.open(params, tx).await.unwrap();
@@ -811,6 +819,14 @@ PY"#;
         assert!(received.contains("first"), "{received}");
         assert!(received.contains("second"), "{received}");
         assert!(received.contains("providerID"), "{received}");
+        for line in received.lines() {
+            let body: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(body["system"], "exact identity context\n");
+            assert!(!body["parts"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("identity context"));
+        }
         assert_eq!(
             std::fs::read_to_string(temp.path().join("abort.log")).unwrap(),
             "abort\n"

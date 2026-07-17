@@ -155,7 +155,12 @@ impl CodexChatSession {
         send_value(&mut stdin, make_initialized()).await?;
         send_value(
             &mut stdin,
-            make_thread_start(2, &workspace, params.model.as_deref()),
+            make_chat_thread_start(
+                2,
+                &workspace,
+                params.model.as_deref(),
+                params.system_prompt.as_deref(),
+            ),
         )
         .await?;
         let thread_result = wait_for_response(&mut lines, 2).await?;
@@ -305,6 +310,19 @@ fn codex_args(params: &ChatSessionParams) -> Vec<OsString> {
         args.extend(runner_core::codex_mcp_bridge_args(bridge));
     }
     args
+}
+
+fn make_chat_thread_start(
+    id: u64,
+    workspace: &str,
+    model: Option<&str>,
+    system_prompt: Option<&str>,
+) -> Value {
+    let mut request = make_thread_start(id, workspace, model);
+    if let Some(system_prompt) = system_prompt.filter(|prompt| !prompt.is_empty()) {
+        request["params"]["developerInstructions"] = Value::String(system_prompt.to_string());
+    }
+    request
 }
 
 fn make_turn_interrupt(id: u64, thread_id: &str, turn_id: &str) -> Value {
@@ -1084,6 +1102,28 @@ mod tests {
         }
         assert_eq!(normalize_turn_error(Some("failed")), "failed");
         assert_eq!(normalize_turn_error(None), "failed");
+    }
+
+    #[test]
+    fn thread_start_delivers_system_prompt_as_developer_instructions() {
+        let request = make_chat_thread_start(
+            2,
+            "/agent",
+            Some("o4-mini"),
+            Some("exact identity context\n"),
+        );
+        assert_eq!(
+            request["params"]["developerInstructions"],
+            "exact identity context\n"
+        );
+    }
+
+    #[test]
+    fn thread_start_omits_absent_or_empty_system_prompt() {
+        for system_prompt in [None, Some("")] {
+            let request = make_chat_thread_start(2, "/agent", None, system_prompt);
+            assert!(request["params"].get("developerInstructions").is_none());
+        }
     }
 
     #[test]
