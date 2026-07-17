@@ -39,6 +39,7 @@ system-context = { package = "dar-system-context", path = "../extensions/system-
 chat-opencode = { package = "dar-chat-opencode", path = "../extensions/chat-opencode", version = "0.3" }
 chat-pi = { package = "dar-chat-pi", path = "../extensions/chat-pi", version = "0.3" }
 chat-codex = { package = "dar-chat-codex", path = "../extensions/chat-codex", version = "0.3" }
+chat-web = { package = "dar-chat-web", path = "../extensions/chat-web", version = "0.3" }
 tui = { package = "dar-tui", path = "../extensions/tui", version = "0.3" }
 
 [dev-dependencies]

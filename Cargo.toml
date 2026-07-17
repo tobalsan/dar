@@ -21,6 +21,7 @@ members = [
     "extensions/chat-opencode",
     "extensions/chat-pi",
     "extensions/chat-codex",
+    "extensions/chat-web",
     "extensions/dashboard",
     "extensions/example",
     "extensions/frontend-log",
