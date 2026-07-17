@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::{Read, Seek};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,10 +20,13 @@ fn standalone_self_rebuild_swaps_once_and_exits() {
     run_dar(&["init-build", "--dir", agent.path().to_str().unwrap()]);
     run_dar(&["build", "--dir", agent.path().to_str().unwrap()]);
     let old = fs::read(agent.path().join("bin/dar")).unwrap();
+    let canonical_agent = agent.path().canonicalize().unwrap();
 
+    let mut stderr = tempfile::tempfile().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_dar"))
         .env("DAR_SRC", repo)
         .args(["self", "rebuild", "--dir", agent.path().to_str().unwrap()])
+        .stderr(Stdio::from(stderr.try_clone().unwrap()))
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -37,7 +41,21 @@ fn standalone_self_rebuild_swaps_once_and_exits() {
         thread::sleep(Duration::from_millis(100));
     };
 
-    assert!(status.success(), "self rebuild failed: {status}");
+    stderr.rewind().unwrap();
+    let mut output = String::new();
+    stderr.read_to_string(&mut output).unwrap();
+    assert!(status.success(), "self rebuild failed: {status}\n{output}");
+    assert!(
+        output.contains(&format!("dar: rebuilding {}...", canonical_agent.display())),
+        "missing rebuild progress: {output}"
+    );
+    assert!(
+        output.contains(&format!(
+            "dar: rebuild complete; wrote {}",
+            canonical_agent.join("bin/dar").display()
+        )),
+        "missing rebuild success: {output}"
+    );
     assert!(agent.path().join("bin/dar").is_file());
     assert_eq!(fs::read(agent.path().join("bin/dar.prev")).unwrap(), old);
 }

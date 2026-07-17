@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
@@ -402,13 +403,28 @@ pub fn run_rebuild_command(
     args: crate::cli::SelfRebuildArgs,
     options: composer::BuildOptions,
 ) -> Result<()> {
+    run_rebuild_command_with_output(args, options, &mut std::io::stderr().lock())
+}
+
+fn run_rebuild_command_with_output(
+    args: crate::cli::SelfRebuildArgs,
+    options: composer::BuildOptions,
+    output: &mut impl Write,
+) -> Result<()> {
     match (args.agent, args.dir) {
-        (None, Some(dir)) => rebuild_with_options(
-            &dir.canonicalize()
-                .with_context(|| format!("resolving agent folder {}", dir.display()))?,
-            options,
-            RestartMode::Skip,
-        ),
+        (None, Some(dir)) => {
+            let agent = dir
+                .canonicalize()
+                .with_context(|| format!("resolving agent folder {}", dir.display()))?;
+            let _ = writeln!(output, "dar: rebuilding {}...", agent.display());
+            rebuild_with_options(&agent, options, RestartMode::Skip)?;
+            let _ = writeln!(
+                output,
+                "dar: rebuild complete; wrote {}",
+                agent.join("bin/dar").display()
+            );
+            Ok(())
+        }
         (Some(name), None) => {
             if options.vendor
                 || options.offline
@@ -418,11 +434,18 @@ pub fn run_rebuild_command(
             {
                 bail!("build flags are unsupported for live rebuilds; use --dir for an offline rebuild")
             }
+            let _ = writeln!(output, "dar: requesting live rebuild for `{name}`...");
             trigger_live_by_name(
                 &name,
                 args.workflow.as_deref(),
                 args.registry_dir.as_deref(),
-            )
+                output,
+            )?;
+            let _ = writeln!(
+                output,
+                "dar: rebuild complete; `{name}` restarted and is healthy"
+            );
+            Ok(())
         }
         (None, None) => {
             bail!("pass an agent name for a live rebuild or --dir for an offline rebuild")
@@ -435,6 +458,7 @@ fn trigger_live_by_name(
     name: &str,
     workflow: Option<&Path>,
     registry_dir: Option<&Path>,
+    output: &mut impl Write,
 ) -> Result<()> {
     let registry = dar_presence::Registry::new(
         registry_dir
@@ -464,7 +488,7 @@ fn trigger_live_by_name(
     } else {
         select_default_live_entry(name, matches)?
     };
-    trigger_live_entry(&registry, &entry)
+    trigger_live_entry(&registry, &entry, output)
 }
 
 fn trigger_live_by_identity(
@@ -541,13 +565,27 @@ fn select_live_entry(
 fn trigger_live_entry(
     registry: &dar_presence::Registry,
     entry: &dar_presence::PresenceEntry,
+    output: &mut impl Write,
 ) -> Result<()> {
-    match post_request(&entry.addr, "/self-update/rebuild") {
-        RelayOutcome::Accepted | RelayOutcome::DeliveryUnknown => {}
+    let delivery_confirmed = match post_request(&entry.addr, "/self-update/rebuild") {
+        RelayOutcome::Accepted => {
+            let _ = writeln!(
+                output,
+                "dar: rebuild accepted; waiting up to 60s for healthy restart..."
+            );
+            true
+        }
+        RelayOutcome::DeliveryUnknown => {
+            let _ = writeln!(
+                output,
+                "dar: rebuild request sent; waiting up to 60s for healthy restart..."
+            );
+            false
+        }
         RelayOutcome::Busy => bail!("live rebuild already in progress"),
         RelayOutcome::NotSent => bail!("live rebuild request was not sent"),
         RelayOutcome::Rejected(status) => bail!("live rebuild request rejected with HTTP {status}"),
-    }
+    };
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(250));
@@ -561,7 +599,10 @@ fn trigger_live_entry(
             }
         }
     }
-    bail!("live rebuild accepted but restart was not confirmed within 60 seconds")
+    if delivery_confirmed {
+        bail!("live rebuild accepted but restart was not confirmed within 60 seconds")
+    }
+    bail!("live rebuild request was sent but restart was not confirmed within 60 seconds")
 }
 
 fn same_presence_identity(
@@ -1001,8 +1042,30 @@ mod tests {
             serve_rebuild_then_health(listener, registry_for_server, updated, true)
         });
 
-        trigger_live_by_name("agent", Some(&selected), Some(registry.dir())).unwrap();
+        let mut output = Vec::new();
+        run_rebuild_command_with_output(
+            crate::cli::SelfRebuildArgs {
+                agent: Some("agent".into()),
+                dir: None,
+                workflow: Some(selected),
+                registry_dir: Some(registry.dir().to_path_buf()),
+                vendor: false,
+                offline: false,
+                target: None,
+                static_: false,
+                universal: false,
+            },
+            composer::BuildOptions::default(),
+            &mut output,
+        )
+        .unwrap();
         server.join().unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "dar: requesting live rebuild for `agent`...\n\
+             dar: rebuild accepted; waiting up to 60s for healthy restart...\n\
+             dar: rebuild complete; `agent` restarted and is healthy\n"
+        );
     }
 
     #[test]
@@ -1036,8 +1099,13 @@ mod tests {
             serve_rebuild_then_health(listener, registry_for_server, updated, false)
         });
 
-        trigger_live_entry(&registry, &entry).unwrap();
+        let mut output = Vec::new();
+        trigger_live_entry(&registry, &entry, &mut output).unwrap();
         server.join().unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "dar: rebuild request sent; waiting up to 60s for healthy restart...\n"
+        );
     }
 
     #[test]
@@ -1056,7 +1124,8 @@ mod tests {
             serve_rebuild_then_health(listener, registry_for_server, updated, true)
         });
 
-        trigger_live_entry(&registry, &legacy).unwrap();
+        let mut output = Vec::new();
+        trigger_live_entry(&registry, &legacy, &mut output).unwrap();
         server.join().unwrap();
     }
 
