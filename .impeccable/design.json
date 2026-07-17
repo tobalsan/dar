@@ -1,0 +1,323 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-17T00:00:00Z",
+  "title": "Design System: dar dashboard",
+  "extensions": {
+    "colorMeta": {
+      "patina-teal": {
+        "role": "primary",
+        "displayName": "Patina Teal",
+        "canonical": "oklch(66% 0.07 187)",
+        "tonalRamp": [
+          "oklch(15% 0.07 187)",
+          "oklch(27% 0.07 187)",
+          "oklch(39% 0.07 187)",
+          "oklch(51% 0.07 187)",
+          "oklch(63% 0.07 187)",
+          "oklch(75% 0.07 187)",
+          "oklch(87% 0.07 187)",
+          "oklch(95% 0.07 187)"
+        ]
+      },
+      "signal-green": {
+        "role": "status-ok",
+        "displayName": "Signal Green",
+        "canonical": "oklch(74% 0.14 150)",
+        "tonalRamp": [
+          "oklch(15% 0.14 150)",
+          "oklch(27% 0.14 150)",
+          "oklch(39% 0.14 150)",
+          "oklch(51% 0.14 150)",
+          "oklch(63% 0.14 150)",
+          "oklch(75% 0.14 150)",
+          "oklch(87% 0.14 150)",
+          "oklch(95% 0.14 150)"
+        ]
+      },
+      "signal-amber": {
+        "role": "status-warn",
+        "displayName": "Signal Amber",
+        "canonical": "oklch(80% 0.13 80)",
+        "tonalRamp": [
+          "oklch(15% 0.13 80)",
+          "oklch(27% 0.13 80)",
+          "oklch(39% 0.13 80)",
+          "oklch(51% 0.13 80)",
+          "oklch(63% 0.13 80)",
+          "oklch(75% 0.13 80)",
+          "oklch(87% 0.13 80)",
+          "oklch(95% 0.13 80)"
+        ]
+      },
+      "signal-red": {
+        "role": "status-bad",
+        "displayName": "Signal Red",
+        "canonical": "oklch(65% 0.17 20)",
+        "tonalRamp": [
+          "oklch(15% 0.17 20)",
+          "oklch(27% 0.17 20)",
+          "oklch(39% 0.17 20)",
+          "oklch(51% 0.17 20)",
+          "oklch(63% 0.17 20)",
+          "oklch(75% 0.17 20)",
+          "oklch(87% 0.17 20)",
+          "oklch(95% 0.17 20)"
+        ]
+      },
+      "signal-blue": {
+        "role": "status-info",
+        "displayName": "Signal Blue",
+        "canonical": "oklch(70% 0.13 260)",
+        "tonalRamp": [
+          "oklch(15% 0.13 260)",
+          "oklch(27% 0.13 260)",
+          "oklch(39% 0.13 260)",
+          "oklch(51% 0.13 260)",
+          "oklch(63% 0.13 260)",
+          "oklch(75% 0.13 260)",
+          "oklch(87% 0.13 260)",
+          "oklch(95% 0.13 260)"
+        ]
+      },
+      "void-black": {
+        "role": "surface-base",
+        "displayName": "Near-Black Void",
+        "canonical": "oklch(14% 0.005 250)",
+        "tonalRamp": [
+          "oklch(15% 0.005 250)",
+          "oklch(27% 0.005 250)",
+          "oklch(39% 0.005 250)",
+          "oklch(51% 0.005 250)",
+          "oklch(63% 0.005 250)",
+          "oklch(75% 0.005 250)",
+          "oklch(87% 0.005 250)",
+          "oklch(95% 0.005 250)"
+        ]
+      },
+      "chrome-black": {
+        "role": "surface-chrome",
+        "displayName": "Chrome Black",
+        "canonical": "oklch(16% 0.006 250)",
+        "tonalRamp": [
+          "oklch(15% 0.006 250)",
+          "oklch(27% 0.006 250)",
+          "oklch(39% 0.006 250)",
+          "oklch(51% 0.006 250)",
+          "oklch(63% 0.006 250)",
+          "oklch(75% 0.006 250)",
+          "oklch(87% 0.006 250)",
+          "oklch(95% 0.006 250)"
+        ]
+      },
+      "panel-charcoal": {
+        "role": "surface-panel",
+        "displayName": "Panel Charcoal",
+        "canonical": "oklch(19% 0.006 250)",
+        "tonalRamp": [
+          "oklch(15% 0.006 250)",
+          "oklch(27% 0.006 250)",
+          "oklch(39% 0.006 250)",
+          "oklch(51% 0.006 250)",
+          "oklch(63% 0.006 250)",
+          "oklch(75% 0.006 250)",
+          "oklch(87% 0.006 250)",
+          "oklch(95% 0.006 250)"
+        ]
+      },
+      "row-charcoal": {
+        "role": "surface-row",
+        "displayName": "Row Charcoal",
+        "canonical": "oklch(17% 0.006 250)",
+        "tonalRamp": [
+          "oklch(15% 0.006 250)",
+          "oklch(27% 0.006 250)",
+          "oklch(39% 0.006 250)",
+          "oklch(51% 0.006 250)",
+          "oklch(63% 0.006 250)",
+          "oklch(75% 0.006 250)",
+          "oklch(87% 0.006 250)",
+          "oklch(95% 0.006 250)"
+        ]
+      },
+      "panel-slate": {
+        "role": "surface-interactive",
+        "displayName": "Elevated Slate",
+        "canonical": "oklch(22% 0.008 250)",
+        "tonalRamp": [
+          "oklch(15% 0.008 250)",
+          "oklch(27% 0.008 250)",
+          "oklch(39% 0.008 250)",
+          "oklch(51% 0.008 250)",
+          "oklch(63% 0.008 250)",
+          "oklch(75% 0.008 250)",
+          "oklch(87% 0.008 250)",
+          "oklch(95% 0.008 250)"
+        ]
+      },
+      "hairline-border": {
+        "role": "border",
+        "displayName": "Hairline Border",
+        "canonical": "oklch(28% 0.012 250)",
+        "tonalRamp": [
+          "oklch(15% 0.012 250)",
+          "oklch(27% 0.012 250)",
+          "oklch(39% 0.012 250)",
+          "oklch(51% 0.012 250)",
+          "oklch(63% 0.012 250)",
+          "oklch(75% 0.012 250)",
+          "oklch(87% 0.012 250)",
+          "oklch(95% 0.012 250)"
+        ]
+      },
+      "fog-white": {
+        "role": "text-primary",
+        "displayName": "Fog White",
+        "canonical": "oklch(95% 0.004 250)",
+        "tonalRamp": [
+          "oklch(15% 0.004 250)",
+          "oklch(27% 0.004 250)",
+          "oklch(39% 0.004 250)",
+          "oklch(51% 0.004 250)",
+          "oklch(63% 0.004 250)",
+          "oklch(75% 0.004 250)",
+          "oklch(87% 0.004 250)",
+          "oklch(95% 0.004 250)"
+        ]
+      },
+      "muted-slate": {
+        "role": "text-secondary",
+        "displayName": "Muted Slate",
+        "canonical": "oklch(68% 0.015 250)",
+        "tonalRamp": [
+          "oklch(15% 0.015 250)",
+          "oklch(27% 0.015 250)",
+          "oklch(39% 0.015 250)",
+          "oklch(51% 0.015 250)",
+          "oklch(63% 0.015 250)",
+          "oklch(75% 0.015 250)",
+          "oklch(87% 0.015 250)",
+          "oklch(95% 0.015 250)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "title": { "displayName": "Title", "purpose": "Page and drawer h1, one per view." },
+      "section-label": { "displayName": "Section Label", "purpose": "Panel and drawer h2 headers (e.g. Active runs, Cron jobs)." },
+      "body": { "displayName": "Body", "purpose": "Base readable size for row titles, prompts, general content." },
+      "meta": { "displayName": "Meta", "purpose": "Secondary detail lines under a row title." },
+      "pill": { "displayName": "Pill", "purpose": "Status pill labels." },
+      "micro-label": { "displayName": "Micro Label", "purpose": "Kv-grid keys and small uppercase headers like RECENT OUTPUTS." }
+    },
+    "shadows": [
+      {
+        "name": "drawer-shadow",
+        "value": "-8px 0 24px rgba(0,0,0,.45)",
+        "purpose": "The one structural shadow exception. Separates the fixed-right run-detail drawer from the page it overlays; no other surface in the system carries a shadow."
+      }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "760px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button",
+      "description": "The default control button (Pause, Resume, Run now, Enable/Disable). Neutral at rest, accent border on hover.",
+      "html": "<button class=\"ds-btn\">Pause</button>",
+      "css": ".ds-btn { border: 1px solid #303844; background: #202630; color: #eceff3; border-radius: 6px; padding: .45rem .7rem; font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; cursor: pointer; } .ds-btn:hover { border-color: #62b3b0; } .ds-btn:focus-visible { outline: 2px solid #62b3b0; outline-offset: 2px; }"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger-hover",
+      "description": "The Stop control. Identical to the primary button at rest; hover shifts border and text to Signal Red.",
+      "html": "<button class=\"ds-btn ds-btn-danger\">Stop</button>",
+      "css": ".ds-btn-danger { border: 1px solid #303844; background: #202630; color: #eceff3; border-radius: 6px; padding: .45rem .7rem; font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; cursor: pointer; } .ds-btn-danger:hover { border-color: #f26d6d; color: #f26d6d; } .ds-btn-danger:focus-visible { outline: 2px solid #f26d6d; outline-offset: 2px; }"
+    },
+    {
+      "name": "Status Pill Set",
+      "kind": "chip",
+      "refersTo": "pill-ok, pill-bad, pill-warn, pill-live, pill-other",
+      "description": "The five run/job status pills. Each is a 15%-alpha tint of its color as background with the full-strength color as text; no other combination is used.",
+      "html": "<span class=\"ds-pill ds-pill-ok\">completed</span> <span class=\"ds-pill ds-pill-bad\">failed</span> <span class=\"ds-pill ds-pill-warn\">interrupted</span> <span class=\"ds-pill ds-pill-live\">live</span> <span class=\"ds-pill ds-pill-other\">other</span>",
+      "css": ".ds-pill { display: inline-block; border-radius: 999px; padding: .12rem .45rem; font-size: .72rem; font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; } .ds-pill-ok { background: rgba(87,199,133,.15); color: #57c785; } .ds-pill-bad { background: rgba(242,109,109,.15); color: #f26d6d; } .ds-pill-warn { background: rgba(242,184,75,.15); color: #f2b84b; } .ds-pill-live { background: rgba(122,162,247,.15); color: #7aa2f7; } .ds-pill-other { background: rgba(155,166,181,.15); color: #9ba6b5; }"
+    },
+    {
+      "name": "Run Row",
+      "kind": "custom",
+      "refersTo": "run-row",
+      "description": "A clickable run entry (active or history). Row Charcoal background, hairline border, accent border on hover, opens the drawer.",
+      "html": "<div class=\"ds-run-row\"><span class=\"ds-run-title\">fix-login-bug</span><span class=\"ds-pill2 ds-pill2-live\">live</span><span class=\"ds-run-meta\">workspaces/fix-login-bug</span><span class=\"ds-run-meta\">pid 4821</span></div>",
+      "css": ".ds-run-row { display: grid; grid-template-columns: 1fr auto; gap: .35rem .75rem; padding: .6rem; background: #171b21; border: 1px solid #303844; border-radius: 6px; cursor: pointer; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; } .ds-run-row:hover { border-color: #62b3b0; } .ds-run-row:focus-visible { outline: 2px solid #62b3b0; outline-offset: 2px; } .ds-run-title { color: #eceff3; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-run-meta { color: #9ba6b5; font-size: .78rem; } .ds-pill2 { display: inline-block; border-radius: 999px; padding: .12rem .45rem; font-size: .72rem; font-weight: 700; } .ds-pill2-live { background: rgba(122,162,247,.15); color: #7aa2f7; }"
+    },
+    {
+      "name": "Panel With Section Label",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "The base content container: Panel Charcoal, 8px radius, hairline border, uppercase section-label header. No shadow, no nested cards.",
+      "html": "<section class=\"ds-panel\"><h2 class=\"ds-panel-label\">Active runs</h2><p class=\"ds-panel-empty\">Idle, nothing running.</p></section>",
+      "css": ".ds-panel { background: #1b1f26; border: 1px solid #303844; border-radius: 8px; padding: .9rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; } .ds-panel-label { font-size: .76rem; color: #9ba6b5; text-transform: uppercase; letter-spacing: .08em; font-weight: 700; margin: 0 0 .65rem; } .ds-panel-empty { color: #9ba6b5; font-style: italic; margin: .3rem 0; font-size: 14px; }"
+    },
+    {
+      "name": "Dash Tabs",
+      "kind": "nav",
+      "refersTo": "dash-tab, dash-tab-active",
+      "description": "The folder-tab strip switching between Runs/Cron/etc. Active tab is the only tab allowed accent color at rest.",
+      "html": "<nav class=\"ds-tabs\"><button class=\"ds-tab ds-tab-active\">Runs</button><button class=\"ds-tab\">Cron</button></nav>",
+      "css": ".ds-tabs { display: flex; gap: .35rem; padding: .55rem 1.25rem 0; border-bottom: 1px solid #303844; background: #15181d; } .ds-tab { border: 1px solid #303844; border-bottom: none; background: #202630; color: #9ba6b5; border-radius: 6px 6px 0 0; padding: .4rem .8rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; cursor: pointer; } .ds-tab:hover { color: #eceff3; border-color: #62b3b0; } .ds-tab:focus-visible { outline: 2px solid #62b3b0; outline-offset: 2px; } .ds-tab-active { color: #eceff3; background: #1b1f26; border-color: #62b3b0; }"
+    },
+    {
+      "name": "Kv Grid",
+      "kind": "custom",
+      "refersTo": "kv",
+      "description": "The drawer's scalar-field layout: a fixed 7rem uppercase micro-label key column beside a plain-case value column.",
+      "html": "<div class=\"ds-kv\"><span class=\"ds-kv-k\">STATUS</span><span class=\"ds-kv-v\">completed</span><span class=\"ds-kv-k\">RUN</span><span class=\"ds-kv-v\">run-2891</span></div>",
+      "css": ".ds-kv { display: grid; grid-template-columns: 7rem 1fr; gap: .5rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; } .ds-kv-k { color: #9ba6b5; text-transform: uppercase; font-size: .68rem; letter-spacing: .06em; padding-top: .1rem; } .ds-kv-v { color: #eceff3; overflow-wrap: anywhere; }"
+    },
+    {
+      "name": "Drawer Header",
+      "kind": "custom",
+      "refersTo": "drawer",
+      "description": "The run-detail/job-detail drawer's top bar. Fixed right, Panel Charcoal, the system's one shadow exception.",
+      "html": "<div class=\"ds-drawer\"><div class=\"ds-drawer-head\"><h2>run-2891</h2><button class=\"ds-drawer-close\">Close</button></div></div>",
+      "css": ".ds-drawer { position: relative; width: min(34rem, 100%); background: #1b1f26; border-left: 1px solid #303844; box-shadow: -8px 0 24px rgba(0,0,0,.45); padding: 1rem 1.1rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; } .ds-drawer-head { display: flex; align-items: center; gap: .6rem; } .ds-drawer-head h2 { margin: 0; font-size: .76rem; color: #9ba6b5; text-transform: uppercase; letter-spacing: .08em; font-weight: 700; } .ds-drawer-close { margin-left: auto; border: 1px solid #303844; background: #202630; color: #eceff3; border-radius: 6px; padding: .45rem .7rem; font: inherit; cursor: pointer; } .ds-drawer-close:hover { border-color: #62b3b0; } .ds-drawer-close:focus-visible { outline: 2px solid #62b3b0; outline-offset: 2px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Operator's Console",
+    "overview": "The dar dashboard is a calm instrument panel beside the terminal: dense, legible, always-on. It is watched in the corner of a dark editor setup, not stared at, so it must earn its place without competing for attention. Every pixel answers one question first: is the agent healthy, and does anything need a human. Detail is one click away in the drawer; the resting state is a glance. This system explicitly rejects enterprise SaaS admin templates: hero metrics, identical card grids, gradient accents. It rejects raw unstyled log dumps and walls of same-weight text; density here is structured, not undifferentiated. It rejects neon \"hacker\" aesthetics; the palette is muted and technical, never lit up. The dashboard must never glow brighter than the terminal it sits beside.",
+    "keyCharacteristics": [
+      "Flat surfaces, borders carry all depth, one deliberate shadow exception (the drawer).",
+      "One monospace type family end to end, size and weight do the differentiating, not decoration.",
+      "Patina Teal appears only on hover and active states; nothing is filled with it at rest.",
+      "Status color is communicated as tinted pill backgrounds, never as page-wide alarm color."
+    ],
+    "rules": [
+      { "name": "The Hover-Only Accent Rule", "body": "Patina Teal never fills a surface and never sits at rest. It appears exclusively as a border color on :hover/active state and on the one active tab. If teal is visible anywhere without a cursor nearby or an active selection, it is a bug.", "section": "colors" },
+      { "name": "The Tinted Pill Rule", "body": "Every status color follows one formula and no other: a 15%-alpha tint of itself as background, the same color at full strength as text. No status color is ever used as a solid fill or as body text outside a pill.", "section": "colors" },
+      { "name": "The One Font Rule", "body": "There is exactly one font family in this system. A second family, serif or humanist sans for \"warmth,\" is forbidden; monospace is the brand, not a technical default to escape.", "section": "typography" },
+      { "name": "The One Shadow Rule", "body": "Exactly one shadow exists in the entire system, on the drawer, because it is the one surface that is genuinely on top of another. Every other panel, row, button, and tab is flat; depth there is drawn with borders, not shadows. Adding a second shadow anywhere else is prohibited.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do keep the palette to Near-Black Void (#111317), Panel Charcoal (#1b1f26), Elevated Slate (#202630), Chrome Black (#15181d), and Row Charcoal (#171b21) as the only surface colors; nothing new joins this stack without a real new context.",
+      "Do use exactly one 1px Hairline Border (#303844) for every seam, panel edge, button, row, and tab; that border, not a shadow, is what carries depth.",
+      "Do hold Patina Teal (#62b3b0) to hover and active states only, per the Hover-Only Accent Rule.",
+      "Do build every status indicator as a 15%-alpha tint background with full-strength text, per the Tinted Pill Rule, and only from the four signal colors (green, amber, red, blue).",
+      "Do set every piece of text in the single monospace stack (ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); differentiate hierarchy with size, weight, and letter-spacing only.",
+      "Do use hex sRGB as the canonical color format (matching the project's own :root custom properties); OKLCH is prose-only reference in the sidecar."
+    ],
+    "donts": [
+      "Don't build enterprise SaaS admin templates: hero metrics, identical card grids, gradient accents.",
+      "Don't ship raw unstyled log dumps or walls of same-weight text; every block of text needs a hierarchy role (title, section-label, body, meta, pill, or micro-label).",
+      "Don't reach for neon \"hacker\" aesthetics; every color in this system is deliberately muted, never saturated past what the status palette already defines.",
+      "Don't use a side-stripe border: no colored border-left/border-right heavier than the standard 1px Hairline Border. Depth comes from the full-perimeter hairline, never a colored accent stripe.",
+      "Don't use gradient text anywhere; text is always a single flat color from the palette.",
+      "Don't nest cards inside cards; a panel holds rows and lists directly, never another bordered panel.",
+      "Don't use pure #000 or pure #fff; the darkest surface is Near-Black Void (#111317) and the lightest text is Fog White (#eceff3).",
+      "Don't introduce a second font family for \"warmth\" or emphasis; see the One Font Rule.",
+      "Don't swap the whole <body> via htmx; the dashboard polls GET /content into the #content div with an innerHTML swap only. A <body> outerHTML swap breaks htmx bindings and blanks the page."
+    ]
+  }
+}
