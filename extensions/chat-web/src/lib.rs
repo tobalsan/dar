@@ -59,8 +59,7 @@ impl Extension for ChatWebExtension {
             let state = Arc::new(AppState {
                 config,
                 root: ctx.paths.root().to_path_buf(),
-                services: ctx.services.clone(),
-                bus: std::sync::OnceLock::new(),
+                start: std::sync::OnceLock::new(),
                 sessions: Mutex::new(HashMap::new()),
             });
             self.state
@@ -87,8 +86,8 @@ impl Extension for ChatWebExtension {
                 return Ok(());
             };
             state
-                .bus
-                .set(ctx.host.bus.clone())
+                .start
+                .set(ctx)
                 .map_err(|_| anyhow::anyhow!("chat-web started twice"))?;
             Ok(())
         })
@@ -111,13 +110,13 @@ impl DashboardTab for ChatTab {
 struct AppState {
     config: Config,
     root: std::path::PathBuf,
-    services: dar_extension_sdk::ServiceRegistry,
-    bus: std::sync::OnceLock<Arc<host_api::EventBus>>,
+    start: std::sync::OnceLock<StartCtx>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
 }
 struct Session {
     inner: Mutex<Option<Box<dyn ChatSession>>>,
     tx: broadcast::Sender<WireEvent>,
+    generation: std::sync::atomic::AtomicU64,
     next_seq: std::sync::atomic::AtomicU64,
     active_turns: std::sync::atomic::AtomicUsize,
     abort_requested: std::sync::atomic::AtomicBool,
@@ -160,26 +159,29 @@ impl AppState {
         if let Some(s) = sessions.get(id).cloned() {
             return Ok(s);
         }
-        let (event_tx, mut event_rx) = mpsc::channel(128);
-        let configured = self.config.backend.as_deref().filter(|s| !s.is_empty());
-        let backend_id = if let Some(id) = configured {
-            id.to_owned()
-        } else {
-            let registered = |id: &str| self.services.get_named::<dyn ChatBackend>(id).is_ok();
-            self.bus
-                .get()
-                .and_then(|bus| {
-                    bus.read_retained::<orchestrator_api::RunSnapshot>(
-                        orchestrator_api::RUN_SNAPSHOT_TOPIC,
-                    )
-                    .ok()
-                })
-                .filter(|x| x.version > 0)
-                .map(|x| x.agent.runner)
-                .filter(|id| registered(id))
-                .unwrap_or_else(|| chat::CHAT_FALLBACK_BACKEND.into())
-        };
-        let backend = self
+        let (tx, _) = broadcast::channel(256);
+        let (abort_signal, _) = watch::channel(false);
+        let session = Arc::new(Session {
+            inner: Mutex::new(None),
+            tx,
+            generation: std::sync::atomic::AtomicU64::new(0),
+            next_seq: std::sync::atomic::AtomicU64::new(0),
+            active_turns: std::sync::atomic::AtomicUsize::new(0),
+            abort_requested: std::sync::atomic::AtomicBool::new(false),
+            abort_signal,
+            publish_lock: std::sync::Mutex::new(()),
+            command_ids: Mutex::new(HashSet::new()),
+            history: std::sync::Mutex::new(VecDeque::new()),
+        });
+        sessions.insert(id.to_owned(), Arc::clone(&session));
+        Ok(session)
+    }
+
+    async fn open_session(&self, session: Arc<Session>) -> Result<Box<dyn ChatSession>> {
+        let start = self.start.get().context("chat-web has not started")?;
+        let backend_id = chat::resolve_agent_backend(start, self.config.backend.as_deref());
+        let backend = start
+            .host
             .services
             .get_named::<dyn ChatBackend>(&backend_id)
             .with_context(|| format!("chat backend {backend_id:?} is not registered"))?;
@@ -197,37 +199,30 @@ impl AppState {
             })
             .unwrap_or_else(|| self.root.join("data/chat-web/sessions"));
         std::fs::create_dir_all(&session_dir)?;
-        let params = cap_chat::ChatSessionParams::builder(
-            self.config.command.as_deref().unwrap_or(""),
-            &self.root,
-            &session_dir,
-        )
-        .build();
-        let opened = backend.open(params, event_tx).await?;
-        let (tx, _) = broadcast::channel(256);
-        let (abort_signal, _) = watch::channel(false);
-        let session = Arc::new(Session {
-            inner: Mutex::new(Some(opened)),
-            tx,
-            next_seq: std::sync::atomic::AtomicU64::new(0),
-            active_turns: std::sync::atomic::AtomicUsize::new(0),
-            abort_requested: std::sync::atomic::AtomicBool::new(false),
-            abort_signal,
-            publish_lock: std::sync::Mutex::new(()),
-            command_ids: Mutex::new(HashSet::new()),
-            history: std::sync::Mutex::new(VecDeque::new()),
-        });
+        let params = chat::agent_session_params(start, &session_dir)
+            .command(self.config.command.as_deref().unwrap_or(""))
+            .build();
+        let generation = session
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let (event_tx, mut event_rx) = mpsc::channel(128);
         let sink = Arc::clone(&session);
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                sink.publish(event);
+                sink.publish_if_current(generation, event);
             }
         });
-        sessions.insert(id.to_owned(), Arc::clone(&session));
-        Ok(session)
+        backend.open(params, event_tx).await
     }
 }
 impl Session {
+    fn publish_if_current(&self, generation: u64, event: ChatEvent) {
+        if self.generation.load(std::sync::atomic::Ordering::SeqCst) == generation {
+            self.publish(event);
+        }
+    }
+
     fn publish(&self, event: ChatEvent) {
         let (kind, text, error) = match event {
             ChatEvent::Delta {
@@ -356,6 +351,19 @@ async fn send(
                     .into_response();
             }
             let mut guard = s.inner.lock().await;
+            if guard.is_none() {
+                match state.open_session(Arc::clone(&s)).await {
+                    Ok(opened) => *guard = Some(opened),
+                    Err(e) => {
+                        s.command_ids.lock().await.remove(&body.command_id);
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(serde_json::json!({"accepted":false,"error":e.to_string()})),
+                        )
+                            .into_response();
+                    }
+                }
+            }
             s.active_turns
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut aborted = s.abort_signal.subscribe();
@@ -399,16 +407,25 @@ async fn abort(Path(id): Path<String>, State(state): State<Arc<AppState>>) -> im
             s.abort_requested
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = s.abort_signal.send(true);
-            tokio::spawn(async move {
-                let mut guard = s.inner.lock().await;
-                if s.active_turns.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-                    let _ = guard.as_mut().expect("session open").abort().await;
-                    s.publish(ChatEvent::TurnFinished {
-                        ok: false,
-                        error: Some("aborted".into()),
-                    });
-                }
-            });
+            let mut inner = s.inner.lock().await;
+            let backend = inner.take();
+            s.generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let turns = s.active_turns.load(std::sync::atomic::Ordering::SeqCst);
+            for _ in 0..turns {
+                s.publish(ChatEvent::TurnFinished {
+                    ok: false,
+                    error: Some("aborted".into()),
+                });
+            }
+            drop(inner);
+            if let Some(mut backend) = backend {
+                tokio::spawn(async move {
+                    if backend.abort().await.is_ok() {
+                        let _ = backend.close().await;
+                    }
+                });
+            }
             StatusCode::ACCEPTED.into_response()
         }
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
@@ -445,11 +462,24 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
     }
+    struct HangingAbortSession;
+    impl ChatSession for HangingAbortSession {
+        fn send_turn(&mut self, _prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(std::future::pending())
+        }
+        fn close(self: Box<Self>) -> cap_chat::BoxFuture<'static, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
     fn session(inner: Box<dyn ChatSession>) -> Arc<Session> {
         let (tx, _) = broadcast::channel(8);
         Arc::new(Session {
             inner: Mutex::new(Some(inner)),
             tx,
+            generation: std::sync::atomic::AtomicU64::new(0),
             next_seq: std::sync::atomic::AtomicU64::new(0),
             active_turns: std::sync::atomic::AtomicUsize::new(0),
             abort_requested: std::sync::atomic::AtomicBool::new(false),
@@ -458,6 +488,103 @@ mod tests {
             command_ids: Mutex::new(HashSet::new()),
             history: std::sync::Mutex::new(VecDeque::new()),
         })
+    }
+
+    struct FakeBackend {
+        opens: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl ChatBackend for FakeBackend {
+        fn open<'a>(
+            &'a self,
+            _params: cap_chat::ChatSessionParams,
+            _tx: mpsc::Sender<ChatEvent>,
+        ) -> cap_chat::BoxFuture<'a, Result<Box<dyn ChatSession>>> {
+            let opens = Arc::clone(&self.opens);
+            Box::pin(async move {
+                opens.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(FakeSession {
+                    aborted: Arc::new(AtomicBool::new(false)),
+                    sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    abort_fails: false,
+                }) as Box<dyn ChatSession>)
+            })
+        }
+    }
+
+    fn start_ctx(services: dar_extension_sdk::ServiceRegistry) -> StartCtx {
+        let paths = host_api::HostPaths::new(std::env::current_dir().unwrap()).unwrap();
+        let (_, shutdown) = watch::channel(false);
+        let register = host_api::RegisterCtx {
+            bus: host_api::EventBus::new(),
+            http: host_api::HttpRegistry::default(),
+            foreground: host_api::ForegroundRegistry::default(),
+            services,
+            paths: paths.clone(),
+            config: host_api::ConfigStore::default(),
+            shutdown: host_api::ShutdownToken::new(shutdown),
+        };
+        StartCtx {
+            shutdown: register.shutdown.clone(),
+            paths,
+            config: register.config.clone(),
+            host: register.into_start_services().unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_does_not_open_backend_before_first_send() {
+        let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut services = dar_extension_sdk::ServiceRegistry::default();
+        services
+            .register::<dyn ChatBackend>(
+                "fake",
+                Arc::new(FakeBackend {
+                    opens: Arc::clone(&opens),
+                }),
+            )
+            .unwrap();
+        let state = Arc::new(AppState {
+            config: Config {
+                backend: Some("fake".into()),
+                ..Config::default()
+            },
+            root: std::env::temp_dir(),
+            start: std::sync::OnceLock::from(start_ctx(services)),
+            sessions: Mutex::new(HashMap::new()),
+        });
+
+        let response = stream(
+            Path("test".into()),
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(state
+            .session("test")
+            .await
+            .unwrap()
+            .inner
+            .lock()
+            .await
+            .is_none());
+        assert_eq!(opens.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            send(
+                Path("test".into()),
+                State(state),
+                Json(Send {
+                    command_id: "one".into(),
+                    message: "hello".into()
+                }),
+            )
+            .await
+            .into_response()
+            .status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -488,6 +615,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_backend_terminal_event_cannot_finish_a_new_turn() {
+        let s = session(Box::new(FakeSession {
+            aborted: Arc::new(AtomicBool::new(false)),
+            sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            abort_fails: false,
+        }));
+        s.generation.store(2, Ordering::SeqCst);
+        s.active_turns.store(1, Ordering::SeqCst);
+
+        s.publish_if_current(
+            1,
+            ChatEvent::TurnFinished {
+                ok: false,
+                error: Some("old backend".into()),
+            },
+        );
+
+        assert_eq!(s.active_turns.load(Ordering::SeqCst), 1);
+        assert!(s.history.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn abort_is_server_authoritative_and_emits_terminal_event() {
         let flag = Arc::new(AtomicBool::new(false));
         let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -499,8 +648,7 @@ mod tests {
         let state = Arc::new(AppState {
             config: Config::default(),
             root: std::env::temp_dir(),
-            services: dar_extension_sdk::ServiceRegistry::default(),
-            bus: std::sync::OnceLock::new(),
+            start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
         });
         let mut events = s.tx.subscribe();
@@ -516,9 +664,15 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        tokio::task::yield_now().await;
         assert!(flag.load(Ordering::SeqCst));
         assert_eq!(event.kind, "aborted");
         assert_eq!(event.error.as_deref(), Some("aborted"));
+        *s.inner.lock().await = Some(Box::new(FakeSession {
+            aborted: Arc::new(AtomicBool::new(false)),
+            sends: Arc::clone(&sends),
+            abort_fails: false,
+        }));
         s.inner
             .lock()
             .await
@@ -540,8 +694,7 @@ mod tests {
         let state = Arc::new(AppState {
             config: Config::default(),
             root: std::env::temp_dir(),
-            services: dar_extension_sdk::ServiceRegistry::default(),
-            bus: std::sync::OnceLock::new(),
+            start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
         });
         let mut events = s.tx.subscribe();
@@ -559,6 +712,65 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(event.kind, "aborted");
+        assert_eq!(s.active_turns.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn abort_terminalizes_every_accepted_turn() {
+        let s = session(Box::new(FakeSession {
+            aborted: Arc::new(AtomicBool::new(false)),
+            sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            abort_fails: false,
+        }));
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: std::env::temp_dir(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+        });
+        let mut events = s.tx.subscribe();
+        s.active_turns.store(2, Ordering::SeqCst);
+
+        assert_eq!(
+            abort(Path("test".into()), State(state))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(events.recv().await.unwrap().kind, "aborted");
+        assert_eq!(events.recv().await.unwrap().kind, "aborted");
+        assert_eq!(s.active_turns.load(Ordering::SeqCst), 0);
+        assert!(!s.abort_requested.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn abort_terminalizes_before_a_hung_backend_abort() {
+        let s = session(Box::new(HangingAbortSession));
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: std::env::temp_dir(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+        });
+        let mut events = s.tx.subscribe();
+        s.active_turns.store(1, Ordering::SeqCst);
+
+        assert_eq!(
+            abort(Path("test".into()), State(state))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .kind,
+            "aborted"
+        );
         assert_eq!(s.active_turns.load(Ordering::SeqCst), 0);
     }
 
