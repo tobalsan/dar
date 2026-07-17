@@ -338,6 +338,12 @@ agent-folder-relative files in listed order. Entries are optional unless
 `required: true`; missing optional files warn and skip. Paths cannot escape
 agent folder. Do not list `AGENTS.md` again.
 
+System context resolves once when the host boots; these files are not watched.
+A successful live self-rebuild restarts the host and reloads the current
+`agent.yaml`, `AGENTS.md`, declared `system_files`, and workspace skills. An
+offline `dar self rebuild --dir ...` only swaps the binary, so a running host
+keeps its existing context until manually restarted.
+
 ## WORKFLOW.md
 
 `WORKFLOW.md` is required only when the issue loop is enabled: the resolved
