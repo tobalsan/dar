@@ -37,9 +37,12 @@ if (typeof module !== 'undefined') module.exports = { reduce, html };
 if (typeof document !== 'undefined') {
   let blocks = [], transcript = document.getElementById('chat-transcript');
   const render = event => { blocks = reduce(blocks, event); transcript.innerHTML = html(blocks); };
+  window.renderChatEvent = render;
+  if (document.getElementById('chat-composer')) {
   const id = sessionStorage.chatSession || (sessionStorage.chatSession = crypto.randomUUID());
   const es = new EventSource(`/chat/${id}/stream`);
   es.onmessage = event => render(JSON.parse(event.data));
-  document.getElementById('chat-composer').onsubmit = async event => { event.preventDefault(); let input = document.getElementById('chat-input'); if (!input.value) return; render({ type: 'user', text: input.value }); await fetch(`/chat/${id}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: crypto.randomUUID(), message: input.value }) }); input.value = ''; };
+  document.getElementById('chat-composer').onsubmit = async event => { event.preventDefault(); let input = document.getElementById('chat-input'); if (!input.value) return; await fetch(`/chat/${id}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: crypto.randomUUID(), message: input.value }) }); input.value = ''; };
   document.getElementById('chat-abort').onclick = () => fetch(`/chat/${id}/abort`, { method: 'POST' });
+  }
 }

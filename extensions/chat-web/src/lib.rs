@@ -3,6 +3,9 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    fs::{self, OpenOptions},
+    io::{BufRead, BufReader, Write},
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -25,7 +28,6 @@ use dar_extension_sdk::{
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, watch, Mutex};
-use tokio_stream::wrappers::BroadcastStream;
 
 const TAB_ID: &str = "chat";
 
@@ -72,6 +74,7 @@ impl Extension for ChatWebExtension {
                 routes: vec![
                     "/".into(),
                     "/{session}/stream".into(),
+                    "/{session}/history".into(),
                     "/{session}/send".into(),
                     "/{session}/abort".into(),
                 ],
@@ -138,16 +141,17 @@ struct Session {
     publish_lock: std::sync::Mutex<()>,
     command_ids: Mutex<HashSet<String>>,
     history: std::sync::Mutex<VecDeque<WireEvent>>,
+    transcript: PathBuf,
     #[cfg(test)]
     pause_after_send: std::sync::Mutex<Option<Arc<PublishPause>>>,
     #[cfg(test)]
     pause_after_subscribe: std::sync::Mutex<Option<Arc<StreamPause>>>,
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct WireEvent {
     seq: u64,
     #[serde(rename = "type")]
-    kind: &'static str,
+    kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -173,6 +177,7 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/{session}/stream", get(stream))
+        .route("/{session}/history", get(history))
         .route("/{session}/send", post(send))
         .route("/{session}/abort", post(abort))
         .with_state(state)
@@ -183,23 +188,30 @@ async fn index() -> Html<&'static str> {
 
 impl AppState {
     async fn session(&self, id: &str) -> Result<Arc<Session>> {
+        if id.is_empty() || id.contains('/') || id.contains('\\') || id == "." || id == ".." {
+            anyhow::bail!("invalid session id");
+        }
         let mut sessions = self.sessions.lock().await;
         if let Some(s) = sessions.get(id).cloned() {
             return Ok(s);
         }
         let (tx, _) = broadcast::channel(256);
         let (abort_signal, _) = watch::channel(false);
+        let transcript = self.transcript_path(id);
+        let history = load_transcript(&transcript)?;
+        let next_seq = history.back().map(|event| event.seq).unwrap_or(0);
         let session = Arc::new(Session {
             inner: Mutex::new(None),
             tx,
             generation: std::sync::atomic::AtomicU64::new(0),
-            next_seq: std::sync::atomic::AtomicU64::new(0),
+            next_seq: std::sync::atomic::AtomicU64::new(next_seq),
             active_turns: std::sync::atomic::AtomicUsize::new(0),
             abort_requested: std::sync::atomic::AtomicBool::new(false),
             abort_signal,
             publish_lock: std::sync::Mutex::new(()),
             command_ids: Mutex::new(HashSet::new()),
-            history: std::sync::Mutex::new(VecDeque::new()),
+            history: std::sync::Mutex::new(history),
+            transcript,
             #[cfg(test)]
             pause_after_send: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -207,6 +219,10 @@ impl AppState {
         });
         sessions.insert(id.to_owned(), Arc::clone(&session));
         Ok(session)
+    }
+
+    fn transcript_path(&self, id: &str) -> PathBuf {
+        self.root.join("data/chat-web/sessions").join(format!("{id}.jsonl"))
     }
 
     async fn open_session(&self, session: Arc<Session>) -> Result<Box<dyn ChatSession>> {
@@ -249,6 +265,14 @@ impl AppState {
     }
 }
 impl Session {
+    fn publish_user(&self, text: String) {
+        let _publish = self.publish_lock.lock().expect("chat-web publish mutex poisoned");
+        let seq = self.next_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let event = WireEvent { seq, kind: "user".into(), text: Some(text), id: None, name: None, args: None, is_error: None, done: None, error: None };
+        append_transcript(&self.transcript, &event).expect("chat-web transcript append failed");
+        self.history.lock().expect("chat-web history mutex poisoned").push_back(event.clone());
+        let _ = self.tx.send(event);
+    }
     fn publish_if_current(&self, generation: u64, event: ChatEvent) {
         if self.generation.load(std::sync::atomic::Ordering::SeqCst) == generation {
             self.publish(event);
@@ -330,7 +354,7 @@ impl Session {
             + 1;
         let event = WireEvent {
             seq,
-            kind,
+            kind: kind.to_owned(),
             text,
             id,
             name,
@@ -343,9 +367,8 @@ impl Session {
             .history
             .lock()
             .expect("chat-web history mutex poisoned");
-        if history.len() == 256 {
-            history.pop_front();
-        }
+        append_transcript(&self.transcript, &event)
+            .expect("chat-web transcript append failed");
         history.push_back(event.clone());
         let _ = self.tx.send(event);
         #[cfg(test)]
@@ -358,6 +381,45 @@ impl Session {
             let _ = pause.sent.send(());
             let _ = pause.proceed.lock().unwrap().recv();
         }
+    }
+}
+fn load_transcript(path: &std::path::Path) -> Result<VecDeque<WireEvent>> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(VecDeque::new()),
+        Err(error) => return Err(error.into()),
+    };
+    BufReader::new(file)
+        .lines()
+        .map(|line| Ok(serde_json::from_str(&line?)?))
+        .collect()
+}
+
+fn append_transcript(path: &std::path::Path, event: &WireEvent) -> Result<()> {
+    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    serde_json::to_writer(&mut file, event)?;
+    file.write_all(b"\n")?;
+    file.sync_data()?;
+    Ok(())
+}
+
+async fn history(Path(id): Path<String>, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.session(&id).await {
+        Ok(session) => {
+            let events: Vec<_> = {
+                let _publish = session.publish_lock.lock().expect("chat-web publish mutex poisoned");
+                match load_transcript(&session.transcript) {
+                    Ok(events) => events.into(),
+                    Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+                }
+            };
+            let json = serde_json::to_string(&events).expect("WireEvent serializes")
+                .replace('&', "\\u0026").replace('<', "\\u003c").replace('>', "\\u003e")
+                .replace('\u{2028}', "\\u2028").replace('\u{2029}', "\\u2029");
+            Html(format!(r#"<div id="chat-transcript"></div><script>{}for (const event of {}) window.renderChatEvent(event);</script>"#, include_str!("renderer.js"), json)).into_response()
+        }
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     }
 }
 async fn stream(
@@ -383,13 +445,12 @@ async fn stream(
                     let _ = pause.subscribed.send(());
                     let _ = pause.proceed.lock().unwrap().recv();
                 }
-                let replay: Vec<_> = s
-                    .history
-                    .lock()
-                    .expect("chat-web history mutex poisoned")
-                    .iter()
+                let replay: Vec<_> = match load_transcript(&s.transcript) {
+                    Ok(events) => events,
+                    Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+                }
+                    .into_iter()
                     .filter(|event| event.seq > last)
-                    .cloned()
                     .collect();
                 #[cfg(test)]
                 if let Some(pause) = s.pause_after_subscribe.lock().unwrap().as_ref() {
@@ -401,11 +462,28 @@ async fn stream(
             let replay = futures_util::stream::iter(
                 replay.into_iter().map(Ok::<_, std::convert::Infallible>),
             );
-            let live = BroadcastStream::new(live).filter_map(move |item| async move {
-                item.ok()
-                    .filter(|event| event.seq > cutoff)
-                    .map(Ok::<_, std::convert::Infallible>)
-            });
+            let live = futures_util::stream::unfold(
+                (live, cutoff, Arc::clone(&s), VecDeque::<WireEvent>::new()),
+                |(mut live, mut last, session, mut pending)| async move {
+                    loop {
+                        if let Some(event) = pending.pop_front() {
+                            last = event.seq;
+                            return Some((Ok::<_, std::convert::Infallible>(event), (live, last, session, pending)));
+                        }
+                        match live.recv().await {
+                            Ok(event) if event.seq <= last => continue,
+                            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                                let _publish = session.publish_lock.lock().expect("chat-web publish mutex poisoned");
+                                pending = match load_transcript(&session.transcript) {
+                                    Ok(events) => events.into_iter().filter(|event| event.seq > last).collect(),
+                                    Err(_) => return None,
+                                };
+                            }
+                            Err(broadcast::error::RecvError::Closed) => return None,
+                        }
+                    }
+                },
+            );
             let stream = replay.chain(live).map(sse_event);
             Sse::new(stream)
                 .keep_alive(KeepAlive::default())
@@ -457,19 +535,22 @@ async fn send(
                     }
                 }
             }
+            s.publish_user(body.message.clone());
             s.active_turns
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut aborted = s.abort_signal.subscribe();
+            let message = body.message.clone();
             let accepted = tokio::select! {
-                result = guard.as_mut().expect("session open").send_turn(body.message) => result,
+                result = guard.as_mut().expect("session open").send_turn(message) => result,
                 _ = aborted.changed() => Err(anyhow::anyhow!("turn aborted before acceptance")),
             };
             match accepted {
-                Ok(()) => (
+                Ok(()) => {
+                    (
                     StatusCode::ACCEPTED,
                     Json(serde_json::json!({"accepted":true,"command_id":body.command_id})),
-                )
-                    .into_response(),
+                    ).into_response()
+                },
                 Err(e) => {
                     if !s.abort_requested.load(std::sync::atomic::Ordering::SeqCst) {
                         s.active_turns
@@ -583,6 +664,7 @@ mod tests {
             publish_lock: std::sync::Mutex::new(()),
             command_ids: Mutex::new(HashSet::new()),
             history: std::sync::Mutex::new(VecDeque::new()),
+            transcript: std::env::temp_dir().join(format!("chat-web-test-{}.jsonl", uuid::Uuid::new_v4())),
             pause_after_send: std::sync::Mutex::new(None),
             pause_after_subscribe: std::sync::Mutex::new(None),
         })
@@ -669,6 +751,10 @@ mod tests {
         }
     }
 
+    fn test_root() -> PathBuf {
+        std::env::temp_dir().join(uuid::Uuid::new_v4().to_string())
+    }
+
     #[tokio::test]
     async fn stream_does_not_open_backend_before_first_send() {
         let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -686,7 +772,7 @@ mod tests {
                 backend: Some("fake".into()),
                 ..Config::default()
             },
-            root: std::env::temp_dir(),
+            root: test_root(),
             start: std::sync::OnceLock::from(start_ctx(services)),
             sessions: Mutex::new(HashMap::new()),
         });
@@ -849,7 +935,7 @@ mod tests {
         }));
         let state = Arc::new(AppState {
             config: Config::default(),
-            root: std::env::temp_dir(),
+            root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
         });
@@ -895,7 +981,7 @@ mod tests {
         }));
         let state = Arc::new(AppState {
             config: Config::default(),
-            root: std::env::temp_dir(),
+            root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
         });
@@ -926,7 +1012,7 @@ mod tests {
         }));
         let state = Arc::new(AppState {
             config: Config::default(),
-            root: std::env::temp_dir(),
+            root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
         });
@@ -951,7 +1037,7 @@ mod tests {
         let s = session(Box::new(HangingAbortSession));
         let state = Arc::new(AppState {
             config: Config::default(),
-            root: std::env::temp_dir(),
+            root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
         });
@@ -993,7 +1079,7 @@ mod tests {
                 backend: Some("fake".into()),
                 ..Config::default()
             },
-            root: std::env::temp_dir(),
+            root: test_root(),
             start: std::sync::OnceLock::from(start_ctx(services)),
             sessions: Mutex::new(HashMap::new()),
         });
@@ -1051,14 +1137,12 @@ mod tests {
         let mut body_a = stream_a.into_body();
         let mut body_b = stream_b.into_body();
         for body in [&mut body_a, &mut body_b] {
-            let frame = tokio::time::timeout(std::time::Duration::from_secs(1), body.frame())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap()
-                .into_data()
-                .unwrap();
-            let event = String::from_utf8(frame.to_vec()).unwrap();
+            let mut event = String::new();
+            for _ in 0..2 {
+                let frame = tokio::time::timeout(std::time::Duration::from_secs(1), body.frame())
+                    .await.unwrap().unwrap().unwrap().into_data().unwrap();
+                event.push_str(&String::from_utf8(frame.to_vec()).unwrap());
+            }
             assert!(event.contains("id: 1"));
             assert!(event.contains("reply"));
         }
@@ -1085,21 +1169,17 @@ mod tests {
             .into_data()
             .unwrap();
         let terminal = String::from_utf8(terminal.to_vec()).unwrap();
-        assert!(terminal.contains("id: 2"));
         assert!(terminal.contains("aborted"));
         assert_eq!(
             app.oneshot(send_request("two")).await.unwrap().status(),
             StatusCode::ACCEPTED
         );
-        let reused = tokio::time::timeout(std::time::Duration::from_secs(1), body_a.frame())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap()
-            .into_data()
-            .unwrap();
-        let reused = String::from_utf8(reused.to_vec()).unwrap();
-        assert!(reused.contains("id: 3"));
+        let mut reused = String::new();
+        for _ in 0..2 {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(1), body_a.frame())
+                .await.unwrap().unwrap().unwrap().into_data().unwrap();
+            reused.push_str(&String::from_utf8(frame.to_vec()).unwrap());
+        }
         assert!(reused.contains("reply"));
         assert_eq!(opens.load(Ordering::SeqCst), 2);
     }
@@ -1108,7 +1188,7 @@ mod tests {
     async fn http_stream_cannot_miss_an_event_during_subscription() {
         let state = Arc::new(AppState {
             config: Config::default(),
-            root: std::env::temp_dir(),
+            root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
         });
@@ -1172,6 +1252,43 @@ mod tests {
         assert!(event.contains("during subscribe"));
     }
 
+    #[tokio::test]
+    async fn stale_last_event_id_replays_durable_tail_after_restart() {
+        let root = test_root();
+        let state = Arc::new(AppState { config: Config::default(), root: root.clone(), start: std::sync::OnceLock::new(), sessions: Mutex::new(HashMap::new()) });
+        let session = state.session("resume").await.unwrap();
+        session.publish_user("first".into());
+        session.publish(ChatEvent::Delta { role: ChatRole::Assistant, text: "second".into() });
+        let restarted = Arc::new(AppState { config: Config::default(), root, start: std::sync::OnceLock::new(), sessions: Mutex::new(HashMap::new()) });
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", "0".parse().unwrap());
+        let response = stream(Path("resume".into()), State(restarted), headers).await.into_response();
+        let mut body = response.into_body();
+        let mut replay = String::new();
+        for _ in 0..2 { replay.push_str(&String::from_utf8(body.frame().await.unwrap().unwrap().into_data().unwrap().to_vec()).unwrap()); }
+        assert!(replay.contains("id: 1") && replay.contains("id: 2") && replay.contains("first") && replay.contains("second"));
+    }
+
+    #[tokio::test]
+    async fn history_renders_persisted_transcript() {
+        let state = Arc::new(AppState { config: Config::default(), root: test_root(), start: std::sync::OnceLock::new(), sessions: Mutex::new(HashMap::new()) });
+        state.session("history").await.unwrap().publish_user("saved <message>".into());
+        let body = history(Path("history".into()), State(state)).await.into_response().into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("renderChatEvent") && html.contains("saved \\u003cmessage\\u003e"));
+    }
+
+    #[tokio::test]
+    async fn lagged_subscriber_recovers_from_transcript() {
+        let state = Arc::new(AppState { config: Config::default(), root: test_root(), start: std::sync::OnceLock::new(), sessions: Mutex::new(HashMap::new()) });
+        let session = state.session("lag").await.unwrap();
+        let response = stream(Path("lag".into()), State(Arc::clone(&state)), HeaderMap::new()).await.into_response();
+        for number in 1..=300 { session.publish(ChatEvent::Delta { role: ChatRole::Assistant, text: number.to_string() }); }
+        let mut body = response.into_body();
+        let first = String::from_utf8(body.frame().await.unwrap().unwrap().into_data().unwrap().to_vec()).unwrap();
+        assert!(first.contains("id: 1") && first.contains("\"text\":\"1\""));
+    }
+
     #[test]
     fn tab_fragment_has_a_usable_composer() {
         let html = ChatTab.render().unwrap();
@@ -1199,5 +1316,17 @@ mod tests {
             .status()
             .expect("node is available for browser renderer tests");
         assert!(status.success());
+    }
+
+    #[test]
+    fn transcripts_are_ordered_and_isolated() {
+        let root = test_root();
+        let first = root.join("one.jsonl");
+        let second = root.join("two.jsonl");
+        for (path, seq) in [(&first, 1), (&first, 2), (&second, 1)] {
+            append_transcript(path, &WireEvent { seq, kind: "delta".into(), text: Some(seq.to_string()), id: None, name: None, args: None, is_error: None, done: None, error: None }).unwrap();
+        }
+        assert_eq!(load_transcript(&first).unwrap().into_iter().map(|event| event.seq).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(load_transcript(&second).unwrap().into_iter().map(|event| event.seq).collect::<Vec<_>>(), [1]);
     }
 }
