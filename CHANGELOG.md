@@ -11,6 +11,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Added
 
+- Web chat transcripts persist per session and reconnecting clients replay missed events.
 - Opt-in web chat dashboard tab with streaming replies and turn abort.
 - Web chat now renders streamed thinking, tool calls and updating tool output,
   markdown, and errors in the transcript.
