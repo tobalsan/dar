@@ -51,7 +51,7 @@ pub(crate) const OAUTH_TOKEN_ENV: &str = "PLANE_OAUTH_TOKEN";
 /// Env var holding a Plane personal API key. Sent as the `X-API-Key` header.
 pub(crate) const API_KEY_ENV: &str = "PLANE_API_KEY";
 #[cfg(test)]
-pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static TEST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Initial sentinel: no real rate-limit observation yet.
 const UNSET_MIN: i64 = i64::MAX;
@@ -1787,7 +1787,7 @@ mod tests {
 
     #[test]
     fn auth_prefers_bot_token_as_bearer() {
-        let _g = super::TEST_ENV_LOCK.lock().unwrap();
+        let _g = super::TEST_ENV_LOCK.blocking_lock();
         std::env::set_var(BOT_TOKEN_ENV, "bot-abc");
         std::env::set_var(OAUTH_TOKEN_ENV, "oauth-abc");
         std::env::set_var(API_KEY_ENV, "plane_key_xyz");
@@ -1801,7 +1801,7 @@ mod tests {
 
     #[test]
     fn auth_falls_back_to_oauth_token_as_bearer() {
-        let _g = super::TEST_ENV_LOCK.lock().unwrap();
+        let _g = super::TEST_ENV_LOCK.blocking_lock();
         std::env::remove_var(BOT_TOKEN_ENV);
         std::env::set_var(OAUTH_TOKEN_ENV, "oauth-abc");
         std::env::set_var(API_KEY_ENV, "plane_key_xyz");
@@ -1814,7 +1814,7 @@ mod tests {
 
     #[test]
     fn auth_falls_back_to_api_key_header() {
-        let _g = super::TEST_ENV_LOCK.lock().unwrap();
+        let _g = super::TEST_ENV_LOCK.blocking_lock();
         std::env::remove_var(BOT_TOKEN_ENV);
         std::env::remove_var(OAUTH_TOKEN_ENV);
         std::env::set_var(API_KEY_ENV, "plane_key_xyz");
@@ -1826,7 +1826,7 @@ mod tests {
 
     #[test]
     fn auth_none_when_unset_or_empty() {
-        let _g = super::TEST_ENV_LOCK.lock().unwrap();
+        let _g = super::TEST_ENV_LOCK.blocking_lock();
         std::env::remove_var(BOT_TOKEN_ENV);
         std::env::remove_var(OAUTH_TOKEN_ENV);
         std::env::remove_var(API_KEY_ENV);
@@ -1891,7 +1891,7 @@ mod tests {
 
     #[test]
     fn agent_env_deletion_does_not_fall_back_to_construction_token() {
-        let _guard = super::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = super::TEST_ENV_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".env");
         std::env::remove_var(BOT_TOKEN_ENV);

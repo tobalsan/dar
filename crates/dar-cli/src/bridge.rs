@@ -214,7 +214,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
     use tool_registry::{ToolExecutor, ToolOutcome, ToolRegistry, ToolSpec};
 
     struct EchoUpper;
@@ -394,8 +393,6 @@ mod tests {
 
     #[tokio::test]
     async fn bridge_read_through_refresh_redacts_old_and_new_values_without_reload_tool() {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let old = "bridge-old-secret-value";
         let new = "bridge-new-secret-value";

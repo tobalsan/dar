@@ -1202,7 +1202,7 @@ mod tests {
         e.chain().any(|cause| {
             cause
                 .downcast_ref::<std::io::Error>()
-                .map_or(false, |io| io.raw_os_error() == Some(26))
+                .is_some_and(|io| io.raw_os_error() == Some(26))
         })
     }
 

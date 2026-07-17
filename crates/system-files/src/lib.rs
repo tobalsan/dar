@@ -500,7 +500,7 @@ mod tests {
     fn detailed_entry_required_defaults_false() {
         let entry: SystemFileEntry =
             serde_yaml_from_str("{ path: foo.md }").expect("parse detailed entry");
-        assert_eq!(entry.required(), false);
+        assert!(!entry.required());
         assert_eq!(entry.path(), "foo.md");
     }
 

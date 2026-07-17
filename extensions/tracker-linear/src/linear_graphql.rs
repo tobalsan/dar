@@ -452,7 +452,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_through_auth_rotates_between_tool_calls() {
-        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = crate::TEST_ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".env");
         std::env::remove_var(OAUTH_TOKEN_ENV);

@@ -317,19 +317,21 @@ async fn run_openai_compatible(
     };
 
     for _ in 0..8 {
-        let outcome = stream_chat_completion_with_retries(
-            &client,
-            &base_url,
-            &api_key,
+        let request = ProviderRequest {
+            client: &client,
+            base_url: &base_url,
+            api_key: &api_key,
             model,
-            &messages,
-            &tools,
-            events.as_ref(),
-            store.as_ref(),
-            &run_id,
-            &issue_id,
-        )
-        .await?;
+            messages: &messages,
+            tools: &tools,
+        };
+        let telemetry = RunTelemetry {
+            events: events.as_ref(),
+            store: store.as_ref(),
+            run_id: &run_id,
+            issue_id: &issue_id,
+        };
+        let outcome = stream_chat_completion_with_retries(&request, &telemetry).await?;
         if outcome.tool_calls.is_empty() {
             persist_event(
                 store.as_ref(),
@@ -521,32 +523,36 @@ fn is_transient_provider_error(err: &anyhow::Error) -> bool {
     )
 }
 
+struct ProviderRequest<'a> {
+    client: &'a reqwest::Client,
+    base_url: &'a str,
+    api_key: &'a str,
+    model: &'a str,
+    messages: &'a [serde_json::Value],
+    tools: &'a [serde_json::Value],
+}
+
+struct RunTelemetry<'a> {
+    events: &'a dyn cap_runner::RunnerEventSink,
+    store: &'a dyn cap_runner::RunnerEventStore,
+    run_id: &'a str,
+    issue_id: &'a str,
+}
+
 async fn stream_chat_completion_with_retries(
-    client: &reqwest::Client,
-    base_url: &str,
-    api_key: &str,
-    model: &str,
-    messages: &[serde_json::Value],
-    tools: &[serde_json::Value],
-    events: &dyn cap_runner::RunnerEventSink,
-    store: &dyn cap_runner::RunnerEventStore,
-    run_id: &str,
-    issue_id: &str,
+    request: &ProviderRequest<'_>,
+    telemetry: &RunTelemetry<'_>,
 ) -> Result<ChatOutcome> {
     let mut last_error = None;
     for attempt in 0..3 {
-        match stream_chat_completion(
-            client, base_url, api_key, model, messages, tools, events, store, run_id, issue_id,
-        )
-        .await
-        {
+        match stream_chat_completion(request, telemetry).await {
             Ok(outcome) => return Ok(outcome),
             Err(err) if is_transient_provider_error(&err) && attempt < 2 => {
                 let delay = Duration::from_millis(500 * (attempt + 1) as u64);
                 persist_event(
-                    store,
-                    Some(run_id),
-                    issue_id,
+                    telemetry.store,
+                    Some(telemetry.run_id),
+                    telemetry.issue_id,
                     serde_json::json!({
                         "type": "retry",
                         "attempt": attempt + 1,
@@ -564,25 +570,25 @@ async fn stream_chat_completion_with_retries(
 }
 
 async fn stream_chat_completion(
-    client: &reqwest::Client,
-    base_url: &str,
-    api_key: &str,
-    model: &str,
-    messages: &[serde_json::Value],
-    tools: &[serde_json::Value],
-    events: &dyn cap_runner::RunnerEventSink,
-    store: &dyn cap_runner::RunnerEventStore,
-    run_id: &str,
-    issue_id: &str,
+    request: &ProviderRequest<'_>,
+    telemetry: &RunTelemetry<'_>,
 ) -> Result<ChatOutcome> {
-    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let mut body = serde_json::json!({"model": model, "stream": true, "messages": messages});
-    if !tools.is_empty() {
-        body["tools"] = serde_json::Value::Array(tools.to_vec());
+    let url = format!(
+        "{}/chat/completions",
+        request.base_url.trim_end_matches('/')
+    );
+    let mut body = serde_json::json!({
+        "model": request.model,
+        "stream": true,
+        "messages": request.messages,
+    });
+    if !request.tools.is_empty() {
+        body["tools"] = serde_json::Value::Array(request.tools.to_vec());
     }
-    let response = client
+    let response = request
+        .client
         .post(&url)
-        .bearer_auth(api_key)
+        .bearer_auth(request.api_key)
         .json(&body)
         .send()
         .await
@@ -603,10 +609,10 @@ async fn stream_chat_completion(
             let line: String = buf.drain(..=idx).collect();
             handle_sse_line(
                 line.trim_end(),
-                events,
-                store,
-                run_id,
-                issue_id,
+                telemetry.events,
+                telemetry.store,
+                telemetry.run_id,
+                telemetry.issue_id,
                 &mut outcome,
                 &mut tool_deltas,
             )?;
@@ -615,10 +621,10 @@ async fn stream_chat_completion(
     if !buf.trim().is_empty() {
         handle_sse_line(
             buf.trim_end(),
-            events,
-            store,
-            run_id,
-            issue_id,
+            telemetry.events,
+            telemetry.store,
+            telemetry.run_id,
+            telemetry.issue_id,
             &mut outcome,
             &mut tool_deltas,
         )?;

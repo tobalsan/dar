@@ -34,7 +34,7 @@ pub(crate) const API_KEY_ENV: &str = "LINEAR_API_KEY";
 /// `Bearer ` prefix. Takes precedence over `LINEAR_API_KEY` when both are set.
 pub(crate) const OAUTH_TOKEN_ENV: &str = "LINEAR_OAUTH_TOKEN";
 #[cfg(test)]
-pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static TEST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Resolve the Linear `Authorization` header value from the environment.
 ///
@@ -1486,7 +1486,7 @@ mod tests {
 
     #[test]
     fn auth_header_prefers_oauth_token_with_bearer_prefix() {
-        let _guard = super::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = super::TEST_ENV_LOCK.blocking_lock();
         std::env::set_var(OAUTH_TOKEN_ENV, "oauth-abc");
         std::env::set_var(API_KEY_ENV, "lin_api_xyz");
         assert_eq!(
@@ -1499,7 +1499,7 @@ mod tests {
 
     #[test]
     fn auth_header_uses_raw_api_key_when_no_oauth_token() {
-        let _guard = super::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = super::TEST_ENV_LOCK.blocking_lock();
         std::env::remove_var(OAUTH_TOKEN_ENV);
         std::env::set_var(API_KEY_ENV, "lin_api_xyz");
         assert_eq!(resolve_linear_auth_header().as_deref(), Some("lin_api_xyz"));
@@ -1508,7 +1508,7 @@ mod tests {
 
     #[test]
     fn auth_header_none_when_unset_or_empty() {
-        let _guard = super::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = super::TEST_ENV_LOCK.blocking_lock();
         std::env::remove_var(OAUTH_TOKEN_ENV);
         std::env::remove_var(API_KEY_ENV);
         assert_eq!(resolve_linear_auth_header(), None);
@@ -1521,7 +1521,7 @@ mod tests {
 
     #[test]
     fn reload_secrets_swaps_cached_token_from_env() {
-        let _guard = super::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = super::TEST_ENV_LOCK.blocking_lock();
         std::env::remove_var(OAUTH_TOKEN_ENV);
         std::env::set_var(API_KEY_ENV, "lin_old");
 
@@ -1560,7 +1560,7 @@ mod tests {
 
     #[test]
     fn agent_env_deletion_does_not_fall_back_to_construction_token() {
-        let _guard = super::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = super::TEST_ENV_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".env");
         std::env::remove_var(OAUTH_TOKEN_ENV);
@@ -1578,7 +1578,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn agent_env_rotation_changes_authorization_on_next_tracker_request() {
-        let _guard = super::TEST_ENV_LOCK.lock().unwrap();
+        let _guard = super::TEST_ENV_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let env_path = dir.path().join(".env");
         std::env::remove_var(OAUTH_TOKEN_ENV);
