@@ -24,7 +24,7 @@ use dar_extension_sdk::{
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex};
 use tokio_stream::wrappers::BroadcastStream;
 
 const TAB_ID: &str = "chat";
@@ -83,9 +83,10 @@ impl Extension for ChatWebExtension {
     }
     fn start<'a>(&'a self, ctx: StartCtx) -> dar_extension_sdk::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            self.state
-                .get()
-                .expect("chat-web registered")
+            let Some(state) = self.state.get() else {
+                return Ok(());
+            };
+            state
                 .bus
                 .set(ctx.host.bus.clone())
                 .map_err(|_| anyhow::anyhow!("chat-web started twice"))?;
@@ -118,6 +119,10 @@ struct Session {
     inner: Mutex<Option<Box<dyn ChatSession>>>,
     tx: broadcast::Sender<WireEvent>,
     next_seq: std::sync::atomic::AtomicU64,
+    active_turns: std::sync::atomic::AtomicUsize,
+    abort_requested: std::sync::atomic::AtomicBool,
+    abort_signal: watch::Sender<bool>,
+    publish_lock: std::sync::Mutex<()>,
     command_ids: Mutex<HashSet<String>>,
     history: std::sync::Mutex<VecDeque<WireEvent>>,
 }
@@ -200,10 +205,15 @@ impl AppState {
         .build();
         let opened = backend.open(params, event_tx).await?;
         let (tx, _) = broadcast::channel(256);
+        let (abort_signal, _) = watch::channel(false);
         let session = Arc::new(Session {
             inner: Mutex::new(Some(opened)),
             tx,
             next_seq: std::sync::atomic::AtomicU64::new(0),
+            active_turns: std::sync::atomic::AtomicUsize::new(0),
+            abort_requested: std::sync::atomic::AtomicBool::new(false),
+            abort_signal,
+            publish_lock: std::sync::Mutex::new(()),
             command_ids: Mutex::new(HashSet::new()),
             history: std::sync::Mutex::new(VecDeque::new()),
         });
@@ -235,6 +245,24 @@ impl Session {
             ChatEvent::SessionClosed { error } => ("closed", None, error),
             _ => return,
         };
+        if matches!(kind, "finished" | "aborted" | "closed") {
+            let Ok(turns) = self.active_turns.fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |turns| turns.checked_sub(1),
+            ) else {
+                return;
+            };
+            if turns == 1 {
+                self.abort_requested
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                let _ = self.abort_signal.send(false);
+            }
+        }
+        let _publish = self
+            .publish_lock
+            .lock()
+            .expect("chat-web publish mutex poisoned");
         let seq = self
             .next_seq
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -328,19 +356,25 @@ async fn send(
                     .into_response();
             }
             let mut guard = s.inner.lock().await;
-            match guard
-                .as_mut()
-                .expect("session open")
-                .send_turn(body.message)
-                .await
-            {
+            s.active_turns
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut aborted = s.abort_signal.subscribe();
+            let accepted = tokio::select! {
+                result = guard.as_mut().expect("session open").send_turn(body.message) => result,
+                _ = aborted.changed() => Err(anyhow::anyhow!("turn aborted before acceptance")),
+            };
+            match accepted {
                 Ok(()) => (
                     StatusCode::ACCEPTED,
                     Json(serde_json::json!({"accepted":true,"command_id":body.command_id})),
                 )
                     .into_response(),
                 Err(e) => {
-                    s.command_ids.lock().await.remove(&body.command_id);
+                    if !s.abort_requested.load(std::sync::atomic::Ordering::SeqCst) {
+                        s.active_turns
+                            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        s.command_ids.lock().await.remove(&body.command_id);
+                    }
                     (
                         StatusCode::CONFLICT,
                         Json(serde_json::json!({"accepted":false,"error":e.to_string()})),
@@ -359,11 +393,24 @@ async fn send(
 async fn abort(Path(id): Path<String>, State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.session(&id).await {
         Ok(s) => {
-            let mut guard = s.inner.lock().await;
-            match guard.as_mut().expect("session open").abort().await {
-                Ok(()) => StatusCode::ACCEPTED.into_response(),
-                Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+            if s.active_turns.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                return (StatusCode::CONFLICT, "no active turn").into_response();
             }
+            s.abort_requested
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = s.abort_signal.send(true);
+            tokio::spawn(async move {
+                let mut guard = s.inner.lock().await;
+                if s.active_turns.load(std::sync::atomic::Ordering::SeqCst) > 0
+                    && guard.as_mut().expect("session open").abort().await.is_ok()
+                {
+                    s.publish(ChatEvent::TurnFinished {
+                        ok: false,
+                        error: Some("aborted".into()),
+                    });
+                }
+            });
+            StatusCode::ACCEPTED.into_response()
         }
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
@@ -376,9 +423,11 @@ mod tests {
 
     struct FakeSession {
         aborted: Arc<AtomicBool>,
+        sends: Arc<std::sync::atomic::AtomicUsize>,
     }
     impl ChatSession for FakeSession {
         fn send_turn(&mut self, _prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
+            self.sends.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Ok(()) })
         }
         fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
@@ -398,6 +447,10 @@ mod tests {
             inner: Mutex::new(Some(inner)),
             tx,
             next_seq: std::sync::atomic::AtomicU64::new(0),
+            active_turns: std::sync::atomic::AtomicUsize::new(0),
+            abort_requested: std::sync::atomic::AtomicBool::new(false),
+            abort_signal: watch::channel(false).0,
+            publish_lock: std::sync::Mutex::new(()),
             command_ids: Mutex::new(HashSet::new()),
             history: std::sync::Mutex::new(VecDeque::new()),
         })
@@ -407,6 +460,7 @@ mod tests {
     async fn fanout_has_monotonic_sequence_ids() {
         let s = session(Box::new(FakeSession {
             aborted: Arc::new(AtomicBool::new(false)),
+            sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }));
         let mut a = s.tx.subscribe();
         let mut b = s.tx.subscribe();
@@ -431,26 +485,43 @@ mod tests {
     #[tokio::test]
     async fn abort_is_server_authoritative_and_emits_terminal_event() {
         let flag = Arc::new(AtomicBool::new(false));
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let s = session(Box::new(FakeSession {
             aborted: Arc::clone(&flag),
+            sends: Arc::clone(&sends),
         }));
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: std::env::temp_dir(),
+            services: dar_extension_sdk::ServiceRegistry::default(),
+            bus: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+        });
         let mut events = s.tx.subscribe();
+        s.active_turns.store(1, Ordering::SeqCst);
+        assert_eq!(
+            abort(Path("test".into()), State(state))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(flag.load(Ordering::SeqCst));
+        assert_eq!(event.kind, "aborted");
+        assert_eq!(event.error.as_deref(), Some("aborted"));
         s.inner
             .lock()
             .await
             .as_mut()
             .unwrap()
-            .abort()
+            .send_turn("next turn".into())
             .await
             .unwrap();
-        s.publish(ChatEvent::TurnFinished {
-            ok: false,
-            error: Some("aborted".into()),
-        });
-        assert!(flag.load(Ordering::SeqCst));
-        let event = events.recv().await.unwrap();
-        assert_eq!(event.kind, "aborted");
-        assert_eq!(event.error.as_deref(), Some("aborted"));
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
     }
 
     #[test]

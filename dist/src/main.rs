@@ -67,6 +67,7 @@ mod tests {
                 "chat_opencode::ChatOpenCodeExtension",
                 "chat_pi::ChatPiExtension",
                 "chat_codex::ChatCodexExtension",
+                "chat_web::ChatWebExtension::default()",
                 "tui::TuiExtension",
             ]
         );
