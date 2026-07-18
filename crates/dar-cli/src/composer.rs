@@ -145,6 +145,10 @@ const STOCK_EXTENSIONS: &[StockExtension] = &[
         factory: "chat_codex::ChatCodexExtension",
     },
     StockExtension {
+        package: "chat-web",
+        factory: "chat_web::ChatWebExtension::default()",
+    },
+    StockExtension {
         package: "tui",
         factory: "tui::TuiExtension",
     },
@@ -270,6 +274,10 @@ fn selected_stock_extensions(
     // `extensions` map. Absent → binary behaves as today.
     if selection.extension_selected("scheduler") {
         packages.push("scheduler");
+    }
+    if selection.extension_selected("chat-web") {
+        packages.push("chat-web");
+        packages.extend_from_slice(ALL_CHATS);
     }
     // Stock extensions required by local extensions.
     for local in locals {
@@ -1504,6 +1512,71 @@ extensions:
         // the extension still links and loads, then stays idle at runtime.
         let main = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
         assert!(main.contains("scheduler::SchedulerExtension"));
+    }
+
+    #[test]
+    fn chat_web_absent_from_agent_yaml_is_not_linked() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(agent, "files", "fake", "logs", "");
+
+        compose(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        let main = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
+        assert!(
+            !manifest.contains("chat-web = { package = "),
+            "chat-web must be opt-in: absent agent.yaml section → not linked"
+        );
+        assert!(!main.contains("chat_web::ChatWebExtension"));
+    }
+
+    #[test]
+    fn chat_web_selected_when_present_in_agent_yaml() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(
+            agent,
+            "files",
+            "fake",
+            "logs",
+            "extensions:\n  chat-web: {}\n",
+        );
+
+        compose(agent).unwrap();
+
+        let manifest = std::fs::read_to_string(agent.join(".dar/Cargo.toml")).unwrap();
+        let main = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
+        assert!(manifest.contains("chat-web = { package = \"dar-chat-web\", version = "));
+        assert!(manifest.contains("stock-chat-web = [\"dep:chat-web\"]"));
+        assert!(main.contains("#[cfg(feature = \"stock-chat-web\")]"));
+        assert!(main.contains("chat_web::ChatWebExtension::default()"));
+        // chat-web resolves a registered `dyn ChatBackend` at runtime, so all
+        // chat backends must be linked alongside it (same reason `foreground:
+        // tui` links ALL_CHATS).
+        assert!(manifest.contains("chat-pi = { package = "));
+        assert!(manifest.contains("chat-codex = { package = "));
+        assert!(manifest.contains("chat-opencode = { package = "));
+    }
+
+    #[test]
+    fn chat_web_disabled_flag_still_links_for_kill_switch() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent = temp.path();
+        write_agent_yaml(
+            agent,
+            "files",
+            "fake",
+            "logs",
+            "extensions:\n  chat-web:\n    enabled: false\n",
+        );
+
+        compose(agent).unwrap();
+
+        // enabled:false is a runtime kill switch, not a build-time exclusion:
+        // the extension still links and loads, then stays idle at runtime.
+        let main = std::fs::read_to_string(agent.join(".dar/src/main.rs")).unwrap();
+        assert!(main.contains("chat_web::ChatWebExtension"));
     }
 
     #[test]
