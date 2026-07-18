@@ -189,21 +189,23 @@
   align-self: center; text-align: center; color: var(--muted);
   font-style: italic; font-size: .78rem; margin: .15rem 0;
 }
-.chat-status, .chat-meter {
+.chat-meter {
   color: var(--muted); font-size: .68rem; letter-spacing: .06em;
   text-transform: uppercase; white-space: nowrap;
 }
-.chat-status { display: inline-flex; align-items: center; gap: .35rem; }
-.chat-status:empty, .chat-meter:empty { display: none; }
-/* working: the canonical blue live pill (Tinted Pill Rule — 15% tint bg +
-   full-strength text, never a solid fill), pulsed for liveness */
-.chat-status.is-busy {
-  border-radius: 999px; padding: .1rem .45rem; font-weight: 700;
-  background: rgba(122,162,247,.15); color: var(--info);
+.chat-meter:empty { display: none; }
+/* pending response: pulsing dots as the placeholder for the agent's reply */
+.chat-loader { display: inline-flex; align-items: center; gap: .3rem; padding: .3rem 0; }
+.chat-loader-word { color: var(--muted); font-style: italic; margin-right: .15rem; }
+.chat-loader span {
+  width: .38rem; height: .38rem; border-radius: 50%;
+  background: var(--muted); opacity: .55;
   animation: chat-pulse 1.1s ease-in-out infinite;
 }
+.chat-loader span:nth-child(2) { animation-delay: .18s; }
+.chat-loader span:nth-child(3) { animation-delay: .36s; }
 @keyframes chat-pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .chat-status.is-busy { animation: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .chat-loader span { animation: none; opacity: 1; } }
 
 @media (max-width: 760px) {
   .chat-web { padding: 0 .8rem .8rem; }  /* mirrors the shell's mobile side padding */
@@ -212,5 +214,5 @@
 @media (max-width: 520px) {
   .chat-input { font-size: 16px; }              /* stop iOS focus-zoom */
   .chat-row .chat-icon { width: 2.6rem; height: 2.6rem; }  /* touch sizing only here */
-  .chat-status, .chat-meter { flex-basis: 100%; order: 5; }
+  .chat-meter { flex-basis: 100%; order: 5; }
 }

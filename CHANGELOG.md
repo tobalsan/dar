@@ -37,6 +37,9 @@ Breaking changes are marked **⚠ BREAKING**.
   starts a fresh session, clearing the transcript with a "Context cleared,
   started a new session." notice. `/compact` is likewise supported in the TUI
   chat, passed through verbatim to the backend CLI.
+- Web chat busy indicator now appears in the transcript as a pending-reply
+  placeholder under your message, with a randomly drawn whimsical status word
+  (Pondering, Conjuring, Brewing, ...) and pulsing dots per turn.
 
 - Added: live `dar self rebuild <agent>` triggers a trusted dashboard-host
   rebuild and confirms the restarted boot identity.

@@ -76,22 +76,29 @@
   };
 
   const refreshBusy = app => {
-    let busy = app.turns > 0, status = $('chat-status'), abort = $('chat-abort'), send = $('chat-send');
-    if (status) { status.className = 'chat-status' + (busy ? ' is-busy' : ''); status.textContent = busy ? 'working' : ''; }
+    let busy = app.turns > 0, abort = $('chat-abort'), send = $('chat-send');
     if (abort) { abort.disabled = !busy; abort.hidden = !busy; }
     if (send) send.disabled = !sendEnabled(app);
   };
 
+  // Whimsy pool for the pending placeholder; a fresh word is drawn per turn.
+  const WORKING_WORDS = ['Pondering', 'Conjuring', 'Brewing', 'Scheming', 'Ruminating', 'Percolating', 'Noodling', 'Tinkering', 'Divining', 'Musing', 'Incanting', 'Summoning', 'Marinating', 'Sleuthing', 'Untangling', 'Hatching'];
+  // Placeholder for the coming agent response: shown right below the user's
+  // message until the first assistant/thinking/tool block replaces it.
+  const pendingHtml = word => `<div class="chat-turn chat-assistant chat-pending"><div class="chat-role">${esc(agentName())}</div><div class="chat-body"><span class="chat-loader" role="status" aria-label="Working"><em class="chat-loader-word">${esc(word)}</em><span></span><span></span><span></span></span></div></div>`;
+
   const paint = app => {
     let transcript = $('chat-transcript'); if (!transcript) return;
     let stick = app.stick;
-    transcript.innerHTML = app.blocks.length ? html(app.blocks) : '<div class="chat-empty">No messages yet. Ask the agent anything.</div>';
+    let last = app.blocks[app.blocks.length - 1];
+    let pending = app.turns > 0 && last && last.kind === 'user';
+    transcript.innerHTML = (app.blocks.length ? html(app.blocks) : '<div class="chat-empty">No messages yet. Ask the agent anything.</div>') + (pending ? pendingHtml(app.workingWord || 'Working') : '');
     if (stick) transcript.scrollTop = transcript.scrollHeight;
   };
 
   const render = (app, event) => {
     if (event.type === 'context_usage') { let m = $('chat-token-meter'); if (m) m.textContent = usageText(event); return; }
-    if (event.type === 'user') app.turns++;
+    if (event.type === 'user') { app.turns++; app.workingWord = WORKING_WORDS[Math.floor(Math.random() * WORKING_WORDS.length)]; }
     if (event.type === 'finished' || event.type === 'aborted' || event.type === 'closed') app.turns = Math.max(0, app.turns - 1);
     app.blocks = reduce(app.blocks, event);
     paint(app);
