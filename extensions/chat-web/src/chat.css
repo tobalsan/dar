@@ -65,6 +65,9 @@
   font: inherit;
 }
 
+.chat-attachment { display: block; margin-top: .5rem; color: var(--accent); }
+.chat-attachment-image { display: block; max-width: min(100%, 36rem); max-height: 24rem; margin-top: .5rem; border-radius: 5px; }
+
 #chat-composer button { min-height: 2.5rem; touch-action: manipulation; }
 
 @media (max-width: 520px) {

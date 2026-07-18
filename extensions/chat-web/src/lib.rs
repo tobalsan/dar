@@ -11,8 +11,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
+    http::{header, HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         Html, IntoResponse,
@@ -30,6 +30,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, watch, Mutex};
 
 const TAB_ID: &str = "chat";
+const MAX_UPLOAD_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ATTACHMENTS: usize = 8;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -85,6 +87,8 @@ impl Extension for ChatWebExtension {
                     "/{session}/stream".into(),
                     "/{session}/history".into(),
                     "/{session}/send".into(),
+                    "/{session}/upload".into(),
+                    "/{session}/attachment/{command}/{name}".into(),
                     "/{session}/abort".into(),
                     "/{session}/compact".into(),
                 ],
@@ -117,7 +121,7 @@ impl DashboardTab for ChatTab {
     }
     fn render(&self) -> Result<String> {
         Ok(format!(
-            r#"<style>{}</style><section class="chat-web"><div id="chat-transcript"></div><div id="chat-token-meter" aria-live="polite"></div><form id="chat-composer"><input id="chat-input" autocomplete="off" placeholder="Message" aria-label="Message"><button type="submit">Send</button><button type="button" id="chat-compact">Compact</button><button type="button" id="chat-abort">Abort</button></form><script>{}</script></section>"#,
+            r#"<style>{}</style><section class="chat-web"><div id="chat-transcript"></div><div id="chat-token-meter" aria-live="polite"></div><form id="chat-composer"><input id="chat-input" autocomplete="off" placeholder="Message" aria-label="Message"><input id="chat-attachments" type="file" multiple aria-label="Attachments"><button type="submit">Send</button><button type="button" id="chat-compact">Compact</button><button type="button" id="chat-abort">Abort</button></form><script>{}</script></section>"#,
             include_str!("chat.css"),
             include_str!("renderer.js"),
         ))
@@ -183,6 +187,14 @@ struct WireEvent {
     tokens_used: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    attachments: Vec<Attachment>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct Attachment {
+    name: String,
+    url: String,
+    image: bool,
 }
 #[derive(Deserialize)]
 struct Send {
@@ -196,8 +208,11 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/{session}/stream", get(stream))
         .route("/{session}/history", get(history))
         .route("/{session}/send", post(send))
+        .route("/{session}/upload", post(upload))
+        .route("/{session}/attachment/{command}/{name}", get(attachment))
         .route("/{session}/abort", post(abort))
         .route("/{session}/compact", post(compact))
+        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .with_state(state)
 }
 async fn index() -> Html<&'static str> {
@@ -354,7 +369,7 @@ impl chat::ChatCoordinator for AppState {
             if inner.is_none() {
                 *inner = Some(self.open_session(Arc::clone(&session)).await?);
             }
-            session.publish_user(display.clone());
+            session.publish_user(display.clone(), vec![]);
             let _ = session.events.send(ChatEvent::User { text: display });
             session
                 .active_turns
@@ -423,6 +438,7 @@ impl chat::ChatCoordinator for AppState {
                     error: None,
                     tokens_used: None,
                     context_window: None,
+                    attachments: vec![],
                 };
                 let _ = session.tx.send(event);
             }
@@ -451,7 +467,7 @@ impl chat::ChatCoordinator for AppState {
     }
 }
 impl Session {
-    fn publish_user(&self, text: String) {
+    fn publish_user(&self, text: String, attachments: Vec<Attachment>) {
         let _publish = self
             .publish_lock
             .lock()
@@ -472,6 +488,7 @@ impl Session {
             error: None,
             tokens_used: None,
             context_window: None,
+            attachments,
         };
         append_transcript(&self.transcript, &event).expect("chat-web transcript append failed");
         self.history
@@ -626,6 +643,7 @@ impl Session {
             error,
             tokens_used,
             context_window,
+            attachments: vec![],
         };
         let mut history = self
             .history
@@ -790,7 +808,18 @@ async fn send(
     State(state): State<Arc<AppState>>,
     Json(body): Json<Send>,
 ) -> impl IntoResponse {
-    if body.command_id.trim().is_empty() || body.message.trim().is_empty() {
+    submit(state, id, body.command_id, body.message, vec![], true).await
+}
+
+async fn submit(
+    state: Arc<AppState>,
+    id: String,
+    command_id: String,
+    message: String,
+    attachments: Vec<Attachment>,
+    reserve_command: bool,
+) -> axum::response::Response {
+    if command_id.trim().is_empty() || (message.trim().is_empty() && attachments.is_empty()) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"accepted":false})),
@@ -799,7 +828,7 @@ async fn send(
     }
     match state.session(&id).await {
         Ok(s) => {
-            if !s.command_ids.lock().await.insert(body.command_id.clone()) {
+            if reserve_command && !s.command_ids.lock().await.insert(command_id.clone()) {
                 return (
                     StatusCode::CONFLICT,
                     Json(serde_json::json!({"accepted":false,"error":"duplicate command_id"})),
@@ -811,7 +840,7 @@ async fn send(
                 match state.open_session(Arc::clone(&s)).await {
                     Ok(opened) => *guard = Some(opened),
                     Err(e) => {
-                        s.command_ids.lock().await.remove(&body.command_id);
+                        s.command_ids.lock().await.remove(&command_id);
                         return (
                             StatusCode::SERVICE_UNAVAILABLE,
                             Json(serde_json::json!({"accepted":false,"error":e.to_string()})),
@@ -820,29 +849,28 @@ async fn send(
                     }
                 }
             }
-            s.publish_user(body.message.clone());
-            let _ = s.events.send(ChatEvent::User {
-                text: body.message.clone(),
-            });
+            let prompt = attachment_prompt(&message, &attachments, &state.root);
+            let display = display_message(&message, &attachments);
+            s.publish_user(display.clone(), attachments);
+            let _ = s.events.send(ChatEvent::User { text: display });
             s.active_turns
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut aborted = s.abort_signal.subscribe();
-            let message = body.message.clone();
             let accepted = tokio::select! {
-                result = guard.as_mut().expect("session open").send_turn(message) => result,
+                result = guard.as_mut().expect("session open").send_turn(prompt) => result,
                 _ = aborted.changed() => Err(anyhow::anyhow!("turn aborted before acceptance")),
             };
             match accepted {
                 Ok(()) => (
                     StatusCode::ACCEPTED,
-                    Json(serde_json::json!({"accepted":true,"command_id":body.command_id})),
+                    Json(serde_json::json!({"accepted":true,"command_id":command_id})),
                 )
                     .into_response(),
                 Err(e) => {
                     if !s.abort_requested.load(std::sync::atomic::Ordering::SeqCst) {
                         s.active_turns
                             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                        s.command_ids.lock().await.remove(&body.command_id);
+                        s.command_ids.lock().await.remove(&command_id);
                     }
                     (
                         StatusCode::CONFLICT,
@@ -857,6 +885,234 @@ async fn send(
             Json(serde_json::json!({"accepted":false,"error":e.to_string()})),
         )
             .into_response(),
+    }
+}
+
+async fn upload(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> axum::response::Response {
+    if !safe_component(&id) {
+        return upload_error("invalid session id");
+    }
+    let mut command_id = None;
+    let mut message = None;
+    let mut files = Vec::new();
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(error) if error.to_string().contains("length limit") => {
+                return StatusCode::PAYLOAD_TOO_LARGE.into_response()
+            }
+            Err(_) => return upload_error("invalid multipart upload"),
+        };
+        match field.name() {
+            Some("command_id") => command_id = field.text().await.ok(),
+            Some("message") => message = field.text().await.ok(),
+            Some("attachment") => {
+                if files.len() == MAX_ATTACHMENTS {
+                    return upload_error("too many attachments");
+                }
+                let Some(name) = field.file_name().map(str::to_owned) else {
+                    return upload_error("attachment needs a filename");
+                };
+                let mime = field.content_type().map(str::to_owned).unwrap_or_default();
+                if !allowed_attachment(&mime) {
+                    return upload_error("unsupported attachment type");
+                }
+                let name = safe_filename(&name);
+                if name.is_empty() {
+                    return upload_error("invalid attachment filename");
+                }
+                match field.bytes().await {
+                    Ok(bytes) if !bytes.is_empty() => files.push((name, mime, bytes)),
+                    Ok(_) => return upload_error("empty attachment"),
+                    Err(_) => return upload_error("invalid attachment"),
+                }
+            }
+            _ => return upload_error("invalid upload field"),
+        }
+    }
+    let Some(command_id) = command_id else {
+        return upload_error("command_id is required");
+    };
+    if !safe_component(&command_id) {
+        return upload_error("invalid command_id");
+    }
+    if files.is_empty() {
+        return upload_error("attachment is required");
+    }
+    let session = match state.session(&id).await {
+        Ok(session) => session,
+        Err(error) => return upload_error(&error.to_string()),
+    };
+    if !session.command_ids.lock().await.insert(command_id.clone()) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"accepted":false,"error":"duplicate command_id"})),
+        )
+            .into_response();
+    }
+    let dir = state
+        .root
+        .join("data/chat/uploads")
+        .join(&id)
+        .join(&command_id);
+    if let Err(error) = fs::create_dir_all(&dir) {
+        session.command_ids.lock().await.remove(&command_id);
+        return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+    }
+    let mut attachments = Vec::new();
+    for (index, (name, mime, bytes)) in files.into_iter().enumerate() {
+        let stored = format!("{index}-{name}");
+        if let Err(error) = fs::write(dir.join(&stored), bytes) {
+            session.command_ids.lock().await.remove(&command_id);
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+        attachments.push(Attachment {
+            name,
+            url: format!("/chat/{id}/attachment/{command_id}/{stored}"),
+            image: mime.starts_with("image/"),
+        });
+    }
+    submit(
+        state,
+        id,
+        command_id,
+        message.unwrap_or_default(),
+        attachments,
+        false,
+    )
+    .await
+}
+
+fn attachment_prompt(message: &str, attachments: &[Attachment], root: &std::path::Path) -> String {
+    let paths = attachments
+        .iter()
+        .filter_map(|attachment| {
+            attachment.url.split_once("/attachment/").map(|(_, path)| {
+                root.join("data/chat/uploads")
+                    .join(path)
+                    .display()
+                    .to_string()
+            })
+        })
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return message.to_owned();
+    }
+    format!(
+        "{message}\n\nAttachments available at:\n{}",
+        paths
+            .into_iter()
+            .map(|path| format!("- {path}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+fn display_message(message: &str, attachments: &[Attachment]) -> String {
+    format!(
+        "{message}{}",
+        attachments
+            .iter()
+            .map(|attachment| format!("\n[attachment: {}]", attachment.name))
+            .collect::<String>()
+    )
+}
+
+fn allowed_attachment(mime: &str) -> bool {
+    let mime = mime.split(';').next().unwrap_or_default().trim();
+    (mime.starts_with("image/") && mime != "image/svg+xml")
+        || matches!(
+            mime,
+            "application/pdf" | "text/plain" | "text/markdown" | "application/json"
+        )
+}
+
+fn safe_filename(name: &str) -> String {
+    name.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("attachment")
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+        })
+        .take(100)
+        .collect::<String>()
+        .trim_matches('.')
+        .to_owned()
+}
+
+fn safe_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+fn upload_error(error: &str) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({"accepted":false,"error":error})),
+    )
+        .into_response()
+}
+
+async fn attachment(
+    Path((id, command, name)): Path<(String, String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    if !safe_component(&id)
+        || !safe_component(&command)
+        || name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains(['/', '\\'])
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    match fs::read(
+        state
+            .root
+            .join("data/chat/uploads")
+            .join(id)
+            .join(command)
+            .join(&name),
+    ) {
+        Ok(bytes) => (
+            [(header::CONTENT_TYPE, attachment_content_type(&name))],
+            bytes,
+        )
+            .into_response(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            StatusCode::NOT_FOUND.into_response()
+        }
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
+}
+
+fn attachment_content_type(name: &str) -> &'static str {
+    match name
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "application/octet-stream",
+        "pdf" => "application/pdf",
+        "txt" | "md" => "text/plain; charset=utf-8",
+        "json" => "application/json",
+        _ => "application/octet-stream",
     }
 }
 async fn abort(Path(id): Path<String>, State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -1207,6 +1463,87 @@ mod tests {
         assert_eq!(usage.kind, "context_usage");
         assert_eq!(usage.tokens_used, Some(12_345));
         assert_eq!(usage.context_window, Some(200_000));
+    }
+
+    #[tokio::test]
+    async fn upload_accepts_attachment_and_rejects_duplicate_command_id() {
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let s = session(Box::new(FakeSession {
+            aborted: Arc::new(AtomicBool::new(false)),
+            sends: Arc::clone(&sends),
+            abort_fails: false,
+        }));
+        let root = test_root();
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: root.clone(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+        });
+        let body = "--x\r\nContent-Disposition: form-data; name=\"command_id\"\r\n\r\nupload-1\r\n--x\r\nContent-Disposition: form-data; name=\"message\"\r\n\r\ninspect this\r\n--x\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"note.txt\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--x--\r\n";
+        let request = || {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/test/upload")
+                .header("content-type", "multipart/form-data; boundary=x")
+                .body(Body::from(body))
+                .unwrap()
+        };
+        let app = router(state);
+        assert_eq!(
+            app.clone().oneshot(request()).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            app.oneshot(request()).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+        let event = load_transcript(&s.transcript).unwrap().pop_front().unwrap();
+        assert_eq!(event.attachments[0].name, "note.txt");
+        assert!(root
+            .join("data/chat/uploads/test/upload-1/0-note.txt")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_invalid_and_oversize_bodies() {
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: test_root(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::new()),
+        });
+        let invalid = "--x\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"bad.exe\"\r\nContent-Type: application/octet-stream\r\n\r\nbad\r\n--x--\r\n";
+        let request = |body: Vec<u8>| {
+            let length = body.len();
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/test/upload")
+                .header("content-type", "multipart/form-data; boundary=x")
+                .header("content-length", length)
+                .body(Body::from(body))
+                .unwrap()
+        };
+        assert_eq!(
+            router(Arc::clone(&state))
+                .oneshot(request(invalid.as_bytes().to_vec()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let mut oversize = b"--x\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"large.txt\"\r\nContent-Type: text/plain\r\n\r\n".to_vec();
+        oversize.extend(vec![b'x'; MAX_UPLOAD_BYTES + 1]);
+        oversize.extend(b"\r\n--x--\r\n");
+        assert_eq!(
+            router(state)
+                .oneshot(request(oversize))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]
@@ -1697,7 +2034,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
         });
         let session = state.session("resume").await.unwrap();
-        session.publish_user("first".into());
+        session.publish_user("first".into(), vec![]);
         session.publish(ChatEvent::Delta {
             role: ChatRole::Assistant,
             text: "second".into(),
@@ -1749,7 +2086,7 @@ mod tests {
             .session("history")
             .await
             .unwrap()
-            .publish_user("saved <message>".into());
+            .publish_user("saved <message>".into(), vec![]);
         let body = history(Path("history".into()), State(state))
             .await
             .into_response()
@@ -1849,6 +2186,7 @@ mod tests {
                     error: None,
                     tokens_used: None,
                     context_window: None,
+                    attachments: vec![],
                 },
             )
             .unwrap();
