@@ -86,6 +86,7 @@ impl Extension for ChatWebExtension {
                     "/{session}/history".into(),
                     "/{session}/send".into(),
                     "/{session}/abort".into(),
+                    "/{session}/compact".into(),
                 ],
                 claim_root: false,
             })?;
@@ -116,7 +117,7 @@ impl DashboardTab for ChatTab {
     }
     fn render(&self) -> Result<String> {
         Ok(format!(
-            r#"<section class="chat-web"><div id="chat-transcript"></div><form id="chat-composer"><input id="chat-input" autocomplete="off" placeholder="Message"><button>Send</button><button type="button" id="chat-abort">Abort</button></form><script>{}</script></section>"#,
+            r#"<section class="chat-web"><div id="chat-transcript"></div><div id="chat-token-meter" aria-live="polite"></div><form id="chat-composer"><input id="chat-input" autocomplete="off" placeholder="Message"><button>Send</button><button type="button" id="chat-compact">Compact</button><button type="button" id="chat-abort">Abort</button></form><script>{}</script></section>"#,
             include_str!("renderer.js")
         ))
     }
@@ -177,6 +178,10 @@ struct WireEvent {
     done: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tokens_used: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window: Option<u64>,
 }
 #[derive(Deserialize)]
 struct Send {
@@ -191,6 +196,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/{session}/history", get(history))
         .route("/{session}/send", post(send))
         .route("/{session}/abort", post(abort))
+        .route("/{session}/compact", post(compact))
         .with_state(state)
 }
 async fn index() -> Html<&'static str> {
@@ -414,6 +420,8 @@ impl chat::ChatCoordinator for AppState {
                     is_error: None,
                     done: None,
                     error: None,
+                    tokens_used: None,
+                    context_window: None,
                 };
                 let _ = session.tx.send(event);
             }
@@ -461,6 +469,8 @@ impl Session {
             is_error: None,
             done: None,
             error: None,
+            tokens_used: None,
+            context_window: None,
         };
         append_transcript(&self.transcript, &event).expect("chat-web transcript append failed");
         self.history
@@ -476,57 +486,111 @@ impl Session {
     }
 
     fn publish(&self, event: ChatEvent) {
-        let (kind, text, error, id, name, args, is_error, done) = match event {
-            ChatEvent::User { .. } | ChatEvent::SessionReset => return,
-            ChatEvent::Delta {
-                role: ChatRole::Assistant,
-                text,
-            } => ("delta", Some(text), None, None, None, None, None, None),
-            ChatEvent::Delta {
-                role: ChatRole::Thinking,
-                text,
-            } => ("thinking", Some(text), None, None, None, None, None, None),
-            ChatEvent::ToolCall { id, name, args } => (
-                "tool_call",
-                None,
-                None,
-                Some(id),
-                Some(name),
-                Some(args),
-                None,
-                None,
-            ),
-            ChatEvent::ToolOutput {
-                id,
-                text,
-                is_error,
-                done,
-            } => (
-                "tool_output",
-                Some(text),
-                None,
-                Some(id),
-                None,
-                None,
-                Some(is_error),
-                Some(done),
-            ),
-            ChatEvent::Error(error) => ("error", None, Some(error), None, None, None, None, None),
-            ChatEvent::TurnFinished { ok, error } => (
-                if ok { "finished" } else { "aborted" },
-                None,
-                error,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ),
-            ChatEvent::SessionClosed { error } => {
-                ("closed", None, error, None, None, None, None, None)
-            }
-            _ => return,
-        };
+        let (kind, text, error, id, name, args, is_error, done, tokens_used, context_window) =
+            match event {
+                ChatEvent::User { .. } | ChatEvent::SessionReset => return,
+                ChatEvent::Delta {
+                    role: ChatRole::Assistant,
+                    text,
+                } => (
+                    "delta",
+                    Some(text),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                ChatEvent::Delta {
+                    role: ChatRole::Thinking,
+                    text,
+                } => (
+                    "thinking",
+                    Some(text),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                ChatEvent::ToolCall { id, name, args } => (
+                    "tool_call",
+                    None,
+                    None,
+                    Some(id),
+                    Some(name),
+                    Some(args),
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                ChatEvent::ToolOutput {
+                    id,
+                    text,
+                    is_error,
+                    done,
+                } => (
+                    "tool_output",
+                    Some(text),
+                    None,
+                    Some(id),
+                    None,
+                    None,
+                    Some(is_error),
+                    Some(done),
+                    None,
+                    None,
+                ),
+                ChatEvent::Error(error) => (
+                    "error",
+                    None,
+                    Some(error),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                ChatEvent::TurnFinished { ok, error } => (
+                    if ok { "finished" } else { "aborted" },
+                    None,
+                    error,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                ChatEvent::ContextUsage {
+                    tokens_used,
+                    context_window,
+                } => (
+                    "context_usage",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(tokens_used),
+                    context_window,
+                ),
+                ChatEvent::SessionClosed { error } => (
+                    "closed", None, error, None, None, None, None, None, None, None,
+                ),
+            };
         if matches!(kind, "finished" | "aborted" | "closed") {
             let Ok(turns) = self.active_turns.fetch_update(
                 std::sync::atomic::Ordering::SeqCst,
@@ -559,6 +623,8 @@ impl Session {
             is_error,
             done,
             error,
+            tokens_used,
+            context_window,
         };
         let mut history = self
             .history
@@ -826,6 +892,27 @@ async fn abort(Path(id): Path<String>, State(state): State<Arc<AppState>>) -> im
     }
 }
 
+async fn compact(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Compact>,
+) -> impl IntoResponse {
+    send(
+        Path(id),
+        State(state),
+        Json(Send {
+            command_id: body.command_id,
+            message: "/compact".into(),
+        }),
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct Compact {
+    command_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1073,6 +1160,52 @@ mod tests {
             StatusCode::ACCEPTED
         );
         assert_eq!(opens.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn compact_posts_a_command_and_usage_is_persisted_for_sse() {
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let s = session(Box::new(FakeSession {
+            aborted: Arc::new(AtomicBool::new(false)),
+            sends: Arc::clone(&sends),
+            abort_fails: false,
+        }));
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: test_root(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+        });
+
+        assert_eq!(
+            router(Arc::clone(&state))
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/test/compact")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"command_id":"compact-1"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            load_transcript(&s.transcript).unwrap()[0].text.as_deref(),
+            Some("/compact")
+        );
+
+        s.publish(ChatEvent::ContextUsage {
+            tokens_used: 12_345,
+            context_window: Some(200_000),
+        });
+        let usage = load_transcript(&s.transcript).unwrap().pop_back().unwrap();
+        assert_eq!(usage.kind, "context_usage");
+        assert_eq!(usage.tokens_used, Some(12_345));
+        assert_eq!(usage.context_window, Some(200_000));
     }
 
     #[tokio::test]
@@ -1685,7 +1818,7 @@ mod tests {
     #[test]
     fn browser_renderer_handles_the_representative_event_sequence() {
         let renderer = format!("{}/src/renderer.js", env!("CARGO_MANIFEST_DIR"));
-        let script = r#"const r=require(process.argv[1]);let b=[];for(const e of [{type:'thinking',text:'plan '},{type:'thinking',text:'it'},{type:'delta',text:'* **answer**\n```txt\n**code**\n```'},{type:'tool_call',id:'x',name:'shell',args:'{}'},{type:'tool_output',id:'x',text:'partial'},{type:'tool_output',id:'x',text:'failed',is_error:true,done:true},{type:'error',error:'warning'},{type:'aborted',error:'aborted'}])b=r.reduce(b,e);let h=r.html(b);if(b.length!==5||b[0].text!=='plan it'||(h.match(/data-tool-id=/g)||[]).length!==1||!h.includes('failed')||!h.includes('is-error is-done')||!h.includes('<ul><li><strong>answer</strong></li></ul>')||!h.includes('<pre><code data-language="txt">**code**\n</code></pre>')||!h.includes('warning')||!h.includes('turn aborted'))process.exit(1);"#;
+        let script = r#"const r=require(process.argv[1]);let b=[];for(const e of [{type:'thinking',text:'plan '},{type:'thinking',text:'it'},{type:'delta',text:'* **answer**\n```txt\n**code**\n```'},{type:'tool_call',id:'x',name:'shell',args:'{}'},{type:'tool_output',id:'x',text:'partial'},{type:'tool_output',id:'x',text:'failed',is_error:true,done:true},{type:'error',error:'warning'},{type:'aborted',error:'aborted'}])b=r.reduce(b,e);let h=r.html(b);if(b.length!==5||b[0].text!=='plan it'||(h.match(/data-tool-id=/g)||[]).length!==1||!h.includes('failed')||!h.includes('is-error is-done')||!h.includes('<ul><li><strong>answer</strong></li></ul>')||!h.includes('<pre><code data-language="txt">**code**\n</code></pre>')||!h.includes('warning')||!h.includes('turn aborted')||r.usageText({tokens_used:12,context_window:100})!=='12 / 100 tokens'||r.usageText({tokens_used:12})!=='12 tokens')process.exit(1);"#;
         let status = std::process::Command::new("node")
             .args(["-e", script, &renderer])
             .status()
@@ -1711,6 +1844,8 @@ mod tests {
                     is_error: None,
                     done: None,
                     error: None,
+                    tokens_used: None,
+                    context_window: None,
                 },
             )
             .unwrap();

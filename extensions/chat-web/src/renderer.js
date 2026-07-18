@@ -24,6 +24,7 @@ const reduce = (blocks, event) => {
       tool.text = text; tool.is_error = !!event.is_error; tool.done = !!event.done; break;
     }
     case 'error': next.push({ kind: 'error', text: event.error || 'unknown error' }); break;
+    case 'context_usage': break;
     case 'aborted': next.push({ kind: 'error', text: event.error === 'aborted' ? 'turn aborted' : `turn failed: ${event.error || 'unknown error'}` }); break;
     case 'closed': next.push({ kind: 'error', text: `chat session closed${event.error ? `: ${event.error}` : ''}` }); break;
   }
@@ -34,10 +35,13 @@ const html = blocks => blocks.map(block => block.kind === 'tool'
   ? `<article class="chat-tool" data-tool-id="${esc(block.id)}"><header>${esc(block.name)}</header><pre class="chat-tool-args">${esc(block.args)}</pre><pre class="chat-tool-output${block.is_error ? ' is-error' : ''}${block.done ? ' is-done' : ''}">${esc(block.text)}</pre></article>`
   : `<article class="chat-${block.kind}">${markdown(block.text)}</article>`).join('');
 
-if (typeof module !== 'undefined') module.exports = { reduce, html };
+const usageText = event => event.context_window ? `${event.tokens_used} / ${event.context_window} tokens` : `${event.tokens_used} tokens`;
+
+if (typeof module !== 'undefined') module.exports = { reduce, html, usageText };
 if (typeof document !== 'undefined') {
   let blocks = [], transcript = document.getElementById('chat-transcript');
-  const render = event => { blocks = reduce(blocks, event); transcript.innerHTML = html(blocks); };
+  const meter = document.getElementById('chat-token-meter');
+  const render = event => { if (event.type === 'context_usage' && meter) meter.textContent = usageText(event); blocks = reduce(blocks, event); transcript.innerHTML = html(blocks); };
   window.renderChatEvent = render;
   if (document.getElementById('chat-composer')) {
   const id = 'main';
@@ -45,5 +49,6 @@ if (typeof document !== 'undefined') {
   es.onmessage = event => render(JSON.parse(event.data));
   document.getElementById('chat-composer').onsubmit = async event => { event.preventDefault(); let input = document.getElementById('chat-input'); if (!input.value) return; await fetch(`/chat/${id}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: crypto.randomUUID(), message: input.value }) }); input.value = ''; };
   document.getElementById('chat-abort').onclick = () => fetch(`/chat/${id}/abort`, { method: 'POST' });
+  document.getElementById('chat-compact').onclick = () => fetch(`/chat/${id}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: crypto.randomUUID() }) });
   }
 }
