@@ -9,6 +9,10 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+
+- Web chat now follows `runner.use` and its model/provider for passive agents without an orchestration snapshot, instead of silently falling back to Pi.
+
 ### Added
 
 - Web chat accepts image and document attachments through multipart uploads, renders them inline, and supplies their local paths to the agent turn.

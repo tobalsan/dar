@@ -24,6 +24,7 @@ pub mod chat {
 
     use host_api::StartCtx;
     use orchestrator_api::{RunSnapshot, RUN_SNAPSHOT_TOPIC};
+    use serde::Deserialize;
 
     pub use cap_chat::{
         ArtifactReady, BoxFuture, ChatBackend, ChatCoordinator, ChatEvent, ChatRole, ChatSession,
@@ -36,9 +37,9 @@ pub mod chat {
     /// exact same precedence the TUI uses:
     ///
     /// 1. an explicit non-empty `configured` override wins;
-    /// 2. else follow the orchestrator's selected runner when it is registered
-    ///    as a `dyn ChatBackend` (only off a real snapshot: `version > 0` and a
-    ///    non-empty runner id);
+    /// 2. else follow the selected runner when it is registered as a
+    ///    `dyn ChatBackend`, using the orchestrator snapshot when available and
+    ///    `agent.yaml` when orchestration is disabled;
     /// 3. else fall back to the stock [`CHAT_FALLBACK_BACKEND`] (`pi`).
     ///
     /// Returning an explicit override even when it is not registered mirrors the
@@ -50,20 +51,47 @@ pub mod chat {
         if let Some(id) = configured.filter(|id| !id.is_empty()) {
             return id.to_string();
         }
-        let runner = ctx
+        if let Some(runner) = agent_profile(ctx).and_then(|profile| profile.runner) {
+            if registered(&runner.use_) {
+                return runner.use_;
+            }
+        }
+        CHAT_FALLBACK_BACKEND.to_string()
+    }
+
+    #[derive(Clone, Default, Deserialize)]
+    #[serde(default)]
+    struct AgentProfile {
+        runner: Option<RunnerProfile>,
+    }
+
+    #[derive(Clone, Default, Deserialize)]
+    #[serde(default)]
+    struct RunnerProfile {
+        #[serde(rename = "use", alias = "sdk", alias = "type")]
+        use_: String,
+        model: Option<String>,
+        provider: Option<String>,
+    }
+
+    fn agent_profile(ctx: &StartCtx) -> Option<AgentProfile> {
+        if let Some(snapshot) = ctx
             .host
             .bus
             .read_retained::<RunSnapshot>(RUN_SNAPSHOT_TOPIC)
             .ok()
-            .filter(|s| s.version > 0)
-            .map(|s| s.agent.runner)
-            .filter(|r| !r.is_empty());
-        if let Some(runner) = runner {
-            if registered(&runner) {
-                return runner;
-            }
+            .filter(|snapshot| snapshot.version > 0)
+        {
+            return Some(AgentProfile {
+                runner: Some(RunnerProfile {
+                    use_: snapshot.agent.runner,
+                    model: snapshot.agent.model,
+                    provider: snapshot.agent.provider,
+                }),
+            });
         }
-        CHAT_FALLBACK_BACKEND.to_string()
+        let yaml = std::fs::read_to_string(ctx.paths.root().join("agent.yaml")).ok()?;
+        serde_yaml::from_str(&yaml).ok()
     }
 
     /// Build the [`ChatSessionParams`] every agent-facing chat surface should
@@ -71,8 +99,8 @@ pub mod chat {
     /// talk to the same agent identity. Sourced entirely from retained bus
     /// state + the host service registry:
     ///
-    /// * **model / provider** — from the retained [`RunSnapshot`] when a real
-    ///   one has been published (`version > 0`), else left unset;
+    /// * **model / provider** — from the retained [`RunSnapshot`] when available,
+    ///   otherwise directly from `agent.yaml` for passive agents;
     /// * **system_prompt** — the retained [`SystemContext`] assembly
     ///   ([`SYSTEM_CONTEXT_TOPIC`]); an absent topic or an empty assembly
     ///   yields `None`, so the session opens exactly as before with no system
@@ -86,14 +114,9 @@ pub mod chat {
     /// command (none of the stock ones do) can override via the returned
     /// builder before `.build()`.
     pub fn agent_session_params(ctx: &StartCtx, session_dir: &Path) -> ChatSessionParamsBuilder {
-        let snapshot = ctx
-            .host
-            .bus
-            .read_retained::<RunSnapshot>(RUN_SNAPSHOT_TOPIC)
-            .ok()
-            .filter(|s| s.version > 0);
-        let model = snapshot.as_ref().and_then(|s| s.agent.model.clone());
-        let provider = snapshot.as_ref().and_then(|s| s.agent.provider.clone());
+        let profile = agent_profile(ctx).and_then(|profile| profile.runner);
+        let model = profile.as_ref().and_then(|runner| runner.model.clone());
+        let provider = profile.and_then(|runner| runner.provider);
         let system_prompt = ctx
             .host
             .bus
@@ -109,6 +132,67 @@ pub mod chat {
                 &ctx.host.services,
                 ctx.paths.root(),
             ))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::sync::Arc;
+
+        use super::*;
+        use host_api::{EventBus, RegisterCtx, ServiceRegistry};
+        use tokio::sync::{mpsc, watch};
+
+        struct Backend;
+
+        impl ChatBackend for Backend {
+            fn open<'a>(
+                &'a self,
+                _params: ChatSessionParams,
+                _tx: mpsc::Sender<ChatEvent>,
+            ) -> BoxFuture<'a, anyhow::Result<Box<dyn ChatSession>>> {
+                unreachable!()
+            }
+        }
+
+        fn start_ctx(root: &Path) -> StartCtx {
+            let paths = host_api::HostPaths::new(root).unwrap();
+            let (_, shutdown) = watch::channel(false);
+            let mut register = RegisterCtx {
+                bus: EventBus::new(),
+                http: host_api::HttpRegistry::default(),
+                foreground: host_api::ForegroundRegistry::default(),
+                services: ServiceRegistry::default(),
+                paths: paths.clone(),
+                config: host_api::ConfigStore::default(),
+                shutdown: host_api::ShutdownToken::new(shutdown),
+            };
+            register
+                .services
+                .register::<dyn ChatBackend>("builtin", Arc::new(Backend))
+                .unwrap();
+            StartCtx {
+                shutdown: register.shutdown.clone(),
+                paths,
+                config: register.config.clone(),
+                host: register.into_start_services().unwrap(),
+            }
+        }
+
+        #[test]
+        fn passive_agent_uses_yaml_backend_and_session_profile() {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(
+                root.path().join("agent.yaml"),
+                "runner:\n  sdk: builtin\n  provider: openai\n  model: gpt-4o-mini\n",
+            )
+            .unwrap();
+            let ctx = start_ctx(root.path());
+
+            assert_eq!(resolve_agent_backend(&ctx, None), "builtin");
+            let params = agent_session_params(&ctx, root.path()).build();
+            assert_eq!(params.provider.as_deref(), Some("openai"));
+            assert_eq!(params.model.as_deref(), Some("gpt-4o-mini"));
+        }
     }
 }
 
