@@ -11,6 +11,7 @@ const reduce = (blocks, event) => {
   let next = blocks.map(block => ({ ...block })), text = event.text || '';
   switch (event.type) {
     case 'user': next.push({ kind: 'user', text }); break;
+    case 'reset': return [];
     case 'delta': case 'thinking': {
       let kind = event.type === 'thinking' ? 'thinking' : 'assistant', last = next.at(-1);
       if (last && last.kind === kind) last.text += text; else next.push({ kind, text });
@@ -39,7 +40,7 @@ if (typeof document !== 'undefined') {
   const render = event => { blocks = reduce(blocks, event); transcript.innerHTML = html(blocks); };
   window.renderChatEvent = render;
   if (document.getElementById('chat-composer')) {
-  const id = sessionStorage.chatSession || (sessionStorage.chatSession = crypto.randomUUID());
+  const id = 'main';
   const es = new EventSource(`/chat/${id}/stream`);
   es.onmessage = event => render(JSON.parse(event.data));
   document.getElementById('chat-composer').onsubmit = async event => { event.preventDefault(); let input = document.getElementById('chat-input'); if (!input.value) return; await fetch(`/chat/${id}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: crypto.randomUUID(), message: input.value }) }); input.value = ''; };

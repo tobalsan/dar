@@ -59,7 +59,7 @@ pub struct ChatConfig {
     /// Backend binary override; empty/absent uses the backend default.
     pub command: Option<String>,
     /// Sessions dir override (relative to the agent root unless absolute);
-    /// absent uses the default `data/tui/sessions`. No `agent.yaml` change is
+    /// absent uses the shared default `data/chat/sessions`. No `agent.yaml` change is
     /// required to get the default behavior.
     pub sessions_dir: Option<String>,
     /// Per-turn timeout in seconds; absent uses [`DEFAULT_TURN_TIMEOUT`]
@@ -104,10 +104,10 @@ impl ChatConfig {
 
 /// Resolve the TUI sessions dir from the chat config: the configured override
 /// (relative paths anchored at the agent root) or the default
-/// `data/tui/sessions`. Shared by the foreground (session open/resume) and the
+/// `data/chat/sessions`. Shared by the foreground (session open/resume) and the
 /// `session_list` recall tool so both read the exact same corpus.
 ///
-/// The default path is host-controlled (`<root>/data/tui/sessions`), so it is
+/// The default path is host-controlled (`<root>/data/chat/sessions`), so it is
 /// composed directly rather than via the data-dir containment check, which
 /// canonicalizes the `data/` parent — that parent need not exist yet at register
 /// time (the foreground creates it lazily on first session open).
@@ -126,7 +126,7 @@ fn sessions_dir(config: &TuiConfig, paths: &host_api::HostPaths) -> Result<PathB
                 paths.root().join(path)
             })
         }
-        None => Ok(paths.root().join("data").join("tui").join("sessions")),
+        None => Ok(paths.root().join("data").join("chat").join("sessions")),
     }
 }
 

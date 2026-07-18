@@ -349,6 +349,15 @@ impl ChatState {
 
     pub fn apply_event(&mut self, event: ChatEvent) {
         match event {
+            ChatEvent::User { text } => self.blocks.push(ChatBlock::User(text)),
+            ChatEvent::SessionReset => {
+                self.clear_transcript();
+                self.in_flight = false;
+                self.pending_turns = 0;
+                self.turn_started_at = None;
+                self.stale_finishes = 0;
+                self.push_notice("— started a fresh session —".to_string());
+            }
             ChatEvent::Delta { role, text } => self.append_delta(role, &text),
             ChatEvent::ToolCall { id, name, args } => self.blocks.push(ChatBlock::Tool {
                 id,

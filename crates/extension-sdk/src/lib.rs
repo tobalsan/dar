@@ -26,8 +26,9 @@ pub mod chat {
     use orchestrator_api::{RunSnapshot, RUN_SNAPSHOT_TOPIC};
 
     pub use cap_chat::{
-        ArtifactReady, BoxFuture, ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams,
-        ChatSessionParamsBuilder, HostToolBridge, CHAT_FALLBACK_BACKEND,
+        ArtifactReady, BoxFuture, ChatBackend, ChatCoordinator, ChatEvent, ChatRole, ChatSession,
+        ChatSessionParams, ChatSessionParamsBuilder, HostToolBridge, CHAT_COORDINATOR_SERVICE,
+        CHAT_FALLBACK_BACKEND,
     };
     pub use orchestrator_api::{SystemContext, SystemContextFile, SYSTEM_CONTEXT_TOPIC};
 

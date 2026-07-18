@@ -6,11 +6,11 @@
 //! [`ExclusiveTerminal`]'s `restore()`/`Drop` undoes it. This extension adds
 //! no terminal lifecycle of its own — it only writes through [`TermWriter`].
 
-use std::io::Write;
 use std::time::Duration;
+use std::{collections::VecDeque, io::Write};
 
 use anyhow::Result;
-use cap_chat::{ChatBackend, ChatEvent, ChatSession};
+use cap_chat::{ChatBackend, ChatCoordinator, ChatEvent, ChatSession, CHAT_COORDINATOR_SERVICE};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
 };
@@ -187,6 +187,18 @@ async fn run_interactive(
     // The chat event channel outlives the lazily opened session; `chat_tx`
     // stays alive here so the recv arm simply idles until the first turn.
     let (chat_tx, mut chat_rx) = tokio::sync::mpsc::channel::<ChatEvent>(256);
+    // When chat-web is enabled it registers the agent-wide coordinator before
+    // this foreground starts.  The TUI then joins the same backend session and
+    // receives the same live events as every browser subscriber.
+    let coordinator = ctx
+        .host
+        .services
+        .get_named::<dyn ChatCoordinator>(CHAT_COORDINATOR_SERVICE)
+        .ok();
+    let mut shared_events = coordinator
+        .as_ref()
+        .map(|coordinator| coordinator.subscribe());
+    let mut local_shared_users = VecDeque::new();
     let mut session: Option<Box<dyn ChatSession>> = None;
     // Backend id resolved lazily at first submit (registry is frozen after
     // boot, so the outcome — including Disabled — is final for this launch).
@@ -237,6 +249,19 @@ async fn run_interactive(
                 match app.handle_event(event) {
                     Action::Quit => break,
                     Action::Submit(prompt) => {
+                        if let Some(coordinator) = coordinator.as_ref() {
+                            let outbound = if preamble_pending {
+                                let snapshot = ctx.host.bus.read_retained::<RunSnapshot>(RUN_SNAPSHOT_TOPIC).ok();
+                                format!("{}\n{prompt}", chat::build_preamble(snapshot.as_ref(), ctx.paths.root()))
+                            } else { prompt.clone() };
+                            if let Err(error) = coordinator.send_turn(outbound.clone(), prompt.clone()).await {
+                                app.chat.fail_turn(format!("sending turn failed: {error:#}"));
+                            } else {
+                                preamble_pending = false;
+                                local_shared_users.push_back(prompt);
+                            }
+                            continue;
+                        }
                         if backend_id.is_none() {
                             match backend::resolve(config.backend.as_deref(), &ctx.host.services, &ctx.host.bus) {
                                 Resolution::Backend { id, notice } => {
@@ -260,6 +285,13 @@ async fn run_interactive(
                         }
                     }
                     Action::NewSession => {
+                        if let Some(coordinator) = coordinator.as_ref() {
+                            if let Err(error) = coordinator.new_session().await {
+                                app.chat.push_error(format!("starting new session failed: {error:#}"));
+                            }
+                            preamble_pending = true;
+                            continue;
+                        }
                         // Close the live session, suppress resume for the next
                         // open (so the next `pi` spawn forks a fresh file),
                         // re-arm the preamble, and mark the boundary. Because
@@ -279,6 +311,12 @@ async fn run_interactive(
                         );
                     }
                     Action::AbortTurn => {
+                        if let Some(coordinator) = coordinator.as_ref() {
+                            if let Err(error) = coordinator.abort().await {
+                                app.chat.push_error(format!("abort failed: {error:#}"));
+                            }
+                            continue;
+                        }
                         if let Some(session) = session.as_mut() {
                             if let Err(e) = session.abort().await {
                                 app.chat.push_error(format!("abort failed: {e:#}"));
@@ -315,9 +353,31 @@ async fn run_interactive(
                 app.chat.apply_event(event);
                 app.dirty = true;
             }
+            event = async { shared_events.as_mut().expect("guarded by is_some").recv().await },
+                    if shared_events.is_some() => {
+                match event {
+                    Ok(event) => {
+                        if let ChatEvent::User { text } = &event {
+                            if local_shared_users.front() == Some(text) {
+                                local_shared_users.pop_front();
+                                continue;
+                            }
+                        }
+                        app.chat.apply_event(event);
+                        app.dirty = true;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        app.chat.push_error(format!("shared chat stream lagged by {skipped} events"));
+                        app.dirty = true;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => shared_events = None,
+                }
+            }
             _ = redraw.tick() => {
                 if app.chat.turn_timed_out(turn_timeout) {
-                    if let Some(session) = session.as_mut() {
+                    if let Some(coordinator) = coordinator.as_ref() {
+                        let _ = coordinator.abort().await;
+                    } else if let Some(session) = session.as_mut() {
                         let _ = session.abort().await;
                     }
                     app.chat.abandon_turn(timeout_notice(turn_timeout));
@@ -393,7 +453,7 @@ async fn submit_turn(
     *preamble_pending = false;
 }
 
-/// Open one session on the resolved backend under `data/tui/sessions`.
+/// Open one session on the resolved backend under `data/chat/sessions`.
 async fn open_session(
     backend_id: &str,
     config: &ChatConfig,
@@ -726,8 +786,8 @@ done"#;
             "accepted first turn consumes the preamble"
         );
         assert!(
-            temp.path().join("data/tui/sessions").is_dir(),
-            "session dir created under data/tui"
+            temp.path().join("data/chat/sessions").is_dir(),
+            "session dir created under data/chat"
         );
 
         while app.chat.in_flight {
@@ -943,7 +1003,7 @@ done"#;
         let temp = tempfile::tempdir().unwrap();
         let script = write_stub(temp.path());
         // Seed a prior session archive under the default sessions dir.
-        let sessions = temp.path().join("data/tui/sessions");
+        let sessions = temp.path().join("data/chat/sessions");
         std::fs::create_dir_all(&sessions).unwrap();
         std::fs::write(
             sessions.join("2024-01-01T00:00:00Z_old.jsonl"),
@@ -986,7 +1046,7 @@ done"#;
         let temp = tempfile::tempdir().unwrap();
         let script = write_stub(temp.path());
         // Seed a prior session that would be the resume target on a normal open.
-        let sessions = temp.path().join("data/tui/sessions");
+        let sessions = temp.path().join("data/chat/sessions");
         std::fs::create_dir_all(&sessions).unwrap();
         std::fs::write(
             sessions.join("2024-06-15T12:30:00Z_prev.jsonl"),
@@ -1007,7 +1067,7 @@ done"#;
     const FRESH_FILE_STUB: &str = r#"#!/bin/sh
 for a in "$@"; do printf '%s\n' "$a" >> argv.log; done
 printf '%s\n' '{"type":"session","id":"fresh-id"}' \
-  > data/tui/sessions/2099-01-01T00:00:00Z_fresh.jsonl
+  > data/chat/sessions/2099-01-01T00:00:00Z_fresh.jsonl
 while IFS= read -r line; do
   case "$line" in
     *'"type":"prompt"'*)
@@ -1025,7 +1085,7 @@ done"#;
         let script = temp.path().join("stub-pi.sh");
         std::fs::write(&script, FRESH_FILE_STUB).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let sessions = temp.path().join("data/tui/sessions");
+        let sessions = temp.path().join("data/chat/sessions");
         std::fs::create_dir_all(&sessions).unwrap();
         // A prior session that `/new` deliberately leaves behind.
         std::fs::write(
