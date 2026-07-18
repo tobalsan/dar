@@ -334,7 +334,7 @@ fn rewrite_html_fragment(html: &str, prefix: &str) -> String {
         format!("{}{}{}", &captures[1], prefix, &captures[2])
     });
     let scripts = Regex::new(r"(?is)(<script\b[^>]*>)(.*?)(</script>)").unwrap();
-    let strings = Regex::new(r#"(?:\"(/[^/\"][^\"]*)\"|'(/[^/'][^']*)')"#).unwrap();
+    let strings = Regex::new(r#"(?:\"(/[^/\"][^\"]*)\"|'(/[^/'][^']*)'|(^|[=(,:;\s])`(/[^/`][^`]*)`)"#).unwrap();
     let double_quoted_handlers =
         Regex::new(r#"(?is)((?:^|[\s<])on[\w:-]*\s*=\s*\")(.*?)\""#).unwrap();
     let single_quoted_handlers = Regex::new(r"(?is)((?:^|[\s<])on[\w:-]*\s*=\s*')(.*?)'").unwrap();
@@ -343,8 +343,10 @@ fn rewrite_html_fragment(html: &str, prefix: &str) -> String {
             .replace_all(code, |string: &regex::Captures<'_>| {
                 if let Some(path) = string.get(1) {
                     format!("\"{prefix}{}\"", path.as_str())
+                } else if let Some(path) = string.get(2) {
+                    format!("'{prefix}{}'", path.as_str())
                 } else {
-                    format!("'{prefix}{}'", &string[2])
+                    format!("{}{}{}{}{}", &string[3], '`', prefix, &string[4], '`')
                 }
             })
             .into_owned()
@@ -657,8 +659,19 @@ mod tests {
 
     #[test]
     fn rewrite_html_prefixes_only_root_absolute_dashboard_urls() {
-        let html = r#"<script src="/assets/x.js"></script><button hx-post="/control/pause" onclick="fetch('/run-now')"></button><button onclick="fetch('/scheduler/jobs/abc/run-now')"></button><button onclick='fetch("/scheduler/jobs/abc/run-now")'></button><script>fetch('/content'); new EventSource('/events')</script><a href="https://example.com/x"></a><img src="//cdn.example/x"><a href="page.html"></a><a href="/"></a><div foo-href="/not-an-attribute"></div><style>.x { background: url('/style') }</style><!-- <a href="/comment"> -->"#;
+        let html = r#"<script>
+  app.es = new EventSource(`/chat/${SESSION}/stream`);
+  fetch(`/chat/${SESSION}/send`, { method: 'POST' });
+  fetch(`/static/no-interp`);
+  fetch(`//cdn.example/x`);
+  const markdown = s => s.replace(/```x```/g, () => `ok`);
+</script><script src="/assets/x.js"></script><button hx-post="/control/pause" onclick="fetch('/run-now')"></button><button onclick="fetch('/scheduler/jobs/abc/run-now')"></button><button onclick='fetch("/scheduler/jobs/abc/run-now")'></button><script>fetch('/content'); new EventSource('/events')</script><a href="https://example.com/x"></a><img src="//cdn.example/x"><a href="page.html"></a><a href="/"></a><div foo-href="/not-an-attribute"></div><style>.x { background: url('/style') }</style><!-- <a href="/comment"> -->"#;
         let rewritten = rewrite_html(html, 50123);
+        assert!(rewritten.contains("EventSource(`/agent/50123/chat/${SESSION}/stream`)"));
+        assert!(rewritten.contains("fetch(`/agent/50123/chat/${SESSION}/send`"));
+        assert!(rewritten.contains("fetch(`/agent/50123/static/no-interp`)"));
+        assert!(rewritten.contains("`//cdn.example/x`"));
+        assert!(rewritten.contains("/```x```/g"));
         assert!(rewritten.contains("src=\"/agent/50123/assets/x.js\""));
         assert!(rewritten.contains("hx-post=\"/agent/50123/control/pause\""));
         assert!(rewritten.contains("fetch('/agent/50123/content')"));
