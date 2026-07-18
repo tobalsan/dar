@@ -125,9 +125,15 @@ impl DashboardTab for ChatTab {
     fn title(&self) -> &str {
         "Chat"
     }
+    fn self_refreshing(&self) -> bool {
+        true
+    }
+    fn passive_default(&self) -> bool {
+        true
+    }
     fn render(&self) -> Result<String> {
         Ok(format!(
-            r#"<style>{}</style><section class="chat-web"><div id="chat-transcript"></div><div id="chat-token-meter" aria-live="polite"></div><form id="chat-composer"><input id="chat-input" autocomplete="off" placeholder="Message" aria-label="Message"><input id="chat-attachments" type="file" multiple aria-label="Attachments"><button type="submit">Send</button><button type="button" id="chat-compact">Compact</button><button type="button" id="chat-abort">Abort</button></form><script>{}</script></section>"#,
+            r#"<style>{}</style><section class="chat-web" id="chat-root"><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite" aria-label="Conversation"></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips" aria-label="Pending attachments"></div><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message the agent" aria-label="Message" enterkeyhint="send"></textarea><div class="chat-bar"><button type="button" id="chat-attach" class="chat-ghost" aria-label="Attach files">Attach</button><input type="file" id="chat-attachments" multiple hidden aria-hidden="true" tabindex="-1"><span class="chat-status" id="chat-status" aria-live="polite"></span><span class="chat-spacer"></span><span class="chat-meter" id="chat-token-meter" aria-live="polite"></span><button type="button" id="chat-compact" class="chat-ghost">Compact</button><button type="button" id="chat-abort" class="danger" disabled>Abort</button><button type="submit" id="chat-send" disabled>Send</button></div></form></section><script>{}</script>"#,
             include_str!("chat.css"),
             include_str!("renderer.js"),
         ))
@@ -1919,7 +1925,7 @@ mod tests {
                     .unwrap()
                     .into_data()
                     .unwrap();
-                event.push_str(&String::from_utf8(frame.to_vec()).unwrap());
+                event.push_str(core::str::from_utf8(&frame).unwrap());
             }
             assert!(event.contains("id: 1"));
             assert!(event.contains("reply"));
@@ -1947,7 +1953,7 @@ mod tests {
                 .unwrap()
                 .into_data()
                 .unwrap();
-            replay.push_str(&String::from_utf8(frame.to_vec()).unwrap());
+            replay.push_str(core::str::from_utf8(&frame).unwrap());
         }
         assert_eq!(concurrent[0], replay);
 
@@ -1987,7 +1993,7 @@ mod tests {
                 .unwrap()
                 .into_data()
                 .unwrap();
-            reused.push_str(&String::from_utf8(frame.to_vec()).unwrap());
+            reused.push_str(core::str::from_utf8(&frame).unwrap());
         }
         assert!(reused.contains("reply"));
         assert_eq!(opens.load(Ordering::SeqCst), 2);
@@ -2091,14 +2097,13 @@ mod tests {
         let mut replay = String::new();
         for _ in 0..2 {
             replay.push_str(
-                &String::from_utf8(
-                    body.frame()
+                core::str::from_utf8(
+                    &body.frame()
                         .await
                         .unwrap()
                         .unwrap()
                         .into_data()
-                        .unwrap()
-                        .to_vec(),
+                        .unwrap(),
                 )
                 .unwrap(),
             );
@@ -2176,9 +2181,18 @@ mod tests {
     fn tab_fragment_has_a_usable_composer() {
         let html = ChatTab.render().unwrap();
         assert!(html.contains("id=\"chat-composer\""));
+        // Belt-and-braces: even if the JS singleton fails to attach, the inline
+        // handler blocks a native submit / full-page reload.
+        assert!(html.contains("onsubmit=\"event.preventDefault()\""));
+        assert!(html.contains("id=\"chat-input\"") && html.contains("<textarea"));
+        assert!(html.contains("id=\"chat-attachments\"") && html.contains("hidden"));
+        assert!(html.contains("id=\"chat-send\"") && html.contains("id=\"chat-abort\""));
         assert!(html.contains("@media (max-width: 520px)"));
         assert!(html.contains("overflow-wrap: anywhere"));
         assert!(!html.contains("\\\"chat-composer\\\""));
+        // The self-refreshing tab owns its own EventSource + JS lifecycle.
+        assert!(ChatTab.self_refreshing());
+        assert!(ChatTab.passive_default());
         for marker in [
             "case 'thinking'",
             "case 'tool_call'",
@@ -2193,9 +2207,23 @@ mod tests {
     }
 
     #[test]
+    fn renderer_source_is_re_execution_safe_under_node() {
+        // The fragment is re-spliced whenever the Chat tab is (re)activated, so
+        // the script must evaluate any number of times with no top-level
+        // redeclaration (e.g. `const esc` collisions) and no throw.
+        let renderer = format!("{}/src/renderer.js", env!("CARGO_MANIFEST_DIR"));
+        let script = r#"const fs=require('fs');const src=fs.readFileSync(process.argv[1],'utf8');eval(src);eval(src);"#;
+        let status = std::process::Command::new("node")
+            .args(["-e", script, &renderer])
+            .status()
+            .expect("node is available for browser renderer tests");
+        assert!(status.success());
+    }
+
+    #[test]
     fn browser_renderer_handles_the_representative_event_sequence() {
         let renderer = format!("{}/src/renderer.js", env!("CARGO_MANIFEST_DIR"));
-        let script = r#"const r=require(process.argv[1]);let b=[];for(const e of [{type:'thinking',text:'plan '},{type:'thinking',text:'it'},{type:'delta',text:'* **answer**\n```txt\n**code**\n```'},{type:'tool_call',id:'x',name:'shell',args:'{}'},{type:'tool_output',id:'x',text:'partial'},{type:'tool_output',id:'x',text:'failed',is_error:true,done:true},{type:'error',error:'warning'},{type:'aborted',error:'aborted'}])b=r.reduce(b,e);let h=r.html(b);if(b.length!==5||b[0].text!=='plan it'||(h.match(/data-tool-id=/g)||[]).length!==1||!h.includes('failed')||!h.includes('is-error is-done')||!h.includes('<ul><li><strong>answer</strong></li></ul>')||!h.includes('<pre><code data-language="txt">**code**\n</code></pre>')||!h.includes('warning')||!h.includes('turn aborted')||r.usageText({tokens_used:12,context_window:100})!=='12 / 100 tokens'||r.usageText({tokens_used:12})!=='12 tokens')process.exit(1);"#;
+        let script = r#"const r=require(process.argv[1]);let b=[];for(const e of [{type:'thinking',text:'plan '},{type:'thinking',text:'it'},{type:'delta',text:'* **answer**\n```txt\n**code**\n```'},{type:'tool_call',id:'x',name:'shell',args:'{}'},{type:'tool_output',id:'x',text:'partial'},{type:'tool_output',id:'x',text:'failed',is_error:true,done:true},{type:'error',error:'warning'},{type:'aborted',error:'aborted'},{type:'user',text:'run `x --y` now'}])b=r.reduce(b,e);let h=r.html(b);if(b.length!==6||b[0].text!=='plan it'||(h.match(/data-tool-id=/g)||[]).length!==1||!h.includes('failed')||!h.includes('is-error is-done')||!h.includes('<ul><li><strong>answer</strong></li></ul>')||!h.includes('<pre><code data-language="txt">**code**\n</code></pre>')||!h.includes('warning')||!h.includes('turn aborted')||!h.includes('<code>x --y</code>')||r.usageText({tokens_used:12,context_window:100})!=='12 / 100 tokens'||r.usageText({tokens_used:12})!=='12 tokens')process.exit(1);"#;
         let status = std::process::Command::new("node")
             .args(["-e", script, &renderer])
             .status()

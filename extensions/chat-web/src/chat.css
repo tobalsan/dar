@@ -1,77 +1,196 @@
+/* Chat tab — one more instrument in the operator's console. Reuses the shell
+   :root tokens; no shadows, no side-stripes, accent only on hover/active,
+   status color only as a 15%-alpha tinted pill. */
 .chat-web {
-  display: grid;
-  gap: .75rem;
-  max-width: 100%;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  height: calc(100dvh - var(--chat-top, 9rem));  /* JS overrides --chat-top with the measured section offset */
+  min-height: 20rem;
+  gap: .55rem;
+  padding: 0 1.25rem;       /* the shell's #content sits outside <main>, so this fragment gets none for free */
+  padding-bottom: .8rem;    /* keep the composer off the window's bottom edge */
 }
 
-#chat-transcript {
-  display: grid;
-  gap: .65rem;
-  min-width: 0;
+/* transcript: the one scroll region; the page body never scrolls */
+.chat-transcript {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: .6rem;
+  padding: .2rem .25rem .3rem 0;
   overflow-wrap: anywhere;
+  align-self: center;         /* .chat-web is a column flex container; cross axis is horizontal */
+  width: min(100%, 48rem);    /* centered, readable-width column */
+}
+.chat-empty {
+  margin: auto;
+  max-width: 26rem;
+  text-align: center;
+  color: var(--muted);
+  font-style: italic;
+  line-height: 1.6;
 }
 
-#chat-transcript > article,
-.chat-tool {
-  min-width: 0;
-  padding: .7rem .8rem;
-  border: 1px solid var(--border);
-  border-radius: 7px;
+/* turns: role by micro-label; contained user echo, bare agent prose */
+.chat-turn { display: flex; flex-direction: column; gap: .25rem; min-width: 0; }
+.chat-role {
+  color: var(--muted);
+  font-size: .68rem; letter-spacing: .06em; text-transform: uppercase;
 }
-
-.chat-user { background: rgba(122, 162, 247, .12); }
-.chat-assistant { background: var(--panel); }
-.chat-thinking { background: rgba(242, 184, 75, .1); color: var(--muted); font-style: italic; }
-.chat-error { background: rgba(242, 109, 109, .12); color: var(--bad); }
-.chat-tool { background: #171b21; }
-.chat-tool header { padding: 0 0 .45rem; background: transparent; border: 0; color: var(--accent); overflow-wrap: anywhere; }
-
-.chat-web pre,
-.chat-web code {
-  max-width: 100%;
+.chat-body { min-width: 0; max-width: 75ch; line-height: 1.5; overflow-wrap: anywhere; }
+.chat-body p { margin: .2rem 0; }
+.chat-body p:first-child { margin-top: 0; }
+.chat-body p:last-child { margin-bottom: 0; }
+.chat-body strong { font-weight: 700; }
+.chat-body em { font-style: italic; }
+.chat-body ul { margin: .25rem 0; padding-left: 1.15rem; }
+.chat-body li { margin: .1rem 0; }
+.chat-body a { color: var(--fg); text-decoration: underline; text-underline-offset: 2px; }
+.chat-body a:hover { color: var(--accent); }
+.chat-user .chat-body {
+  background: #171b21; border: 1px solid var(--border);
+  border-radius: 6px; padding: .5rem .6rem;
 }
-
-.chat-web pre {
-  margin: .55rem 0 0;
-  padding: .6rem;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  background: rgba(0, 0, 0, .2);
-  border-radius: 5px;
+.chat-body pre {
+  margin: .45rem 0 0; padding: .5rem .6rem;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+  overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere;
 }
-
-.chat-tool-output.is-error { color: var(--bad); }
-.chat-tool-output.is-done { border-left: 2px solid var(--ok); }
-#chat-token-meter { color: var(--muted); font-size: .82rem; }
-
-#chat-composer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
-  gap: .45rem;
-  align-items: stretch;
-  min-width: 0;
+.chat-body code {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 0 .3em;
 }
+.chat-body pre code { background: none; border: 0; padding: 0; }
 
-#chat-input {
-  min-width: 0;
-  width: 100%;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: .55rem .65rem;
-  background: var(--panel-2);
+/* thinking + tool: the run-drawer <details> vocabulary */
+.chat-think, .chat-tool { min-width: 0; }
+.chat-think > summary {
+  list-style: none; cursor: pointer;
+  color: var(--muted); font-size: .68rem; letter-spacing: .06em; text-transform: uppercase;
+}
+.chat-think > summary::-webkit-details-marker { display: none; }
+.chat-think > pre {
+  margin: .35rem 0 0; padding: .45rem .55rem;
+  background: #171b21; border: 1px solid var(--border); border-radius: 5px;
+  color: var(--muted); font-style: italic;
+  white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto;
+}
+.chat-tool > summary {
+  list-style: none; cursor: pointer;
+  display: flex; align-items: center; gap: .45rem; overflow: hidden;
+  padding: .35rem .5rem; background: #171b21;
+  border: 1px solid var(--border); border-radius: 5px;
+}
+.chat-tool > summary::-webkit-details-marker { display: none; }
+.chat-tool > summary:hover { border-color: var(--accent); }
+.chat-tool[open] > summary { border-radius: 5px 5px 0 0; }
+.chat-tool-name {
+  min-width: 0; flex: 1 1 auto;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--muted);
+}
+.chat-tool-args, .chat-tool-output {
+  margin: 0; padding: .45rem .55rem;
+  background: var(--bg); border: 1px solid var(--border); border-top: 0;
+  overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere;
   color: var(--fg);
-  font: inherit;
+}
+.chat-tool-args { color: var(--muted); }
+.chat-tool[open] > .chat-tool-output:last-child { border-radius: 0 0 5px 5px; }
+/* .is-error / .is-done carry NO color: red lives only in the summary pill
+   (Tinted Pill Rule); a finished tool reads normally. The banned
+   `.is-done { border-left: 2px solid var(--ok) }` side-stripe stays removed. */
+
+/* error turn: quiet block, red confined to the pill */
+.chat-error { display: flex; flex-direction: column; gap: .3rem; min-width: 0; }
+.chat-error-body { color: var(--muted); max-width: 75ch; line-height: 1.5; overflow-wrap: anywhere; }
+
+/* status pills — Tinted Pill Rule, one formula only */
+.chat-pill {
+  align-self: flex-start; border-radius: 999px; padding: .1rem .45rem;
+  font-size: .68rem; font-weight: 700; white-space: nowrap;
+}
+.chat-pill-live { background: rgba(122,162,247,.15); color: var(--info); }
+.chat-pill-done { background: rgba(155,166,181,.15); color: var(--muted); }
+.chat-pill-bad  { background: rgba(242,109,109,.15); color: var(--bad); }
+
+/* attachments in the transcript */
+.chat-attach-row { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .4rem; }
+.chat-attachment {
+  display: inline-flex; align-items: center; gap: .3rem;
+  padding: .12rem .5rem; background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 999px;
+  font-size: .72rem; color: var(--fg); text-decoration: none;
+}
+.chat-attachment:hover { border-color: var(--accent); }
+.chat-attachment-image {
+  display: block; max-width: min(100%, 22rem); max-height: 18rem;
+  margin-top: .4rem; border: 1px solid var(--border); border-radius: 5px;
 }
 
-.chat-attachment { display: block; margin-top: .5rem; color: var(--accent); }
-.chat-attachment-image { display: block; max-width: min(100%, 36rem); max-height: 24rem; margin-top: .5rem; border-radius: 5px; }
+/* dock: pinned below the transcript */
+.chat-dock {
+  flex: 0 0 auto; display: flex; flex-direction: column; gap: .45rem; min-width: 0;
+  align-self: center;         /* .chat-web is a column flex container; cross axis is horizontal */
+  width: min(100%, 48rem);    /* centered, readable-width column, matches .chat-transcript */
+}
+.chat-chips { display: flex; flex-wrap: wrap; gap: .35rem; }
+.chat-chips:empty { display: none; }
+.chat-chip {
+  display: inline-flex; align-items: center; gap: .35rem; max-width: 15rem;
+  padding: .12rem .3rem .12rem .5rem; background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 999px;
+  font-size: .72rem; color: var(--muted);
+}
+.chat-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-chip-x {
+  border: 0; background: none; color: var(--muted); cursor: pointer;
+  padding: 0 .15rem; font: inherit; line-height: 1;
+}
+.chat-chip-x:hover { color: var(--bad); }
 
-#chat-composer button { min-height: 2.5rem; touch-action: manipulation; }
+.chat-input {
+  width: 100%; min-width: 0; resize: none; overflow-y: auto; max-height: 40vh;
+  padding: .55rem .65rem; background: var(--panel-2); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 6px; font: inherit; line-height: 1.5;
+}
+.chat-input::placeholder { color: var(--muted); }
+.chat-input:focus { outline: none; border-color: var(--accent); }
 
+.chat-bar { display: flex; align-items: center; gap: .5rem; min-width: 0; }
+.chat-spacer { flex: 1 1 auto; }
+.chat-ghost { color: var(--muted); }
+.chat-ghost:hover { color: var(--fg); }
+.chat-status, .chat-meter {
+  color: var(--muted); font-size: .68rem; letter-spacing: .06em;
+  text-transform: uppercase; white-space: nowrap;
+}
+.chat-status { display: inline-flex; align-items: center; gap: .35rem; }
+.chat-status:empty, .chat-meter:empty { display: none; }
+/* working: the canonical blue live pill (Tinted Pill Rule — 15% tint bg +
+   full-strength text, never a solid fill), pulsed for liveness */
+.chat-status.is-busy {
+  border-radius: 999px; padding: .1rem .45rem; font-weight: 700;
+  background: rgba(122,162,247,.15); color: var(--info);
+  animation: chat-pulse 1.1s ease-in-out infinite;
+}
+@keyframes chat-pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .chat-status.is-busy { animation: none; opacity: 1; } }
+
+#chat-send:disabled, #chat-abort:disabled { opacity: .4; cursor: default; }
+#chat-send:disabled:hover, #chat-abort:disabled:hover { border-color: var(--border); }
+
+@media (max-width: 760px) {
+  .chat-web { padding: 0 .8rem .8rem; }  /* mirrors the shell's mobile side padding */
+  .chat-bar { flex-wrap: wrap; }
+}
 @media (max-width: 520px) {
-  #chat-composer { grid-template-columns: 1fr 1fr; }
-  #chat-input { grid-column: 1 / -1; min-height: 2.75rem; font-size: 16px; }
-  #chat-composer button { min-height: 2.75rem; padding: .5rem; }
+  .chat-input { font-size: 16px; }              /* stop iOS focus-zoom */
+  .chat-bar button { min-height: 2.5rem; padding: .5rem .7rem; }  /* touch sizing only here */
+  .chat-status, .chat-meter { flex-basis: 100%; order: 5; }
+  #chat-send { flex: 1 1 auto; }
 }
