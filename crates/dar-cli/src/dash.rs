@@ -157,7 +157,7 @@ async fn proxy_agent(
         return (StatusCode::BAD_REQUEST, "invalid agent port").into_response();
     };
     let Ok(port) = u16::try_from(port_number) else {
-        return (StatusCode::NOT_FOUND, "agent dashboard not found").into_response();
+        return (StatusCode::BAD_REQUEST, "invalid agent port").into_response();
     };
     if !state
         .registry
@@ -334,7 +334,7 @@ fn rewrite_html_fragment(html: &str, prefix: &str) -> String {
         format!("{}{}{}", &captures[1], prefix, &captures[2])
     });
     let scripts = Regex::new(r"(?is)(<script\b[^>]*>)(.*?)(</script>)").unwrap();
-    let strings = Regex::new(r#"(?:\"(/[^/\"]*[^/\"])\"|'(/[^/']*[^/'])')"#).unwrap();
+    let strings = Regex::new(r#"(?:\"(/[^/\"][^\"]*)\"|'(/[^/'][^']*)')"#).unwrap();
     let double_quoted_handlers =
         Regex::new(r#"(?is)((?:^|[\s<])on[\w:-]*\s*=\s*\")(.*?)\""#).unwrap();
     let single_quoted_handlers = Regex::new(r"(?is)((?:^|[\s<])on[\w:-]*\s*=\s*')(.*?)'").unwrap();
@@ -657,12 +657,14 @@ mod tests {
 
     #[test]
     fn rewrite_html_prefixes_only_root_absolute_dashboard_urls() {
-        let html = r#"<script src="/assets/x.js"></script><button hx-post="/control/pause" onclick="fetch('/run-now')"></button><script>fetch('/content'); new EventSource('/events')</script><a href="https://example.com/x"></a><img src="//cdn.example/x"><a href="page.html"></a><a href="/"></a><div foo-href="/not-an-attribute"></div><style>.x { background: url('/style') }</style><!-- <a href="/comment"> -->"#;
+        let html = r#"<script src="/assets/x.js"></script><button hx-post="/control/pause" onclick="fetch('/run-now')"></button><button onclick="fetch('/scheduler/jobs/abc/run-now')"></button><button onclick='fetch("/scheduler/jobs/abc/run-now")'></button><script>fetch('/content'); new EventSource('/events')</script><a href="https://example.com/x"></a><img src="//cdn.example/x"><a href="page.html"></a><a href="/"></a><div foo-href="/not-an-attribute"></div><style>.x { background: url('/style') }</style><!-- <a href="/comment"> -->"#;
         let rewritten = rewrite_html(html, 50123);
         assert!(rewritten.contains("src=\"/agent/50123/assets/x.js\""));
         assert!(rewritten.contains("hx-post=\"/agent/50123/control/pause\""));
         assert!(rewritten.contains("fetch('/agent/50123/content')"));
         assert!(rewritten.contains("onclick=\"fetch('/agent/50123/run-now')\""));
+        assert!(rewritten.contains("onclick=\"fetch('/agent/50123/scheduler/jobs/abc/run-now')\""));
+        assert!(rewritten.contains("onclick='fetch(\"/agent/50123/scheduler/jobs/abc/run-now\")'"));
         assert!(rewritten.contains("EventSource('/agent/50123/events')"));
         assert!(rewritten.contains("https://example.com/x"));
         assert!(rewritten.contains("//cdn.example/x"));
@@ -856,11 +858,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-        let missing = app
+        let invalid = app
             .clone()
             .oneshot(
                 Request::builder()
                     .uri("/agent/99999/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/12345/")
                     .body(Body::empty())
                     .unwrap(),
             )
