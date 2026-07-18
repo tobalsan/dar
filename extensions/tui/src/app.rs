@@ -159,9 +159,12 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        // `/new` (exact, trimmed) is the one slash command the TUI parses:
-        // intercept it before `submit()` so it never reaches the backend as a
-        // turn. Any other text — including input that merely begins with `/` —
+        // `/new` (exact, trimmed) is intercepted locally before `submit()` so
+        // it never reaches the backend as a turn. `/compact` deliberately
+        // falls through to a normal submit instead: the backend CLI (pi)
+        // interprets it as its own compaction command and reports fresh
+        // context usage afterward — this is supported, not accidental. Any
+        // other text — including input that merely begins with `/` — also
         // falls through to a normal submit. Checked here, before the `input`
         // mutable borrow below, and only on a plain Enter (no Shift/Alt, which
         // compose a newline).
@@ -357,6 +360,19 @@ mod tests {
                 "{text:?} must submit as a normal turn"
             );
         }
+    }
+
+    #[test]
+    fn slash_compact_submits_to_the_backend() {
+        // `/compact` is not intercepted like `/new`: it falls through to a
+        // normal submit so the backend CLI performs its own compaction.
+        let mut app = App::new();
+        type_str(&mut app, "/compact");
+        assert_eq!(
+            app.handle_event(key(KeyCode::Enter)),
+            Action::Submit("/compact".to_string())
+        );
+        assert!(app.chat.input.is_empty());
     }
 
     #[test]
