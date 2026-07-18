@@ -1,6 +1,12 @@
 (function () {
   const esc = s => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 
+  // crypto.randomUUID only exists in secure contexts (https/localhost); dashboards served over plain http (e.g. tailnet hostnames) need the fallback.
+  const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    let r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+  }));
+
   const markdown = s => {
     let code = [];
     let html = esc(s).replace(/```([^\n]*)\n([\s\S]*?)```/g, (_, lang, text) => `\0${code.push(`<pre><code${lang ? ` data-language="${esc(lang)}"` : ''}>${text}</code></pre>`) - 1}\0`).replace(/`([^`\n]+)`/g, (_, text) => `\0${code.push(`<code>${text}</code>`) - 1}\0`);
@@ -108,7 +114,7 @@
   const sendFlow = async app => {
     let input = $('chat-input');
     if (!input || !sendEnabled(app)) return;
-    let message = input.value, files = app.pending.slice(), command_id = crypto.randomUUID();
+    let message = input.value, files = app.pending.slice(), command_id = uuid();
     let command = message.trim();
     if (!files.length && command === '/new') {
       app.draft = ''; input.value = ''; app.pending = []; renderChips(app); autogrow(input); refreshBusy(app);
@@ -122,7 +128,7 @@
     if (!files.length && command === '/compact') {
       app.draft = ''; input.value = ''; app.pending = []; renderChips(app); autogrow(input); refreshBusy(app);
       try {
-        await fetch(`/chat/${SESSION}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: crypto.randomUUID() }) });
+        await fetch(`/chat/${SESSION}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: uuid() }) });
       } catch (_) {
         app.draft = message; input.value = message; app.pending = files; renderChips(app); autogrow(input); refreshBusy(app);
       }

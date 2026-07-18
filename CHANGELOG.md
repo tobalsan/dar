@@ -11,6 +11,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Fixed
 
+- Web chat send no longer crashes on non-HTTPS, non-localhost origins (e.g. tailnet hostnames) where `crypto.randomUUID` is unavailable.
 - Web chat now follows `runner.use` and its model/provider for passive agents without an orchestration snapshot, instead of silently falling back to Pi.
 
 ### Added
