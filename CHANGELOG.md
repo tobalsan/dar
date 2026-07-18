@@ -97,6 +97,8 @@ Breaking changes are marked **⚠ BREAKING**.
   parity.
 
 ### Fixed
+- Web chat attachment paths given to the agent were missing the session
+  directory, so the agent hit ENOENT reading any uploaded file.
 - CLI: `dar build` agent-local binaries now link the opt-in web chat extension
   (and its chat backends) when `extensions.chat-web` is present; previously
   the section was silently ignored.

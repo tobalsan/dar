@@ -1055,8 +1055,10 @@ fn attachment_prompt(message: &str, attachments: &[Attachment], root: &std::path
     let paths = attachments
         .iter()
         .filter_map(|attachment| {
-            attachment.url.split_once("/attachment/").map(|(_, path)| {
+            attachment.url.split_once("/attachment/").map(|(prefix, path)| {
+                let session = prefix.rsplit('/').next().unwrap_or_default();
                 root.join("data/chat/uploads")
+                    .join(session)
                     .join(path)
                     .display()
                     .to_string()
@@ -2314,6 +2316,22 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "reset");
         assert!(events[0].seq > user_seq);
+    }
+
+    #[test]
+    fn attachment_prompt_paths_include_the_session_segment() {
+        // Uploads land at data/chat/uploads/{session}/{command}/{file}; the
+        // path told to the agent must match or every read ends in ENOENT.
+        let attachments = vec![Attachment {
+            name: "logo.png".into(),
+            url: "/chat/main/attachment/upload-1/0-logo.png".into(),
+            image: true,
+        }];
+        let prompt = attachment_prompt("look", &attachments, std::path::Path::new("/agent"));
+        assert!(
+            prompt.contains("/agent/data/chat/uploads/main/upload-1/0-logo.png"),
+            "{prompt}"
+        );
     }
 
     #[test]
