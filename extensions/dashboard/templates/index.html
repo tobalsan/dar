@@ -110,24 +110,32 @@
 <body>
   {% if !tabs.is_empty() %}
   <nav class="dash-tabs" id="dash-tabs" aria-label="Dashboard tabs">
-    <button class="dash-tab active" data-tab-url="/content"
+    <button class="dash-tab{% if active_tab == "content" %} active{% endif %}" data-tab-url="/content" data-self-refreshing="false"
             onclick="activateDashTab(this,'/content')">Runs</button>
     {% for t in tabs %}
-    <button class="dash-tab" data-tab-url="/tabs/{{ t.id }}"
+    <button class="dash-tab{% if active_tab == t.id %} active{% endif %}" data-tab-url="/tabs/{{ t.id }}" data-self-refreshing="{{ t.self_refreshing }}"
             onclick="activateDashTab(this,'/tabs/{{ t.id }}')">{{ t.title }}</button>
     {% endfor %}
   </nav>
   {% endif %}
-  <div id="content" hx-get="/content" hx-trigger="every 2s" hx-swap="innerHTML">
-    {{ content|safe }}
+  <div id="content">
+    {% match initial_fragment %}
+    {% when Some with (f) %}{{ f|safe }}
+    {% when None %}{{ content|safe }}
+    {% endmatch %}
   </div>
   <div id="run-detail"></div>
   <script>
     window.__dashPage = window.__dashPage || 1;
-    // Active tab URL the #content poller re-fetches. Defaults to the
-    // orchestrator run view so a dashboard with zero registered tabs behaves
-    // exactly as before.
-    window.__dashTab = window.__dashTab || '/content';
+    // Active tab URL/liveness the #content poller reads. Initialized from the
+    // server-rendered active tab button so a page load lands on whatever tab
+    // was chosen (Runs, or a passive-default tab); falls back to the run view
+    // when there is no tab nav at all.
+    (function () {
+      var activeBtn = document.querySelector('.dash-tab.active');
+      window.__dashTab = activeBtn ? activeBtn.dataset.tabUrl : '/content';
+      window.__dashTabLive = activeBtn ? activeBtn.dataset.selfRefreshing === 'true' : false;
+    })();
     document.body.addEventListener('htmx:configRequest', function (ev) {
       var path = ev.detail.path || '';
       // Only the run view carries pagination page-state.
@@ -135,21 +143,29 @@
         ev.detail.parameters['page'] = window.__dashPage;
       }
     });
-    // Switch the active tab: repoint the #content poller at the tab's fragment
-    // URL and load it immediately. Preserves the htmx innerHTML-swap of
-    // #content (no <body> swap); the run view stays the default tab.
+    // Switch the active tab: repoint the poller at the tab's fragment URL and
+    // load it immediately. Preserves the innerHTML-swap of #content (no
+    // <body> swap); a self-refreshing tab suspends the poller entirely so its
+    // own live DOM/JS is never torn down.
     function activateDashTab(btn, url) {
       window.__dashTab = url;
+      window.__dashTabLive = btn.dataset.selfRefreshing === 'true';
       var nav = document.getElementById('dash-tabs');
       if (nav) {
         nav.querySelectorAll('.dash-tab').forEach(function (b) { b.classList.remove('active'); });
       }
       btn.classList.add('active');
-      var content = document.getElementById('content');
-      content.setAttribute('hx-get', url);
-      htmx.process(content);
       htmx.ajax('GET', url, { target: '#content', swap: 'innerHTML' });
     }
+    // #content used to self-poll declaratively every 2s, which tore down and
+    // recreated any self-refreshing tab's DOM/JS every tick. This timer
+    // re-fetches the active tab's fragment on the same cadence, but skips the
+    // fetch entirely while __dashTabLive is true.
+    setInterval(function () {
+      if (!window.__dashTabLive) {
+        htmx.ajax('GET', window.__dashTab, { target: '#content', swap: 'innerHTML' });
+      }
+    }, 2000);
     function closeDrawer() {
       document.getElementById('run-detail').innerHTML = '';
     }

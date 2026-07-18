@@ -37,6 +37,15 @@
 //! hx-target="..." hx-swap="innerHTML"`), exactly as the orchestrator run view
 //! does. The contract does not impose a cadence; it only guarantees the
 //! fragment is composed into `#content` via `innerHTML`.
+//!
+//! ### Escape hatch: tabs with their own live transport
+//!
+//! A tab that manages its own live updates outside of htmx polling (e.g. an
+//! `EventSource`/SSE stream, or any JS that must not be torn down and
+//! recreated) declares [`DashboardTab::self_refreshing`] `true`. While such a
+//! tab is the active one, the dashboard suspends its own `#content` timer
+//! entirely instead of re-fetching and innerHTML-swapping the fragment out
+//! from under the tab's live DOM/JS.
 
 use std::sync::{Arc, Mutex};
 
@@ -67,6 +76,23 @@ pub trait DashboardTab: Send + Sync {
     /// in-place polling; it must not swap `<body>` or replace the dashboard
     /// shell.
     fn render(&self) -> Result<String>;
+
+    /// Whether this tab manages its own live updates (SSE, `EventSource`, or
+    /// any JS that must survive across ticks). While this tab is active the
+    /// dashboard MUST NOT re-fetch/swap `#content` on its poll timer — doing
+    /// so would tear down and recreate the tab's own DOM and live transport.
+    /// Defaults to `false` (the tab is fine being periodically re-fetched).
+    fn self_refreshing(&self) -> bool {
+        false
+    }
+
+    /// Whether this tab should be the initially-active tab when the agent is
+    /// **passive** (no orchestration workflow configured, so the Runs view
+    /// has nothing to show). The first registered tab claiming this wins.
+    /// Defaults to `false` (defer to the built-in Runs tab).
+    fn passive_default(&self) -> bool {
+        false
+    }
 }
 
 /// Shared, append-only registry of dashboard tab providers.
@@ -229,5 +255,35 @@ mod tests {
         assert!(registry.add(tab("ok-id.1", "Dup", "")).is_err());
         assert!(registry.add(tab("bad/id", "Bad", "")).is_err());
         assert!(registry.add(tab("", "Bad", "")).is_err());
+    }
+
+    struct LiveDefaultTab;
+    impl DashboardTab for LiveDefaultTab {
+        fn id(&self) -> &str {
+            "live"
+        }
+        fn title(&self) -> &str {
+            "Live"
+        }
+        fn render(&self) -> Result<String> {
+            Ok(String::new())
+        }
+        fn self_refreshing(&self) -> bool {
+            true
+        }
+        fn passive_default(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn self_refreshing_and_passive_default_default_to_false_and_are_overridable() {
+        let plain: Arc<dyn DashboardTab> = tab("plain", "Plain", "");
+        assert!(!plain.self_refreshing(), "default is false");
+        assert!(!plain.passive_default(), "default is false");
+
+        let live: Arc<dyn DashboardTab> = Arc::new(LiveDefaultTab);
+        assert!(live.self_refreshing(), "override honored via trait object");
+        assert!(live.passive_default(), "override honored via trait object");
     }
 }

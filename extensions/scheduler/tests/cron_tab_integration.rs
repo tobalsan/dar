@@ -196,11 +196,11 @@ async fn cron_tab_present_when_scheduler_enabled_and_shows_job() {
     // The index shell keeps the #content innerHTML self-poll that drives the
     // active tab's refresh.
     assert!(
-        html.contains("hx-get=\"/content\""),
+        html.contains("htmx.ajax('GET', window.__dashTab, { target: '#content', swap: 'innerHTML' })"),
         "shared content poller present"
     );
     assert!(
-        html.contains("hx-swap=\"innerHTML\""),
+        html.contains("swap: 'innerHTML'"),
         "innerHTML swap preserved"
     );
 }

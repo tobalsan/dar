@@ -9,6 +9,7 @@ use orchestrator_api::{ActiveRun, AgentInfo, EventRow, HistoryRow, RunRow, RunSn
 pub struct TabNav {
     pub id: String,
     pub title: String,
+    pub self_refreshing: bool,
 }
 
 #[derive(Template)]
@@ -16,6 +17,12 @@ pub struct TabNav {
 pub struct DashboardTemplate {
     pub content: ContentTemplate,
     pub tabs: Vec<TabNav>,
+    /// Which tab is initially active: `"content"` for the built-in Runs view,
+    /// or a registered tab's id.
+    pub active_tab: String,
+    /// Pre-rendered fragment for `active_tab` when it is not `"content"`;
+    /// `None` renders `content` (the Runs view) as the initial body.
+    pub initial_fragment: Option<String>,
 }
 
 impl DashboardTemplate {
@@ -27,6 +34,26 @@ impl DashboardTemplate {
         Self {
             content: ContentTemplate::from_snapshot(snapshot),
             tabs,
+            active_tab: "content".to_string(),
+            initial_fragment: None,
+        }
+    }
+
+    /// Passive-agent variant: `active_tab_id` is the id of the tab that
+    /// claimed `passive_default()`, pre-rendered as `fragment`. The Runs view
+    /// is still built from `snapshot` (it just isn't the initial body) so a
+    /// tab render failure can fall back to it.
+    pub fn page_with_active_tab(
+        snapshot: RunSnapshot,
+        tabs: Vec<TabNav>,
+        active_tab_id: String,
+        fragment: String,
+    ) -> Self {
+        Self {
+            content: ContentTemplate::from_snapshot(snapshot),
+            tabs,
+            active_tab: active_tab_id,
+            initial_fragment: Some(fragment),
         }
     }
 }
@@ -546,6 +573,7 @@ mod tests {
         let tabs = vec![TabNav {
             id: "scheduler".to_string(),
             title: "Scheduler".to_string(),
+            self_refreshing: false,
         }];
         let html = DashboardTemplate::page_with_tabs(RunSnapshot::empty(), tabs)
             .render()
@@ -561,12 +589,91 @@ mod tests {
             "registered tab title rendered"
         );
         assert!(
-            html.contains("hx-swap=\"innerHTML\""),
-            "content keeps innerHTML swap"
+            !html.contains("hx-trigger=\"every 2s\""),
+            "no declarative poll on #content"
         );
         assert!(
             !html.contains("hx-swap=\"outerHTML\""),
             "no body/outer swap introduced"
+        );
+    }
+
+    #[test]
+    fn index_tab_buttons_carry_self_refreshing_data_attr() {
+        let tabs = vec![
+            TabNav {
+                id: "scheduler".to_string(),
+                title: "Scheduler".to_string(),
+                self_refreshing: false,
+            },
+            TabNav {
+                id: "chat".to_string(),
+                title: "Chat".to_string(),
+                self_refreshing: true,
+            },
+        ];
+        let html = DashboardTemplate::page_with_tabs(RunSnapshot::empty(), tabs)
+            .render()
+            .expect("page renders");
+        assert!(
+            html.contains(r#"data-tab-url="/content" data-self-refreshing="false""#),
+            "Runs button is not self-refreshing: {html}"
+        );
+        assert!(
+            html.contains(r#"data-tab-url="/tabs/scheduler" data-self-refreshing="false""#),
+            "polling tab marked non-self-refreshing: {html}"
+        );
+        assert!(
+            html.contains(r#"data-tab-url="/tabs/chat" data-self-refreshing="true""#),
+            "live tab marked self-refreshing: {html}"
+        );
+    }
+
+    #[test]
+    fn index_poller_is_a_setinterval_gated_on_dashtablive() {
+        let html = DashboardTemplate::page(RunSnapshot::empty())
+            .render()
+            .expect("page renders");
+        assert!(
+            html.contains("setInterval"),
+            "poller uses setInterval, not hx-trigger: {html}"
+        );
+        assert!(
+            html.contains("__dashTabLive"),
+            "poller gated on __dashTabLive: {html}"
+        );
+    }
+
+    #[test]
+    fn index_passive_active_tab_renders_claimed_fragment_as_default_and_active() {
+        let tabs = vec![TabNav {
+            id: "chat".to_string(),
+            title: "Chat".to_string(),
+            self_refreshing: true,
+        }];
+        let html = DashboardTemplate::page_with_active_tab(
+            RunSnapshot::empty(),
+            tabs,
+            "chat".to_string(),
+            "<p id=\"chat-body\">hi</p>".to_string(),
+        )
+        .render()
+        .expect("page renders");
+        assert!(
+            html.contains("<p id=\"chat-body\">hi</p>"),
+            "claimed tab's fragment is the initial #content body: {html}"
+        );
+        let chat_btn = html.find("/tabs/chat").expect("chat button present");
+        let snippet = &html[chat_btn.saturating_sub(60)..chat_btn];
+        assert!(
+            snippet.contains("dash-tab active"),
+            "chat button carries active class: {snippet}"
+        );
+        let runs_btn = html.find("/content").expect("runs button present");
+        let snippet = &html[runs_btn.saturating_sub(60)..runs_btn];
+        assert!(
+            !snippet.contains("active"),
+            "Runs button is not active when a passive tab claims default: {snippet}"
         );
     }
 

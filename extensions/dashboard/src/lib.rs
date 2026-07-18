@@ -223,10 +223,24 @@ fn tab_nav(api: &BusApiState) -> Vec<TabNav> {
                 .map(|t| TabNav {
                     id: t.id().to_string(),
                     title: t.title().to_string(),
+                    self_refreshing: t.self_refreshing(),
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// First registered tab claiming `passive_default()`, pre-rendered. `None`
+/// when there is no such tab or its `render()` fails — either way the caller
+/// falls back to the Runs view.
+fn passive_default_tab(api: &BusApiState) -> Option<(String, String)> {
+    let registry = api.tabs.get()?;
+    let tab = registry
+        .snapshot()
+        .into_iter()
+        .find(|t| t.passive_default())?;
+    let fragment = tab.render().ok()?;
+    Some((tab.id().to_string(), fragment))
 }
 
 async fn index(State(api): State<BusApiState>) -> Response {
@@ -236,7 +250,19 @@ async fn index(State(api): State<BusApiState>) -> Response {
     let snapshot = bus
         .read_retained::<RunSnapshot>(RUN_SNAPSHOT_TOPIC)
         .unwrap_or_else(|_| RunSnapshot::empty());
-    match DashboardTemplate::page_with_tabs(snapshot, tab_nav(&api)).render() {
+    let tabs = tab_nav(&api);
+    // Passive agents (no orchestration loop) have nothing to show on the Runs
+    // view; let the first tab that claims passive_default() be the initial
+    // active tab instead. The active loop always publishes a non-empty tracker
+    // kind; an empty tracker is the genuine passive signal (passive_snapshot()).
+    let passive = snapshot.agent.tracker.is_empty();
+    let page = match passive.then(|| passive_default_tab(&api)).flatten() {
+        Some((id, fragment)) => {
+            DashboardTemplate::page_with_active_tab(snapshot, tabs, id, fragment)
+        }
+        None => DashboardTemplate::page_with_tabs(snapshot, tabs),
+    };
+    match page.render() {
         Ok(html) => Html(html).into_response(),
         Err(e) => {
             tracing::error!("dashboard render failed: {e}");
@@ -642,6 +668,110 @@ mod tests {
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("demo-body"), "fragment body spliced: {html}");
+    }
+
+    struct SelfRefreshingTab;
+    impl cap_dashboard_tab::DashboardTab for SelfRefreshingTab {
+        fn id(&self) -> &str {
+            "live"
+        }
+        fn title(&self) -> &str {
+            "Live"
+        }
+        fn render(&self) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn self_refreshing(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn tab_nav_carries_self_refreshing_through() {
+        let registry = Arc::new(DashboardTabs::default());
+        registry.add(Arc::new(SelfRefreshingTab)).unwrap();
+        let state = make_state();
+        let _ = state.tabs.set(registry);
+        let nav = tab_nav(&state);
+        assert_eq!(nav.len(), 1);
+        assert!(nav[0].self_refreshing, "self_refreshing passed through");
+    }
+
+    struct ClaimTab;
+    impl cap_dashboard_tab::DashboardTab for ClaimTab {
+        fn id(&self) -> &str {
+            "claim"
+        }
+        fn title(&self) -> &str {
+            "Claim"
+        }
+        fn render(&self) -> anyhow::Result<String> {
+            Ok("<p id=\"claim-body\">hi</p>".to_string())
+        }
+        fn passive_default(&self) -> bool {
+            true
+        }
+    }
+
+    fn snapshot_with_tracker(tracker: &str) -> RunSnapshot {
+        let mut s = RunSnapshot::empty();
+        s.agent.tracker = tracker.to_string();
+        s
+    }
+
+    #[tokio::test]
+    async fn index_passive_snapshot_activates_claiming_tab() {
+        // No retained snapshot registered -> RunSnapshot::empty() (tracker
+        // empty), which is the passive case.
+        let state = make_state();
+        let _ = state.bus.set(Arc::new(host_api::EventBus::new()));
+        let registry = Arc::new(DashboardTabs::default());
+        registry.add(Arc::new(ClaimTab)).unwrap();
+        let _ = state.tabs.set(registry);
+        let resp = index(axum::extract::State(state)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            html.contains("claim-body"),
+            "claiming tab's fragment is the initial #content body: {html}"
+        );
+        let claim_pos = html.find("/tabs/claim").expect("claim button present");
+        let snippet = &html[claim_pos.saturating_sub(60)..claim_pos];
+        assert!(
+            snippet.contains("dash-tab active"),
+            "claiming tab's button is active: {snippet}"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_non_passive_snapshot_keeps_runs_active_despite_claimant() {
+        let state = make_state();
+        let mut bus = host_api::EventBus::new();
+        bus.register_retained(RUN_SNAPSHOT_TOPIC, snapshot_with_tracker("files"))
+            .unwrap();
+        let _ = state.bus.set(Arc::new(bus));
+        let registry = Arc::new(DashboardTabs::default());
+        registry.add(Arc::new(ClaimTab)).unwrap();
+        let _ = state.tabs.set(registry);
+        let resp = index(axum::extract::State(state)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            !html.contains("claim-body"),
+            "non-passive agent does not use the claimant's fragment as initial body: {html}"
+        );
+        let runs_pos = html.find("/content").expect("runs button present");
+        let snippet = &html[runs_pos.saturating_sub(60)..runs_pos];
+        assert!(
+            snippet.contains("dash-tab active"),
+            "Runs button stays active for a non-passive agent: {snippet}"
+        );
     }
 
     #[tokio::test]
