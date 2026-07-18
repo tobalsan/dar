@@ -15,7 +15,9 @@ Breaking changes are marked **⚠ BREAKING**.
   being iframed over plain HTTP, enabling HTTPS fronts. HTML attributes, htmx
   verbs, and heuristic inline-JS URLs are rewritten while SSE/chat streams
   through unchanged. Proxied agents share the aggregator origin, so cookies
-  and credentials are shared across agents.
+  and credentials are shared across agents. All dashboards on the host must be
+  trusted: this prefix is a presentation convenience, not an isolation or
+  security boundary.
 - Web chat send no longer crashes on non-HTTPS, non-localhost origins (e.g. tailnet hostnames) where `crypto.randomUUID` is unavailable.
 - Web chat now follows `runner.use` and its model/provider for passive agents without an orchestration snapshot, instead of silently falling back to Pi.
 
