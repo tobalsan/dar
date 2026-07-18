@@ -33,6 +33,10 @@ Breaking changes are marked **⚠ BREAKING**.
 - Web chat UI redesign: full-height conversation layout with role labels,
   collapsible thinking and tool drawers, attachment chips, Enter-to-send
   composer with Shift+Enter newline, and inline code rendering.
+- Web chat slash commands: `/compact` compacts the session context; `/new`
+  starts a fresh session, clearing the transcript with a "Context cleared,
+  started a new session." notice. `/compact` is likewise supported in the TUI
+  chat, passed through verbatim to the backend CLI.
 
 - Added: live `dar self rebuild <agent>` triggers a trusted dashboard-host
   rebuild and confirms the restarted boot identity.
@@ -136,8 +140,17 @@ Breaking changes are marked **⚠ BREAKING**.
   `TurnDecision::Finish` at the first turn boundary so the long-lived child
   exits cleanly instead of parking until `job_timeout` and being reported as a
   false `TimedOut`. Turn-opt-out runners (`cli`/`fake`) are unaffected (ALG-348).
+- Web chat: a session reset is now persisted to the chat transcript, so
+  connected browsers see the reset immediately and the notice survives page
+  reloads (previously the reset event never reached SSE clients).
 
 ### Changed
+- Web chat transcript labels agent turns with the agent's `name` from
+  `agent.yaml` (falls back to `Agent`).
+- Web chat composer redesigned around icon buttons: attach (paperclip) left of
+  the input, send (arrow) right of it, and a stop button that appears only
+  while a turn is running; the Compact button is replaced by the `/compact`
+  chat command.
 - CLI: `dar init-workflow` / `dar export` now route to the tracker-specific
   command for the resolved `WORKFLOW.md`'s `tracker.kind` (e.g.
   `init-workflow.plane`, `export.plane`), falling back to the

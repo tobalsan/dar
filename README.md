@@ -816,9 +816,16 @@ share one live session: transcripts live under `data/chat/sessions/`, a turn
 started on either surface streams into every open browser tab, and reconnects
 replay missed events (SSE with `Last-Event-ID`). Attachments are uploaded via
 multipart `POST /chat/{session}/upload` (max 8 files, 8 MiB body) and stored
-under `data/chat/uploads/`; the agent turn receives their local paths. The
-composer also exposes **Compact** (backend context compaction) and a token
-meter fed by backend-reported context usage.
+under `data/chat/uploads/`; the agent turn receives their local paths.
+Assistant turns are labeled with the agent's `name` from `agent.yaml` (falls
+back to `Agent`).
+
+The composer is a row of icon buttons: attach (paperclip) left of the input,
+send (arrow) right of it, and a stop button that appears only while a turn is
+running, plus a token meter fed by backend-reported context usage. Two slash
+commands are recognized in the chat input: `/compact` passes through to the
+backend CLI to compact the session context, and `/new` clears the shared
+session with a "Context cleared, started a new session." notice.
 
 When the agent is passive (no orchestration loop configured), the dashboard
 opens on the Chat tab by default; the composer sends with Enter (Shift+Enter
