@@ -11,6 +11,11 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Fixed
 
+- `dar dash`: agents are now reverse-proxied at `/agent/<port>/...` instead of
+  being iframed over plain HTTP, enabling HTTPS fronts. HTML attributes, htmx
+  verbs, and heuristic inline-JS URLs are rewritten while SSE/chat streams
+  through unchanged. Proxied agents share the aggregator origin, so cookies
+  and credentials are shared across agents.
 - Web chat send no longer crashes on non-HTTPS, non-localhost origins (e.g. tailnet hostnames) where `crypto.randomUUID` is unavailable.
 - Web chat now follows `runner.use` and its model/provider for passive agents without an orchestration snapshot, instead of silently falling back to Pi.
 

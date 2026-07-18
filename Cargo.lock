@@ -713,6 +713,8 @@ dependencies = [
  "dar-system-context",
  "dar-tool-registry",
  "fs2",
+ "regex",
+ "reqwest",
  "semver",
  "serde",
  "serde_json",
@@ -720,6 +722,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tower",
 ]
 
 [[package]]

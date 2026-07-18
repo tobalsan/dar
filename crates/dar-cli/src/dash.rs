@@ -4,35 +4,31 @@
 //! live agent dashboard on this host. It owns no cross-process state: each
 //! request rebuilds entirely from the presence registry (read + prune dead).
 //!
-//! Two endpoints:
+//! The shell exposes discovery endpoints plus a streaming reverse proxy for
+//! each live agent.  Browser requests to `/agent/<port>/...` stay same-origin
+//! with the fleet shell while this process forwards them to loopback dashboards.
+//!
+//! Endpoints:
 //! * `GET /api/agents` — machine-readable JSON list of live agents.
-//! * `GET /` — a sidebar SPA whose content area is an `<iframe>` pointing at
-//!   the selected agent's own dashboard.
-//!
-//! The aggregator is *pure discovery + presentation*: it never proxies control,
-//! logs, or render. The iframe loads each agent's self-contained dashboard
-//! directly, so pause/stop/interrupt/kill and live logs keep working unchanged.
-//!
-//! ## Host substitution
-//!
-//! Presence files store the agent's bound address (e.g. `0.0.0.0:53124`). A
-//! literal `0.0.0.0` is not dialable from a browser, and when the operator
-//! browses from a MacBook to `studio.ts.net:7878` the iframe must target
-//! `studio.ts.net:<port>`, not the Studio's loopback. So we substitute the
-//! *host* portion of each addr with the host the browser used to reach the
-//! aggregator (the request `Host` header), keeping only the agent's port.
+//! * `GET /` — a sidebar SPA whose content area is an agent iframe.
+//! * `/agent/{port}` and `/agent/{port}/{*rest}` — streaming loopback proxy
+//!   routes. HTML responses have root-absolute dashboard URLs rewritten for
+//!   the proxy prefix; non-HTML responses stream unchanged.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::body::Body;
+use axum::extract::{OriginalUri, Path as AxumPath, State};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Request, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{any, get};
 use axum::Router;
 
 use dar_presence::{PresenceEntry, Registry};
+use regex::Regex;
 
 /// Options for the aggregator server.
 pub struct DashOptions {
@@ -54,16 +50,27 @@ impl DashOptions {
 #[derive(Clone)]
 struct DashState {
     registry: Registry,
+    client: reqwest::Client,
 }
 
 /// Boot the aggregator and serve until Ctrl-C.
 pub async fn serve(opts: DashOptions) -> Result<()> {
     let state = DashState {
         registry: Registry::new(&opts.registry_dir),
+        client: reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(3))
+            // reqwest 0.12 accepts a Duration rather than `None`; this is
+            // effectively unbounded while preserving long-lived SSE streams.
+            .timeout(Duration::from_secs(60 * 60 * 24 * 365 * 100))
+            .build()
+            .context("building dash proxy client")?,
     };
     let app = Router::new()
         .route("/", get(index))
         .route("/api/agents", get(api_agents))
+        .route("/agent/{port}", any(proxy_agent))
+        .route("/agent/{port}/{*rest}", any(proxy_agent))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind((opts.bind, opts.port))
@@ -121,76 +128,175 @@ async fn api_agents(State(state): State<DashState>) -> Response {
 }
 
 /// `GET /` — sidebar + iframe shell over the live agents.
-async fn index(State(state): State<DashState>, headers: HeaderMap) -> Response {
+async fn index(State(state): State<DashState>) -> Response {
     let agents = state.registry.read_live();
-    let host = request_host(&headers);
-    match render_shell(&agents, host.as_deref()) {
+    match render_shell(&agents) {
         Ok(html) => Html(html).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "render error").into_response(),
     }
 }
 
-/// The host the browser used to reach us (the `Host` request header), used to
-/// rewrite each agent addr's host so iframes resolve from the client side.
-fn request_host(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(|h| host_only(h).to_string())
+fn agent_url(entry: &PresenceEntry) -> String {
+    entry
+        .port()
+        .map(|port| format!("/agent/{port}/"))
+        .unwrap_or_default()
 }
 
-/// Strip a trailing `:port` from a `Host` header value, leaving just the host.
-/// IPv6 literals are bracketed (`[::1]:7878`) so we only split on the last
-/// colon when there's no closing bracket after it.
-fn host_only(host: &str) -> &str {
-    if host.starts_with('[') {
-        // `[ipv6]` or `[ipv6]:port` — host is everything up to and incl. `]`.
-        if let Some(end) = host.find(']') {
-            return &host[..=end];
+async fn proxy_agent(
+    State(state): State<DashState>,
+    AxumPath(params): AxumPath<std::collections::HashMap<String, String>>,
+    OriginalUri(original_uri): OriginalUri,
+    request: Request<Body>,
+) -> Response {
+    let Some(port) = params.get("port") else {
+        return (StatusCode::BAD_REQUEST, "invalid agent port").into_response();
+    };
+    let Ok(port) = port.parse::<u16>() else {
+        return (StatusCode::BAD_REQUEST, "invalid agent port").into_response();
+    };
+    if !state
+        .registry
+        .read_live()
+        .iter()
+        .any(|entry| entry.port() == Some(port))
+    {
+        return (StatusCode::NOT_FOUND, "agent dashboard not found").into_response();
+    }
+
+    let prefix = format!("/agent/{port}");
+    let Some(path_and_query) = original_uri.path_and_query() else {
+        return (StatusCode::BAD_REQUEST, "invalid agent path").into_response();
+    };
+    let path = path_and_query.as_str();
+    let rest = path.strip_prefix(&prefix).unwrap_or_default();
+    let upstream = format!(
+        "http://127.0.0.1:{port}{}",
+        if rest.is_empty() { "/" } else { rest }
+    );
+    let original_host = request.headers().get(header::HOST).cloned();
+    let (parts, body) = request.into_parts();
+    let mut headers = forwarded_headers(&parts.headers);
+    headers.insert(
+        header::HOST,
+        HeaderValue::from_str(&format!("127.0.0.1:{port}")).unwrap(),
+    );
+    if let Some(host) = &original_host {
+        headers.insert(HeaderName::from_static("x-forwarded-host"), host.clone());
+    }
+    let upstream = match state
+        .client
+        .request(parts.method, upstream)
+        .headers(headers)
+        .body(reqwest::Body::wrap_stream(body.into_data_stream()))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(_) => return (StatusCode::BAD_GATEWAY, "agent dashboard unavailable").into_response(),
+    };
+    proxy_response(upstream, port, original_host).await
+}
+
+fn forwarded_headers(headers: &HeaderMap) -> HeaderMap {
+    let mut result = HeaderMap::new();
+    let connection_tokens = headers
+        .get(header::CONNECTION)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(',')
+                .map(|name| name.trim().to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for (name, value) in headers {
+        let lower = name.as_str().to_ascii_lowercase();
+        if !is_hop_by_hop(&lower)
+            && !connection_tokens.iter().any(|token| token == &lower)
+            && name != header::HOST
+        {
+            result.append(name.clone(), value.clone());
         }
     }
-    match host.rsplit_once(':') {
-        Some((h, _)) => h,
-        None => host,
-    }
+    result
 }
 
-/// Build the iframe URL for an agent, substituting the request host for the
-/// agent's stored (and possibly unspecified) host while keeping its port.
-fn agent_url(entry: &PresenceEntry, request_host: Option<&str>) -> String {
-    let port = entry.port();
-    let host = request_host
-        .map(|h| h.to_string())
-        .unwrap_or_else(|| dialable_host(&entry.addr));
-    let host = bracket_ipv6(&host);
-    match port {
-        Some(p) => format!("http://{host}:{p}/"),
-        None => format!("http://{host}/"),
-    }
+fn is_hop_by_hop(name: &str) -> bool {
+    matches!(
+        name,
+        "connection"
+            | "keep-alive"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+    )
 }
 
-/// Wrap a bare IPv6 literal in `[...]` so it can carry a `:port` suffix in a
-/// URL. Already-bracketed hosts and ordinary hostnames/IPv4 pass through.
-fn bracket_ipv6(host: &str) -> String {
-    if host.starts_with('[') || !host.contains(':') {
-        host.to_string()
+async fn proxy_response(
+    response: reqwest::Response,
+    port: u16,
+    original_host: Option<HeaderValue>,
+) -> Response {
+    let status = response.status();
+    let is_html = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|content_type| content_type.to_ascii_lowercase().starts_with("text/html"));
+    let mut builder = Response::builder().status(status);
+    for (name, value) in response.headers() {
+        if !is_hop_by_hop(name.as_str()) && (!is_html || name != header::CONTENT_LENGTH) {
+            builder = builder.header(name, value);
+        }
+    }
+    if let Some(host) = original_host {
+        builder = builder.header(HeaderName::from_static("x-forwarded-host"), host);
+    }
+    if is_html {
+        let body = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return (StatusCode::BAD_GATEWAY, "agent dashboard response failed").into_response()
+            }
+        };
+        let body = rewrite_html(&String::from_utf8_lossy(&body), port);
+        builder
+            .header(header::CONTENT_LENGTH, body.len())
+            .body(Body::from(body))
+            .unwrap()
     } else {
-        format!("[{host}]")
+        builder
+            .body(Body::from_stream(response.bytes_stream()))
+            .unwrap()
     }
 }
 
-/// Fallback host when there's no request `Host` header: replace an unspecified
-/// `0.0.0.0`/`::` bind host with loopback so the URL is at least dialable.
-fn dialable_host(addr: &str) -> String {
-    if let Ok(sa) = addr.parse::<SocketAddr>() {
-        return display_host(sa.ip());
-    }
-    let host = host_only(addr);
-    if host == "0.0.0.0" || host == "::" || host.is_empty() {
-        "127.0.0.1".to_string()
-    } else {
-        host.to_string()
-    }
+// This is deliberately heuristic: it rewrites dar's HTML attributes and inline
+// JavaScript string literals, not arbitrary JavaScript syntax.
+fn rewrite_html(html: &str, port: u16) -> String {
+    let prefix = format!("/agent/{port}");
+    let attrs = Regex::new(r#"(?i)(\b(?:href|src|action|formaction|poster|data-src|data-href|hx-get|hx-post|hx-put|hx-patch|hx-delete|data-tab-url)\s*=\s*[\"'])(/[^/][^\"']*)"#).unwrap();
+    let rewritten = attrs.replace_all(html, |captures: &regex::Captures<'_>| {
+        format!("{}{}{}", &captures[1], prefix, &captures[2])
+    });
+    let scripts = Regex::new(r"(?is)(<script\b[^>]*>)(.*?)(</script>)").unwrap();
+    let strings = Regex::new(r#"(?:\"(/[^/][^\"]*)\"|'(/[^/][^']*)')"#).unwrap();
+    scripts
+        .replace_all(&rewritten, |captures: &regex::Captures<'_>| {
+            let code = strings.replace_all(&captures[2], |string: &regex::Captures<'_>| {
+                if let Some(path) = string.get(1) {
+                    format!("\"{prefix}{}\"", path.as_str())
+                } else {
+                    format!("'{prefix}{}'", &string[2])
+                }
+            });
+            format!("{}{}{}", &captures[1], code, &captures[3])
+        })
+        .into_owned()
 }
 
 /// `id · <workflow-dir basename>-<path hash>`, or plain `id` when the
@@ -223,15 +329,18 @@ fn agent_label(entry: &PresenceEntry) -> String {
     }
 }
 
-fn render_shell(agents: &[PresenceEntry], request_host: Option<&str>) -> Result<String> {
+fn render_shell(agents: &[PresenceEntry]) -> Result<String> {
     let mut items = String::new();
     let mut first_url = String::new();
     if agents.is_empty() {
         items.push_str("<li class=\"empty\">No live agents</li>");
     }
-    for (i, a) in agents.iter().enumerate() {
-        let url = agent_url(a, request_host);
-        if i == 0 {
+    for a in agents {
+        let url = agent_url(a);
+        if url.is_empty() {
+            continue;
+        }
+        if first_url.is_empty() {
             first_url = url.clone();
         }
         let folder = a.folder.rsplit('/').next().unwrap_or(&a.folder);
@@ -303,9 +412,6 @@ fn render_shell(agents: &[PresenceEntry], request_host: Option<&str>) -> Result<
       var current = document.querySelector('.agent.active');
       var currentSrc = current ? current.dataset.src : null;
       var ul = document.getElementById('agents');
-      // Bracket bare IPv6 literals so `host:port` stays a valid URL.
-      var host = location.hostname;
-      if (host.indexOf(':') !== -1 && host[0] !== '[') {{ host = '[' + host + ']'; }}
       ul.innerHTML = '';
       if (!data.agents.length) {{
         ul.innerHTML = '<li class="empty">No live agents</li>';
@@ -313,7 +419,7 @@ fn render_shell(agents: &[PresenceEntry], request_host: Option<&str>) -> Result<
       }}
       data.agents.forEach(function (a) {{
         var port = (a.addr || '').split(':').pop();
-        var url = 'http://' + host + ':' + port + '/';
+        var url = '/agent/' + port + '/';
         var li = document.createElement('li');
         var b = document.createElement('button');
         b.className = 'agent';
@@ -354,6 +460,14 @@ fn he(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tower::ServiceExt;
+
+    fn state(registry: Registry) -> DashState {
+        DashState {
+            registry,
+            client: reqwest::Client::new(),
+        }
+    }
 
     fn entry(id: &str, folder: &str, addr: &str, pid: u32) -> PresenceEntry {
         entry_wf(id, folder, &format!("{folder}/WORKFLOW.md"), addr, pid)
@@ -371,36 +485,11 @@ mod tests {
     }
 
     #[test]
-    fn host_only_strips_port() {
-        assert_eq!(host_only("studio.ts.net:7878"), "studio.ts.net");
-        assert_eq!(host_only("studio.ts.net"), "studio.ts.net");
-        assert_eq!(host_only("127.0.0.1:7878"), "127.0.0.1");
-    }
-
-    #[test]
-    fn agent_url_substitutes_request_host_keeps_port() {
+    fn agent_url_uses_proxy_path() {
         let e = entry("ALG-1", "/agents/a", "0.0.0.0:53124", 1);
-        assert_eq!(
-            agent_url(&e, Some("studio.ts.net")),
-            "http://studio.ts.net:53124/"
-        );
-    }
-
-    #[test]
-    fn agent_url_falls_back_to_loopback_for_unspecified() {
-        let e = entry("ALG-1", "/agents/a", "0.0.0.0:53124", 1);
-        assert_eq!(agent_url(&e, None), "http://127.0.0.1:53124/");
-    }
-
-    #[test]
-    fn agent_url_brackets_ipv6_request_host() {
-        let e = entry("ALG-1", "/agents/a", "0.0.0.0:53124", 1);
-        // Host header for an IPv6 literal already arrives bracketed.
-        assert_eq!(agent_url(&e, Some("[fd7a::1]")), "http://[fd7a::1]:53124/");
-        // A bare IPv6 fallback gets bracketed.
-        assert_eq!(bracket_ipv6("fd7a::1"), "[fd7a::1]");
-        assert_eq!(bracket_ipv6("studio.ts.net"), "studio.ts.net");
-        assert_eq!(bracket_ipv6("127.0.0.1"), "127.0.0.1");
+        assert_eq!(agent_url(&e), "/agent/53124/");
+        let e = entry("ALG-2", "/agents/b", "not-an-address", 1);
+        assert_eq!(agent_url(&e), "");
     }
 
     #[test]
@@ -434,13 +523,13 @@ mod tests {
             entry("ALG-1", "/agents/one", "0.0.0.0:50001", 1),
             entry("ALG-2", "/agents/two", "0.0.0.0:50002", 2),
         ];
-        let html = render_shell(&agents, Some("studio.ts.net")).unwrap();
+        let html = render_shell(&agents).unwrap();
         assert!(html.contains("ALG-1"));
         assert!(html.contains("ALG-2"));
-        assert!(html.contains("http://studio.ts.net:50001/"));
-        assert!(html.contains("http://studio.ts.net:50002/"));
+        assert!(html.contains("/agent/50001/"));
+        assert!(html.contains("/agent/50002/"));
         // First agent's dashboard is loaded by default.
-        assert!(html.contains("src=\"http://studio.ts.net:50001/\""));
+        assert!(html.contains("src=\"/agent/50001/\""));
     }
 
     #[test]
@@ -452,7 +541,7 @@ mod tests {
             "0.0.0.0:50001",
             1,
         )];
-        let html = render_shell(&agents, Some("studio.ts.net")).unwrap();
+        let html = render_shell(&agents).unwrap();
         assert!(html.contains("ALG-1 \u{b7} wf-a-"));
     }
 
@@ -476,14 +565,14 @@ mod tests {
         let b_label = agent_label(&b);
         assert_ne!(a_label, b_label);
 
-        let html = render_shell(&[a, b], Some("studio.ts.net")).unwrap();
+        let html = render_shell(&[a, b]).unwrap();
         assert!(html.contains(&a_label));
         assert!(html.contains(&b_label));
     }
 
     #[test]
     fn render_empty_when_no_agents() {
-        let html = render_shell(&[], Some("studio.ts.net")).unwrap();
+        let html = render_shell(&[]).unwrap();
         assert!(html.contains("No live agents"));
         assert!(html.contains("about:blank"));
     }
@@ -491,9 +580,117 @@ mod tests {
     #[test]
     fn render_escapes_ids() {
         let agents = vec![entry("<script>", "/a", "0.0.0.0:1", 1)];
-        let html = render_shell(&agents, Some("h")).unwrap();
+        let html = render_shell(&agents).unwrap();
         assert!(!html.contains("<script>x"));
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn rewrite_html_prefixes_only_root_absolute_dashboard_urls() {
+        let html = r#"<script src="/assets/x.js"></script><button hx-post="/control/pause"></button><script>fetch('/content'); new EventSource('/events')</script><a href="https://example.com/x"></a><img src="//cdn.example/x"><a href="page.html"></a>"#;
+        let rewritten = rewrite_html(html, 50123);
+        assert!(rewritten.contains("src=\"/agent/50123/assets/x.js\""));
+        assert!(rewritten.contains("hx-post=\"/agent/50123/control/pause\""));
+        assert!(rewritten.contains("fetch('/agent/50123/content')"));
+        assert!(rewritten.contains("EventSource('/agent/50123/events')"));
+        assert!(rewritten.contains("https://example.com/x"));
+        assert!(rewritten.contains("//cdn.example/x"));
+        assert!(rewritten.contains("href=\"page.html\""));
+    }
+
+    #[tokio::test]
+    async fn proxy_routes_methods_query_headers_and_html_rewriting() {
+        async fn upstream(
+            method: axum::http::Method,
+            uri: axum::http::Uri,
+            headers: HeaderMap,
+            body: String,
+        ) -> Response {
+            if uri.path() == "/html" {
+                return ([(header::CONTENT_TYPE, "text/html")], "<script src=\"/assets/x.js\"></script><button hx-post=\"/control/pause\"></button><script>fetch('/content')</script>").into_response();
+            }
+            (
+                StatusCode::CREATED,
+                [
+                    ("x-method", method.as_str().to_string()),
+                    ("x-query", uri.query().unwrap_or_default().to_string()),
+                    (
+                        "x-host",
+                        headers
+                            .get(header::HOST)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_string(),
+                    ),
+                    ("x-body", body),
+                    ("connection", "close".to_string()),
+                ],
+                "ok",
+            )
+                .into_response()
+        }
+        let upstream = Router::new().route("/{*rest}", any(upstream));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::new(dir.path());
+        registry
+            .write(&entry(
+                "agent",
+                "/agent",
+                &format!("0.0.0.0:{port}"),
+                std::process::id(),
+            ))
+            .unwrap();
+        let app = Router::new()
+            .route("/", get(index))
+            .route("/agent/{port}", any(proxy_agent))
+            .route("/agent/{port}/{*rest}", any(proxy_agent))
+            .with_state(state(registry));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/agent/{port}/echo?x=%2Fok"))
+                    .header(header::CONTENT_TYPE, "text/plain")
+                    .header(header::HOST, "fleet.test")
+                    .body(Body::from("hello"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let response_headers = response.headers().clone();
+        let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&response_body)
+        );
+        assert_eq!(response_headers["x-method"], "PATCH");
+        assert_eq!(response_headers["x-query"], "x=%2Fok");
+        assert_eq!(response_headers["x-host"], format!("127.0.0.1:{port}"));
+        assert_eq!(response_headers["x-body"], "hello");
+        assert!(response_headers.get(header::CONNECTION).is_none());
+        let html = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/agent/{port}/html"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(html.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains(&format!("/agent/{port}/control/pause")));
     }
 
     #[tokio::test]
@@ -510,7 +707,7 @@ mod tests {
         reg.write(&live).unwrap();
         reg.write(&entry("ALG-DEAD", "/agents/dead", "0.0.0.0:51001", 999_999))
             .unwrap();
-        let state = DashState { registry: reg };
+        let state = state(reg);
         let resp = api_agents(State(state)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -541,7 +738,7 @@ mod tests {
             ))
             .unwrap();
         }
-        let resp = api_agents(State(DashState { registry: reg })).await;
+        let resp = api_agents(State(state(reg))).await;
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -562,16 +759,14 @@ mod tests {
             std::process::id(),
         ))
         .unwrap();
-        let state = DashState { registry: reg };
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, "studio.ts.net:7878".parse().unwrap());
-        let resp = index(State(state), headers).await;
+        let state = state(reg);
+        let resp = index(State(state)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("ALG-X"));
-        assert!(html.contains("http://studio.ts.net:52000/"));
+        assert!(html.contains("/agent/52000/"));
     }
 }

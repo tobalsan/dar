@@ -122,8 +122,8 @@ impl host_api::Extension for DashboardExtension {
 
 /// Reachable address advertised in the presence file. The host binds on
 /// `0.0.0.0` for direction A, but a literal `0.0.0.0` host is not dialable; the
-/// aggregator rewrites the host portion to the browser's request host anyway,
-/// so we keep the real port and a placeholder host that survives that rewrite.
+/// fleet aggregator proxies browser traffic through `/agent/<port>/`, so it
+/// dials loopback using this port; keep a placeholder host for direct access.
 /// Uses `SocketAddr`'s own `Display` so IPv6 hosts are bracketed (`[::]:port`)
 /// and the stored addr stays a well-formed `host:port`.
 fn advertised_addr(bound: std::net::SocketAddr) -> String {

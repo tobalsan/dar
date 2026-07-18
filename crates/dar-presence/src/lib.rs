@@ -58,8 +58,8 @@ pub struct PresenceEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow: Option<String>,
     /// Host:port the dashboard's HTTP server bound, as seen on the LAN/tailnet
-    /// (e.g. `0.0.0.0:53124`). The aggregator substitutes the host portion with
-    /// the browser's request host so the iframe resolves from the client side.
+    /// (e.g. `0.0.0.0:53124`). The fleet aggregator uses its port to proxy the
+    /// dashboard over the aggregator's origin.
     pub addr: String,
     /// PID of the agent process owning this dashboard. Used for liveness.
     pub pid: u32,
