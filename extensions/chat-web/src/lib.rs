@@ -97,6 +97,7 @@ impl Extension for ChatWebExtension {
                     "/{session}/attachment/{command}/{name}".into(),
                     "/{session}/abort".into(),
                     "/{session}/compact".into(),
+                    "/{session}/new".into(),
                 ],
                 claim_root: false,
             })?;
@@ -224,6 +225,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/{session}/attachment/{command}/{name}", get(attachment))
         .route("/{session}/abort", post(abort))
         .route("/{session}/compact", post(compact))
+        .route("/{session}/new", post(new_session_route))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .with_state(state)
 }
@@ -317,6 +319,71 @@ impl AppState {
             idle > std::time::Duration::from_secs(idle_minutes.saturating_mul(60))
         })
     }
+
+    async fn reset_session(&self, id: &str) -> Result<()> {
+        let session = self.session(id).await?;
+        let backend = session.inner.lock().await.take();
+        session
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        session
+            .active_turns
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        session
+            .abort_requested
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        session
+            .suppress_resume
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = session.abort_signal.send(false);
+        {
+            let _publish = session
+                .publish_lock
+                .lock()
+                .expect("chat-web publish mutex poisoned");
+            session
+                .history
+                .lock()
+                .expect("chat-web history mutex poisoned")
+                .clear();
+            if let Some(parent) = session.transcript.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&session.transcript, "")?;
+            let seq = session
+                .next_seq
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            let event = WireEvent {
+                seq,
+                kind: "reset".into(),
+                text: None,
+                id: None,
+                name: None,
+                args: None,
+                is_error: None,
+                done: None,
+                error: None,
+                tokens_used: None,
+                context_window: None,
+                attachments: vec![],
+            };
+            append_transcript(&session.transcript, &event)?;
+            session
+                .history
+                .lock()
+                .expect("chat-web history mutex poisoned")
+                .push_back(event.clone());
+            let _ = session.tx.send(event);
+        }
+        let _ = session.events.send(ChatEvent::SessionReset);
+        if let Some(backend) = backend {
+            tokio::spawn(async move {
+                let _ = backend.close().await;
+            });
+        }
+        Ok(())
+    }
 }
 
 fn migrate_tui_sessions(root: &std::path::Path) -> Result<()> {
@@ -404,64 +471,7 @@ impl chat::ChatCoordinator for AppState {
     }
 
     fn new_session<'a>(&'a self) -> dar_extension_sdk::BoxFuture<'a, Result<()>> {
-        Box::pin(async move {
-            let session = self.session("main").await?;
-            let backend = session.inner.lock().await.take();
-            session
-                .generation
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            session
-                .active_turns
-                .store(0, std::sync::atomic::Ordering::SeqCst);
-            session
-                .abort_requested
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-            session
-                .suppress_resume
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            let _ = session.abort_signal.send(false);
-            {
-                let _publish = session
-                    .publish_lock
-                    .lock()
-                    .expect("chat-web publish mutex poisoned");
-                session
-                    .history
-                    .lock()
-                    .expect("chat-web history mutex poisoned")
-                    .clear();
-                if let Some(parent) = session.transcript.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(&session.transcript, "")?;
-                let seq = session
-                    .next_seq
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                    + 1;
-                let event = WireEvent {
-                    seq,
-                    kind: "reset".into(),
-                    text: None,
-                    id: None,
-                    name: None,
-                    args: None,
-                    is_error: None,
-                    done: None,
-                    error: None,
-                    tokens_used: None,
-                    context_window: None,
-                    attachments: vec![],
-                };
-                let _ = session.tx.send(event);
-            }
-            let _ = session.events.send(ChatEvent::SessionReset);
-            if let Some(backend) = backend {
-                tokio::spawn(async move {
-                    let _ = backend.close().await;
-                });
-            }
-            Ok(())
-        })
+        Box::pin(async move { self.reset_session("main").await })
     }
 
     fn subscribe(&self) -> broadcast::Receiver<ChatEvent> {
@@ -1180,6 +1190,16 @@ async fn compact(
 #[derive(Deserialize)]
 struct Compact {
     command_id: String,
+}
+
+async fn new_session_route(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.reset_session(&id).await {
+        Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
 }
 
 #[cfg(test)]
@@ -2204,6 +2224,44 @@ mod tests {
         ] {
             assert!(html.contains(marker), "renderer contains {marker}");
         }
+    }
+
+    #[tokio::test]
+    async fn new_endpoint_resets_transcript_and_persists_reset() {
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let s = session(Box::new(FakeSession {
+            aborted: Arc::new(AtomicBool::new(false)),
+            sends: Arc::clone(&sends),
+            abort_fails: false,
+        }));
+        s.publish_user("hi".into(), vec![]);
+        let user_seq = load_transcript(&s.transcript).unwrap().back().unwrap().seq;
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: test_root(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+        });
+
+        assert_eq!(
+            router(state)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/test/new")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+
+        let events = load_transcript(&s.transcript).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "reset");
+        assert!(events[0].seq > user_seq);
     }
 
     #[test]
