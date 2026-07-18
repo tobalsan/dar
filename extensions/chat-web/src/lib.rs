@@ -84,7 +84,9 @@ impl Extension for ChatWebExtension {
                 chat::CHAT_COORDINATOR_SERVICE,
                 coordinator,
             )?;
-            DashboardTabs::shared(&mut ctx.services)?.add(Arc::new(ChatTab))?;
+            DashboardTabs::shared(&mut ctx.services)?.add(Arc::new(ChatTab {
+                agent_name: agent_display_name(ctx.paths.root()),
+            }))?;
             ctx.http.mount(host_api::HttpMount {
                 namespace: "/chat".into(),
                 router: router(state),
@@ -118,7 +120,9 @@ impl Extension for ChatWebExtension {
     }
 }
 
-struct ChatTab;
+struct ChatTab {
+    agent_name: String,
+}
 impl DashboardTab for ChatTab {
     fn id(&self) -> &str {
         TAB_ID
@@ -134,11 +138,48 @@ impl DashboardTab for ChatTab {
     }
     fn render(&self) -> Result<String> {
         Ok(format!(
-            r#"<style>{}</style><section class="chat-web" id="chat-root"><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite" aria-label="Conversation"></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips" aria-label="Pending attachments"></div><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message the agent" aria-label="Message" enterkeyhint="send"></textarea><div class="chat-bar"><button type="button" id="chat-attach" class="chat-ghost" aria-label="Attach files">Attach</button><input type="file" id="chat-attachments" multiple hidden aria-hidden="true" tabindex="-1"><span class="chat-status" id="chat-status" aria-live="polite"></span><span class="chat-spacer"></span><span class="chat-meter" id="chat-token-meter" aria-live="polite"></span><button type="button" id="chat-compact" class="chat-ghost">Compact</button><button type="button" id="chat-abort" class="danger" disabled>Abort</button><button type="submit" id="chat-send" disabled>Send</button></div></form></section><script>{}</script>"#,
+            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite" aria-label="Conversation"></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips" aria-label="Pending attachments"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files" title="Attach files"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button><input type="file" id="chat-attachments" multiple hidden aria-hidden="true" tabindex="-1"><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message the agent" aria-label="Message" enterkeyhint="send"></textarea><button type="button" id="chat-abort" class="chat-icon chat-icon-stop" aria-label="Stop the running turn" title="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon chat-icon-send" aria-label="Send message" title="Send" disabled><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg></button></div><div class="chat-bar"><span class="chat-status" id="chat-status" aria-live="polite"></span><span class="chat-spacer"></span><span class="chat-meter" id="chat-token-meter" aria-live="polite"></span></div></form></section><script>{}</script>"#,
             include_str!("chat.css"),
+            escape_html_attr(&self.agent_name),
             include_str!("renderer.js"),
         ))
     }
+}
+
+/// Reads `agent.yaml`'s `name` (falling back to `id`, then `"Agent"`) so the
+/// Chat tab can show which agent it's talking to. Any read/parse error also
+/// falls back to `"Agent"` — this is a display label, not a config gate.
+fn agent_display_name(root: &std::path::Path) -> String {
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct AgentYaml {
+        name: Option<String>,
+        id: Option<String>,
+    }
+    fs::read_to_string(root.join("agent.yaml"))
+        .ok()
+        .and_then(|contents| serde_yaml::from_str::<AgentYaml>(&contents).ok())
+        .and_then(|parsed| {
+            parsed
+                .name
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty())
+                .or_else(|| {
+                    parsed
+                        .id
+                        .map(|id| id.trim().to_owned())
+                        .filter(|id| !id.is_empty())
+                })
+        })
+        .unwrap_or_else(|| "Agent".to_owned())
+}
+
+fn escape_html_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 struct AppState {
@@ -2199,20 +2240,31 @@ mod tests {
 
     #[test]
     fn tab_fragment_has_a_usable_composer() {
-        let html = ChatTab.render().unwrap();
+        let tab = ChatTab {
+            agent_name: "Test Agent".into(),
+        };
+        let html = tab.render().unwrap();
         assert!(html.contains("id=\"chat-composer\""));
         // Belt-and-braces: even if the JS singleton fails to attach, the inline
         // handler blocks a native submit / full-page reload.
         assert!(html.contains("onsubmit=\"event.preventDefault()\""));
+        assert!(html.contains("data-agent-name="));
         assert!(html.contains("id=\"chat-input\"") && html.contains("<textarea"));
         assert!(html.contains("id=\"chat-attachments\"") && html.contains("hidden"));
-        assert!(html.contains("id=\"chat-send\"") && html.contains("id=\"chat-abort\""));
+        assert!(html.contains("id=\"chat-attach\""));
+        assert!(html.contains("id=\"chat-send\""));
+        let abort_pos = html.find("id=\"chat-abort\"").unwrap();
+        let abort_tag_end = abort_pos + html[abort_pos..].find('>').unwrap();
+        assert!(html[abort_pos..abort_tag_end].contains("hidden"));
+        assert!(!html.contains("chat-compact"));
+        assert!(!html.contains(">Compact<"));
         assert!(html.contains("@media (max-width: 520px)"));
         assert!(html.contains("overflow-wrap: anywhere"));
         assert!(!html.contains("\\\"chat-composer\\\""));
+        assert!(html.contains("Context cleared, started a new session."));
         // The self-refreshing tab owns its own EventSource + JS lifecycle.
-        assert!(ChatTab.self_refreshing());
-        assert!(ChatTab.passive_default());
+        assert!(tab.self_refreshing());
+        assert!(tab.passive_default());
         for marker in [
             "case 'thinking'",
             "case 'tool_call'",
@@ -2262,6 +2314,22 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "reset");
         assert!(events[0].seq > user_seq);
+    }
+
+    #[test]
+    fn agent_display_name_falls_back() {
+        let named = test_root();
+        fs::create_dir_all(&named).unwrap();
+        fs::write(named.join("agent.yaml"), "name: Twc\n").unwrap();
+        assert_eq!(agent_display_name(&named), "Twc");
+
+        let id_only = test_root();
+        fs::create_dir_all(&id_only).unwrap();
+        fs::write(id_only.join("agent.yaml"), "id: twc\n").unwrap();
+        assert_eq!(agent_display_name(&id_only), "twc");
+
+        let missing = test_root();
+        assert_eq!(agent_display_name(&missing), "Agent");
     }
 
     #[test]

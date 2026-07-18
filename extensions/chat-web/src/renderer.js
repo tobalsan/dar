@@ -12,7 +12,7 @@
     let next = blocks.map(block => ({ ...block })), text = event.text || '';
     switch (event.type) {
       case 'user': next.push({ kind: 'user', text, attachments: event.attachments || [] }); break;
-      case 'reset': return [];
+      case 'reset': return [{ kind: 'notice', text: 'Context cleared, started a new session.' }];
       case 'delta': case 'thinking': {
         let kind = event.type === 'thinking' ? 'thinking' : 'assistant', last = next.at(-1);
         if (last && last.kind === kind) last.text += text; else next.push({ kind, text });
@@ -32,7 +32,7 @@
     return next;
   };
 
-  const roleLabel = { user: 'You', assistant: 'Agent' };
+  const agentName = () => (typeof document !== 'undefined' && document.getElementById('chat-root') && document.getElementById('chat-root').dataset.agentName) || 'Agent';
 
   const html = blocks => blocks.map(block => {
     if (block.kind === 'tool') {
@@ -46,10 +46,14 @@
     if (block.kind === 'error') {
       return `<div class="chat-turn chat-error"><span class="chat-pill chat-pill-bad">error</span><div class="chat-error-body">${markdown(block.text)}</div></div>`;
     }
+    if (block.kind === 'notice') {
+      return `<div class="chat-notice">${esc(block.text)}</div>`;
+    }
+    let roleLabel = block.kind === 'user' ? 'You' : block.kind === 'assistant' ? esc(agentName()) : block.kind;
     let attachments = (block.attachments || []).map(a => a.image
       ? `<img class="chat-attachment-image" src="${esc(a.url)}" alt="${esc(a.name)}">`
       : `<a class="chat-attachment" href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.name)}</a>`).join('');
-    return `<div class="chat-turn chat-${block.kind}"><div class="chat-role">${roleLabel[block.kind] || block.kind}</div><div class="chat-body">${markdown(block.text)}${attachments ? `<div class="chat-attach-row">${attachments}</div>` : ''}</div></div>`;
+    return `<div class="chat-turn chat-${block.kind}"><div class="chat-role">${roleLabel}</div><div class="chat-body">${markdown(block.text)}${attachments ? `<div class="chat-attach-row">${attachments}</div>` : ''}</div></div>`;
   }).join('');
 
   const usageText = event => event.context_window ? `${event.tokens_used} / ${event.context_window} tokens` : `${event.tokens_used} tokens`;
@@ -74,7 +78,7 @@
   const refreshBusy = app => {
     let busy = app.turns > 0, status = $('chat-status'), abort = $('chat-abort'), send = $('chat-send');
     if (status) { status.className = 'chat-status' + (busy ? ' is-busy' : ''); status.textContent = busy ? 'working' : ''; }
-    if (abort) abort.disabled = !busy;
+    if (abort) { abort.disabled = !busy; abort.hidden = !busy; }
     if (send) send.disabled = !sendEnabled(app);
   };
 
@@ -98,6 +102,25 @@
     let input = $('chat-input');
     if (!input || !sendEnabled(app)) return;
     let message = input.value, files = app.pending.slice(), command_id = crypto.randomUUID();
+    let command = message.trim();
+    if (!files.length && command === '/new') {
+      app.draft = ''; input.value = ''; app.pending = []; renderChips(app); autogrow(input); refreshBusy(app);
+      try {
+        await fetch(`/chat/${SESSION}/new`, { method: 'POST' });
+      } catch (_) {
+        app.draft = message; input.value = message; app.pending = files; renderChips(app); autogrow(input); refreshBusy(app);
+      }
+      return;
+    }
+    if (!files.length && command === '/compact') {
+      app.draft = ''; input.value = ''; app.pending = []; renderChips(app); autogrow(input); refreshBusy(app);
+      try {
+        await fetch(`/chat/${SESSION}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: crypto.randomUUID() }) });
+      } catch (_) {
+        app.draft = message; input.value = message; app.pending = files; renderChips(app); autogrow(input); refreshBusy(app);
+      }
+      return;
+    }
     app.draft = ''; input.value = ''; app.pending = []; renderChips(app); autogrow(input); refreshBusy(app);
     try {
       if (files.length) {
@@ -126,7 +149,6 @@
       let chip = e.target.closest('.chat-chip-x');
       if (chip) { app.pending.splice(Number(chip.dataset.chip), 1); renderChips(app); refreshBusy(app); return; }
       if (e.target.closest('#chat-attach')) { let f = $('chat-attachments'); if (f) f.click(); return; }
-      if (e.target.closest('#chat-compact')) { fetch(`/chat/${SESSION}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: crypto.randomUUID() }) }); return; }
       let abort = e.target.closest('#chat-abort');
       if (abort && !abort.disabled) fetch(`/chat/${SESSION}/abort`, { method: 'POST' });
     });
