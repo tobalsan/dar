@@ -170,6 +170,9 @@ Breaking changes are marked **⚠ BREAKING**.
 - Worker prompt: added Git Usage guidance steering workers away from
   interactive/TTY-blocking git commands (ALG-291).
 
+### Removed
+- Web chat no longer accepts the obsolete `extensions.chat-web.sessions_dir` config key (ignored since sessions became shared with the TUI); remove it from `agent.yaml` if present.
+
 ## [0.3.1] — 2026-06-29
 
 Patch release: additive SDK/chat surface plus TUI session recall. No breaking

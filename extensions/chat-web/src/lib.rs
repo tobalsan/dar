@@ -38,8 +38,6 @@ const MAX_ATTACHMENTS: usize = 8;
 struct Config {
     backend: Option<String>,
     command: Option<String>,
-    // Retained for backwards-compatible config parsing; sessions are shared.
-    sessions_dir: Option<String>,
     idle_minutes: Option<u64>,
 }
 
