@@ -772,8 +772,10 @@ extensions:
 
 **Chat.** Backed by a long-lived `pi --mode rpc` child (cwd = the agent
 folder, so it can read issues, workspaces, and logs with its own tools), with
-session transcripts kept under `data/tui/sessions/`. The first message is
-prepended with a context preamble (run snapshot summary + `issues/` listing).
+session transcripts kept under `data/chat/sessions/` (shared with the web
+chat; old `data/tui/sessions/` transcripts are migrated on boot). The first
+message is prepended with a context preamble (run snapshot summary +
+`issues/` listing).
 Backend resolution at first message: `extensions.tui.chat.backend` if set,
 else the configured `runner.use` when it has a registered chat backend, else
 `pi` (with a transcript notice when the runner had no chat backend; chat is
@@ -791,6 +793,31 @@ dar down and kills running children, exactly like Ctrl-C on
 
 When stdout is not a terminal (piped/CI), the TUI degrades to the exact
 `foreground: logs` line stream.
+
+## Web chat (`extensions.chat-web`)
+
+Opt-in browser chat on the agent dashboard. Add an `extensions.chat-web`
+section to `agent.yaml` (`{}` is enough) and the dashboard grows a **Chat**
+tab plus HTTP routes under `/chat`; without the section the extension mounts
+nothing.
+
+```yaml
+extensions:
+  chat-web:
+    backend: pi        # optional; default: follow runner.use, then pi
+    command: ""        # optional backend binary override ("" = backend default)
+    idle_minutes: 360  # optional; shut an idle session's child down (default 360)
+```
+
+Backend resolution matches the TUI: `backend` if set, else `runner.use` when
+that id has a registered chat backend, else `pi`. The web chat and the TUI
+share one live session: transcripts live under `data/chat/sessions/`, a turn
+started on either surface streams into every open browser tab, and reconnects
+replay missed events (SSE with `Last-Event-ID`). Attachments are uploaded via
+multipart `POST /chat/{session}/upload` (max 8 files, 8 MiB body) and stored
+under `data/chat/uploads/`; the agent turn receives their local paths. The
+composer also exposes **Compact** (backend context compaction) and a token
+meter fed by backend-reported context usage.
 
 ## Persistence
 
