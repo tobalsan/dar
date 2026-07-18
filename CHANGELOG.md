@@ -23,6 +23,16 @@ Breaking changes are marked **⚠ BREAKING**.
 - Opt-in web chat dashboard tab with streaming replies and turn abort.
 - Web chat now renders streamed thinking, tool calls and updating tool output,
   markdown, and errors in the transcript.
+- Web chat honors `extensions.chat-web.enabled: false` as a runtime kill switch
+  (the extension still links and loads but mounts nothing), matching the
+  scheduler extension.
+- Dashboard tabs can now declare themselves self-refreshing (the shell's 2s
+  poll leaves them alone while active) and mark themselves as the default tab
+  for passive agents; the web chat tab uses both, so agents without an
+  orchestration loop open on Chat.
+- Web chat UI redesign: full-height conversation layout with role labels,
+  collapsible thinking and tool drawers, attachment chips, Enter-to-send
+  composer with Shift+Enter newline, and inline code rendering.
 
 - Added: live `dar self rebuild <agent>` triggers a trusted dashboard-host
   rebuild and confirms the restarted boot identity.
@@ -33,6 +43,9 @@ Breaking changes are marked **⚠ BREAKING**.
 - Fixed: `dar self rebuild` now reports rebuild progress and confirms success.
 - Fixed: Codex and OpenCode TUI chats now receive the configured agent system
   files instead of silently dropping their identity context.
+- Fixed: the web chat tab no longer breaks under the dashboard's periodic
+  refresh — the transcript, stream, and composer draft now survive tab
+  switches, and sending with Enter or Send no longer reloads the page.
 
 - External workflows now expand `$AGENT_HOME` in `workspace.root` to the agent identity folder while relative roots and `{{ workflow.dir }}` resolve to the canonical WORKFLOW.md folder.
 - Fleet dashboard: same-named workers using different workflow paths now get distinct, stable labels.
@@ -80,6 +93,9 @@ Breaking changes are marked **⚠ BREAKING**.
   parity.
 
 ### Fixed
+- CLI: `dar build` agent-local binaries now link the opt-in web chat extension
+  (and its chat backends) when `extensions.chat-web` is present; previously
+  the section was silently ignored.
 - CLI: standalone `dar self rebuild` now swaps the rebuilt binary and exits
   instead of re-executing itself indefinitely.
 - Secrets: `dar run` now detects valid agent `.env` content changes on its poll

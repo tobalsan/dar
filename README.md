@@ -804,6 +804,7 @@ nothing.
 ```yaml
 extensions:
   chat-web:
+    enabled: true      # optional runtime kill switch; linking is by section presence
     backend: pi        # optional; default: follow runner.use, then pi
     command: ""        # optional backend binary override ("" = backend default)
     idle_minutes: 360  # optional; shut an idle session's child down (default 360)
@@ -818,6 +819,12 @@ multipart `POST /chat/{session}/upload` (max 8 files, 8 MiB body) and stored
 under `data/chat/uploads/`; the agent turn receives their local paths. The
 composer also exposes **Compact** (backend context compaction) and a token
 meter fed by backend-reported context usage.
+
+When the agent is passive (no orchestration loop configured), the dashboard
+opens on the Chat tab by default; the composer sends with Enter (Shift+Enter
+inserts a newline), and while the chat tab is active the dashboard's periodic
+content refresh is suspended so the conversation and draft are never torn
+down.
 
 ## Persistence
 
