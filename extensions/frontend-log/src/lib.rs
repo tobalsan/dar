@@ -32,7 +32,8 @@ struct FrontendLogForeground;
 fn write_event(terminal: &mut ExclusiveTerminal, event: &LogEvent) -> std::io::Result<()> {
     writeln!(
         terminal.writer(),
-        "{} {} {}",
+        "{} {} {} {}",
+        event.time,
         event.level,
         event.target,
         event.message
@@ -172,6 +173,7 @@ mod tests {
             .publish(
                 STARTUP_BANNER_TOPIC,
                 Some(LogEvent {
+                    time: "2026-07-18 10:00:00".to_string(),
                     level: "INFO".to_string(),
                     target: "issue=- event=startup".to_string(),
                     message: "dar running; dashboard on http://127.0.0.1:7878/".to_string(),
@@ -196,7 +198,7 @@ mod tests {
 
         assert_eq!(
             buf.contents(),
-            "INFO issue=- event=startup dar running; dashboard on http://127.0.0.1:7878/\n"
+            "2026-07-18 10:00:00 INFO issue=- event=startup dar running; dashboard on http://127.0.0.1:7878/\n"
         );
     }
 
@@ -228,6 +230,7 @@ mod tests {
             .publish(
                 STARTUP_BANNER_TOPIC,
                 Some(LogEvent {
+                    time: "2026-07-18 10:00:00".to_string(),
                     level: "INFO".to_string(),
                     target: "issue=- event=startup".to_string(),
                     message: "late banner".to_string(),
@@ -244,6 +247,9 @@ mod tests {
 
         shutdown_tx.send(true).unwrap();
         task.await.unwrap().unwrap();
-        assert_eq!(buf.contents(), "INFO issue=- event=startup late banner\n");
+        assert_eq!(
+            buf.contents(),
+            "2026-07-18 10:00:00 INFO issue=- event=startup late banner\n"
+        );
     }
 }

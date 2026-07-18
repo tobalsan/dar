@@ -54,6 +54,11 @@ pub fn set_event_bus(bus: Arc<EventBus>) {
     extension_sdk::log::set_event_hook(ev);
 }
 
+/// The local wall-clock time, formatted as `LogEvent::time` expects it.
+pub(crate) fn now_stamp() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 /// Emit one structured lifecycle/runner event. `issue` is the issue identifier
 /// (or `"-"` for process-level events), `event` is the event kind, `msg` is the
 /// free-form message.
@@ -63,6 +68,7 @@ pub fn ev(issue: &str, event: &str, msg: &str) {
         let _ = bus.publish(
             LOG_EVENTS_TOPIC,
             LogEvent {
+                time: now_stamp(),
                 level: "INFO".to_string(),
                 target: format!("issue={issue} event={event}"),
                 message: msg.to_string(),

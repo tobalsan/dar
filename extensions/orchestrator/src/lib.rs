@@ -262,6 +262,7 @@ impl Extension for OrchestratorExtension {
                     .publish(
                         host_api::STARTUP_BANNER_TOPIC,
                         Some(host_api::LogEvent {
+                            time: logging::now_stamp(),
                             level: "INFO".to_string(),
                             target: "issue=- event=startup".to_string(),
                             message,
@@ -787,6 +788,7 @@ impl Orchestrator {
             let _ = bus.publish(
                 host_api::STARTUP_BANNER_TOPIC,
                 Some(host_api::LogEvent {
+                    time: logging::now_stamp(),
                     level: "INFO".to_string(),
                     target: "issue=- event=startup".to_string(),
                     message,

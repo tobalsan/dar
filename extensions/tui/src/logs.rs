@@ -1,7 +1,7 @@
 //! Logs tab state: a bounded ring of log rows fed from the `host.log-events`
 //! broadcast plus the retained one-shot startup banner, with follow-tail
 //! scrolling. Row text is identical to `frontend-log`'s
-//! `{level} {target} {message}` line format (see [`format_event`]).
+//! `{time} {level} {target} {message}` line format (see [`format_event`]).
 
 use std::collections::VecDeque;
 
@@ -11,11 +11,15 @@ use tokio::sync::{broadcast, watch};
 /// Max retained log rows; the oldest row is dropped when the ring is full.
 pub const LOG_CAP: usize = 2000;
 
-/// Render text for one event — exactly `frontend-log`'s line format (the
-/// non-interactive degrade path writes through this too, so the two outputs
-/// cannot drift apart).
+/// Render text for one event — exactly `frontend-log`'s
+/// `{time} {level} {target} {message}` line format (the non-interactive
+/// degrade path writes through this too, so the two outputs cannot drift
+/// apart).
 pub fn format_event(event: &LogEvent) -> String {
-    format!("{} {} {}", event.level, event.target, event.message)
+    format!(
+        "{} {} {} {}",
+        event.time, event.level, event.target, event.message
+    )
 }
 
 /// One row in the logs ring: a real event, or the synthetic marker for rows
@@ -202,6 +206,7 @@ mod tests {
 
     fn event(level: &str, target: &str, message: &str) -> LogEvent {
         LogEvent {
+            time: "2026-07-18 10:00:00".to_string(),
             level: level.to_string(),
             target: target.to_string(),
             message: message.to_string(),
@@ -220,8 +225,8 @@ mod tests {
 
     #[test]
     fn row_format_matches_frontend_logs_line_format() {
-        // frontend-log writes "{level} {target} {message}" per line; the
-        // logs tab must show byte-identical text for the same event.
+        // frontend-log writes "{time} {level} {target} {message}" per line;
+        // the logs tab must show byte-identical text for the same event.
         let row = LogRow::Event(event(
             "INFO",
             "issue=ISSUE-1 event=dispatched",
@@ -229,7 +234,7 @@ mod tests {
         ));
         assert_eq!(
             row.text(),
-            "INFO issue=ISSUE-1 event=dispatched runner started"
+            "2026-07-18 10:00:00 INFO issue=ISSUE-1 event=dispatched runner started"
         );
     }
 
@@ -245,10 +250,13 @@ mod tests {
             logs.push_event(event("INFO", "t", &format!("row-{i}")));
         }
         assert_eq!(logs.rows.len(), LOG_CAP);
-        assert_eq!(logs.rows.front().unwrap().text(), "INFO t row-10");
+        assert_eq!(
+            logs.rows.front().unwrap().text(),
+            "2026-07-18 10:00:00 INFO t row-10"
+        );
         assert_eq!(
             logs.rows.back().unwrap().text(),
-            format!("INFO t row-{}", LOG_CAP + 9)
+            format!("2026-07-18 10:00:00 INFO t row-{}", LOG_CAP + 9)
         );
     }
 
@@ -289,7 +297,14 @@ mod tests {
             feed.apply(delivery, &mut logs);
         }
         let texts: Vec<String> = logs.rows.iter().map(LogRow::text).collect();
-        assert_eq!(texts, ["INFO t one", "INFO t two", "INFO t three"]);
+        assert_eq!(
+            texts,
+            [
+                "2026-07-18 10:00:00 INFO t one",
+                "2026-07-18 10:00:00 INFO t two",
+                "2026-07-18 10:00:00 INFO t three"
+            ]
+        );
     }
 
     /// The M0 startup banner (the dashboard-URL LogEvent on the retained
@@ -315,7 +330,7 @@ mod tests {
         feed.apply(delivery, &mut logs);
         assert_eq!(
             logs.rows.back().unwrap().text(),
-            "INFO issue=- event=startup dar running; dashboard on http://127.0.0.1:7878/"
+            "2026-07-18 10:00:00 INFO issue=- event=startup dar running; dashboard on http://127.0.0.1:7878/"
         );
         // One-shot: the banner watch is no longer pending, so a re-publish
         // can never print it a second time.
@@ -334,7 +349,7 @@ mod tests {
         let feed = LogFeed::subscribe(&bus, &mut logs);
         assert_eq!(
             logs.rows.front().unwrap().text(),
-            "INFO issue=- event=startup early banner"
+            "2026-07-18 10:00:00 INFO issue=- event=startup early banner"
         );
         assert!(!feed.banner_pending);
     }
@@ -360,7 +375,11 @@ mod tests {
         let texts: Vec<String> = logs.rows.iter().map(LogRow::text).collect();
         assert_eq!(
             texts,
-            ["… 3 log lines skipped", "INFO t row-3", "INFO t row-4"]
+            [
+                "… 3 log lines skipped",
+                "2026-07-18 10:00:00 INFO t row-3",
+                "2026-07-18 10:00:00 INFO t row-4"
+            ]
         );
     }
 

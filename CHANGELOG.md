@@ -15,6 +15,7 @@ Breaking changes are marked **⚠ BREAKING**.
   transcript storage and browser stream fan-out.
 - Shared chat now resumes the newest backend session, expires idle sessions
   lazily, and migrates legacy TUI sessions into an empty shared store.
+- TUI Logs tab and `foreground: logs` output now prefix each line with the local date and time.
 - Web chat transcripts persist per session and reconnecting clients replay missed events.
 - Opt-in web chat dashboard tab with streaming replies and turn abort.
 - Web chat now renders streamed thinking, tool calls and updating tool output,

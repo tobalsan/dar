@@ -615,6 +615,7 @@ mod tests {
             .publish(
                 STARTUP_BANNER_TOPIC,
                 Some(LogEvent {
+                    time: "2026-07-18 10:00:00".to_string(),
                     level: "INFO".to_string(),
                     target: "issue=- event=startup".to_string(),
                     message: "dar running; dashboard on http://127.0.0.1:7878/".to_string(),
@@ -627,6 +628,7 @@ mod tests {
             .publish(
                 LOG_EVENTS_TOPIC,
                 LogEvent {
+                    time: "2026-07-18 10:00:00".to_string(),
                     level: "INFO".to_string(),
                     target: "issue=ISSUE-1 event=dispatched".to_string(),
                     message: "runner started".to_string(),
@@ -637,6 +639,7 @@ mod tests {
             .publish(
                 LOG_EVENTS_TOPIC,
                 LogEvent {
+                    time: "2026-07-18 10:00:00".to_string(),
                     level: "WARN".to_string(),
                     target: "issue=ISSUE-1 event=stalled".to_string(),
                     message: "no events for 30s".to_string(),
@@ -669,9 +672,9 @@ mod tests {
         assert_eq!(tui_output, logs_output);
         assert_eq!(
             tui_output,
-            "INFO issue=- event=startup dar running; dashboard on http://127.0.0.1:7878/\n\
-             INFO issue=ISSUE-1 event=dispatched runner started\n\
-             WARN issue=ISSUE-1 event=stalled no events for 30s\n"
+            "2026-07-18 10:00:00 INFO issue=- event=startup dar running; dashboard on http://127.0.0.1:7878/\n\
+             2026-07-18 10:00:00 INFO issue=ISSUE-1 event=dispatched runner started\n\
+             2026-07-18 10:00:00 WARN issue=ISSUE-1 event=stalled no events for 30s\n"
         );
     }
 

@@ -161,6 +161,9 @@ pub type ForegroundFactory = Arc<dyn Fn() -> Box<dyn Foreground> + Send + Sync>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogEvent {
+    /// Pre-formatted local wall-clock time (`YYYY-MM-DD HH:MM:SS`) stamped at
+    /// emission.
+    pub time: String,
     pub level: String,
     pub target: String,
     pub message: String,

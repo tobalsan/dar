@@ -435,6 +435,7 @@ mod tests {
 
     fn log_event(message: &str) -> host_api::LogEvent {
         host_api::LogEvent {
+            time: "2026-07-18 10:00:00".to_string(),
             level: "INFO".to_string(),
             target: "issue=- event=test".to_string(),
             message: message.to_string(),
@@ -465,7 +466,7 @@ mod tests {
             app.logs.push_event(log_event(&format!("row-{i}")));
         }
         let tail = rendered(&app);
-        assert!(tail.contains("INFO issue=- event=test row-39"));
+        assert!(tail.contains("2026-07-18 10:00:00 INFO issue=- event=test row-39"));
         assert!(!tail.contains("row-0 "));
 
         app.logs.scroll_up(1000);
@@ -516,6 +517,7 @@ mod tests {
         bus.publish(
             host_api::STARTUP_BANNER_TOPIC,
             Some(host_api::LogEvent {
+                time: "2026-07-18 10:00:00".to_string(),
                 level: "INFO".to_string(),
                 target: "issue=- event=startup".to_string(),
                 message: "dar running; dashboard on http://127.0.0.1:7878/".to_string(),
@@ -526,7 +528,7 @@ mod tests {
         feed.apply(delivery, &mut app.logs);
 
         let screen = rendered(&app);
-        assert!(screen.contains("INFO issue=- event=startup dar running; dashboard"));
+        assert!(screen.contains("2026-07-18 10:00:00 INFO issue=- event=startup dar running"));
     }
 
     // -- dash tab -----------------------------------------------------------
