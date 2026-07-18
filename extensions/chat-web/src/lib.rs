@@ -39,6 +39,11 @@ struct Config {
     backend: Option<String>,
     command: Option<String>,
     idle_minutes: Option<u64>,
+    /// Runtime kill switch: `false` skips mounting routes, the dashboard tab,
+    /// and the chat coordinator service, even though the extension still
+    /// links (build-time selection is by section presence). Mirrors the
+    /// scheduler extension's `enabled` flag.
+    enabled: Option<bool>,
 }
 
 #[derive(Default)]
@@ -60,6 +65,9 @@ impl Extension for ChatWebExtension {
             };
             let config: Config = serde_json::from_value(value.clone())
                 .context("invalid extensions.chat-web config")?;
+            if config.enabled == Some(false) {
+                return Ok(());
+            }
             let state = Arc::new(AppState {
                 config,
                 root: ctx.paths.root().to_path_buf(),
@@ -1344,6 +1352,37 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
         };
         assert!(state.session_is_idle(&persisted));
+    }
+
+    fn register_ctx(root: PathBuf, config_value: serde_json::Value) -> host_api::RegisterCtx {
+        let paths = host_api::HostPaths::new(root).unwrap();
+        let (_, shutdown) = watch::channel(false);
+        let mut values = HashMap::new();
+        values.insert("chat-web".to_string(), config_value);
+        host_api::RegisterCtx {
+            bus: host_api::EventBus::new(),
+            http: host_api::HttpRegistry::default(),
+            foreground: host_api::ForegroundRegistry::default(),
+            services: dar_extension_sdk::ServiceRegistry::default(),
+            paths,
+            config: host_api::ConfigStore::from_values(values),
+            shutdown: host_api::ShutdownToken::new(shutdown),
+        }
+    }
+
+    #[tokio::test]
+    async fn enabled_false_registers_nothing() {
+        let root = test_root();
+        fs::create_dir_all(&root).unwrap();
+        let mut ctx = register_ctx(root, serde_json::json!({ "enabled": false }));
+
+        let extension = ChatWebExtension::default();
+        extension.register(&mut ctx).await.unwrap();
+
+        assert!(
+            extension.state.get().is_none(),
+            "enabled: false must not mount any routes, tab, or coordinator service"
+        );
     }
 
     #[test]
