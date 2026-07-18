@@ -117,8 +117,9 @@ impl DashboardTab for ChatTab {
     }
     fn render(&self) -> Result<String> {
         Ok(format!(
-            r#"<section class="chat-web"><div id="chat-transcript"></div><div id="chat-token-meter" aria-live="polite"></div><form id="chat-composer"><input id="chat-input" autocomplete="off" placeholder="Message"><button>Send</button><button type="button" id="chat-compact">Compact</button><button type="button" id="chat-abort">Abort</button></form><script>{}</script></section>"#,
-            include_str!("renderer.js")
+            r#"<style>{}</style><section class="chat-web"><div id="chat-transcript"></div><div id="chat-token-meter" aria-live="polite"></div><form id="chat-composer"><input id="chat-input" autocomplete="off" placeholder="Message" aria-label="Message"><button type="submit">Send</button><button type="button" id="chat-compact">Compact</button><button type="button" id="chat-abort">Abort</button></form><script>{}</script></section>"#,
+            include_str!("chat.css"),
+            include_str!("renderer.js"),
         ))
     }
 }
@@ -1801,6 +1802,8 @@ mod tests {
     fn tab_fragment_has_a_usable_composer() {
         let html = ChatTab.render().unwrap();
         assert!(html.contains("id=\"chat-composer\""));
+        assert!(html.contains("@media (max-width: 520px)"));
+        assert!(html.contains("overflow-wrap: anywhere"));
         assert!(!html.contains("\\\"chat-composer\\\""));
         for marker in [
             "case 'thinking'",
