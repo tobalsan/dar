@@ -11,6 +11,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Added
 
+- Web chat accepts image and document attachments through multipart uploads, renders them inline, and supplies their local paths to the agent turn.
 - Web chat now has a responsive phone layout with touch-friendly controls and contained tool, thinking, and code blocks.
 - Web chat can compact the active conversation and shows backend-reported context usage.
 - Chat tabs and the TUI now join one live agent-wide chat session, with shared

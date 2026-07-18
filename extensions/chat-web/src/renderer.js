@@ -10,7 +10,7 @@ const markdown = s => {
 const reduce = (blocks, event) => {
   let next = blocks.map(block => ({ ...block })), text = event.text || '';
   switch (event.type) {
-    case 'user': next.push({ kind: 'user', text }); break;
+    case 'user': next.push({ kind: 'user', text, attachments: event.attachments || [] }); break;
     case 'reset': return [];
     case 'delta': case 'thinking': {
       let kind = event.type === 'thinking' ? 'thinking' : 'assistant', last = next.at(-1);
@@ -33,7 +33,7 @@ const reduce = (blocks, event) => {
 
 const html = blocks => blocks.map(block => block.kind === 'tool'
   ? `<article class="chat-tool" data-tool-id="${esc(block.id)}"><header>${esc(block.name)}</header><pre class="chat-tool-args">${esc(block.args)}</pre><pre class="chat-tool-output${block.is_error ? ' is-error' : ''}${block.done ? ' is-done' : ''}">${esc(block.text)}</pre></article>`
-  : `<article class="chat-${block.kind}">${markdown(block.text)}</article>`).join('');
+  : `<article class="chat-${block.kind}">${markdown(block.text)}${(block.attachments || []).map(attachment => attachment.image ? `<img class="chat-attachment-image" src="${esc(attachment.url)}" alt="${esc(attachment.name)}">` : `<a class="chat-attachment" href="${esc(attachment.url)}" target="_blank" rel="noopener noreferrer">${esc(attachment.name)}</a>`).join('')}</article>`).join('');
 
 const usageText = event => event.context_window ? `${event.tokens_used} / ${event.context_window} tokens` : `${event.tokens_used} tokens`;
 
@@ -47,7 +47,7 @@ if (typeof document !== 'undefined') {
   const id = 'main';
   const es = new EventSource(`/chat/${id}/stream`);
   es.onmessage = event => render(JSON.parse(event.data));
-  document.getElementById('chat-composer').onsubmit = async event => { event.preventDefault(); let input = document.getElementById('chat-input'); if (!input.value) return; await fetch(`/chat/${id}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: crypto.randomUUID(), message: input.value }) }); input.value = ''; };
+  document.getElementById('chat-composer').onsubmit = async event => { event.preventDefault(); let input = document.getElementById('chat-input'), files = document.getElementById('chat-attachments'); if (!input.value && !files.files.length) return; let command_id = crypto.randomUUID(); if (files.files.length) { let body = new FormData(); body.append('command_id', command_id); body.append('message', input.value); for (const file of files.files) body.append('attachment', file); await fetch(`/chat/${id}/upload`, { method: 'POST', body }); files.value = ''; } else await fetch(`/chat/${id}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id, message: input.value }) }); input.value = ''; };
   document.getElementById('chat-abort').onclick = () => fetch(`/chat/${id}/abort`, { method: 'POST' });
   document.getElementById('chat-compact').onclick = () => fetch(`/chat/${id}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: crypto.randomUUID() }) });
   }
