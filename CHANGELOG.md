@@ -11,6 +11,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Added
 
+- Web chat now has a responsive phone layout with touch-friendly controls and contained tool, thinking, and code blocks.
 - Web chat can compact the active conversation and shows backend-reported context usage.
 - Chat tabs and the TUI now join one live agent-wide chat session, with shared
   transcript storage and browser stream fan-out.
