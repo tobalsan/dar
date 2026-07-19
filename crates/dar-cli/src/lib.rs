@@ -232,6 +232,7 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
             },
         ),
         Command::LockRefresh(args) => composer::lock_refresh(&args.resolve_root()?),
+        Command::Compose(args) => composer::compose(&args.resolve_root()?).map(|_| ()),
         Command::Self_(args) => match args.command {
             cli::SelfCommand::Rebuild(args) => {
                 let options = composer::BuildOptions {

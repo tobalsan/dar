@@ -29,6 +29,11 @@ pub enum Command {
     Build(BuildArgs),
     /// Refresh the per-agent Cargo.lock.
     LockRefresh(DirArgs),
+    /// Regenerate the `.dar` composition crate without touching the lockfile.
+    /// Used by the self-rebuild bootstrap to detect composition drift under a
+    /// freshly built binary; must remain stable across versions, since the
+    /// bootstrap invokes it on newer binaries than the one that built it.
+    Compose(DirArgs),
     /// Manage this agent binary.
     #[command(name = "self")]
     Self_(SelfArgs),

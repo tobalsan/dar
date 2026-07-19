@@ -241,13 +241,19 @@ pub fn rebuild_with_options(
         .with_context(|| format!("resolving agent folder {}", _agent.display()))?;
     ensure_self_rebuild_output_runnable(&options)?;
     with_lock(&agent, || {
-        composer::compose(&agent)?;
+        let changed = composer::compose(&agent)?;
+        if lock_self_heal_needed(changed, &options) {
+            composer::update_lockfile(&agent)?;
+        }
         let new_binary = agent.join("bin/dar.new");
         if new_binary.exists() {
             fs::remove_file(&new_binary)
                 .with_context(|| format!("removing stale {}", new_binary.display()))?;
         }
-        composer::build_to_with_options(&agent, &new_binary, options)?;
+        composer::build_to_with_options(&agent, &new_binary, options.clone())?;
+        if bootstrap_needed(&options) {
+            bootstrap_through_new_binary(&agent, &new_binary, &options)?;
+        }
         doctor_gate(&agent, &ProcessDoctor)?;
         atomic_swap(&agent)?;
         match _restart {
@@ -255,6 +261,89 @@ pub fn rebuild_with_options(
             RestartMode::Skip => Ok(()),
         }
     })
+}
+
+/// Whether a compose-detected change warrants running `cargo update` before
+/// the build. Gated off for offline/vendor builds, which must not touch the
+/// network or the vendored dependency snapshot.
+fn lock_self_heal_needed(changed: bool, options: &composer::BuildOptions) -> bool {
+    changed && !options.offline && !options.vendor
+}
+
+/// Whether the bootstrap phase (re-invoking the freshly built binary to
+/// recompose with its own, possibly newer, composer) applies. Restricted to
+/// the default option set — the one both live rebuild and plain `--dir`
+/// rebuilds use — so offline/vendor/cross-target/static/universal builds,
+/// which cannot cheaply re-run `cargo update`/`cargo build` a second time,
+/// are left alone.
+fn bootstrap_needed(options: &composer::BuildOptions) -> bool {
+    !options.offline
+        && !options.vendor
+        && !options.universal
+        && !options.static_
+        && options.target.is_none()
+}
+
+/// Re-invoke the just-built binary's own `compose` so a newer composer
+/// (unknown to the binary that started this rebuild) gets a chance to
+/// recompose before the old composer's output ships. `compose` only rewrites
+/// the `.dar` composition crate — it never touches the lockfile — so this is
+/// a cheap, network-free check on every rebuild. Only when the new binary's
+/// composer actually disagrees with what was just built does this run `cargo
+/// update` to bring the lock back in sync and rebuild once more with the
+/// updated composition (`--locked`, via `build_to_with_options`).
+fn bootstrap_through_new_binary(
+    agent: &Path,
+    new_binary: &Path,
+    options: &composer::BuildOptions,
+) -> Result<()> {
+    let cargo_toml = agent.join(".dar/Cargo.toml");
+    let main_rs = agent.join(".dar/src/main.rs");
+    let rust_toolchain = agent.join(".dar/rust-toolchain.toml");
+    let cargo_toml_before = fs::read_to_string(&cargo_toml)
+        .with_context(|| format!("reading {}", cargo_toml.display()))?;
+    let main_rs_before =
+        fs::read_to_string(&main_rs).with_context(|| format!("reading {}", main_rs.display()))?;
+    let rust_toolchain_before = fs::read_to_string(&rust_toolchain)
+        .with_context(|| format!("reading {}", rust_toolchain.display()))?;
+
+    // The child's own `current_exe` lives inside the agent folder, so its
+    // `DAR_SRC`-less fallback (walk up from the executable) cannot find the
+    // dar checkout for agents that live outside it. Resolve the source root
+    // here, in the parent, and hand it down explicitly.
+    let source_root = composer::dar_source_root()?;
+    let output = Command::new(new_binary)
+        .env("DAR_SRC", &source_root)
+        .args(["compose", "--dir"])
+        .arg(agent)
+        .output()
+        .with_context(|| format!("running compose via {}", new_binary.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "bootstrap compose via {} failed with {}:\n{stderr}",
+            new_binary.display(),
+            output.status
+        );
+    }
+
+    let cargo_toml_after = fs::read_to_string(&cargo_toml)
+        .with_context(|| format!("reading {}", cargo_toml.display()))?;
+    let main_rs_after =
+        fs::read_to_string(&main_rs).with_context(|| format!("reading {}", main_rs.display()))?;
+    let rust_toolchain_after = fs::read_to_string(&rust_toolchain)
+        .with_context(|| format!("reading {}", rust_toolchain.display()))?;
+    if cargo_toml_after != cargo_toml_before
+        || main_rs_after != main_rs_before
+        || rust_toolchain_after != rust_toolchain_before
+    {
+        eprintln!(
+            "dar: composition changed under new binary; refreshing lockfile and rebuilding once more..."
+        );
+        composer::update_lockfile(agent)?;
+        composer::build_to_with_options(agent, new_binary, options.clone())?;
+    }
+    Ok(())
 }
 
 fn ensure_self_rebuild_output_runnable(options: &composer::BuildOptions) -> Result<()> {
@@ -571,14 +660,14 @@ fn trigger_live_entry(
         RelayOutcome::Accepted => {
             let _ = writeln!(
                 output,
-                "dar: rebuild accepted; waiting up to 60s for healthy restart..."
+                "dar: rebuild accepted; waiting up to 300s for healthy restart..."
             );
             true
         }
         RelayOutcome::DeliveryUnknown => {
             let _ = writeln!(
                 output,
-                "dar: rebuild request sent; waiting up to 60s for healthy restart..."
+                "dar: rebuild request sent; waiting up to 300s for healthy restart..."
             );
             false
         }
@@ -586,7 +675,7 @@ fn trigger_live_entry(
         RelayOutcome::NotSent => bail!("live rebuild request was not sent"),
         RelayOutcome::Rejected(status) => bail!("live rebuild request rejected with HTTP {status}"),
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(300);
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(250));
         if let Some(current) = registry
@@ -600,9 +689,9 @@ fn trigger_live_entry(
         }
     }
     if delivery_confirmed {
-        bail!("live rebuild accepted but restart was not confirmed within 60 seconds")
+        bail!("live rebuild accepted but restart was not confirmed within 300 seconds")
     }
-    bail!("live rebuild request was sent but restart was not confirmed within 60 seconds")
+    bail!("live rebuild request was sent but restart was not confirmed within 300 seconds")
 }
 
 fn same_presence_identity(
@@ -966,6 +1055,52 @@ mod tests {
     }
 
     #[test]
+    fn lock_self_heal_runs_only_when_composition_changed_and_network_allowed() {
+        let default_options = composer::BuildOptions::default();
+        assert!(lock_self_heal_needed(true, &default_options));
+        assert!(!lock_self_heal_needed(false, &default_options));
+
+        let offline = composer::BuildOptions {
+            offline: true,
+            ..composer::BuildOptions::default()
+        };
+        assert!(!lock_self_heal_needed(true, &offline));
+
+        let vendor = composer::BuildOptions {
+            vendor: true,
+            ..composer::BuildOptions::default()
+        };
+        assert!(!lock_self_heal_needed(true, &vendor));
+    }
+
+    #[test]
+    fn bootstrap_gated_off_for_offline_vendor_universal_static_and_explicit_target() {
+        let default_options = composer::BuildOptions::default();
+        assert!(bootstrap_needed(&default_options));
+
+        assert!(!bootstrap_needed(&composer::BuildOptions {
+            offline: true,
+            ..composer::BuildOptions::default()
+        }));
+        assert!(!bootstrap_needed(&composer::BuildOptions {
+            vendor: true,
+            ..composer::BuildOptions::default()
+        }));
+        assert!(!bootstrap_needed(&composer::BuildOptions {
+            universal: true,
+            ..composer::BuildOptions::default()
+        }));
+        assert!(!bootstrap_needed(&composer::BuildOptions {
+            static_: true,
+            ..composer::BuildOptions::default()
+        }));
+        assert!(!bootstrap_needed(&composer::BuildOptions {
+            target: Some("x86_64-unknown-linux-musl".to_string()),
+            ..composer::BuildOptions::default()
+        }));
+    }
+
+    #[test]
     fn live_name_resolution_without_default_lists_workflow_choices() {
         let external = presence("agent", "/agent", "/agent/workflows/other/WORKFLOW.md", 1);
 
@@ -1063,7 +1198,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(output).unwrap(),
             "dar: requesting live rebuild for `agent`...\n\
-             dar: rebuild accepted; waiting up to 60s for healthy restart...\n\
+             dar: rebuild accepted; waiting up to 300s for healthy restart...\n\
              dar: rebuild complete; `agent` restarted and is healthy\n"
         );
     }
@@ -1104,7 +1239,7 @@ mod tests {
         server.join().unwrap();
         assert_eq!(
             String::from_utf8(output).unwrap(),
-            "dar: rebuild request sent; waiting up to 60s for healthy restart...\n"
+            "dar: rebuild request sent; waiting up to 300s for healthy restart...\n"
         );
     }
 

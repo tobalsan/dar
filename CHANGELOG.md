@@ -11,6 +11,18 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Fixed
 
+- `dar self rebuild` now bootstraps through the freshly built binary: after
+  building, it re-invokes the new binary's own `dar compose` (a new,
+  lockfile-untouched subcommand) to detect composition drift, resolving the
+  dar source checkout itself and passing it down via `DAR_SRC` so this works
+  for agent folders outside the checkout. Only when composition actually
+  changed does it refresh the lockfile and rebuild once more. One pass now
+  picks up newly selected stock extensions (e.g. `chat-web`), self rebuild no
+  longer fails with a stale `--locked` lockfile after a newer composer ran
+  against the still-running old binary, and unaffected rebuilds no longer pay
+  for an unconditional `cargo update` (and its network round trip) on every
+  run. Live-rebuild restart confirmation now waits up to 300s (was 60s), since
+  a composition-changed live rebuild can now run two full release builds.
 - `dar dash`: agents are now reverse-proxied at `/agent/<port>/...` instead of
   being iframed over plain HTTP, enabling HTTPS fronts. HTML attributes, htmx
   verbs, and heuristic inline-JS URLs are rewritten while SSE/chat streams

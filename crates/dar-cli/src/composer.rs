@@ -306,7 +306,7 @@ fn selected_stock_extensions(
 /// extension crates. Honors `DAR_SRC`; otherwise walks up from the running
 /// binary to the checkout root. Resolved fresh each compose (never baked at
 /// compile time) so a relocated `dar` binary still emits correct paths.
-fn dar_source_root() -> Result<PathBuf> {
+pub(crate) fn dar_source_root() -> Result<PathBuf> {
     let is_root = |d: &Path| {
         d.join("crates/host-api/Cargo.toml").exists()
             && d.join("extensions/orchestrator/Cargo.toml").exists()
@@ -544,6 +544,14 @@ fn build_universal_to(crate_dir: &Path, dest: &Path, offline: bool) -> Result<()
 pub fn lock_refresh(agent: &Path) -> Result<()> {
     let (crate_dir, _) = write_composition_crate(agent)?;
     run_cargo(&crate_dir, ["update"])
+}
+
+/// Refresh `.dar/Cargo.lock` in place without recomposing. Used by self
+/// rebuild's lock self-heal: after `compose()` has already rewritten
+/// `Cargo.toml`, this brings the lock back in sync so a `--locked` build
+/// doesn't fail on entries only the new composition introduced.
+pub fn update_lockfile(agent: &Path) -> Result<()> {
+    run_cargo(&agent.join(".dar"), ["update"])
 }
 
 fn run_cargo_with_stderr<I, S>(crate_dir: &Path, args: I) -> Result<()>
