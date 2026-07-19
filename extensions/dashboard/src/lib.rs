@@ -7,7 +7,7 @@ pub mod view;
 
 use askama::Template;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -60,6 +60,7 @@ impl host_api::Extension for DashboardExtension {
                 .route("/control/pause", post(control_pause))
                 .route("/control/resume", post(control_resume))
                 .route("/assets/{*path}", get(asset))
+                .layer(axum::middleware::map_response(mark_prefix_aware))
                 .with_state(state);
             ctx.http.mount(host_api::HttpMount {
                 namespace: "/".to_string(),
@@ -243,7 +244,37 @@ fn passive_default_tab(api: &BusApiState) -> Option<(String, String)> {
     Some((tab.id().to_string(), fragment))
 }
 
-async fn index(State(api): State<BusApiState>) -> Response {
+/// Sanitize an inbound `x-forwarded-prefix` before it is echoed into the
+/// shell's `<script src>` and `window.__dashPrefix`. Accepts only
+/// `/agent/<port>`-shaped values: must start with `/`, contain only
+/// `[A-Za-z0-9/_.-]` (rules out quotes/angle-brackets breaking out of the
+/// `<script>` context), no `..` (path traversal) and no `//` (protocol-
+/// relative confusion). A single trailing slash is stripped. Anything else,
+/// including a missing header, sanitizes to `""` (direct-access behavior).
+fn sanitize_prefix(raw: &str) -> String {
+    let ok = raw.starts_with('/')
+        && !raw.contains("//")
+        && !raw.contains("..")
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'));
+    if !ok {
+        return String::new();
+    }
+    raw.strip_suffix('/').unwrap_or(raw).to_string()
+}
+
+/// Router-level `map_response` layer: marks every response from this
+/// extension's first-party HTML as managing its own `X-Forwarded-Prefix`
+/// awareness, so `dar dash`'s proxy skips its compatibility HTML rewriter.
+async fn mark_prefix_aware(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert("x-prefix-aware", HeaderValue::from_static("1"));
+    response
+}
+
+async fn index(State(api): State<BusApiState>, headers: axum::http::HeaderMap) -> Response {
     let Some(bus) = api.bus.get() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "dashboard bus unavailable").into_response();
     };
@@ -251,6 +282,11 @@ async fn index(State(api): State<BusApiState>) -> Response {
         .read_retained::<RunSnapshot>(RUN_SNAPSHOT_TOPIC)
         .unwrap_or_else(|_| RunSnapshot::empty());
     let tabs = tab_nav(&api);
+    let prefix = headers
+        .get("x-forwarded-prefix")
+        .and_then(|v| v.to_str().ok())
+        .map(sanitize_prefix)
+        .unwrap_or_default();
     // Passive agents (no orchestration loop) have nothing to show on the Runs
     // view; let the first tab that claims passive_default() be the initial
     // active tab instead. The active loop always publishes a non-empty tracker
@@ -258,9 +294,9 @@ async fn index(State(api): State<BusApiState>) -> Response {
     let passive = snapshot.agent.tracker.is_empty();
     let page = match passive.then(|| passive_default_tab(&api)).flatten() {
         Some((id, fragment)) => {
-            DashboardTemplate::page_with_active_tab(snapshot, tabs, id, fragment)
+            DashboardTemplate::page_with_active_tab(snapshot, tabs, id, fragment, prefix)
         }
-        None => DashboardTemplate::page_with_tabs(snapshot, tabs),
+        None => DashboardTemplate::page_with_tabs(snapshot, tabs, prefix),
     };
     match page.render() {
         Ok(html) => Html(html).into_response(),
@@ -728,7 +764,7 @@ mod tests {
         let registry = Arc::new(DashboardTabs::default());
         registry.add(Arc::new(ClaimTab)).unwrap();
         let _ = state.tabs.set(registry);
-        let resp = index(axum::extract::State(state)).await;
+        let resp = index(axum::extract::State(state), axum::http::HeaderMap::new()).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -756,7 +792,7 @@ mod tests {
         let registry = Arc::new(DashboardTabs::default());
         registry.add(Arc::new(ClaimTab)).unwrap();
         let _ = state.tabs.set(registry);
-        let resp = index(axum::extract::State(state)).await;
+        let resp = index(axum::extract::State(state), axum::http::HeaderMap::new()).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -791,5 +827,129 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn sanitize_prefix_accepts_agent_port_shape() {
+        assert_eq!(sanitize_prefix("/agent/50123"), "/agent/50123");
+        assert_eq!(
+            sanitize_prefix("/agent/50123/"),
+            "/agent/50123",
+            "single trailing slash stripped"
+        );
+    }
+
+    #[test]
+    fn sanitize_prefix_rejects_hostile_values() {
+        assert_eq!(sanitize_prefix(""), "");
+        assert_eq!(sanitize_prefix("agent/50123"), "", "must start with /");
+        assert_eq!(
+            sanitize_prefix("/\"><script>"),
+            "",
+            "script-breakout chars rejected"
+        );
+        assert_eq!(sanitize_prefix("/a/../b"), "", "path traversal rejected");
+        assert_eq!(
+            sanitize_prefix("//evil.example"),
+            "",
+            "protocol-relative rejected"
+        );
+    }
+
+    fn header_map(pairs: &[(&str, &str)]) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        for (k, v) in pairs {
+            headers.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        headers
+    }
+
+    #[tokio::test]
+    async fn index_with_forwarded_prefix_renders_prefixed_asset_and_dash_prefix() {
+        let state = make_state();
+        let _ = state.bus.set(Arc::new(host_api::EventBus::new()));
+        let resp = index(
+            axum::extract::State(state),
+            header_map(&[("x-forwarded-prefix", "/agent/50123")]),
+        )
+        .await;
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            html.contains(r#"src="/agent/50123/assets/htmx.min.js""#),
+            "htmx asset src prefixed: {html}"
+        );
+        assert!(
+            html.contains(r#"window.__dashPrefix = "/agent/50123";"#),
+            "dashPrefix set: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_without_forwarded_prefix_renders_direct_access() {
+        let state = make_state();
+        let _ = state.bus.set(Arc::new(host_api::EventBus::new()));
+        let resp = index(axum::extract::State(state), axum::http::HeaderMap::new()).await;
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            html.contains(r#"src="/assets/htmx.min.js""#),
+            "unprefixed htmx asset src: {html}"
+        );
+        assert!(
+            html.contains(r#"window.__dashPrefix = "";"#),
+            "empty dashPrefix: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn index_sanitizes_hostile_forwarded_prefix() {
+        let state = make_state();
+        let _ = state.bus.set(Arc::new(host_api::EventBus::new()));
+        let resp = index(
+            axum::extract::State(state),
+            header_map(&[("x-forwarded-prefix", "/a/../b")]),
+        )
+        .await;
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            html.contains(r#"src="/assets/htmx.min.js""#),
+            "hostile prefix sanitized to empty: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn content_response_carries_prefix_aware_header() {
+        use tower::ServiceExt;
+        let state = make_state();
+        let _ = state.bus.set(Arc::new(host_api::EventBus::new()));
+        let app = Router::new()
+            .route("/content", get(content))
+            .layer(axum::middleware::map_response(mark_prefix_aware))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/content")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.headers().get("x-prefix-aware").map(|v| v.as_bytes()),
+            Some(&b"1"[..]),
+            "first-party HTML opts out of the proxy's rewriter"
+        );
     }
 }
