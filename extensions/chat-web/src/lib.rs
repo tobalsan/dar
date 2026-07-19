@@ -12,10 +12,11 @@ use std::{
 use anyhow::{Context, Result};
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    middleware,
     response::{
         sse::{Event, KeepAlive, Sse},
-        Html, IntoResponse,
+        Html, IntoResponse, Response,
     },
     routing::{get, post},
     Json, Router,
@@ -260,18 +261,34 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/{session}/stream", get(stream))
-        .route("/{session}/history", get(history))
         .route("/{session}/send", post(send))
         .route("/{session}/upload", post(upload))
         .route("/{session}/attachment/{command}/{name}", get(attachment))
         .route("/{session}/abort", post(abort))
         .route("/{session}/compact", post(compact))
         .route("/{session}/new", post(new_session_route))
+        .layer(middleware::map_response(mark_prefix_aware))
+        // `/{session}/history` is a standalone page, never spliced into the
+        // dashboard shell, so no `window.__dashPrefix`/patched
+        // `fetch`/`EventSource` exist on it. Registered after the layer so it
+        // stays un-marked and the fleet proxy's compat rewriter prefixes its
+        // URLs (attachments, EventSource) as before.
+        .route("/{session}/history", get(history))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .with_state(state)
 }
 async fn index() -> Html<&'static str> {
     Html("chat web is available from the Chat dashboard tab")
+}
+
+// Tells the fleet proxy (`dar dash`) this response's URLs are already
+// prefix-correct at request time (shell JS shim), so it must skip its
+// regex HTML rewriter for this response.
+async fn mark_prefix_aware(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert("x-prefix-aware", HeaderValue::from_static("1"));
+    response
 }
 
 impl AppState {
@@ -2205,6 +2222,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_page_is_not_prefix_aware_but_other_routes_are() {
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: test_root(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::new()),
+        });
+        let get = |uri: &str| {
+            axum::http::Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let app = router(state);
+        let index = app.clone().oneshot(get("/")).await.unwrap();
+        assert_eq!(index.headers()["x-prefix-aware"], "1");
+        // The standalone history page has no shell shim; it must stay
+        // un-marked so the fleet proxy's compat rewriter prefixes its URLs.
+        let history = app.oneshot(get("/main/history")).await.unwrap();
+        assert!(history.headers().get("x-prefix-aware").is_none());
+    }
+
+    #[tokio::test]
     async fn lagged_subscriber_recovers_from_transcript() {
         let state = Arc::new(AppState {
             config: Config::default(),
@@ -2255,6 +2295,8 @@ mod tests {
         assert!(html.contains("id=\"chat-attachments\"") && html.contains("hidden"));
         assert!(html.contains("id=\"chat-attach\""));
         assert!(html.contains("id=\"chat-send\""));
+        // Guards against the renderer losing the fleet-proxy prefix read.
+        assert!(html.contains("window.__dashPrefix"));
         let abort_pos = html.find("id=\"chat-abort\"").unwrap();
         let abort_tag_end = abort_pos + html[abort_pos..].find('>').unwrap();
         assert!(html[abort_pos..abort_tag_end].contains("hidden"));

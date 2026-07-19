@@ -1,6 +1,8 @@
 (function () {
   const esc = s => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 
+  const PREFIX = (typeof window !== 'undefined' && window.__dashPrefix) || '';
+
   // crypto.randomUUID only exists in secure contexts (https/localhost); dashboards served over plain http (e.g. tailnet hostnames) need the fallback.
   const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
     let r = Math.random() * 16 | 0;
@@ -57,8 +59,8 @@
     }
     let roleLabel = block.kind === 'user' ? 'You' : block.kind === 'assistant' ? esc(agentName()) : block.kind;
     let attachments = (block.attachments || []).map(a => a.image
-      ? `<img class="chat-attachment-image" src="${esc(a.url)}" alt="${esc(a.name)}">`
-      : `<a class="chat-attachment" href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.name)}</a>`).join('');
+      ? `<img class="chat-attachment-image" src="${esc(PREFIX + a.url)}" alt="${esc(a.name)}">`
+      : `<a class="chat-attachment" href="${esc(PREFIX + a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.name)}</a>`).join('');
     return `<div class="chat-turn chat-${block.kind}"><div class="chat-role">${roleLabel}</div><div class="chat-body">${markdown(block.text)}${attachments ? `<div class="chat-attach-row">${attachments}</div>` : ''}</div></div>`;
   }).join('');
 
