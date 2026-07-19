@@ -176,7 +176,9 @@ pub struct SelfArgs {
 
 #[derive(Debug, Args)]
 pub struct SelfRebuildArgs {
-    /// Live agent id to rebuild. Requires dashboard presence.
+    /// Live agent id to rebuild. Requires dashboard presence. If omitted
+    /// along with `--dir`, targets the live agent whose dashboard presence
+    /// folder is the current directory (like `dar build`'s default).
     pub agent: Option<String>,
     /// Agent folder for an offline one-pass rebuild.
     #[arg(long)]
@@ -202,7 +204,8 @@ pub struct SelfRebuildArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum SelfCommand {
-    /// Rebuild a live agent, or rebuild --dir once without restarting.
+    /// Rebuild a live agent (defaults to the one in the current directory,
+    /// like `dar build`), or rebuild --dir once without restarting.
     Rebuild(SelfRebuildArgs),
 }
 

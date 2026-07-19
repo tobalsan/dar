@@ -537,7 +537,34 @@ fn run_rebuild_command_with_output(
             Ok(())
         }
         (None, None) => {
-            bail!("pass an agent name for a live rebuild or --dir for an offline rebuild")
+            if options.vendor
+                || options.offline
+                || options.target.is_some()
+                || options.static_
+                || options.universal
+            {
+                bail!("build flags are unsupported for live rebuilds; use --dir for an offline rebuild")
+            }
+            let cwd = std::env::current_dir().context("resolving current directory")?;
+            let cwd = cwd
+                .canonicalize()
+                .with_context(|| format!("resolving current directory {}", cwd.display()))?;
+            if !cwd.join("agent.yaml").is_file() {
+                bail!("pass an agent name for a live rebuild or --dir for an offline rebuild")
+            }
+            let _ = writeln!(
+                output,
+                "dar: requesting live rebuild for `{}`...",
+                cwd.display()
+            );
+            trigger_live_by_folder(
+                &cwd,
+                args.workflow.as_deref(),
+                args.registry_dir.as_deref(),
+                output,
+            )?;
+            let _ = writeln!(output, "dar: rebuild complete; restarted and is healthy");
+            Ok(())
         }
         (Some(_), Some(_)) => bail!("agent name and --dir cannot be used together"),
     }
@@ -578,6 +605,70 @@ fn trigger_live_by_name(
         select_default_live_entry(name, matches)?
     };
     trigger_live_entry(&registry, &entry, output)
+}
+
+/// Live-rebuild the agent whose dashboard presence folder matches `cwd`,
+/// mirroring `trigger_live_by_name` but keyed by folder instead of id (used
+/// by `dar self rebuild` with no arguments, like `dar build`'s cwd default).
+fn trigger_live_by_folder(
+    cwd: &Path,
+    workflow: Option<&Path>,
+    registry_dir: Option<&Path>,
+    output: &mut impl Write,
+) -> Result<()> {
+    let registry = dar_presence::Registry::new(
+        registry_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(dar_presence::default_registry_dir),
+    );
+    let mut matches = live_entries_for_folder(cwd, registry.read_live());
+    let entry = if let Some(workflow) = workflow {
+        let workflow = if workflow.is_dir() {
+            workflow.join("WORKFLOW.md")
+        } else {
+            workflow.to_path_buf()
+        }
+        .canonicalize()
+        .with_context(|| format!("resolving --workflow {}", workflow.display()))?;
+        matches.retain(|entry| {
+            entry
+                .workflow
+                .as_deref()
+                .is_some_and(|candidate| Path::new(candidate) == workflow)
+        });
+        select_live_entry(&cwd.display().to_string(), matches)?
+    } else {
+        select_default_live_entry_for_folder(cwd, matches)?
+    };
+    trigger_live_entry(&registry, &entry, output)
+}
+
+fn live_entries_for_folder(
+    cwd: &Path,
+    entries: Vec<dar_presence::PresenceEntry>,
+) -> Vec<dar_presence::PresenceEntry> {
+    entries
+        .into_iter()
+        .filter(|entry| Path::new(&entry.folder) == cwd)
+        .collect()
+}
+
+/// Like `select_default_live_entry`, but for the folder-keyed selector: an
+/// empty match set gets a message speaking of the agent folder (there is no
+/// agent id to quote — this lookup is keyed by folder, not id) and pointing
+/// at the two escape hatches (a named agent, or `--dir` for an offline
+/// rebuild) instead of the generic "no live dashboard presence" text.
+fn select_default_live_entry_for_folder(
+    cwd: &Path,
+    matches: Vec<dar_presence::PresenceEntry>,
+) -> Result<dar_presence::PresenceEntry> {
+    if matches.is_empty() {
+        bail!(
+            "no live dashboard presence found for agent folder {}; pass an agent name, or use --dir for an offline rebuild",
+            cwd.display()
+        );
+    }
+    select_default_live_entry(&cwd.display().to_string(), matches)
 }
 
 fn trigger_live_by_identity(
@@ -1052,6 +1143,42 @@ mod tests {
 
         let none = select_default_live_entry("agent", vec![]).unwrap_err();
         assert!(none.to_string().contains("no live dashboard presence"));
+    }
+
+    #[test]
+    fn live_folder_resolution_filters_by_folder_not_id() {
+        let cwd = Path::new("/agent");
+        let here = passive_presence("agent", "/agent", 1);
+        let elsewhere = passive_presence("other-id", "/elsewhere", 1);
+
+        assert_eq!(
+            live_entries_for_folder(cwd, vec![here.clone(), elsewhere]),
+            vec![here]
+        );
+    }
+
+    #[test]
+    fn live_folder_resolution_without_selector_targets_default_process() {
+        let cwd = Path::new("/agent");
+        let default = passive_presence("agent", "/agent", 1);
+        let external = presence("agent", "/agent", "/agent/workflows/other/WORKFLOW.md", 1);
+
+        assert_eq!(
+            select_default_live_entry_for_folder(cwd, vec![default.clone(), external]).unwrap(),
+            default
+        );
+    }
+
+    #[test]
+    fn live_folder_resolution_with_no_matches_guides_toward_alternatives() {
+        let cwd = Path::new("/agent");
+
+        let error = select_default_live_entry_for_folder(cwd, vec![]).unwrap_err();
+
+        assert!(error.to_string().contains("no live dashboard presence"));
+        assert!(error.to_string().contains("agent folder"));
+        assert!(error.to_string().contains("pass an agent name"));
+        assert!(error.to_string().contains("--dir"));
     }
 
     #[test]

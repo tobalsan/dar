@@ -39,6 +39,9 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Added
 
+- `dar self rebuild` with no arguments now rebuilds the live agent whose
+  dashboard presence folder is the current directory, matching `dar build`'s
+  default.
 - Web chat accepts image and document attachments through multipart uploads, renders them inline, and supplies their local paths to the agent turn.
 - Web chat now has a responsive phone layout with touch-friendly controls and contained tool, thinking, and code blocks.
 - Web chat can compact the active conversation and shows backend-reported context usage.
