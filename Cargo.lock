@@ -534,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "dar-agent-env"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "dar-host-api",
@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "dar-artifacts"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "fs2",
  "hex",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "dar-cap-chat"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "dar-artifacts",
@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "dar-cap-dashboard-tab"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "dar-host-api",
@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "dar-cap-runner"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -589,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "dar-cap-tracker"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "dar-chat-codex"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "dar-cap-chat",
@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "dar-chat-opencode"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "dar-cap-chat",
@@ -629,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "dar-chat-pi"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "dar-cap-chat",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "dar-chat-web"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -667,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "dar-cli"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "dar-cli-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "dar-dashboard"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "askama",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "dar-extension-sdk"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "dar-artifacts",
@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "dar-frontend-log"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "dar-host-api",
@@ -790,7 +790,7 @@ dependencies = [
 
 [[package]]
 name = "dar-host"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "dar-host-api"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -817,7 +817,7 @@ dependencies = [
 
 [[package]]
 name = "dar-opencode-client"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -833,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "dar-orchestrator"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -872,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "dar-orchestrator-api"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "serde",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "dar-presence"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -894,7 +894,7 @@ dependencies = [
 
 [[package]]
 name = "dar-runner-builtin"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "dar-runner-cli"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "dar-runner-codex"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "dar-runner-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "dar-runner-fake"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "dar-runner-opencode"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -985,7 +985,7 @@ dependencies = [
 
 [[package]]
 name = "dar-runner-pi"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "dar-scheduler"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1028,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "dar-system-context"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "dar-host-api",
@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "dar-system-files"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "dar-orchestrator-api",
  "serde",
@@ -1051,7 +1051,7 @@ dependencies = [
 
 [[package]]
 name = "dar-tool-registry"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1063,7 +1063,7 @@ dependencies = [
 
 [[package]]
 name = "dar-tool-registry-host"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "dar-tool-shim"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "dar-tracker-files"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1105,7 +1105,7 @@ dependencies = [
 
 [[package]]
 name = "dar-tracker-linear"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "dar-tracker-plane"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "dar-tui"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "example"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "dar-cap-dashboard-tab",

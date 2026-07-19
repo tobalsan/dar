@@ -7,7 +7,7 @@ the minor slot carries breaking changes, the patch slot carries compatible ones)
 
 Breaking changes are marked **⚠ BREAKING**.
 
-## [Unreleased]
+## [0.4.0] — 2026-07-19
 
 ### Fixed
 
@@ -377,6 +377,7 @@ loop.
   startup; record runs for failed dispatch attempts; honor Linear complexity
   rate limits.
 
+[0.4.0]: https://github.com/tobalsan/dar/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/tobalsan/dar/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/tobalsan/dar/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tobalsan/dar/compare/v0.1.0...v0.2.0

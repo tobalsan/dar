@@ -10,8 +10,8 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-host-api = { package = "dar-host-api", path = "../host-api", version = "0.3" }
-runner-core = { package = "dar-runner-core", path = "../runner-core", version = "0.3" }
+host-api = { package = "dar-host-api", path = "../host-api", version = "0.4" }
+runner-core = { package = "dar-runner-core", path = "../runner-core", version = "0.4" }
 
 [dev-dependencies]
 tempfile = "3"

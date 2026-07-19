@@ -12,7 +12,7 @@ publish = false
 name = "system_files"
 
 [dependencies]
-orchestrator-api = { package = "dar-orchestrator-api", path = "../orchestrator-api", version = "0.3" }
+orchestrator-api = { package = "dar-orchestrator-api", path = "../orchestrator-api", version = "0.4" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

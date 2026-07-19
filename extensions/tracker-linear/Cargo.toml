@@ -13,18 +13,18 @@ name = "tracker_linear"
 
 [dependencies]
 anyhow = "1"
-cap-tracker = { package = "dar-cap-tracker", path = "../../crates/cap-tracker", version = "0.3" }
+cap-tracker = { package = "dar-cap-tracker", path = "../../crates/cap-tracker", version = "0.4" }
 chrono = { version = "0.4", features = ["serde"] }
-host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.3" }
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.4" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 tokio = { version = "1.43", features = ["rt-multi-thread", "time", "macros", "net", "io-util"] }
-tool-registry = { package = "dar-tool-registry", path = "../../crates/tool-registry", version = "0.3" }
+tool-registry = { package = "dar-tool-registry", path = "../../crates/tool-registry", version = "0.4" }
 tracing = "0.1"
 async-trait = "0.1"
 
 [dev-dependencies]
-agent-env = { package = "dar-agent-env", path = "../../crates/agent-env", version = "0.3" }
+agent-env = { package = "dar-agent-env", path = "../../crates/agent-env", version = "0.4" }
 tempfile = "3"

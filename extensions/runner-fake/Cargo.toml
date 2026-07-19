@@ -13,9 +13,9 @@ name = "runner_fake"
 
 [dependencies]
 anyhow = "1"
-cap-runner = { package = "dar-cap-runner", path = "../../crates/cap-runner", version = "0.3" }
-host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.3" }
-runner-core = { package = "dar-runner-core", path = "../../crates/runner-core", version = "0.3" }
+cap-runner = { package = "dar-cap-runner", path = "../../crates/cap-runner", version = "0.4" }
+host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.4" }
+runner-core = { package = "dar-runner-core", path = "../../crates/runner-core", version = "0.4" }
 
 [dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }

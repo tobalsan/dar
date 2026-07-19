@@ -1052,7 +1052,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
         write_test_agent_yaml(agent);
-        write_test_extension_with_dependency(agent, "dar-extension-sdk = \"0.3\"");
+        write_test_extension_with_dependency(
+            agent,
+            &format!("dar-extension-sdk = \"{LOCAL_CRATE_VERSION}\""),
+        );
 
         compose(agent).unwrap();
 
@@ -1082,7 +1085,7 @@ mod tests {
         write_test_agent_yaml(agent);
         write_test_extension_with_dependency(
             agent,
-            "sdk = { package = \"dar-extension-sdk\", version = \"0.3\" }",
+            &format!("sdk = {{ package = \"dar-extension-sdk\", version = \"{LOCAL_CRATE_VERSION}\" }}"),
         );
 
         compose(agent).unwrap();
