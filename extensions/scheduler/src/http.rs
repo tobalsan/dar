@@ -349,7 +349,10 @@ async fn tail(State(api): State<ApiState>, Path(id): Path<String>) -> Response {
 /// never escape `cron/output/{id}/`: unknown job, invalid name, and missing
 /// file all render a 404 drawer; an fs read error renders a 500 drawer. Both
 /// carry the error message so the failure is visible in the UI, not just logs.
-async fn output_detail(State(api): State<ApiState>, Path((id, name)): Path<(String, String)>) -> Response {
+async fn output_detail(
+    State(api): State<ApiState>,
+    Path((id, name)): Path<(String, String)>,
+) -> Response {
     let jobs = api.state.jobs();
     let Some(job) = jobs.iter().find(|j| j.id == id) else {
         return error_drawer(
@@ -1207,7 +1210,13 @@ mod tests {
     async fn output_detail_rejects_unsafe_names() {
         let (api, _dir) = api();
         let id = create_one(&api).await;
-        for bad in ["../../etc/passwd", "sub/dir.md", "..md", "a/b.md", "no-md-suffix"] {
+        for bad in [
+            "../../etc/passwd",
+            "sub/dir.md",
+            "..md",
+            "a/b.md",
+            "no-md-suffix",
+        ] {
             let resp = output_detail(State(api.clone()), Path((id.clone(), bad.to_string()))).await;
             assert_eq!(resp.status(), StatusCode::NOT_FOUND, "rejected: {bad}");
         }
@@ -1217,11 +1226,8 @@ mod tests {
     async fn output_detail_missing_file_is_404() {
         let (api, _dir) = api();
         let id = create_one(&api).await;
-        let resp = output_detail(
-            State(api),
-            Path((id, "2026-01-01_00-00-00.md".to_string())),
-        )
-        .await;
+        let resp =
+            output_detail(State(api), Path((id, "2026-01-01_00-00-00.md".to_string()))).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
@@ -1236,16 +1242,16 @@ mod tests {
             "<script>alert(1)</script>",
         )
         .unwrap();
-        let resp = output_detail(
-            State(api),
-            Path((id, "2026-01-01_00-00-00.md".to_string())),
-        )
-        .await;
+        let resp =
+            output_detail(State(api), Path((id, "2026-01-01_00-00-00.md".to_string()))).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let html = String::from_utf8(bytes.to_vec()).unwrap();
         assert!(html.contains("&lt;script&gt;"), "content escaped: {html}");
-        assert!(!html.contains("<script>alert"), "raw script not injected: {html}");
+        assert!(
+            !html.contains("<script>alert"),
+            "raw script not injected: {html}"
+        );
     }
 
     #[tokio::test]
@@ -1311,10 +1317,19 @@ mod tests {
             html.contains("&lt;script&gt;alert(1)&lt;/script&gt; full prompt text"),
             "full prompt escaped: {html}"
         );
-        assert!(!html.contains("<script>alert"), "raw script not injected: {html}");
-        assert!(html.contains("Outputs (4)"), "total output count shown: {html}");
+        assert!(
+            !html.contains("<script>alert"),
+            "raw script not injected: {html}"
+        );
+        assert!(
+            html.contains("Outputs (4)"),
+            "total output count shown: {html}"
+        );
         for ts in timestamps {
-            assert!(html.contains(ts), "output {ts} listed in full history: {html}");
+            assert!(
+                html.contains(ts),
+                "output {ts} listed in full history: {html}"
+            );
         }
     }
 

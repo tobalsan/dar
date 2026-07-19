@@ -1072,14 +1072,17 @@ fn attachment_prompt(message: &str, attachments: &[Attachment], root: &std::path
     let paths = attachments
         .iter()
         .filter_map(|attachment| {
-            attachment.url.split_once("/attachment/").map(|(prefix, path)| {
-                let session = prefix.rsplit('/').next().unwrap_or_default();
-                root.join("data/chat/uploads")
-                    .join(session)
-                    .join(path)
-                    .display()
-                    .to_string()
-            })
+            attachment
+                .url
+                .split_once("/attachment/")
+                .map(|(prefix, path)| {
+                    let session = prefix.rsplit('/').next().unwrap_or_default();
+                    root.join("data/chat/uploads")
+                        .join(session)
+                        .join(path)
+                        .display()
+                        .to_string()
+                })
         })
         .collect::<Vec<_>>();
     if paths.is_empty() {
@@ -2177,15 +2180,8 @@ mod tests {
         let mut replay = String::new();
         for _ in 0..2 {
             replay.push_str(
-                core::str::from_utf8(
-                    &body.frame()
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .into_data()
-                        .unwrap(),
-                )
-                .unwrap(),
+                core::str::from_utf8(&body.frame().await.unwrap().unwrap().into_data().unwrap())
+                    .unwrap(),
             );
         }
         assert!(

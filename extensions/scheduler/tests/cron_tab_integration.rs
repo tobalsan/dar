@@ -174,8 +174,14 @@ async fn cron_tab_present_when_scheduler_enabled_and_shows_job() {
         "schedule + tz shown"
     );
     assert!(frag.contains("daily at 08:00"), "humanized schedule shown");
-    assert!(!frag.contains(">disabled<"), "no disabled pill for enabled job");
-    assert!(frag.contains(">Disable<"), "disable control offered for enabled job");
+    assert!(
+        !frag.contains(">disabled<"),
+        "no disabled pill for enabled job"
+    );
+    assert!(
+        frag.contains(">Disable<"),
+        "disable control offered for enabled job"
+    );
     assert!(
         frag.contains("hx-get=\"/scheduler/jobs/digest/detail\""),
         "job name opens the job-detail drawer: {frag}"
@@ -196,7 +202,9 @@ async fn cron_tab_present_when_scheduler_enabled_and_shows_job() {
     // The index shell keeps the #content innerHTML self-poll that drives the
     // active tab's refresh.
     assert!(
-        html.contains("htmx.ajax('GET', window.__dashTab, { target: '#content', swap: 'innerHTML' })"),
+        html.contains(
+            "htmx.ajax('GET', window.__dashTab, { target: '#content', swap: 'innerHTML' })"
+        ),
         "shared content poller present"
     );
     assert!(

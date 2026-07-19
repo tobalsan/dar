@@ -565,7 +565,10 @@ mod tests {
         // poller drives refresh, so the fragment declares no inner poll, and
         // with zero jobs there are no output rows or job-detail links either.
         assert!(!html.contains("<body"));
-        assert!(!html.contains("hx-get"), "no poll and no clickable rows: {html}");
+        assert!(
+            !html.contains("hx-get"),
+            "no poll and no clickable rows: {html}"
+        );
     }
 
     #[test]
@@ -589,7 +592,10 @@ mod tests {
         let tab = tab_with(state, dir.path().to_path_buf());
         let html = tab.render().unwrap();
         assert!(html.contains("Morning digest"), "job name shown: {html}");
-        assert!(html.contains("daily at 08:00"), "humanized schedule: {html}");
+        assert!(
+            html.contains("daily at 08:00"),
+            "humanized schedule: {html}"
+        );
         assert!(
             html.contains("0 8 * * * · Europe/Paris"),
             "raw schedule + tz shown: {html}"
@@ -635,7 +641,10 @@ mod tests {
         let html = tab.render().unwrap();
         assert!(html.contains(">disabled<"), "disabled flag shown");
         assert!(html.contains("never run"), "never-run status shown");
-        assert!(html.contains(">Enable<"), "enable control offered when disabled");
+        assert!(
+            html.contains(">Enable<"),
+            "enable control offered when disabled"
+        );
     }
 
     #[test]
@@ -644,8 +653,14 @@ mod tests {
         let state = Arc::new(SchedulerState::new(vec![job("j", "Job", true)]));
         let tab = tab_with(state, dir.path().to_path_buf());
         let html = tab.render().unwrap();
-        assert!(html.contains(">Disable<"), "disable control offered when enabled");
-        assert!(!html.contains(">disabled<"), "no disabled pill when enabled");
+        assert!(
+            html.contains(">Disable<"),
+            "disable control offered when enabled"
+        );
+        assert!(
+            !html.contains(">disabled<"),
+            "no disabled pill when enabled"
+        );
     }
 
     #[test]
@@ -679,7 +694,9 @@ mod tests {
         let tab = tab_with(state, dir.path().to_path_buf());
         let html = tab.render().unwrap();
         assert!(
-            html.contains("<button class=\"cron-btn\" disabled onclick=\"fetch('/scheduler/jobs/j/run-now'"),
+            html.contains(
+                "<button class=\"cron-btn\" disabled onclick=\"fetch('/scheduler/jobs/j/run-now'"
+            ),
             "run now disabled for a disabled job: {html}"
         );
     }
@@ -704,7 +721,9 @@ mod tests {
         let tab = tab_with(state, dir.path().to_path_buf());
         let html = tab.render().unwrap();
         assert!(
-            html.contains("<button class=\"cron-btn\" disabled onclick=\"fetch('/scheduler/jobs/j/run-now'"),
+            html.contains(
+                "<button class=\"cron-btn\" disabled onclick=\"fetch('/scheduler/jobs/j/run-now'"
+            ),
             "run now disabled while running: {html}"
         );
     }
@@ -863,10 +882,7 @@ mod tests {
             "in 2d 4h"
         );
         assert_eq!(fmt_relative(now, now - 45_000), "45s ago");
-        assert_eq!(
-            fmt_relative(now, now - (12 * 3600) * 1000),
-            "12h ago"
-        );
+        assert_eq!(fmt_relative(now, now - (12 * 3600) * 1000), "12h ago");
     }
 
     // ---- humanize_output_name -------------------------------------------------
