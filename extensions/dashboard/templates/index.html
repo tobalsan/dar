@@ -4,7 +4,35 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>dar - {{ content.agent.id }}</title>
-  <script src="/assets/htmx.min.js"></script>
+  <script src="{{ prefix }}/assets/htmx.min.js"></script>
+  <script>
+    // ORDERING INVARIANT: this script must stay here, in <head>, before any
+    // fragment JS runs. A passive_default tab's fragment (e.g. chat) is
+    // inlined straight into #content below, above the bottom-of-body script;
+    // its inline JS (EventSource) must observe __dashPrefix and the patched
+    // fetch/EventSource already installed, or it connects unprefixed.
+    window.__dashPrefix = "{{ prefix }}";
+    (function () {
+      var prefix = window.__dashPrefix;
+      if (!prefix) return; // direct access: native fetch/EventSource untouched
+      function prefixed(url) {
+        if (typeof url !== 'string') return url;
+        // not root-absolute, or protocol-relative ("//host/...") -> leave alone
+        if (url.indexOf('/') !== 0 || url.indexOf('//') === 0) return url;
+        if (url.indexOf(prefix + '/') === 0) return url; // already prefixed
+        return prefix + url;
+      }
+      var nativeFetch = window.fetch;
+      window.fetch = function (input, init) {
+        return nativeFetch.call(this, typeof input === 'string' ? prefixed(input) : input, init);
+      };
+      var NativeEventSource = window.EventSource;
+      window.EventSource = function (url, opts) {
+        return new NativeEventSource(prefixed(url), opts);
+      };
+      window.EventSource.prototype = NativeEventSource.prototype;
+    })();
+  </script>
   <style>
     :root {
       --bg: #111317; --panel: #1b1f26; --panel-2: #202630; --border: #303844;
@@ -138,9 +166,14 @@
     })();
     document.body.addEventListener('htmx:configRequest', function (ev) {
       var path = ev.detail.path || '';
-      // Only the run view carries pagination page-state.
+      // Only the run view carries pagination page-state. Must match the
+      // unprefixed path, so this runs before the prefix is prepended below.
       if (path.indexOf('/content') === 0) {
         ev.detail.parameters['page'] = window.__dashPage;
+      }
+      var prefix = window.__dashPrefix;
+      if (prefix && path.indexOf('/') === 0 && path.indexOf(prefix + '/') !== 0) {
+        ev.detail.path = prefix + path;
       }
     });
     // Switch the active tab: repoint the poller at the tab's fragment URL and

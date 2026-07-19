@@ -15,6 +15,8 @@ name = "dar_cli_core"
 anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["stream"] }
+regex = "1"
 clap = { version = "4.5", features = ["derive"] }
 fs2 = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -34,3 +36,4 @@ system-context = { package = "dar-system-context", path = "../../extensions/syst
 
 [dev-dependencies]
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

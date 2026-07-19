@@ -4,35 +4,36 @@
 //! live agent dashboard on this host. It owns no cross-process state: each
 //! request rebuilds entirely from the presence registry (read + prune dead).
 //!
-//! Two endpoints:
+//! The shell exposes discovery endpoints plus a streaming reverse proxy for
+//! each live agent.  Browser requests to `/agent/<port>/...` stay same-origin
+//! with the fleet shell while this process forwards them to loopback dashboards.
+//!
+//! Endpoints:
 //! * `GET /api/agents` — machine-readable JSON list of live agents.
-//! * `GET /` — a sidebar SPA whose content area is an `<iframe>` pointing at
-//!   the selected agent's own dashboard.
-//!
-//! The aggregator is *pure discovery + presentation*: it never proxies control,
-//! logs, or render. The iframe loads each agent's self-contained dashboard
-//! directly, so pause/stop/interrupt/kill and live logs keep working unchanged.
-//!
-//! ## Host substitution
-//!
-//! Presence files store the agent's bound address (e.g. `0.0.0.0:53124`). A
-//! literal `0.0.0.0` is not dialable from a browser, and when the operator
-//! browses from a MacBook to `studio.ts.net:7878` the iframe must target
-//! `studio.ts.net:<port>`, not the Studio's loopback. So we substitute the
-//! *host* portion of each addr with the host the browser used to reach the
-//! aggregator (the request `Host` header), keeping only the agent's port.
+//! * `GET /` — a sidebar SPA whose content area is an agent iframe.
+//! * `/agent/{port}` and `/agent/{port}/{*rest}` — streaming loopback proxy
+//!   routes. HTML responses that do not declare `x-prefix-aware` have
+//!   root-absolute dashboard URLs rewritten for the proxy prefix; prefix-aware
+//!   and non-HTML responses stream unchanged.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+mod proxy;
+mod rewrite;
+
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{any, get};
 use axum::Router;
 
 use dar_presence::{PresenceEntry, Registry};
+
+use proxy::LivePorts;
 
 /// Options for the aggregator server.
 pub struct DashOptions {
@@ -54,16 +55,29 @@ impl DashOptions {
 #[derive(Clone)]
 struct DashState {
     registry: Registry,
+    client: reqwest::Client,
+    live_ports: Arc<LivePorts>,
 }
 
 /// Boot the aggregator and serve until Ctrl-C.
 pub async fn serve(opts: DashOptions) -> Result<()> {
     let state = DashState {
         registry: Registry::new(&opts.registry_dir),
+        client: reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(3))
+            // No total timeout: reqwest has none by default, and proxied SSE
+            // streams must stay open indefinitely.
+            .build()
+            .context("building dash proxy client")?,
+        live_ports: Arc::new(LivePorts::new()),
     };
     let app = Router::new()
         .route("/", get(index))
         .route("/api/agents", get(api_agents))
+        .route("/agent/{port}", any(proxy::proxy_agent))
+        .route("/agent/{port}/", any(proxy::proxy_agent))
+        .route("/agent/{port}/{*rest}", any(proxy::proxy_agent))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind((opts.bind, opts.port))
@@ -121,76 +135,16 @@ async fn api_agents(State(state): State<DashState>) -> Response {
 }
 
 /// `GET /` — sidebar + iframe shell over the live agents.
-async fn index(State(state): State<DashState>, headers: HeaderMap) -> Response {
+async fn index(State(state): State<DashState>) -> Response {
     let agents = state.registry.read_live();
-    let host = request_host(&headers);
-    match render_shell(&agents, host.as_deref()) {
+    match render_shell(&agents) {
         Ok(html) => Html(html).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "render error").into_response(),
     }
 }
 
-/// The host the browser used to reach us (the `Host` request header), used to
-/// rewrite each agent addr's host so iframes resolve from the client side.
-fn request_host(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(|h| host_only(h).to_string())
-}
-
-/// Strip a trailing `:port` from a `Host` header value, leaving just the host.
-/// IPv6 literals are bracketed (`[::1]:7878`) so we only split on the last
-/// colon when there's no closing bracket after it.
-fn host_only(host: &str) -> &str {
-    if host.starts_with('[') {
-        // `[ipv6]` or `[ipv6]:port` — host is everything up to and incl. `]`.
-        if let Some(end) = host.find(']') {
-            return &host[..=end];
-        }
-    }
-    match host.rsplit_once(':') {
-        Some((h, _)) => h,
-        None => host,
-    }
-}
-
-/// Build the iframe URL for an agent, substituting the request host for the
-/// agent's stored (and possibly unspecified) host while keeping its port.
-fn agent_url(entry: &PresenceEntry, request_host: Option<&str>) -> String {
-    let port = entry.port();
-    let host = request_host
-        .map(|h| h.to_string())
-        .unwrap_or_else(|| dialable_host(&entry.addr));
-    let host = bracket_ipv6(&host);
-    match port {
-        Some(p) => format!("http://{host}:{p}/"),
-        None => format!("http://{host}/"),
-    }
-}
-
-/// Wrap a bare IPv6 literal in `[...]` so it can carry a `:port` suffix in a
-/// URL. Already-bracketed hosts and ordinary hostnames/IPv4 pass through.
-fn bracket_ipv6(host: &str) -> String {
-    if host.starts_with('[') || !host.contains(':') {
-        host.to_string()
-    } else {
-        format!("[{host}]")
-    }
-}
-
-/// Fallback host when there's no request `Host` header: replace an unspecified
-/// `0.0.0.0`/`::` bind host with loopback so the URL is at least dialable.
-fn dialable_host(addr: &str) -> String {
-    if let Ok(sa) = addr.parse::<SocketAddr>() {
-        return display_host(sa.ip());
-    }
-    let host = host_only(addr);
-    if host == "0.0.0.0" || host == "::" || host.is_empty() {
-        "127.0.0.1".to_string()
-    } else {
-        host.to_string()
-    }
+fn agent_url(entry: &PresenceEntry) -> Option<String> {
+    entry.port().map(|port| format!("/agent/{port}/"))
 }
 
 /// `id · <workflow-dir basename>-<path hash>`, or plain `id` when the
@@ -223,15 +177,18 @@ fn agent_label(entry: &PresenceEntry) -> String {
     }
 }
 
-fn render_shell(agents: &[PresenceEntry], request_host: Option<&str>) -> Result<String> {
+fn render_shell(agents: &[PresenceEntry]) -> Result<String> {
     let mut items = String::new();
     let mut first_url = String::new();
     if agents.is_empty() {
         items.push_str("<li class=\"empty\">No live agents</li>");
     }
-    for (i, a) in agents.iter().enumerate() {
-        let url = agent_url(a, request_host);
-        if i == 0 {
+    for a in agents {
+        // No parseable port means the agent isn't proxyable; skip its entry.
+        let Some(url) = agent_url(a) else {
+            continue;
+        };
+        if first_url.is_empty() {
             first_url = url.clone();
         }
         let folder = a.folder.rsplit('/').next().unwrap_or(&a.folder);
@@ -303,9 +260,6 @@ fn render_shell(agents: &[PresenceEntry], request_host: Option<&str>) -> Result<
       var current = document.querySelector('.agent.active');
       var currentSrc = current ? current.dataset.src : null;
       var ul = document.getElementById('agents');
-      // Bracket bare IPv6 literals so `host:port` stays a valid URL.
-      var host = location.hostname;
-      if (host.indexOf(':') !== -1 && host[0] !== '[') {{ host = '[' + host + ']'; }}
       ul.innerHTML = '';
       if (!data.agents.length) {{
         ul.innerHTML = '<li class="empty">No live agents</li>';
@@ -313,7 +267,8 @@ fn render_shell(agents: &[PresenceEntry], request_host: Option<&str>) -> Result<
       }}
       data.agents.forEach(function (a) {{
         var port = (a.addr || '').split(':').pop();
-        var url = 'http://' + host + ':' + port + '/';
+        if (!/^\d+$/.test(port) || Number(port) > 65535) return;
+        var url = '/agent/' + port + '/';
         var li = document.createElement('li');
         var b = document.createElement('button');
         b.className = 'agent';
@@ -352,14 +307,28 @@ fn he(s: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+mod test_support {
     use super::*;
 
-    fn entry(id: &str, folder: &str, addr: &str, pid: u32) -> PresenceEntry {
+    pub(super) fn state(registry: Registry) -> DashState {
+        DashState {
+            registry,
+            client: reqwest::Client::new(),
+            live_ports: Arc::new(LivePorts::new()),
+        }
+    }
+
+    pub(super) fn entry(id: &str, folder: &str, addr: &str, pid: u32) -> PresenceEntry {
         entry_wf(id, folder, &format!("{folder}/WORKFLOW.md"), addr, pid)
     }
 
-    fn entry_wf(id: &str, folder: &str, workflow: &str, addr: &str, pid: u32) -> PresenceEntry {
+    pub(super) fn entry_wf(
+        id: &str,
+        folder: &str,
+        workflow: &str,
+        addr: &str,
+        pid: u32,
+    ) -> PresenceEntry {
         PresenceEntry {
             id: id.to_string(),
             folder: folder.to_string(),
@@ -369,38 +338,20 @@ mod tests {
             started_at: 0,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{entry, entry_wf, state};
+    use super::*;
+    use axum::http::StatusCode;
 
     #[test]
-    fn host_only_strips_port() {
-        assert_eq!(host_only("studio.ts.net:7878"), "studio.ts.net");
-        assert_eq!(host_only("studio.ts.net"), "studio.ts.net");
-        assert_eq!(host_only("127.0.0.1:7878"), "127.0.0.1");
-    }
-
-    #[test]
-    fn agent_url_substitutes_request_host_keeps_port() {
+    fn agent_url_uses_proxy_path() {
         let e = entry("ALG-1", "/agents/a", "0.0.0.0:53124", 1);
-        assert_eq!(
-            agent_url(&e, Some("studio.ts.net")),
-            "http://studio.ts.net:53124/"
-        );
-    }
-
-    #[test]
-    fn agent_url_falls_back_to_loopback_for_unspecified() {
-        let e = entry("ALG-1", "/agents/a", "0.0.0.0:53124", 1);
-        assert_eq!(agent_url(&e, None), "http://127.0.0.1:53124/");
-    }
-
-    #[test]
-    fn agent_url_brackets_ipv6_request_host() {
-        let e = entry("ALG-1", "/agents/a", "0.0.0.0:53124", 1);
-        // Host header for an IPv6 literal already arrives bracketed.
-        assert_eq!(agent_url(&e, Some("[fd7a::1]")), "http://[fd7a::1]:53124/");
-        // A bare IPv6 fallback gets bracketed.
-        assert_eq!(bracket_ipv6("fd7a::1"), "[fd7a::1]");
-        assert_eq!(bracket_ipv6("studio.ts.net"), "studio.ts.net");
-        assert_eq!(bracket_ipv6("127.0.0.1"), "127.0.0.1");
+        assert_eq!(agent_url(&e).as_deref(), Some("/agent/53124/"));
+        let e = entry("ALG-2", "/agents/b", "not-an-address", 1);
+        assert_eq!(agent_url(&e), None);
     }
 
     #[test]
@@ -434,13 +385,13 @@ mod tests {
             entry("ALG-1", "/agents/one", "0.0.0.0:50001", 1),
             entry("ALG-2", "/agents/two", "0.0.0.0:50002", 2),
         ];
-        let html = render_shell(&agents, Some("studio.ts.net")).unwrap();
+        let html = render_shell(&agents).unwrap();
         assert!(html.contains("ALG-1"));
         assert!(html.contains("ALG-2"));
-        assert!(html.contains("http://studio.ts.net:50001/"));
-        assert!(html.contains("http://studio.ts.net:50002/"));
+        assert!(html.contains("/agent/50001/"));
+        assert!(html.contains("/agent/50002/"));
         // First agent's dashboard is loaded by default.
-        assert!(html.contains("src=\"http://studio.ts.net:50001/\""));
+        assert!(html.contains("src=\"/agent/50001/\""));
     }
 
     #[test]
@@ -452,7 +403,7 @@ mod tests {
             "0.0.0.0:50001",
             1,
         )];
-        let html = render_shell(&agents, Some("studio.ts.net")).unwrap();
+        let html = render_shell(&agents).unwrap();
         assert!(html.contains("ALG-1 \u{b7} wf-a-"));
     }
 
@@ -476,22 +427,30 @@ mod tests {
         let b_label = agent_label(&b);
         assert_ne!(a_label, b_label);
 
-        let html = render_shell(&[a, b], Some("studio.ts.net")).unwrap();
+        let html = render_shell(&[a, b]).unwrap();
         assert!(html.contains(&a_label));
         assert!(html.contains(&b_label));
     }
 
     #[test]
     fn render_empty_when_no_agents() {
-        let html = render_shell(&[], Some("studio.ts.net")).unwrap();
+        let html = render_shell(&[]).unwrap();
         assert!(html.contains("No live agents"));
         assert!(html.contains("about:blank"));
     }
 
     #[test]
+    fn render_skips_entries_without_parseable_port() {
+        let agents = vec![entry("ALG-BAD", "/agents/bad", "not-an-address", 1)];
+        let html = render_shell(&agents).unwrap();
+        assert!(!html.contains("data-src=\"\""));
+        assert!(!html.contains("ALG-BAD"));
+    }
+
+    #[test]
     fn render_escapes_ids() {
         let agents = vec![entry("<script>", "/a", "0.0.0.0:1", 1)];
-        let html = render_shell(&agents, Some("h")).unwrap();
+        let html = render_shell(&agents).unwrap();
         assert!(!html.contains("<script>x"));
         assert!(html.contains("&lt;script&gt;"));
     }
@@ -510,7 +469,7 @@ mod tests {
         reg.write(&live).unwrap();
         reg.write(&entry("ALG-DEAD", "/agents/dead", "0.0.0.0:51001", 999_999))
             .unwrap();
-        let state = DashState { registry: reg };
+        let state = state(reg);
         let resp = api_agents(State(state)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -541,7 +500,7 @@ mod tests {
             ))
             .unwrap();
         }
-        let resp = api_agents(State(DashState { registry: reg })).await;
+        let resp = api_agents(State(state(reg))).await;
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -562,16 +521,14 @@ mod tests {
             std::process::id(),
         ))
         .unwrap();
-        let state = DashState { registry: reg };
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, "studio.ts.net:7878".parse().unwrap());
-        let resp = index(State(state), headers).await;
+        let state = state(reg);
+        let resp = index(State(state)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("ALG-X"));
-        assert!(html.contains("http://studio.ts.net:52000/"));
+        assert!(html.contains("/agent/52000/"));
     }
 }

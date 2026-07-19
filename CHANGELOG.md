@@ -11,6 +11,17 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Fixed
 
+- `dar dash`: agents are now reverse-proxied at `/agent/<port>/...` instead of
+  being iframed over plain HTTP, enabling HTTPS fronts. HTML attributes, htmx
+  verbs, and heuristic inline-JS URLs are rewritten while SSE/chat streams
+  through unchanged. Proxied agents share the aggregator origin, so cookies
+  and credentials are shared across agents. All dashboards on the host must be
+  trusted: this prefix is a presentation convenience, not an isolation or
+  security boundary.
+- `dar dash` proxy now sends `X-Forwarded-Prefix` header and skips HTML rewriting for prefix-aware first-party pages (dashboard, cron tab, chat), enabling them to work behind the fleet proxy with SSE reconnect and attachments; regex rewriting retained as a compatibility fallback for third-party pages.
+- `dar dash` proxy now forwards all request headers to agents except `Authorization` and `Accept-Encoding`, fixing SSE `Last-Event-ID` reconnect and HTTP `Range` requests through the proxy.
+- `dar dash` agent liveness is now cached (~1s) instead of re-scanning the registry per request.
+- `dar dash` proxy errors now log the target agent port and cause.
 - Web chat send no longer crashes on non-HTTPS, non-localhost origins (e.g. tailnet hostnames) where `crypto.randomUUID` is unavailable.
 - Web chat now follows `runner.use` and its model/provider for passive agents without an orchestration snapshot, instead of silently falling back to Pi.
 

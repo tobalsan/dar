@@ -23,19 +23,23 @@ pub struct DashboardTemplate {
     /// Pre-rendered fragment for `active_tab` when it is not `"content"`;
     /// `None` renders `content` (the Runs view) as the initial body.
     pub initial_fragment: Option<String>,
+    /// Sanitized `X-Forwarded-Prefix` (e.g. `/agent/50123`), or `""` for
+    /// direct access. Echoed into the asset `src` and `window.__dashPrefix`.
+    pub prefix: String,
 }
 
 impl DashboardTemplate {
     pub fn page(snapshot: RunSnapshot) -> Self {
-        Self::page_with_tabs(snapshot, Vec::new())
+        Self::page_with_tabs(snapshot, Vec::new(), String::new())
     }
 
-    pub fn page_with_tabs(snapshot: RunSnapshot, tabs: Vec<TabNav>) -> Self {
+    pub fn page_with_tabs(snapshot: RunSnapshot, tabs: Vec<TabNav>, prefix: String) -> Self {
         Self {
             content: ContentTemplate::from_snapshot(snapshot),
             tabs,
             active_tab: "content".to_string(),
             initial_fragment: None,
+            prefix,
         }
     }
 
@@ -48,12 +52,14 @@ impl DashboardTemplate {
         tabs: Vec<TabNav>,
         active_tab_id: String,
         fragment: String,
+        prefix: String,
     ) -> Self {
         Self {
             content: ContentTemplate::from_snapshot(snapshot),
             tabs,
             active_tab: active_tab_id,
             initial_fragment: Some(fragment),
+            prefix,
         }
     }
 }
@@ -575,7 +581,7 @@ mod tests {
             title: "Scheduler".to_string(),
             self_refreshing: false,
         }];
-        let html = DashboardTemplate::page_with_tabs(RunSnapshot::empty(), tabs)
+        let html = DashboardTemplate::page_with_tabs(RunSnapshot::empty(), tabs, String::new())
             .render()
             .expect("page renders");
         assert!(html.contains("id=\"dash-tabs\""), "tab nav rendered");
@@ -612,7 +618,7 @@ mod tests {
                 self_refreshing: true,
             },
         ];
-        let html = DashboardTemplate::page_with_tabs(RunSnapshot::empty(), tabs)
+        let html = DashboardTemplate::page_with_tabs(RunSnapshot::empty(), tabs, String::new())
             .render()
             .expect("page renders");
         assert!(
@@ -656,6 +662,7 @@ mod tests {
             tabs,
             "chat".to_string(),
             "<p id=\"chat-body\">hi</p>".to_string(),
+            String::new(),
         )
         .render()
         .expect("page renders");

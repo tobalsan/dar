@@ -20,7 +20,8 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::middleware::map_response;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -61,6 +62,17 @@ pub fn router(state: ApiState) -> Router {
         .route("/jobs/{id}/outputs/{name}", get(output_detail))
         .route("/jobs/{id}/detail", get(job_detail))
         .with_state(state)
+        .layer(map_response(mark_prefix_aware))
+}
+
+/// Marks every response `x-prefix-aware: 1` so the fleet proxy (`dar dash`)
+/// skips its HTML rewriter for this first-party frontend and lets the
+/// dashboard shell's own JS shim handle prefixing instead.
+async fn mark_prefix_aware(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert("x-prefix-aware", HeaderValue::from_static("1"));
+    response
 }
 
 /// Route paths claimed in the host registry (namespace-relative).
@@ -1304,6 +1316,31 @@ mod tests {
         for ts in timestamps {
             assert!(html.contains(ts), "output {ts} listed in full history: {html}");
         }
+    }
+
+    #[tokio::test]
+    async fn job_detail_response_carries_prefix_aware_header() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let (api, _dir) = api();
+        let id = create_one(&api).await;
+        let resp = router(api)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/jobs/{id}/detail"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("x-prefix-aware").unwrap(),
+            "1",
+            "first-party HTML fragment opts out of the fleet proxy's rewriter"
+        );
     }
 
     #[tokio::test]
