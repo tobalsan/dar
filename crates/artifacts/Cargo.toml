@@ -6,7 +6,6 @@ license.workspace = true
 repository.workspace = true
 description = "Immutable, verified artifact vault for DAR"
 rust-version = "1.83"
-publish = false
 
 [lib]
 name = "dar_artifacts"

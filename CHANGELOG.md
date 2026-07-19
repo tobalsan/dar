@@ -7,6 +7,14 @@ the minor slot carries breaking changes, the patch slot carries compatible ones)
 
 Breaking changes are marked **⚠ BREAKING**.
 
+## [Unreleased]
+
+### Changed
+
+- `dar-artifacts` is now published to crates.io alongside the other public
+  crates — it became part of the SDK surface (`dar-cap-chat` and
+  `dar-extension-sdk` depend on it), so registry-only extension builds resolve.
+
 ## [0.4.0] — 2026-07-19
 
 ### Fixed
