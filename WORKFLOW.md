@@ -1,9 +1,9 @@
 ---
 tracker:
-  kind: plane
-  workspace: algodyn
-  projects: 
-    - 1aa9d7a3-c1e6-41ac-a908-5a98267bcf8c
+  kind: linear
+  team: ALG
+  label: 
+    - repo:dar
   active_states: [Todo, In Progress]
   terminal_states: [In Review, Done, Cancelled]
   needs_human: "Needs Human"
