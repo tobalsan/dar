@@ -397,6 +397,28 @@ impl WorkflowFrontmatter {
         if t.resolved_terminal_states().is_empty() {
             bail!("WORKFLOW.md frontmatter `tracker.terminal_states` must be non-empty");
         }
+        if let Some(polling) = &self.polling {
+            if polling.interval_ms == Some(0) {
+                bail!("WORKFLOW.md frontmatter `polling.interval_ms` must be > 0");
+            }
+            if polling.max_concurrent == Some(0) {
+                bail!("WORKFLOW.md frontmatter `polling.max_concurrent` must be > 0");
+            }
+        }
+        if let Some(agent) = &self.agent {
+            if agent.max_run_timeout_ms == Some(0) {
+                bail!("WORKFLOW.md frontmatter `agent.max_run_timeout_ms` must be > 0");
+            }
+            if agent.turn_timeout_ms == Some(0) {
+                bail!("WORKFLOW.md frontmatter `agent.turn_timeout_ms` must be > 0");
+            }
+            if agent.stall_timeout_ms == Some(0) {
+                bail!("WORKFLOW.md frontmatter `agent.stall_timeout_ms` must be > 0");
+            }
+            if agent.max_turns == Some(0) {
+                bail!("WORKFLOW.md frontmatter `agent.max_turns` must be > 0");
+            }
+        }
         Ok(())
     }
 }
@@ -825,6 +847,44 @@ body"#;
             .unwrap_err()
             .to_string();
         assert!(err.contains("tracker.terminal_states"), "{err}");
+    }
+
+    #[test]
+    fn validate_loop_rejects_zero_runtime_limits() {
+        let cases = [
+            ("polling:\n  interval_ms: 0", "polling.interval_ms"),
+            ("polling:\n  max_concurrent: 0", "polling.max_concurrent"),
+            (
+                "agent:\n  max_run_timeout_ms: 0",
+                "agent.max_run_timeout_ms",
+            ),
+            ("agent:\n  turn_timeout_ms: 0", "agent.turn_timeout_ms"),
+            ("agent:\n  stall_timeout_ms: 0", "agent.stall_timeout_ms"),
+            ("agent:\n  max_turns: 0", "agent.max_turns"),
+        ];
+
+        for (section, field) in cases {
+            let raw = format!(
+                "---\ntracker:\n  kind: files\n  active_states: [todo]\n  terminal_states: [done]\n{section}\n---"
+            );
+            let workflow = parse_workflow_md(&raw).unwrap();
+            let error = workflow
+                .frontmatter
+                .validate_loop()
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(field), "{field}: {error}");
+        }
+    }
+
+    #[test]
+    fn validate_loop_accepts_positive_runtime_limits() {
+        let workflow = parse_workflow_md(
+            "---\ntracker:\n  kind: files\n  active_states: [todo]\n  terminal_states: [done]\npolling:\n  interval_ms: 1\n  max_concurrent: 1\nagent:\n  max_run_timeout_ms: 1\n  turn_timeout_ms: 1\n  stall_timeout_ms: 1\n  max_turns: 1\n---",
+        )
+        .unwrap();
+
+        workflow.frontmatter.validate_loop().unwrap();
     }
 
     #[test]

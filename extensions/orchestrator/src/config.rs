@@ -299,6 +299,9 @@ impl AgentConfig {
         if self.runner.stall_timeout_ms == 0 {
             bail!("runner.stall_timeout_ms must be > 0");
         }
+        if self.runner.max_turns == 0 {
+            bail!("runner.max_turns must be > 0");
+        }
         Ok(())
     }
 }
@@ -389,6 +392,16 @@ mod tests {
     fn identity_only_agent_validates() {
         let cfg: AgentConfig = serde_yaml::from_str(BASE).unwrap();
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn zero_max_turns_is_rejected() {
+        let raw = BASE.replace("use: fake", "use: fake\n  max_turns: 0");
+        let cfg: AgentConfig = serde_yaml::from_str(&raw).unwrap();
+
+        let error = cfg.validate().unwrap_err().to_string();
+
+        assert!(error.contains("runner.max_turns"), "{error}");
     }
 
     #[test]

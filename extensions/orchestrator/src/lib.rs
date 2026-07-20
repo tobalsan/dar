@@ -1131,13 +1131,25 @@ impl Orchestrator {
             }
 
             let identifier = self.slots[idx].identifier.clone();
-            // Re-read the issue: active state decides continue vs finish.
-            let state_now = self
-                .tracker
-                .fetch_one(&identifier)
-                .ok()
-                .flatten()
-                .map(|i| i.state);
+            // Re-read the issue: active state decides continue vs finish. A
+            // tracker error is not evidence that the issue left active, so keep
+            // the live session intact and retry the read at the next boundary.
+            let state_now = match self.tracker.fetch_one(&identifier) {
+                Ok(issue) => issue.map(|i| i.state),
+                Err(e) => {
+                    logging::ev(
+                        &identifier,
+                        "turn",
+                        &format!("fetch_one error: {e:#}; keeping run"),
+                    );
+                    if let Some(h) = self.slots[idx].handle.as_ref() {
+                        h.send_turn_decision(TurnDecision::Continue {
+                            prompt: TURN_CONTINUE_PROMPT.to_string(),
+                        });
+                    }
+                    continue;
+                }
+            };
             let still_active = state_now.as_ref().is_some_and(|st| active.contains(st));
 
             let decision = if !still_active {
@@ -1335,9 +1347,42 @@ impl Orchestrator {
 
             match exit {
                 ExitKind::Normal => {
-                    let state_now = self.tracker.fetch_one(&id).ok().flatten().map(|i| i.state);
+                    let state_now = self
+                        .tracker
+                        .fetch_one(&id)
+                        .map(|issue| issue.map(|i| i.state));
                     match state_now {
-                        Some(ref st) if terminal.contains(st) => {
+                        Err(e) => {
+                            logging::ev(
+                                &id,
+                                "continuation",
+                                &format!("fetch_one error after exit 0: {e:#}; retry 1s"),
+                            );
+                            let ended_at = Utc::now();
+                            if let Err(store_err) = self.state.store.finish_run(
+                                &run_id,
+                                &RunFinish {
+                                    outcome: RunStatus::RetryQueued,
+                                    exit_code: Some(0),
+                                    finished_at: ended_at,
+                                },
+                            ) {
+                                tracing::warn!(issue = %id, "finish_run SQLite write failed: {store_err:#}");
+                            }
+                            if let Some(cid) = claim_id {
+                                let _ = self.state.store.release_claim(cid, ended_at);
+                            }
+                            self.claims.remove(&slot.issue.id);
+                            self.retries.push(Retry {
+                                identifier: id.clone(),
+                                attempt: slot.attempt,
+                                due_at: Utc::now()
+                                    + chrono::Duration::from_std(CONTINUATION_DELAY).unwrap(),
+                                last_error: format!("tracker read failed: {e:#}"),
+                                continuation: true,
+                            });
+                        }
+                        Ok(Some(ref st)) if terminal.contains(st) => {
                             logging::ev(&id, "succeeded", "terminal after normal exit");
                             self.record_history(
                                 &run_id,
@@ -1352,7 +1397,7 @@ impl Orchestrator {
                                 claim_id,
                             );
                         }
-                        Some(ref st) if needs_human.as_deref() == Some(st.as_str()) => {
+                        Ok(Some(ref st)) if needs_human.as_deref() == Some(st.as_str()) => {
                             logging::ev(
                                 &id,
                                 "needs_human",
@@ -1371,7 +1416,7 @@ impl Orchestrator {
                                 claim_id,
                             );
                         }
-                        Some(ref st) if active.contains(st) => {
+                        Ok(Some(ref st)) if active.contains(st) => {
                             logging::ev(&id, "continuation", "still active after exit 0; retry 1s");
                             self.record_history(
                                 &run_id,
@@ -1396,7 +1441,7 @@ impl Orchestrator {
                                 continuation: true,
                             });
                         }
-                        _ => {
+                        Ok(_) => {
                             logging::ev(
                                 &id,
                                 "succeeded",
@@ -1489,10 +1534,21 @@ impl Orchestrator {
                                 delay.as_millis()
                             ),
                         );
-                        // Release claim for this attempt; a new claim is opened
+                        // Close and release this attempt; a new run and claim are opened
                         // when the retry is dispatched.
+                        let ended_at = Utc::now();
+                        if let Err(e) = self.state.store.finish_run(
+                            &run_id,
+                            &RunFinish {
+                                outcome: RunStatus::RetryQueued,
+                                exit_code,
+                                finished_at: ended_at,
+                            },
+                        ) {
+                            tracing::warn!(issue = %id, "finish_run SQLite write failed: {e:#}");
+                        }
                         if let Some(cid) = claim_id {
-                            let _ = self.state.store.release_claim(cid, Utc::now());
+                            let _ = self.state.store.release_claim(cid, ended_at);
                         }
                         self.claims.remove(&slot.issue.id);
                         let _ = self.state.store.insert_event(&NewEvent {
@@ -3274,6 +3330,26 @@ mod tests {
         }
     }
 
+    struct ErrorTracker;
+
+    impl Tracker for ErrorTracker {
+        fn poll_candidates(&self) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_states(&self, _ids: &[String]) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_terminal(&self) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_one(&self, _id: &str) -> Result<Option<Issue>> {
+            anyhow::bail!("transient tracker failure")
+        }
+    }
+
     struct MissingTracker;
 
     impl Tracker for MissingTracker {
@@ -3934,6 +4010,23 @@ dashboard:
         );
         let started_at = Utc::now();
         let run_id = new_run_id(&active_issue.identifier, &started_at);
+        store
+            .insert_run(&NewRun {
+                run_id: &run_id,
+                issue_id: &active_issue.id,
+                issue_identifier: &active_issue.identifier,
+                workspace: "workspace",
+                profile_json: None,
+                workflow_path: None,
+                workflow_sha: None,
+                pid: 42,
+                worker_id: None,
+                started_at,
+                runner: None,
+                model: None,
+                provider: None,
+            })
+            .unwrap();
         orchestrator.slots.push(RunSlot {
             identifier: active_issue.identifier.clone(),
             issue: active_issue,
@@ -3941,7 +4034,7 @@ dashboard:
             handle: Some(finished_handle_for_test(42, ExitKind::Abnormal(None))),
             attempt: 1,
             turns_used: 0,
-            run_id,
+            run_id: run_id.clone(),
             started_at,
             claim_id: None,
             last_event_at: Arc::new(Mutex::new(started_at)),
@@ -3955,6 +4048,11 @@ dashboard:
         assert_eq!(orchestrator.retries[0].attempt, 2);
         assert!(!orchestrator.retries[0].continuation);
         assert!(state.history.snapshot().is_empty());
+        let run = store.get_run(&run_id).unwrap().unwrap();
+        assert_eq!(run.outcome.as_deref(), Some("RetryQueued"));
+        assert_eq!(run.exit_code, None);
+        assert!(run.finished_at.is_some());
+        assert!(!run.process_alive);
     }
 
     #[tokio::test]
@@ -5161,6 +5259,49 @@ dashboard:
         orch.collect_finished().await;
         assert_eq!(orch.slots.len(), 1, "Continue keeps the run live");
         assert_eq!(store.list_runs_paged(0, 10).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn turn_end_tracker_error_keeps_live_run() {
+        let temp = TempDir::new().unwrap();
+        let active_issue = issue("ISSUE-1", None, None);
+        let agent_cfg = test_agent_config();
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
+        let (mut orch, _state, mut harness, _store, _run_id) =
+            turn_loop_fixture(&temp, Arc::new(ErrorTracker), &active_issue, effective_cfg).await;
+
+        harness.ended_tx.send(crate::runner::TurnEnded).unwrap();
+        tokio::task::yield_now().await;
+        orch.poll_turns();
+
+        assert!(matches!(
+            harness.recv_decision().await,
+            TurnDecision::Continue { .. }
+        ));
+        assert_eq!(orch.slots.len(), 1);
+        assert_eq!(orch.slots[0].turns_used, 0);
+    }
+
+    #[tokio::test]
+    async fn normal_exit_tracker_error_queues_continuation_without_success() {
+        let temp = TempDir::new().unwrap();
+        let active_issue = issue("ISSUE-1", None, None);
+        let agent_cfg = test_agent_config();
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
+        let (mut orch, state, _harness, store, run_id) =
+            turn_loop_fixture(&temp, Arc::new(ErrorTracker), &active_issue, effective_cfg).await;
+        orch.slots[0].handle = Some(finished_handle_for_test(42, ExitKind::Normal));
+        tokio::task::yield_now().await;
+
+        orch.collect_finished().await;
+
+        assert!(orch.slots.is_empty());
+        assert_eq!(orch.retries.len(), 1);
+        assert!(orch.retries[0].continuation);
+        assert!(state.history.snapshot().is_empty());
+        let run = store.get_run(&run_id).unwrap().unwrap();
+        assert_eq!(run.outcome.as_deref(), Some("RetryQueued"));
+        assert!(!run.process_alive);
     }
 
     #[tokio::test]
