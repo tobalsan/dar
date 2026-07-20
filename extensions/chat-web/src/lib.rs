@@ -202,12 +202,16 @@ struct StreamPause {
 }
 struct Session {
     inner: Mutex<Option<Box<dyn ChatSession>>>,
+    /// Serializes backend event publication with turn acceptance so an eager
+    /// backend cannot publish output before its accepted user event.
+    acceptance_lock: Mutex<()>,
     tx: broadcast::Sender<WireEvent>,
     events: broadcast::Sender<ChatEvent>,
     generation: std::sync::atomic::AtomicU64,
     next_seq: std::sync::atomic::AtomicU64,
     active_turns: std::sync::atomic::AtomicUsize,
     abort_requested: std::sync::atomic::AtomicBool,
+    transcript_failed: std::sync::atomic::AtomicBool,
     suppress_resume: std::sync::atomic::AtomicBool,
     abort_signal: watch::Sender<bool>,
     publish_lock: std::sync::Mutex<()>,
@@ -308,12 +312,14 @@ impl AppState {
         let next_seq = history.back().map(|event| event.seq).unwrap_or(0);
         let session = Arc::new(Session {
             inner: Mutex::new(None),
+            acceptance_lock: Mutex::new(()),
             tx,
             events,
             generation: std::sync::atomic::AtomicU64::new(0),
             next_seq: std::sync::atomic::AtomicU64::new(next_seq),
             active_turns: std::sync::atomic::AtomicUsize::new(0),
             abort_requested: std::sync::atomic::AtomicBool::new(false),
+            transcript_failed: std::sync::atomic::AtomicBool::new(false),
             suppress_resume: std::sync::atomic::AtomicBool::new(false),
             abort_signal,
             publish_lock: std::sync::Mutex::new(()),
@@ -364,8 +370,10 @@ impl AppState {
         let sink = Arc::clone(&session);
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                let _ = sink.events.send(event.clone());
-                sink.publish_if_current(generation, event);
+                let _acceptance = sink.acceptance_lock.lock().await;
+                if sink.publish_if_current(generation, event.clone()) {
+                    let _ = sink.events.send(event);
+                }
             }
         });
         backend.open(params, event_tx).await
@@ -389,6 +397,9 @@ impl AppState {
             .store(0, std::sync::atomic::Ordering::SeqCst);
         session
             .abort_requested
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        session
+            .transcript_failed
             .store(false, std::sync::atomic::Ordering::SeqCst);
         session
             .suppress_resume
@@ -506,15 +517,13 @@ impl chat::ChatCoordinator for AppState {
             if inner.is_none() {
                 *inner = Some(self.open_session(Arc::clone(&session)).await?);
             }
-            session.publish_user(display.clone(), vec![]);
-            let _ = session.events.send(ChatEvent::User { text: display });
             session
-                .active_turns
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            inner
-                .as_mut()
-                .expect("session opened above")
-                .send_turn(prompt)
+                .accept_turn(
+                    inner.as_mut().expect("session opened above").as_mut(),
+                    prompt,
+                    display,
+                    vec![],
+                )
                 .await
         })
     }
@@ -547,7 +556,32 @@ impl chat::ChatCoordinator for AppState {
     }
 }
 impl Session {
-    fn publish_user(&self, text: String, attachments: Vec<Attachment>) {
+    async fn accept_turn(
+        &self,
+        backend: &mut dyn ChatSession,
+        prompt: String,
+        display: String,
+        attachments: Vec<Attachment>,
+    ) -> Result<()> {
+        let _acceptance = self.acceptance_lock.lock().await;
+        if self
+            .transcript_failed
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            anyhow::bail!("chat transcript storage is unavailable; start a new session");
+        }
+        backend.send_turn(prompt).await?;
+        if let Err(error) = self.publish_user(display.clone(), attachments) {
+            let _ = backend.abort().await;
+            return Err(error.context("failed to persist accepted chat turn"));
+        }
+        let _ = self.events.send(ChatEvent::User { text: display });
+        self.active_turns
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn publish_user(&self, text: String, attachments: Vec<Attachment>) -> Result<()> {
         let _publish = self
             .publish_lock
             .lock()
@@ -570,23 +604,25 @@ impl Session {
             context_window: None,
             attachments,
         };
-        append_transcript(&self.transcript, &event).expect("chat-web transcript append failed");
+        append_transcript(&self.transcript, &event)?;
         self.history
             .lock()
             .expect("chat-web history mutex poisoned")
             .push_back(event.clone());
         let _ = self.tx.send(event);
+        Ok(())
     }
-    fn publish_if_current(&self, generation: u64, event: ChatEvent) {
-        if self.generation.load(std::sync::atomic::Ordering::SeqCst) == generation {
-            self.publish(event);
+    fn publish_if_current(&self, generation: u64, event: ChatEvent) -> bool {
+        if self.generation.load(std::sync::atomic::Ordering::SeqCst) != generation {
+            return false;
         }
+        self.publish(event)
     }
 
-    fn publish(&self, event: ChatEvent) {
+    fn publish(&self, event: ChatEvent) -> bool {
         let (kind, text, error, id, name, args, is_error, done, tokens_used, context_window) =
             match event {
-                ChatEvent::User { .. } | ChatEvent::SessionReset => return,
+                ChatEvent::User { .. } | ChatEvent::SessionReset => return true,
                 ChatEvent::Delta {
                     role: ChatRole::Assistant,
                     text,
@@ -689,19 +725,9 @@ impl Session {
                     "closed", None, error, None, None, None, None, None, None, None,
                 ),
             };
-        if matches!(kind, "finished" | "aborted" | "closed") {
-            let Ok(turns) = self.active_turns.fetch_update(
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-                |turns| turns.checked_sub(1),
-            ) else {
-                return;
-            };
-            if turns == 1 {
-                self.abort_requested
-                    .store(false, std::sync::atomic::Ordering::SeqCst);
-                let _ = self.abort_signal.send(false);
-            }
+        let terminal = matches!(kind, "finished" | "aborted" | "closed");
+        if terminal && self.active_turns.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            return true;
         }
         let _publish = self
             .publish_lock
@@ -729,7 +755,22 @@ impl Session {
             .history
             .lock()
             .expect("chat-web history mutex poisoned");
-        append_transcript(&self.transcript, &event).expect("chat-web transcript append failed");
+        if let Err(error) = append_transcript(&self.transcript, &event) {
+            drop(history);
+            drop(_publish);
+            self.fail_transcript(error);
+            return false;
+        }
+        if terminal {
+            let turns = self
+                .active_turns
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            if turns == 1 {
+                self.abort_requested
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                let _ = self.abort_signal.send(false);
+            }
+        }
         history.push_back(event.clone());
         let _ = self.tx.send(event);
         #[cfg(test)]
@@ -742,6 +783,67 @@ impl Session {
             let _ = pause.sent.send(());
             let _ = pause.proceed.lock().unwrap().recv();
         }
+        true
+    }
+
+    fn fail_transcript(&self, error: anyhow::Error) {
+        self.transcript_failed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let turns = self
+            .active_turns
+            .swap(0, std::sync::atomic::Ordering::SeqCst);
+        self.abort_requested
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.abort_signal.send(false);
+
+        let message = format!("chat transcript write failed: {error:#}");
+        let _ = self.events.send(ChatEvent::Error(message.clone()));
+        let _publish = self
+            .publish_lock
+            .lock()
+            .expect("chat-web publish mutex poisoned");
+        let mut history = self
+            .history
+            .lock()
+            .expect("chat-web history mutex poisoned");
+        self.publish_volatile(&mut history, "error", Some(message.clone()));
+        for _ in 0..turns {
+            let _ = self.events.send(ChatEvent::TurnFinished {
+                ok: false,
+                error: Some(message.clone()),
+            });
+            self.publish_volatile(&mut history, "aborted", Some(message.clone()));
+        }
+    }
+
+    fn publish_volatile(
+        &self,
+        history: &mut VecDeque<WireEvent>,
+        kind: &str,
+        error: Option<String>,
+    ) {
+        let seq = self
+            .next_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let event = WireEvent {
+            seq,
+            kind: kind.to_owned(),
+            text: None,
+            id: None,
+            name: None,
+            args: None,
+            is_error: None,
+            done: None,
+            error,
+            tokens_used: None,
+            context_window: None,
+            attachments: vec![],
+        };
+        history.push_back(event.clone());
+        let _ = self.tx.send(event);
     }
 }
 fn load_transcript(path: &std::path::Path) -> Result<VecDeque<WireEvent>> {
@@ -931,13 +1033,14 @@ async fn submit(
             }
             let prompt = attachment_prompt(&message, &attachments, &state.root);
             let display = display_message(&message, &attachments);
-            s.publish_user(display.clone(), attachments);
-            let _ = s.events.send(ChatEvent::User { text: display });
-            s.active_turns
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut aborted = s.abort_signal.subscribe();
             let accepted = tokio::select! {
-                result = guard.as_mut().expect("session open").send_turn(prompt) => result,
+                result = s.accept_turn(
+                    guard.as_mut().expect("session open").as_mut(),
+                    prompt,
+                    display,
+                    attachments,
+                ) => result,
                 _ = aborted.changed() => Err(anyhow::anyhow!("turn aborted before acceptance")),
             };
             match accepted {
@@ -947,11 +1050,7 @@ async fn submit(
                 )
                     .into_response(),
                 Err(e) => {
-                    if !s.abort_requested.load(std::sync::atomic::Ordering::SeqCst) {
-                        s.active_turns
-                            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                        s.command_ids.lock().await.remove(&command_id);
-                    }
+                    s.command_ids.lock().await.remove(&command_id);
                     (
                         StatusCode::CONFLICT,
                         Json(serde_json::json!({"accepted":false,"error":e.to_string()})),
@@ -1298,6 +1397,18 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
     }
+    struct RejectingSession;
+    impl ChatSession for RejectingSession {
+        fn send_turn(&mut self, _prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { anyhow::bail!("turn rejected") })
+        }
+        fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn close(self: Box<Self>) -> cap_chat::BoxFuture<'static, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
     struct HangingAbortSession;
     impl ChatSession for HangingAbortSession {
         fn send_turn(&mut self, _prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
@@ -1315,12 +1426,14 @@ mod tests {
         let (events, _) = broadcast::channel(8);
         Arc::new(Session {
             inner: Mutex::new(Some(inner)),
+            acceptance_lock: Mutex::new(()),
             tx,
             events,
             generation: std::sync::atomic::AtomicU64::new(0),
             next_seq: std::sync::atomic::AtomicU64::new(0),
             active_turns: std::sync::atomic::AtomicUsize::new(0),
             abort_requested: std::sync::atomic::AtomicBool::new(false),
+            transcript_failed: std::sync::atomic::AtomicBool::new(false),
             suppress_resume: std::sync::atomic::AtomicBool::new(false),
             abort_signal: watch::channel(false).0,
             publish_lock: std::sync::Mutex::new(()),
@@ -1543,6 +1656,160 @@ mod tests {
             StatusCode::ACCEPTED
         );
         assert_eq!(opens.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn rejected_http_send_has_no_user_event_or_active_turn() {
+        let s = session(Box::new(RejectingSession));
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: test_root(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+        });
+        let mut events = s.events.subscribe();
+
+        let response = send(
+            Path("test".into()),
+            State(state),
+            Json(Send {
+                command_id: "rejected-1".into(),
+                message: "hello".into(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(s.active_turns.load(Ordering::SeqCst), 0);
+        assert!(s.history.lock().unwrap().is_empty());
+        assert!(events.try_recv().is_err());
+        assert!(!s.command_ids.lock().await.contains("rejected-1"));
+    }
+
+    #[tokio::test]
+    async fn accepted_turn_transcript_failure_aborts_without_shared_side_effects() {
+        let aborted = Arc::new(AtomicBool::new(false));
+        let s = session(Box::new(FakeSession {
+            aborted: Arc::clone(&aborted),
+            sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            abort_fails: false,
+        }));
+        fs::create_dir(&s.transcript).unwrap();
+        let mut wire_events = s.tx.subscribe();
+        let mut shared_events = s.events.subscribe();
+        let mut backend = s.inner.lock().await.take().unwrap();
+
+        let result = s
+            .accept_turn(backend.as_mut(), "prompt".into(), "display".into(), vec![])
+            .await;
+
+        assert!(result.is_err());
+        assert!(aborted.load(Ordering::SeqCst));
+        assert_eq!(s.active_turns.load(Ordering::SeqCst), 0);
+        assert!(s.history.lock().unwrap().is_empty());
+        assert!(wire_events.try_recv().is_err());
+        assert!(shared_events.try_recv().is_err());
+        fs::remove_dir(&s.transcript).unwrap();
+    }
+
+    #[test]
+    fn backend_transcript_failure_terminalizes_clients_without_panicking() {
+        let s = session(Box::new(RejectingSession));
+        s.active_turns.store(1, Ordering::SeqCst);
+        fs::create_dir(&s.transcript).unwrap();
+        let generation = s.generation.load(Ordering::SeqCst);
+        let mut wire_events = s.tx.subscribe();
+        let mut shared_events = s.events.subscribe();
+
+        assert!(!s.publish_if_current(
+            generation,
+            ChatEvent::Delta {
+                role: ChatRole::Assistant,
+                text: "reply".into(),
+            },
+        ));
+
+        assert_eq!(s.active_turns.load(Ordering::SeqCst), 0);
+        assert_eq!(wire_events.try_recv().unwrap().kind, "error");
+        assert_eq!(wire_events.try_recv().unwrap().kind, "aborted");
+        assert!(matches!(
+            shared_events.try_recv().unwrap(),
+            ChatEvent::Error(_)
+        ));
+        assert!(matches!(
+            shared_events.try_recv().unwrap(),
+            ChatEvent::TurnFinished { ok: false, .. }
+        ));
+        assert!(!s.publish_if_current(
+            generation,
+            ChatEvent::Delta {
+                role: ChatRole::Assistant,
+                text: "late".into(),
+            },
+        ));
+        fs::remove_dir(&s.transcript).unwrap();
+    }
+
+    #[tokio::test]
+    async fn coordinator_publishes_user_before_eager_backend_output() {
+        let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut services = dar_extension_sdk::ServiceRegistry::default();
+        services
+            .register::<dyn ChatBackend>(
+                "fake",
+                Arc::new(StreamingBackend {
+                    opens: Arc::clone(&opens),
+                }),
+            )
+            .unwrap();
+        let state = AppState {
+            config: Config {
+                backend: Some("fake".into()),
+                ..Config::default()
+            },
+            root: test_root(),
+            start: std::sync::OnceLock::from(start_ctx(services)),
+            sessions: Mutex::new(HashMap::new()),
+        };
+        let session = state.session("main").await.unwrap();
+        let mut events = session.events.subscribe();
+
+        chat::ChatCoordinator::send_turn(&state, "prompt".into(), "display".into())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            events.recv().await.unwrap(),
+            ChatEvent::User { text } if text == "display"
+        ));
+        assert!(matches!(
+            events.recv().await.unwrap(),
+            ChatEvent::Delta { role: ChatRole::Assistant, text } if text == "reply"
+        ));
+        assert_eq!(session.active_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn rejected_coordinator_send_has_no_user_event_or_active_turn() {
+        let s = session(Box::new(RejectingSession));
+        let state = AppState {
+            config: Config::default(),
+            root: test_root(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::from([("main".into(), Arc::clone(&s))])),
+        };
+        let mut events = s.events.subscribe();
+
+        assert!(
+            chat::ChatCoordinator::send_turn(&state, "prompt".into(), "display".into())
+                .await
+                .is_err()
+        );
+        assert_eq!(s.active_turns.load(Ordering::SeqCst), 0);
+        assert!(s.history.lock().unwrap().is_empty());
+        assert!(events.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -2160,7 +2427,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
         });
         let session = state.session("resume").await.unwrap();
-        session.publish_user("first".into(), vec![]);
+        session.publish_user("first".into(), vec![]).unwrap();
         session.publish(ChatEvent::Delta {
             role: ChatRole::Assistant,
             text: "second".into(),
@@ -2204,7 +2471,8 @@ mod tests {
             .session("history")
             .await
             .unwrap()
-            .publish_user("saved <message>".into(), vec![]);
+            .publish_user("saved <message>".into(), vec![])
+            .unwrap();
         let body = history(Path("history".into()), State(state))
             .await
             .into_response()
@@ -2326,7 +2594,7 @@ mod tests {
             sends: Arc::clone(&sends),
             abort_fails: false,
         }));
-        s.publish_user("hi".into(), vec![]);
+        s.publish_user("hi".into(), vec![]).unwrap();
         let user_seq = load_transcript(&s.transcript).unwrap().back().unwrap().seq;
         let state = Arc::new(AppState {
             config: Config::default(),
@@ -2395,6 +2663,17 @@ mod tests {
         // redeclaration (e.g. `const esc` collisions) and no throw.
         let renderer = format!("{}/src/renderer.js", env!("CARGO_MANIFEST_DIR"));
         let script = r#"const fs=require('fs');const src=fs.readFileSync(process.argv[1],'utf8');eval(src);eval(src);"#;
+        let status = std::process::Command::new("node")
+            .args(["-e", script, &renderer])
+            .status()
+            .expect("node is available for browser renderer tests");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn browser_renderer_restores_draft_after_rejected_send() {
+        let renderer = format!("{}/src/renderer.js", env!("CARGO_MANIFEST_DIR"));
+        let script = r#"const handlers={},style={setProperty(){}};const element=(id)=>({id,style:{...style},dataset:{},value:'',disabled:false,hidden:false,innerHTML:'',scrollHeight:10,scrollTop:0,clientHeight:10,getBoundingClientRect:()=>({top:0})});const elements=Object.fromEntries(['chat-root','chat-transcript','chat-input','chat-chips','chat-send','chat-abort','chat-token-meter'].map(id=>[id,element(id)]));elements['chat-root'].dataset.agentName='Agent';global.document={getElementById:id=>elements[id]||null,addEventListener:(type,fn)=>handlers[type]=fn};global.window={innerHeight:1000,addEventListener(){}};global.EventSource=function(){};global.crypto={randomUUID:()=> 'command-id'};global.fetch=async()=>({ok:false,status:409,text:async()=>JSON.stringify({error:'backend rejected turn'})});require(process.argv[1]);const app=window.__chatWeb,file={name:'notes.txt'};app.pending=[file];elements['chat-input'].value='keep this';handlers.input({target:elements['chat-input']});handlers.submit({target:{id:'chat-composer'},preventDefault(){}});setTimeout(()=>{if(app.draft!=='keep this'||elements['chat-input'].value!=='keep this'||app.pending[0]!==file||app.turns!==0||elements['chat-send'].disabled||!elements['chat-transcript'].innerHTML.includes('backend rejected turn'))process.exit(1)},0);"#;
         let status = std::process::Command::new("node")
             .args(["-e", script, &renderer])
             .status()

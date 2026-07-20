@@ -66,7 +66,15 @@
 
   const usageText = event => event.context_window ? `${event.tokens_used} / ${event.context_window} tokens` : `${event.tokens_used} tokens`;
 
-  if (typeof module !== 'undefined') module.exports = { reduce, html, usageText };
+  const request = async (url, options) => {
+    const response = await fetch(url, options);
+    if (response.ok) return response;
+    let detail = await response.text().catch(() => '');
+    try { detail = JSON.parse(detail).error || detail; } catch (_) { /* plain-text response */ }
+    throw new Error(detail || `request failed (${response.status})`);
+  };
+
+  if (typeof module !== 'undefined') module.exports = { reduce, html, usageText, request };
   if (typeof document === 'undefined') return;
 
   const SESSION = 'main', MAX_ATTACHMENTS = 8;
@@ -113,6 +121,12 @@
     refreshBusy(app);
   };
 
+  const restoreDraft = (app, input, message, files, error) => {
+    app.draft = message; input.value = message; app.pending = files;
+    renderChips(app); autogrow(input); refreshBusy(app);
+    render(app, { type: 'error', error: `Message not sent: ${error.message || 'request failed'}` });
+  };
+
   const sendFlow = async app => {
     let input = $('chat-input');
     if (!input || !sendEnabled(app)) return;
@@ -121,18 +135,18 @@
     if (!files.length && command === '/new') {
       app.draft = ''; input.value = ''; app.pending = []; renderChips(app); autogrow(input); refreshBusy(app);
       try {
-        await fetch(`/chat/${SESSION}/new`, { method: 'POST' });
-      } catch (_) {
-        app.draft = message; input.value = message; app.pending = files; renderChips(app); autogrow(input); refreshBusy(app);
+        await request(`/chat/${SESSION}/new`, { method: 'POST' });
+      } catch (error) {
+        restoreDraft(app, input, message, files, error);
       }
       return;
     }
     if (!files.length && command === '/compact') {
       app.draft = ''; input.value = ''; app.pending = []; renderChips(app); autogrow(input); refreshBusy(app);
       try {
-        await fetch(`/chat/${SESSION}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: uuid() }) });
-      } catch (_) {
-        app.draft = message; input.value = message; app.pending = files; renderChips(app); autogrow(input); refreshBusy(app);
+        await request(`/chat/${SESSION}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: uuid() }) });
+      } catch (error) {
+        restoreDraft(app, input, message, files, error);
       }
       return;
     }
@@ -142,12 +156,12 @@
         let body = new FormData();
         body.append('command_id', command_id); body.append('message', message);
         for (const file of files) body.append('attachment', file);
-        await fetch(`/chat/${SESSION}/upload`, { method: 'POST', body });
+        await request(`/chat/${SESSION}/upload`, { method: 'POST', body });
       } else {
-        await fetch(`/chat/${SESSION}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id, message }) });
+        await request(`/chat/${SESSION}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id, message }) });
       }
-    } catch (_) {
-      app.draft = message; input.value = message; app.pending = files; renderChips(app); autogrow(input); refreshBusy(app);
+    } catch (error) {
+      restoreDraft(app, input, message, files, error);
     }
   };
 
