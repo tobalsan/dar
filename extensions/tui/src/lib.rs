@@ -107,10 +107,8 @@ impl ChatConfig {
 /// `data/chat/sessions`. Shared by the foreground (session open/resume) and the
 /// `session_list` recall tool so both read the exact same corpus.
 ///
-/// The default path is host-controlled (`<root>/data/chat/sessions`), so it is
-/// composed directly rather than via the data-dir containment check, which
-/// canonicalizes the `data/` parent — that parent need not exist yet at register
-/// time (the foreground creates it lazily on first session open).
+/// The default path is host-controlled (`<root>/data/chat/sessions`) and uses
+/// the host's contained per-extension data path.
 fn sessions_dir(config: &TuiConfig, paths: &host_api::HostPaths) -> Result<PathBuf> {
     match config
         .chat
@@ -126,7 +124,7 @@ fn sessions_dir(config: &TuiConfig, paths: &host_api::HostPaths) -> Result<PathB
                 paths.root().join(path)
             })
         }
-        None => Ok(paths.root().join("data").join("chat").join("sessions")),
+        None => Ok(paths.data_dir("chat")?.join("sessions")),
     }
 }
 

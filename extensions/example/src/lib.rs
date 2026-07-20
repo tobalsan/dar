@@ -53,7 +53,6 @@ impl Extension for ExampleExtension {
                 bail!("example.greeting must not be empty when configured");
             }
 
-            std::fs::create_dir_all(ctx.paths.root().join("data"))?;
             let data_dir = ctx.data_dir(self.id())?;
             ctx.bus
                 .register_broadcast::<ExampleCommand>(EXAMPLE_COMMANDS_TOPIC, 16)?;
@@ -78,7 +77,6 @@ impl Extension for ExampleExtension {
 
     fn start<'a>(&'a self, ctx: StartCtx) -> host_api::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            std::fs::create_dir_all(ctx.paths.root().join("data"))?;
             let data_dir = ctx.paths.data_dir(self.id())?;
             std::fs::create_dir_all(&data_dir)?;
             let marker = data_dir.join("started.txt");

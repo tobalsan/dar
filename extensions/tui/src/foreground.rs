@@ -462,8 +462,6 @@ async fn open_session(
     suppress_resume: bool,
 ) -> Result<Box<dyn ChatSession>> {
     let backend = ctx.host.services.get_named::<dyn ChatBackend>(backend_id)?;
-    // data_dir containment-checks against an existing data/ parent.
-    std::fs::create_dir_all(ctx.paths.root().join("data"))?;
     let session_dir = sessions_dir(config, ctx)?;
     std::fs::create_dir_all(&session_dir)?;
     // Resume the newest archived session so restarting `dar` drops the human

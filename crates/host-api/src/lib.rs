@@ -402,6 +402,7 @@ impl HostPaths {
 
     pub fn data_dir(&self, ext_id: &str) -> Result<PathBuf> {
         validate_segment(ext_id)?;
+        std::fs::create_dir_all(&self.data_root).context("creating host data root")?;
         let path = self.data_root.join(ext_id);
         assert_contained(&self.root, &path)
     }
@@ -831,6 +832,35 @@ mod tests {
         assert_eq!(*cache.value.lock().unwrap(), "after");
         assert_eq!(cache.reloads.load(Ordering::SeqCst), 1);
         std::env::remove_var("HOST_API_RELOAD_SECRET");
+    }
+
+    #[test]
+    fn data_dir_works_for_fresh_agent_root() {
+        let agent = tempfile::tempdir().unwrap();
+        let paths = HostPaths::new(agent.path()).unwrap();
+
+        let data_dir = paths.data_dir("example").unwrap();
+
+        assert_eq!(
+            data_dir,
+            agent.path().canonicalize().unwrap().join("data/example")
+        );
+        assert!(agent.path().join("data").is_dir());
+        assert!(!data_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn data_dir_rejects_symlinked_data_root_escape() {
+        let agent = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), agent.path().join("data")).unwrap();
+        let paths = HostPaths::new(agent.path()).unwrap();
+
+        let error = paths.data_dir("example").unwrap_err();
+
+        assert!(error.to_string().contains("escapes root"), "{error:#}");
+        assert!(!outside.path().join("example").exists());
     }
 
     #[test]
