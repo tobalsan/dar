@@ -83,6 +83,9 @@ impl ScheduleJob {
         }
         self.schedule.validate(now_ms)?;
         self.payload.validate()?;
+        if self.timeout_ms == Some(0) {
+            return Err("timeoutMs must be greater than 0".to_string());
+        }
         Ok(())
     }
 }
@@ -335,6 +338,10 @@ mod tests {
                 r#"{ "id": "empty-message", "schedule": { "cron": "* * * * *", "tz": "UTC" }, "payload": { "message": "" } }"#,
             ),
             (
+                "zero-timeout",
+                r#"{ "id": "zero-timeout", "schedule": { "cron": "* * * * *", "tz": "UTC" }, "payload": { "message": "x" }, "timeoutMs": 0 }"#,
+            ),
+            (
                 "mixed-valid-invalid",
                 r#"{ "id": "valid", "schedule": { "cron": "* * * * *", "tz": "UTC" }, "payload": { "message": "x" } }, { "id": "invalid", "schedule": { "cron": "bad", "tz": "UTC" }, "payload": { "message": "x" } }"#,
             ),
@@ -381,6 +388,20 @@ mod tests {
             },
             timeout_ms: Some(60_000),
         }
+    }
+
+    #[test]
+    fn timeout_validation_accepts_inheritance_and_positive_values() {
+        let mut job = sample_job("timeout");
+        assert!(job.validate(chrono::Utc::now().timestamp_millis()).is_ok());
+        job.timeout_ms = None;
+        assert!(job.validate(chrono::Utc::now().timestamp_millis()).is_ok());
+        job.timeout_ms = Some(0);
+        assert_eq!(
+            job.validate(chrono::Utc::now().timestamp_millis())
+                .unwrap_err(),
+            "timeoutMs must be greater than 0"
+        );
     }
 
     #[test]

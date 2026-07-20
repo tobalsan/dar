@@ -155,19 +155,27 @@ async fn create_job(
         Err(msg) => return bad_request(&msg),
     };
 
-    let mut jobs = api.state.jobs();
-    let id = generate_job_id(&jobs);
-    let job = ScheduleJob {
-        id,
-        name: body.name.unwrap_or_default(),
-        enabled: body.enabled.unwrap_or(true),
-        schedule,
-        payload,
-        timeout_ms: body.timeout_ms,
+    let job = match mutate_jobs(&api, |current| {
+        let mut jobs = current.to_vec();
+        let job = ScheduleJob {
+            id: generate_job_id(current),
+            name: body.name.unwrap_or_default(),
+            enabled: body.enabled.unwrap_or(true),
+            schedule,
+            payload,
+            timeout_ms: body.timeout_ms,
+        };
+        if let Err(msg) = job.validate(Utc::now().timestamp_millis()) {
+            return Err(Box::new(bad_request(&msg)));
+        }
+        jobs.push(job.clone());
+        Ok((jobs, job))
+    }) {
+        Ok(job) => job,
+        Err(response) => return *response,
     };
-    jobs.push(job.clone());
-
-    persist_and_respond(&api, jobs, &job, StatusCode::CREATED)
+    let now_ms = Utc::now().timestamp_millis();
+    json_ok(StatusCode::CREATED, job_with_runtime(&api, &job, now_ms))
 }
 
 /// `PATCH /scheduler/jobs/{id}` \u2014 patch name/enabled/schedule/payload/timeout.
@@ -182,51 +190,60 @@ async fn update_job(
         Err(e) => return bad_request(&e.body_text()),
     };
 
-    let mut jobs = api.state.jobs();
-    let Some(idx) = jobs.iter().position(|j| j.id == id) else {
-        return not_found(&id);
+    let job = match mutate_jobs(&api, |current| {
+        let mut jobs = current.to_vec();
+        let Some(idx) = jobs.iter().position(|j| j.id == id) else {
+            return Err(Box::new(not_found(&id)));
+        };
+        let mut job = jobs[idx].clone();
+        if let Some(name) = body.name {
+            job.name = name;
+        }
+        if let Some(enabled) = body.enabled {
+            job.enabled = enabled;
+        }
+        if let Some(schedule) = body.schedule {
+            job.schedule = match validate_schedule(Some(schedule)) {
+                Ok(s) => s,
+                Err(msg) => return Err(Box::new(bad_request(&msg))),
+            };
+        }
+        if let Some(payload) = body.payload {
+            job.payload = match validate_payload(Some(payload)) {
+                Ok(p) => p,
+                Err(msg) => return Err(Box::new(bad_request(&msg))),
+            };
+        }
+        if let Some(timeout_ms) = body.timeout_ms {
+            job.timeout_ms = timeout_ms;
+        }
+        if let Err(msg) = job.validate(Utc::now().timestamp_millis()) {
+            return Err(Box::new(bad_request(&msg)));
+        }
+
+        jobs[idx] = job.clone();
+        Ok((jobs, job))
+    }) {
+        Ok(job) => job,
+        Err(response) => return *response,
     };
-
-    let mut job = jobs[idx].clone();
-    if let Some(name) = body.name {
-        job.name = name;
-    }
-    if let Some(enabled) = body.enabled {
-        job.enabled = enabled;
-    }
-    if let Some(schedule) = body.schedule {
-        job.schedule = match validate_schedule(Some(schedule)) {
-            Ok(s) => s,
-            Err(msg) => return bad_request(&msg),
-        };
-    }
-    if let Some(payload) = body.payload {
-        job.payload = match validate_payload(Some(payload)) {
-            Ok(p) => p,
-            Err(msg) => return bad_request(&msg),
-        };
-    }
-    if let Some(timeout_ms) = body.timeout_ms {
-        job.timeout_ms = timeout_ms;
-    }
-
-    jobs[idx] = job.clone();
-
-    persist_and_respond(&api, jobs, &job, StatusCode::OK)
+    let now_ms = Utc::now().timestamp_millis();
+    json_ok(StatusCode::OK, job_with_runtime(&api, &job, now_ms))
 }
 
 /// `DELETE /scheduler/jobs/{id}` \u2014 remove the job. 204 on success, 404 unknown.
 async fn delete_job(State(api): State<ApiState>, Path(id): Path<String>) -> Response {
-    let mut jobs = api.state.jobs();
-    let before = jobs.len();
-    jobs.retain(|j| j.id != id);
-    if jobs.len() == before {
-        return not_found(&id);
+    if let Err(response) = mutate_jobs(&api, |current| {
+        let mut jobs = current.to_vec();
+        let before = jobs.len();
+        jobs.retain(|job| job.id != id);
+        if jobs.len() == before {
+            return Err(Box::new(not_found(&id)));
+        }
+        Ok((jobs, ()))
+    }) {
+        return *response;
     }
-    if let Err(e) = save_jobs(&api.root, &jobs) {
-        return server_error(&format!("persisting jobs.json: {e}"));
-    }
-    api.state.set_jobs(jobs);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -670,20 +687,21 @@ fn job_with_runtime(api: &ApiState, job: &ScheduleJob, now_ms: i64) -> Value {
     value
 }
 
-/// Persist `jobs` to disk, update shared state, and return the HTTP response
-/// for `job` at `status` (201 for create, 200 for update).
-fn persist_and_respond(
+/// Serialize a complete read-modify-persist-install transaction with tool and
+/// HTTP mutations so concurrent requests cannot overwrite each other.
+fn mutate_jobs<T>(
     api: &ApiState,
-    jobs: Vec<ScheduleJob>,
-    job: &ScheduleJob,
-    status: StatusCode,
-) -> Response {
-    if let Err(e) = save_jobs(&api.root, &jobs) {
-        return server_error(&format!("persisting jobs.json: {e}"));
-    }
-    api.state.set_jobs(jobs);
-    let now_ms = Utc::now().timestamp_millis();
-    json_ok(status, job_with_runtime(api, job, now_ms))
+    mutation: impl FnOnce(&[ScheduleJob]) -> Result<(Vec<ScheduleJob>, T), Box<Response>>,
+) -> Result<T, Box<Response>> {
+    api.state.mutate_jobs(|current| {
+        let (jobs, result) = mutation(current)?;
+        if let Err(e) = save_jobs(&api.root, &jobs) {
+            return Err(Box::new(server_error(&format!(
+                "persisting jobs.json: {e}"
+            ))));
+        }
+        Ok((jobs, result))
+    })
 }
 
 fn json_ok(status: StatusCode, body: Value) -> Response {
@@ -829,6 +847,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_zero_timeout_is_400() {
+        let (api, _dir) = api();
+        let mut body = create_body("0 8 * * *", "UTC", "hi").0;
+        body.timeout_ms = Some(0);
+        let resp = create_job(State(api), Ok(Json(body))).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let value = body_json(resp).await;
+        assert!(value["error"].as_str().unwrap().contains("timeoutMs"));
+    }
+
+    #[tokio::test]
     async fn list_includes_runtime_fields() {
         let (api, _dir) = api();
         create_job(
@@ -870,6 +899,30 @@ mod tests {
         assert_eq!(v["name"], "Renamed");
         assert_eq!(v["enabled"], false);
         assert_eq!(v["timeoutMs"], 5000);
+    }
+
+    #[tokio::test]
+    async fn update_zero_timeout_is_400_and_preserves_job() {
+        let (api, _dir) = api();
+        let created = body_json(
+            create_job(
+                State(api.clone()),
+                Ok(create_body("0 8 * * *", "UTC", "hi")),
+            )
+            .await,
+        )
+        .await;
+        let id = created["id"].as_str().unwrap().to_string();
+        let body = Json(UpdateBody {
+            name: None,
+            enabled: None,
+            schedule: None,
+            payload: None,
+            timeout_ms: Some(Some(0)),
+        });
+        let resp = update_job(State(api.clone()), Path(id), Ok(body)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(api.state.jobs()[0].timeout_ms, None);
     }
 
     #[tokio::test]
@@ -1072,6 +1125,27 @@ mod tests {
             .unwrap()
             .next()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn run_now_output_write_failure_is_500_and_records_error() {
+        let (api, dir) = api_with_runner(false);
+        let id = create_one(&api).await;
+        std::fs::write(dir.path().join("cron/output"), "not a directory").unwrap();
+
+        let resp = run_now(State(api.clone()), Path(id.clone())).await;
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(resp).await;
+        assert_eq!(body["status"], "error");
+        assert!(body["outputPath"].is_null());
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("failed to persist run output"));
+        let runtime = api.state.runtime(&id);
+        assert_eq!(runtime.last_status, Some(crate::state::LastStatus::Error));
+        assert_eq!(runtime.last_error.as_deref(), body["error"].as_str());
     }
 
     #[tokio::test]

@@ -227,18 +227,34 @@ fn parse_and_validate_payload(payload: &Value) -> Result<Payload, Box<ToolOutcom
     Ok(Payload { message })
 }
 
-/// Persist `jobs` to disk and push into shared state (which wakes the timer
-/// loop to re-arm). Returns a structured error outcome on a write failure.
-fn persist(deps: &ToolDeps, jobs: Vec<ScheduleJob>) -> Result<(), Box<ToolOutcome>> {
-    if let Err(e) = save_jobs(&deps.root, &jobs) {
-        return Err(Box::new(ToolOutcome::error_code(
-            "persist_error",
-            format!("failed to persist cron/jobs.json: {e}"),
-            None::<String>,
-        )));
-    }
-    deps.state.set_jobs(jobs);
-    Ok(())
+fn validate_job(job: &ScheduleJob) -> Result<(), Box<ToolOutcome>> {
+    job.validate(Utc::now().timestamp_millis())
+        .map_err(|message| {
+            Box::new(ToolOutcome::error_code(
+                "invalid_args",
+                message,
+                None::<String>,
+            ))
+        })
+}
+
+/// Atomically mutate the shared job set and its file representation. Returns a
+/// structured error outcome on a rejected mutation or write failure.
+fn mutate_jobs<T>(
+    deps: &ToolDeps,
+    mutation: impl FnOnce(&[ScheduleJob]) -> Result<(Vec<ScheduleJob>, T), Box<ToolOutcome>>,
+) -> Result<T, Box<ToolOutcome>> {
+    deps.state.mutate_jobs(|current| {
+        let (jobs, result) = mutation(current)?;
+        if let Err(e) = save_jobs(&deps.root, &jobs) {
+            return Err(Box::new(ToolOutcome::error_code(
+                "persist_error",
+                format!("failed to persist cron/jobs.json: {e}"),
+                None::<String>,
+            )));
+        }
+        Ok((jobs, result))
+    })
 }
 
 /// Structured `not found` outcome for an unknown job id.
@@ -649,24 +665,27 @@ impl ToolExecutor for CreateTool {
             Err(out) => return Ok(*out),
         };
 
-        let mut jobs = self.deps.state.jobs();
-        let id = generate_job_id(&jobs);
-        let job = ScheduleJob {
-            id,
-            name: args
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            enabled: args.get("enabled").and_then(Value::as_bool).unwrap_or(true),
-            schedule,
-            payload,
-            timeout_ms: args.get("timeoutMs").and_then(Value::as_u64),
+        let job = match mutate_jobs(&self.deps, |current| {
+            let mut jobs = current.to_vec();
+            let job = ScheduleJob {
+                id: generate_job_id(current),
+                name: args
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                enabled: args.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+                schedule,
+                payload,
+                timeout_ms: args.get("timeoutMs").and_then(Value::as_u64),
+            };
+            validate_job(&job)?;
+            jobs.push(job.clone());
+            Ok((jobs, job))
+        }) {
+            Ok(job) => job,
+            Err(out) => return Ok(*out),
         };
-        jobs.push(job.clone());
-        if let Err(out) = persist(&self.deps, jobs) {
-            return Ok(*out);
-        }
         let now_ms = Utc::now().timestamp_millis();
         Ok(ToolOutcome::ok(render(&job_view(&self.deps, &job, now_ms))))
     }
@@ -726,46 +745,49 @@ impl ToolExecutor for UpdateTool {
             Ok(id) => id,
             Err(out) => return Ok(*out),
         };
-        let mut jobs = self.deps.state.jobs();
-        let Some(idx) = jobs.iter().position(|j| j.id == id) else {
-            return Ok(unknown_job(&id));
-        };
-        let mut job = jobs[idx].clone();
-        if let Some(name) = args.get("name").and_then(Value::as_str) {
-            job.name = name.to_string();
-        }
-        if let Some(enabled) = args.get("enabled").and_then(Value::as_bool) {
-            if !enabled && job.enabled {
-                if let Err(out) = require_confirm(&args, "disabling a scheduler job via update") {
-                    return Ok(*out);
-                }
+        let result = mutate_jobs(&self.deps, |current| {
+            let mut jobs = current.to_vec();
+            let Some(idx) = jobs.iter().position(|j| j.id == id) else {
+                return Err(Box::new(unknown_job(&id)));
+            };
+            let mut job = jobs[idx].clone();
+            if let Some(name) = args.get("name").and_then(Value::as_str) {
+                job.name = name.to_string();
             }
-            job.enabled = enabled;
-        }
-        if let Some(schedule_arg) = args.get("schedule") {
-            job.schedule = match parse_and_validate_schedule(schedule_arg) {
-                Ok(s) => s,
-                Err(out) => return Ok(*out),
-            };
-        }
-        if let Some(payload_arg) = args.get("payload") {
-            job.payload = match parse_and_validate_payload(payload_arg) {
-                Ok(p) => p,
-                Err(out) => return Ok(*out),
-            };
-        }
-        // timeoutMs present-as-null clears the override; present-as-number sets
-        // it; absent leaves it unchanged.
-        if let Some(timeout) = args.get("timeoutMs") {
-            job.timeout_ms = match timeout {
-                Value::Null => None,
-                v => v.as_u64(),
-            };
-        }
-        jobs[idx] = job.clone();
-        if let Err(out) = persist(&self.deps, jobs) {
-            return Ok(*out);
-        }
+            if let Some(enabled) = args.get("enabled").and_then(Value::as_bool) {
+                if !enabled && job.enabled {
+                    require_confirm(&args, "disabling a scheduler job via update")?;
+                }
+                job.enabled = enabled;
+            }
+            if let Some(schedule_arg) = args.get("schedule") {
+                job.schedule = match parse_and_validate_schedule(schedule_arg) {
+                    Ok(s) => s,
+                    Err(out) => return Err(out),
+                };
+            }
+            if let Some(payload_arg) = args.get("payload") {
+                job.payload = match parse_and_validate_payload(payload_arg) {
+                    Ok(p) => p,
+                    Err(out) => return Err(out),
+                };
+            }
+            // timeoutMs present-as-null clears the override; present-as-number
+            // sets it; absent leaves it unchanged.
+            if let Some(timeout) = args.get("timeoutMs") {
+                job.timeout_ms = match timeout {
+                    Value::Null => None,
+                    v => v.as_u64(),
+                };
+            }
+            validate_job(&job)?;
+            jobs[idx] = job.clone();
+            Ok((jobs, job))
+        });
+        let job = match result {
+            Ok(job) => job,
+            Err(out) => return Ok(*out),
+        };
         let now_ms = Utc::now().timestamp_millis();
         Ok(ToolOutcome::ok(render(&job_view(&self.deps, &job, now_ms))))
     }
@@ -831,15 +853,18 @@ impl ToolExecutor for SetEnabledTool {
                 return Ok(*out);
             }
         }
-        let mut jobs = self.deps.state.jobs();
-        let Some(idx) = jobs.iter().position(|j| j.id == id) else {
-            return Ok(unknown_job(&id));
+        let job = match mutate_jobs(&self.deps, |current| {
+            let mut jobs = current.to_vec();
+            let Some(idx) = jobs.iter().position(|j| j.id == id) else {
+                return Err(Box::new(unknown_job(&id)));
+            };
+            jobs[idx].enabled = self.enable;
+            let job = jobs[idx].clone();
+            Ok((jobs, job))
+        }) {
+            Ok(job) => job,
+            Err(out) => return Ok(*out),
         };
-        jobs[idx].enabled = self.enable;
-        let job = jobs[idx].clone();
-        if let Err(out) = persist(&self.deps, jobs) {
-            return Ok(*out);
-        }
         let now_ms = Utc::now().timestamp_millis();
         Ok(ToolOutcome::ok(render(&job_view(&self.deps, &job, now_ms))))
     }
@@ -882,13 +907,15 @@ impl ToolExecutor for DeleteTool {
         if let Err(out) = require_confirm(&args, "deleting a scheduler job") {
             return Ok(*out);
         }
-        let mut jobs = self.deps.state.jobs();
-        let before = jobs.len();
-        jobs.retain(|j| j.id != id);
-        if jobs.len() == before {
-            return Ok(unknown_job(&id));
-        }
-        if let Err(out) = persist(&self.deps, jobs) {
+        if let Err(out) = mutate_jobs(&self.deps, |current| {
+            let mut jobs = current.to_vec();
+            let before = jobs.len();
+            jobs.retain(|job| job.id != id);
+            if jobs.len() == before {
+                return Err(Box::new(unknown_job(&id)));
+            }
+            Ok((jobs, ()))
+        }) {
             return Ok(*out);
         }
         Ok(ToolOutcome::ok(render(&json!({ "deleted": id }))))
@@ -1105,6 +1132,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_zero_timeout_is_invalid_args() {
+        let (deps, _dir) = deps();
+        let out = dispatch(
+            &deps,
+            "scheduler_create_job",
+            json!({
+                "schedule": { "cron": "0 8 * * *", "tz": "UTC" },
+                "payload": { "message": "hi" },
+                "timeoutMs": 0
+            }),
+        )
+        .await;
+        assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "invalid_args");
+        assert!(deps.state.jobs().is_empty());
+    }
+
+    #[tokio::test]
     async fn get_unknown_is_error() {
         let (deps, _dir) = deps();
         let out = dispatch(&deps, "scheduler_get_job", json!({ "id": "nope" })).await;
@@ -1172,6 +1217,21 @@ mod tests {
         assert_eq!(v["timeoutMs"], 5000);
         // Schedule + payload untouched.
         assert_eq!(v["payload"]["message"], "hi");
+    }
+
+    #[tokio::test]
+    async fn update_zero_timeout_is_invalid_args_and_persists_nothing() {
+        let (deps, dir) = deps();
+        let id = create_job(&deps, "0 8 * * *", "UTC", "hi").await;
+        let out = dispatch(
+            &deps,
+            "scheduler_update_job",
+            json!({ "id": id, "timeoutMs": 0 }),
+        )
+        .await;
+        assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "invalid_args");
+        assert_eq!(load_jobs(dir.path(), |_| {})[0].timeout_ms, None);
     }
 
     #[tokio::test]
@@ -1341,6 +1401,28 @@ mod tests {
             .unwrap()
             .next()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn run_now_output_write_failure_is_error_and_records_error() {
+        let (deps, dir) = deps_with_runner(false);
+        let id = create_job(&deps, "0 0 1 1 *", "UTC", "hi").await;
+        std::fs::write(dir.path().join("cron/output"), "not a directory").unwrap();
+
+        let out = dispatch(&deps, "scheduler_run_job_now", json!({ "id": id.clone() })).await;
+
+        assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "run_error");
+        let body = parse(&out);
+        assert_eq!(body["status"], "error");
+        assert!(body["outputPath"].is_null());
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("failed to persist run output"));
+        let runtime = deps.state.runtime(&id);
+        assert_eq!(runtime.last_status, Some(crate::state::LastStatus::Error));
+        assert_eq!(runtime.last_error.as_deref(), body["error"].as_str());
     }
 
     #[tokio::test]

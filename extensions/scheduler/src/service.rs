@@ -421,9 +421,6 @@ fn persist_execute_result(
     } = output;
     let schedule = format_schedule(&job.schedule);
 
-    // Keep a copy of the error for runtime state before it is moved into the
-    // output writer, so the Cron tab can surface the failure reason.
-    let last_error = error.clone();
     let written = write_cron_run_output(&CronRunOutput {
         root: &config.root,
         job_id: &job.id,
@@ -437,22 +434,29 @@ fn persist_execute_result(
         error: error.clone(),
     });
 
+    let (status, error, output_path) = match written {
+        Ok(path) => {
+            tracing::info!("[scheduler] Wrote output {}", path.display());
+            (status, error, Some(path))
+        }
+        Err(write_error) => {
+            tracing::error!(
+                "[scheduler] Failed to write output for {}: {write_error:#}",
+                job.id
+            );
+            let persistence_error = format!("failed to persist run output: {write_error:#}");
+            let error = Some(match error {
+                Some(run_error) => format!("{run_error}; {persistence_error}"),
+                None => persistence_error,
+            });
+            (RunStatus::Error, error, None)
+        }
+    };
     let final_status = match status {
         RunStatus::Ok => LastStatus::Ok,
         RunStatus::Error => LastStatus::Error,
     };
-    state.mark_finished(&job.id, final_status, last_error);
-
-    let output_path = match written {
-        Ok(path) => {
-            tracing::info!("[scheduler] Wrote output {}", path.display());
-            Some(path)
-        }
-        Err(err) => {
-            tracing::error!("[scheduler] Failed to write output for {}: {err:#}", job.id);
-            None
-        }
-    };
+    state.mark_finished(&job.id, final_status, error.clone());
 
     ExecuteResult {
         status,

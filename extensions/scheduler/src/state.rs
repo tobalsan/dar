@@ -88,17 +88,42 @@ impl SchedulerState {
         self.lock().runtime.get(job_id).cloned().unwrap_or_default()
     }
 
-    /// Replace the job set wholesale (after a create/update/delete) and wake the
-    /// loop. Runtime entries for removed jobs are pruned.
+    /// Replace the job set wholesale and wake the loop. Used when file-backed
+    /// configuration is reloaded; runtime entries for removed jobs are pruned.
     pub fn set_jobs(&self, jobs: Vec<ScheduleJob>) {
-        {
+        self.replace_jobs(jobs);
+        self.changed.notify_one();
+    }
+
+    /// Atomically derive, persist, and install a jobs mutation.
+    ///
+    /// The callback runs while the jobs lock is held and must persist its
+    /// returned vector before returning. This serializes the complete
+    /// read-modify-persist-install transaction across HTTP and tool callers,
+    /// while leaving file I/O and caller-specific errors at those interfaces.
+    pub fn mutate_jobs<T, E>(
+        &self,
+        mutation: impl FnOnce(&[ScheduleJob]) -> Result<(Vec<ScheduleJob>, T), E>,
+    ) -> Result<T, E> {
+        let result = {
             let mut inner = self.lock();
+            let (jobs, result) = mutation(&inner.jobs)?;
             inner
                 .runtime
                 .retain(|id, _| jobs.iter().any(|j| &j.id == id));
             inner.jobs = jobs;
-        }
+            result
+        };
         self.changed.notify_one();
+        Ok(result)
+    }
+
+    fn replace_jobs(&self, jobs: Vec<ScheduleJob>) {
+        let mut inner = self.lock();
+        inner
+            .runtime
+            .retain(|id, _| jobs.iter().any(|j| &j.id == id));
+        inner.jobs = jobs;
     }
 
     /// Record a job's next computed fire instant (or clear it when disabled).
@@ -258,6 +283,45 @@ mod tests {
         assert!(state.try_claim_running("a", 200));
         state.mark_finished("a", LastStatus::Ok, None);
         assert!(state.runtime("a").last_error.is_none());
+    }
+
+    #[test]
+    fn concurrent_mutations_preserve_both_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::sync::Arc::new(dir.path().to_path_buf());
+        let state = std::sync::Arc::new(SchedulerState::new(vec![]));
+        let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut threads = Vec::new();
+        for id in ["a", "b"] {
+            let root = root.clone();
+            let state = state.clone();
+            let start = start.clone();
+            threads.push(std::thread::spawn(move || {
+                start.wait();
+                state
+                    .mutate_jobs(|current| {
+                        let mut jobs = current.to_vec();
+                        jobs.push(job(id));
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        crate::store::save_jobs(&root, &jobs).map(|()| (jobs, ()))
+                    })
+                    .unwrap();
+            }));
+        }
+        start.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let mut memory_ids: Vec<_> = state.jobs().into_iter().map(|job| job.id).collect();
+        memory_ids.sort();
+        let mut disk_ids: Vec<_> = crate::store::load_jobs(&root, |_| {})
+            .into_iter()
+            .map(|job| job.id)
+            .collect();
+        disk_ids.sort();
+        assert_eq!(memory_ids, ["a", "b"]);
+        assert_eq!(disk_ids, memory_ids);
     }
 
     #[tokio::test]
