@@ -119,6 +119,13 @@ struct WorkspaceSkill {
 
 fn discover_workspace_skills(root: &Path) -> Vec<WorkspaceSkill> {
     let skills_dir = root.join("skills");
+    if host_api::assert_contained(root, &skills_dir).is_err() {
+        tracing::warn!(
+            "workspace skills directory escapes agent root: {}",
+            skills_dir.display()
+        );
+        return Vec::new();
+    }
     let Ok(entries) = fs::read_dir(&skills_dir) else {
         return Vec::new();
     };
@@ -127,6 +134,10 @@ fn discover_workspace_skills(root: &Path) -> Vec<WorkspaceSkill> {
     for entry in entries.flatten() {
         let skill_md = entry.path().join("SKILL.md");
         if !skill_md.is_file() {
+            continue;
+        }
+        if host_api::assert_contained(root, &skill_md).is_err() {
+            tracing::warn!("skill file escapes agent root: {}", skill_md.display());
             continue;
         }
         match load_workspace_skill(&skill_md) {
@@ -232,6 +243,56 @@ mod tests {
             "{}",
             ctx.text
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skips_skill_directory_symlinks_escaping_agent_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        write(
+            outside.path(),
+            "escaped/SKILL.md",
+            "---\nname: escaped-dir\ndescription: Must not load\n---\nBody",
+        );
+        fs::create_dir_all(dir.path().join("skills")).unwrap();
+        symlink(
+            outside.path().join("escaped"),
+            dir.path().join("skills/escaped"),
+        )
+        .unwrap();
+
+        let ctx = resolve(dir.path(), None).unwrap();
+
+        assert!(!ctx.text.contains("escaped-dir"), "{}", ctx.text);
+        assert!(!ctx.text.contains("<available_skills>"), "{}", ctx.text);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skips_skill_file_symlinks_escaping_agent_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        write(
+            outside.path(),
+            "SKILL.md",
+            "---\nname: escaped-file\ndescription: Must not load\n---\nBody",
+        );
+        fs::create_dir_all(dir.path().join("skills/local")).unwrap();
+        symlink(
+            outside.path().join("SKILL.md"),
+            dir.path().join("skills/local/SKILL.md"),
+        )
+        .unwrap();
+
+        let ctx = resolve(dir.path(), None).unwrap();
+
+        assert!(!ctx.text.contains("escaped-file"), "{}", ctx.text);
+        assert!(!ctx.text.contains("<available_skills>"), "{}", ctx.text);
     }
 
     #[test]
