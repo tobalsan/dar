@@ -1085,7 +1085,9 @@ mod tests {
         write_test_agent_yaml(agent);
         write_test_extension_with_dependency(
             agent,
-            &format!("sdk = {{ package = \"dar-extension-sdk\", version = \"{LOCAL_CRATE_VERSION}\" }}"),
+            &format!(
+                "sdk = {{ package = \"dar-extension-sdk\", version = \"{LOCAL_CRATE_VERSION}\" }}"
+            ),
         );
 
         compose(agent).unwrap();
