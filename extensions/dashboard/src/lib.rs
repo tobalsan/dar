@@ -197,11 +197,7 @@ struct PresenceGuard {
 
 impl PresenceGuard {
     fn unlink(&self) {
-        if let Err(e) = self.registry.remove(
-            &self.entry.id,
-            &self.entry.folder,
-            self.entry.workflow.as_deref(),
-        ) {
+        if let Err(e) = self.registry.remove(&self.entry) {
             tracing::warn!("dashboard presence unlink failed: {e:#}");
         }
     }

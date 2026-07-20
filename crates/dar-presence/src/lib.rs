@@ -26,9 +26,13 @@
 //! drop off the list automatically; cleanly shut-down agents additionally
 //! `unlink` their own file so nothing lingers even briefly.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs::File,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -138,8 +142,7 @@ impl Registry {
     /// registry directory if needed. Write is atomic via a temp file + rename
     /// so a concurrent reader never observes a half-written file.
     pub fn write(&self, entry: &PresenceEntry) -> Result<PathBuf> {
-        std::fs::create_dir_all(&self.dir)
-            .with_context(|| format!("creating registry dir {}", self.dir.display()))?;
+        let _lock = self.lock()?;
         let path = self.dir.join(entry.file_name());
         let tmp = self.dir.join(format!(".{}.tmp", entry.file_name()));
         let json = serde_json::to_vec_pretty(entry).context("serializing presence entry")?;
@@ -150,15 +153,44 @@ impl Registry {
         Ok(path)
     }
 
-    /// Remove this entry's presence file. Missing file is not an error
-    /// (clean-shutdown unlink is idempotent across restarts).
-    pub fn remove(&self, id: &str, folder: &str, workflow: Option<&str>) -> Result<()> {
-        let path = self.dir.join(file_name_for(id, folder, workflow));
+    /// Remove this entry's presence file only if it still belongs to the same
+    /// dashboard boot. Missing and superseded files are left alone, making
+    /// clean-shutdown unlink idempotent across restarts.
+    pub fn remove(&self, entry: &PresenceEntry) -> Result<()> {
+        let _lock = self.lock()?;
+        let path = self.dir.join(entry.file_name());
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(e).with_context(|| format!("reading presence file {}", path.display()))
+            }
+        };
+        let current: PresenceEntry = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing presence file {}", path.display()))?;
+        if current.started_at != entry.started_at {
+            return Ok(());
+        }
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e).with_context(|| format!("removing presence file {}", path.display())),
         }
+    }
+
+    fn lock(&self) -> Result<File> {
+        std::fs::create_dir_all(&self.dir)
+            .with_context(|| format!("creating registry dir {}", self.dir.display()))?;
+        let path = self.dir.join(".registry.lock");
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("opening registry lock {}", path.display()))?;
+        file.lock_exclusive()
+            .with_context(|| format!("locking registry {}", path.display()))?;
+        Ok(file)
     }
 
     /// Read all *live* entries: every well-formed presence file whose pid is
@@ -290,10 +322,27 @@ mod tests {
         let reg = Registry::new(dir.path());
         let e = entry("ALG-3", "/agents/c", std::process::id());
         reg.write(&e).unwrap();
-        reg.remove(&e.id, &e.folder, e.workflow.as_deref()).unwrap();
+        reg.remove(&e).unwrap();
         assert!(reg.read_live().is_empty());
         // Idempotent: removing again is not an error.
-        reg.remove(&e.id, &e.folder, e.workflow.as_deref()).unwrap();
+        reg.remove(&e).unwrap();
+    }
+
+    #[test]
+    fn older_boot_cannot_unlink_newer_same_key_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path());
+        let mut older = entry("ALG-11", "/agents/overlap", std::process::id());
+        older.started_at = 1_700_000_000;
+        let mut newer = older.clone();
+        newer.started_at += 1;
+        newer.addr = "0.0.0.0:60002".to_string();
+
+        reg.write(&older).unwrap();
+        reg.write(&newer).unwrap();
+        reg.remove(&older).unwrap();
+
+        assert_eq!(reg.read_live(), vec![newer]);
     }
 
     #[test]

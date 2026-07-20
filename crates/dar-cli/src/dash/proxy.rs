@@ -582,17 +582,11 @@ mod tests {
         let ports = LivePorts::new();
         assert!(!ports.contains(&registry, 50000));
         // Registered after a cold cache: found via refresh-on-miss.
-        registry
-            .write(&entry(
-                "agent",
-                "/agent",
-                "0.0.0.0:50000",
-                std::process::id(),
-            ))
-            .unwrap();
+        let registered = entry("agent", "/agent", "0.0.0.0:50000", std::process::id());
+        registry.write(&registered).unwrap();
         assert!(ports.contains(&registry, 50000));
         // Removed from the registry: still found while the TTL holds.
-        registry.remove("agent", "/agent", None).unwrap();
+        registry.remove(&registered).unwrap();
         assert!(ports.contains(&registry, 50000));
     }
 }

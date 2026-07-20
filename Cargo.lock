@@ -884,6 +884,7 @@ name = "dar-presence"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "fs2",
  "hex",
  "libc",
  "serde",
