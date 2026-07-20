@@ -9,6 +9,21 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+### Fixed
+
+- An older overlapping dashboard process can no longer remove a newer same-agent/workflow fleet presence entry during shutdown.
+- Extension `data_dir` lookup now works for fresh agent folders by preparing the contained shared `data/` parent, so SDK callers no longer need to create it first.
+- Scheduler jobs now consistently reject `timeoutMs: 0` from `cron/jobs.json`, HTTP mutations, and agent tools instead of accepting runs that time out immediately.
+- Boot and `dar doctor` now reject zero-valued workflow polling, concurrency, timeout, and turn limits instead of accepting configurations that spin, disable dispatch, or terminate runs immediately.
+- Chat transcript write failures now return or stream a recoverable error and settle active turns instead of panicking request or backend-forwarding tasks.
+- Concurrent scheduler job changes from HTTP and agent tools no longer overwrite one another; memory and `cron/jobs.json` now retain every accepted mutation.
+- Scheduler runs now report an error when their required output artifact cannot be written, keeping run-now responses and Cron status consistent with persisted output.
+- Web chat now reports rejected sends and restores the message and pending attachments instead of silently discarding the draft or leaving the composer in a stale busy state.
+- Rejected web and TUI chat turns no longer create phantom transcript messages or leave turns marked active; accepted turns still publish the user message before backend output.
+- Orchestrator tracker read errors at turn boundaries and after normal worker exits now preserve work for a later retry instead of finishing it as non-active.
+- Workspace skill discovery now ignores skill directories and files whose symlinks resolve outside the agent folder, preventing external files from entering system context.
+- Abnormally exited orchestrator attempts are now closed in persisted run history before a retry is queued, so dashboards and restart cleanup no longer treat exited workers as live.
+
 ### Changed
 
 - `dar-artifacts` is now published to crates.io alongside the other public
