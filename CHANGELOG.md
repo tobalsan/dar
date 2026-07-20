@@ -23,6 +23,7 @@ Breaking changes are marked **⚠ BREAKING**.
 - Orchestrator tracker read errors at turn boundaries and after normal worker exits now preserve work for a later retry instead of finishing it as non-active.
 - Workspace skill discovery now ignores skill directories and files whose symlinks resolve outside the agent folder, preventing external files from entering system context.
 - Abnormally exited orchestrator attempts are now closed in persisted run history before a retry is queued, so dashboards and restart cleanup no longer treat exited workers as live.
+- Web chat dashboard no longer froze the page for seconds on load when a session had a long transcript; repaint is now coalesced per animation frame instead of per replayed event.
 
 ### Changed
 

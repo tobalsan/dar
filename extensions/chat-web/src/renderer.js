@@ -112,13 +112,20 @@
     if (stick) transcript.scrollTop = transcript.scrollHeight;
   };
 
+  // per-event repaint is O(events × transcript) during replay
+  const raf = typeof requestAnimationFrame !== 'undefined' ? requestAnimationFrame : queueMicrotask;
+  const schedulePaint = app => {
+    if (app.paintScheduled) return;
+    app.paintScheduled = true;
+    raf(() => { app.paintScheduled = false; paint(app); refreshBusy(app); });
+  };
+
   const render = (app, event) => {
     if (event.type === 'context_usage') { let m = $('chat-token-meter'); if (m) m.textContent = usageText(event); return; }
     if (event.type === 'user') { app.turns++; app.workingWord = WORKING_WORDS[Math.floor(Math.random() * WORKING_WORDS.length)]; }
     if (event.type === 'finished' || event.type === 'aborted' || event.type === 'closed') app.turns = Math.max(0, app.turns - 1);
     app.blocks = reduce(app.blocks, event);
-    paint(app);
-    refreshBusy(app);
+    schedulePaint(app);
   };
 
   const restoreDraft = (app, input, message, files, error) => {
@@ -194,7 +201,7 @@
   };
 
   if (!window.__chatWeb) {
-    let app = { blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null };
+    let app = { blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false };
     window.__chatWeb = app;
     window.renderChatEvent = event => render(app, event);
     app.es = new EventSource(`/chat/${SESSION}/stream`);
