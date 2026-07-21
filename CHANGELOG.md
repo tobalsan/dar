@@ -11,6 +11,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Fixed
 
+- `WORKFLOW.md` `polling:` now accepts `poll_interval_ms` as an alias for `interval_ms` (matching agent.yaml's `orchestrator.poll_interval_ms`), and unrecognized `polling:` keys are logged as warnings instead of being silently dropped — a misnamed interval key previously fell back to the 1 s default and could exhaust tracker API rate limits.
 - An older overlapping dashboard process can no longer remove a newer same-agent/workflow fleet presence entry during shutdown.
 - Extension `data_dir` lookup now works for fresh agent folders by preparing the contained shared `data/` parent, so SDK callers no longer need to create it first.
 - Scheduler jobs now consistently reject `timeoutMs: 0` from `cron/jobs.json`, HTTP mutations, and agent tools instead of accepting runs that time out immediately.

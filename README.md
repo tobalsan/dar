@@ -437,7 +437,7 @@ Nullable fields render as `none` when absent — guard with `{% if %}`.
   root, for WORKFLOW.md-inside-a-repo setups).
 - `workflow.file` — the resolved `WORKFLOW.md` path itself.
 
-Fields omitted from frontmatter fall back to: `poll_interval_ms 1000`,
+Fields omitted from frontmatter fall back to: `interval_ms 1000`,
 `max_concurrent 3`, `max_active_runs 3`, `max_retries 3`, `retry_backoff_ms
 30000`, `jitter_ms 0`, `workspace.root "workspaces"`, `reuse true`,
 `cleanup_on_terminal false`. `tracker.needs_human` has no default — omitting

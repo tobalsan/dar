@@ -109,6 +109,8 @@ pub struct WfTrackerStates {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct WfPollingConfig {
+    /// Accepts both `interval_ms` and the agent.yaml-style `poll_interval_ms`.
+    #[serde(alias = "poll_interval_ms")]
     pub interval_ms: Option<u64>,
     pub jitter_ms: Option<u64>,
     pub max_concurrent: Option<usize>,
@@ -227,13 +229,45 @@ pub struct WorkflowSnapshot {
 pub fn parse_workflow_md(raw: &str) -> Result<WorkflowSnapshot> {
     let (fm_raw, body) = split_frontmatter(raw);
     let frontmatter: WorkflowFrontmatter = match fm_raw {
-        Some(fm) => serde_yaml::from_str(fm).context("parsing WORKFLOW.md frontmatter YAML")?,
+        Some(fm) => {
+            warn_unknown_polling_keys(fm);
+            serde_yaml::from_str(fm).context("parsing WORKFLOW.md frontmatter YAML")?
+        }
         None => WorkflowFrontmatter::default(),
     };
     Ok(WorkflowSnapshot {
         frontmatter,
         body: body.to_string(),
     })
+}
+
+/// Keys accepted in the `polling:` frontmatter section, including serde aliases.
+const KNOWN_POLLING_KEYS: &[&str] = &[
+    "interval_ms",
+    "poll_interval_ms",
+    "jitter_ms",
+    "max_concurrent",
+    "max_retries",
+    "retry_backoff_ms",
+    "allow_stale",
+    "allowStale",
+];
+
+/// Unknown `polling:` keys are silently dropped by serde, which turns a typo
+/// into a wrong-default footgun (e.g. a misnamed interval key falling back to
+/// the 1 s poll default). Warn so the mistake is visible in logs and doctor.
+fn warn_unknown_polling_keys(fm_raw: &str) {
+    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(fm_raw) else {
+        return;
+    };
+    let Some(map) = value.get("polling").and_then(serde_yaml::Value::as_mapping) else {
+        return;
+    };
+    for key in map.keys().filter_map(serde_yaml::Value::as_str) {
+        if !KNOWN_POLLING_KEYS.contains(&key) {
+            tracing::warn!("WORKFLOW.md `polling.{key}` is not a recognized key; ignoring it");
+        }
+    }
 }
 
 /// Split `---\n…\n---` frontmatter from the rest of the document.
@@ -1038,6 +1072,28 @@ body"#;
             snap.frontmatter.polling.as_ref().unwrap().allow_stale,
             Some(false),
             "allowStale alias must deserialize to allow_stale=false"
+        );
+    }
+
+    #[test]
+    fn parse_poll_interval_ms_alias() {
+        // `poll_interval_ms` (agent.yaml-style) must deserialize as `interval_ms`.
+        let raw = "---\npolling:\n  poll_interval_ms: 10000\n---\nbody";
+        let snap = parse_workflow_md(raw).unwrap();
+        assert_eq!(
+            snap.frontmatter.polling.as_ref().unwrap().interval_ms,
+            Some(10_000),
+            "poll_interval_ms alias must deserialize to interval_ms"
+        );
+    }
+
+    #[test]
+    fn parse_unknown_polling_key_is_ignored_not_fatal() {
+        let raw = "---\npolling:\n  not_a_real_key: 5\n  interval_ms: 2000\n---\nbody";
+        let snap = parse_workflow_md(raw).unwrap();
+        assert_eq!(
+            snap.frontmatter.polling.as_ref().unwrap().interval_ms,
+            Some(2000)
         );
     }
 
