@@ -27,6 +27,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Changed
 
+- Linear HTTP responses now emit structured process, operation, status, attempt, and rate-limit telemetry without logging request contents or credentials.
 - `dar-artifacts` is now published to crates.io alongside the other public
   crates — it became part of the SDK surface (`dar-cap-chat` and
   `dar-extension-sdk` depend on it), so registry-only extension builds resolve.

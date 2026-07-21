@@ -63,6 +63,40 @@ const UNSET_MIN: i64 = i64::MAX;
 /// Page size for GraphQL pagination.
 const PAGE_SIZE: u64 = 50;
 
+fn rate_limit_header(headers: &reqwest::header::HeaderMap, name: &str) -> Option<i64> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+}
+
+pub(crate) fn log_linear_response(
+    operation: &'static str,
+    attempt: u8,
+    response: &reqwest::Response,
+) {
+    tracing::info!(
+        pid = std::process::id(),
+        operation,
+        attempt,
+        http_status = response.status().as_u16(),
+        requests_remaining = ?rate_limit_header(
+            response.headers(),
+            "x-ratelimit-requests-remaining"
+        ),
+        requests_reset = ?rate_limit_header(response.headers(), "x-ratelimit-requests-reset"),
+        complexity_remaining = ?rate_limit_header(
+            response.headers(),
+            "x-ratelimit-complexity-remaining"
+        ),
+        complexity_reset = ?rate_limit_header(
+            response.headers(),
+            "x-ratelimit-complexity-reset"
+        ),
+        "Linear HTTP response"
+    );
+}
+
 pub struct LinearTrackerConfig {
     pub endpoint: String,
     /// The full `Authorization` header value (raw API key, or `Bearer <token>`
@@ -706,7 +740,9 @@ query DarUsers($after: String, $first: Int!) {
         loop {
             let vars = json!({ "after": cursor, "first": 250 });
             let body = json!({ "query": query, "variables": vars });
-            let response = self.send_with_rate_limit_async(body).await?;
+            let response = self
+                .send_with_rate_limit_async("tracker.fetch_users", body)
+                .await?;
             let conn = response
                 .pointer("/data/users")
                 .ok_or_else(|| anyhow!("missing users in Linear response"))?;
@@ -782,7 +818,9 @@ query DarCandidates($filter: IssueFilter, $after: String, $first: Int!) {
 "#;
         let vars = json!({ "filter": filter, "after": after, "first": PAGE_SIZE });
         let body = json!({ "query": query, "variables": vars });
-        let response = self.send_with_rate_limit_async(body).await?;
+        let response = self
+            .send_with_rate_limit_async("tracker.fetch_issues_page", body)
+            .await?;
         let issues_obj = response
             .pointer("/data/issues")
             .ok_or_else(|| anyhow!("missing 'issues' node in Linear response"))?;
@@ -813,7 +851,11 @@ query DarCandidates($filter: IssueFilter, $after: String, $first: Int!) {
     /// - Rate-limit header tracking for both requests and complexity dimensions.
     /// - Sleep until reset + 1 s when remaining ≤ 0 on either dimension.
     /// - HTTP 429: sleep for `Retry-After` (or 60 s), retry once.
-    async fn send_with_rate_limit_async(&self, body: Value) -> Result<Value> {
+    async fn send_with_rate_limit_async(
+        &self,
+        operation: &'static str,
+        body: Value,
+    ) -> Result<Value> {
         let resp = self
             .client
             .post(&self.endpoint)
@@ -823,6 +865,8 @@ query DarCandidates($filter: IssueFilter, $after: String, $first: Int!) {
             .send()
             .await
             .context("sending Linear GraphQL request")?;
+
+        log_linear_response(operation, 1, &resp);
 
         if resp.status().as_u16() == 429 {
             let retry_after = resp
@@ -848,6 +892,7 @@ query DarCandidates($filter: IssueFilter, $after: String, $first: Int!) {
                 .await
                 .context("sending Linear GraphQL request (retry after 429)")?;
 
+            log_linear_response(operation, 2, &resp2);
             self.process_rate_limit_headers(&resp2.headers().clone())
                 .await;
             let status = resp2.status();
@@ -903,15 +948,8 @@ query DarCandidates($filter: IssueFilter, $after: String, $first: Int!) {
         ];
 
         for (label, remaining_hdr, reset_hdr) in dims {
-            let remaining = headers
-                .get(*remaining_hdr)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<i64>().ok());
-
-            let reset_ts = headers
-                .get(*reset_hdr)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<i64>().ok());
+            let remaining = rate_limit_header(headers, remaining_hdr);
+            let reset_ts = rate_limit_header(headers, reset_hdr);
 
             if let Some(r) = remaining {
                 // Track minimum across both dimensions using fetch_min (stable since Rust 1.45).
@@ -1050,7 +1088,9 @@ mutation DarParkIssue($issueId: String!, $stateId: String!, $body: String!) {
             "body": comment,
         });
         let body = json!({ "query": mutation, "variables": vars });
-        let response = self.send_with_rate_limit_async(body).await?;
+        let response = self
+            .send_with_rate_limit_async("tracker.park_issue", body)
+            .await?;
         ensure_success(&response, "/data/issueUpdate/success", "issueUpdate")?;
         ensure_success(&response, "/data/commentCreate/success", "commentCreate")?;
         Ok(())
@@ -1087,7 +1127,9 @@ query DarFetchOne($id: String!) {
 "#;
         let vars = json!({ "id": id });
         let body = json!({ "query": query, "variables": vars });
-        let response = self.send_with_rate_limit_async(body).await?;
+        let response = self
+            .send_with_rate_limit_async("tracker.fetch_one", body)
+            .await?;
 
         // Linear returns `"issue": null` when not found — treat as Ok(None).
         let node = match response.pointer("/data/issue") {
@@ -1117,7 +1159,9 @@ query DarNeedsHumanState($issueId: String!, $stateName: String!) {
             "stateName": state_name,
         });
         let body = json!({ "query": query, "variables": vars });
-        let response = self.send_with_rate_limit_async(body).await?;
+        let response = self
+            .send_with_rate_limit_async("tracker.resolve_state", body)
+            .await?;
         response
             .pointer("/data/issue/team/states/nodes/0/id")
             .and_then(Value::as_str)
@@ -1480,9 +1524,32 @@ mod tests {
     use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
     use super::{
-        resolve_linear_auth_header, LinearTracker, LinearTrackerConfig, RawIssue, API_KEY_ENV,
-        OAUTH_TOKEN_ENV, UNSET_MIN,
+        rate_limit_header, resolve_linear_auth_header, LinearTracker, LinearTrackerConfig,
+        RawIssue, API_KEY_ENV, OAUTH_TOKEN_ENV, UNSET_MIN,
     };
+
+    #[test]
+    fn rate_limit_header_parses_only_valid_integer_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-ratelimit-requests-remaining",
+            HeaderValue::from_static("42"),
+        );
+        headers.insert(
+            "x-ratelimit-requests-reset",
+            HeaderValue::from_static("invalid"),
+        );
+
+        assert_eq!(
+            rate_limit_header(&headers, "x-ratelimit-requests-remaining"),
+            Some(42)
+        );
+        assert_eq!(
+            rate_limit_header(&headers, "x-ratelimit-requests-reset"),
+            None
+        );
+        assert_eq!(rate_limit_header(&headers, "missing"), None);
+    }
 
     #[test]
     fn auth_header_prefers_oauth_token_with_bearer_prefix() {

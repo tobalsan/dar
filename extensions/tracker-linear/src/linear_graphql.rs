@@ -205,6 +205,7 @@ impl ToolExecutor for LinearGraphqlTool {
             }
         };
 
+        crate::log_linear_response("tool.linear_graphql", 1, &response);
         let status = response.status();
         let text = match response.text().await {
             Ok(text) => text,
