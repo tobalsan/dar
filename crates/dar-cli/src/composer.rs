@@ -420,8 +420,7 @@ pub fn build_with_options(agent: &Path, options: BuildOptions) -> Result<()> {
     fs::create_dir_all(agent.join("bin"))
         .with_context(|| format!("creating {}", agent.join("bin").display()))?;
     let binary = built_binary_path(&crate_dir, target.as_deref());
-    fs::copy(&binary, agent.join("bin").join(binary_name("dar")))
-        .with_context(|| format!("copying {}", binary.display()))?;
+    install_binary(&binary, &agent.join("bin").join(binary_name("dar")))?;
     Ok(())
 }
 
@@ -465,13 +464,7 @@ pub fn build_to_with_options(agent: &Path, dest: &Path, options: BuildOptions) -
     }
     run_cargo_with_stderr(&crate_dir, args)?;
     let binary = built_binary_path(&crate_dir, target.as_deref());
-    fs::copy(&binary, dest).with_context(|| {
-        format!(
-            "copying built dar binary from {} to {}",
-            binary.display(),
-            dest.display()
-        )
-    })?;
+    install_binary(&binary, dest)?;
     Ok(())
 }
 
@@ -527,18 +520,53 @@ fn build_universal_to(crate_dir: &Path, dest: &Path, offline: bool) -> Result<()
         }
         run_cargo_with_stderr(crate_dir, args)?;
     }
+    let temp = temp_install_path(dest);
     let status = Command::new("lipo")
         .arg("-create")
         .arg("-output")
-        .arg(dest)
+        .arg(&temp)
         .arg(built_binary_path(crate_dir, Some("aarch64-apple-darwin")))
         .arg(built_binary_path(crate_dir, Some("x86_64-apple-darwin")))
         .status()
         .context("running lipo")?;
     if !status.success() {
+        let _ = fs::remove_file(&temp);
         bail!("lipo exited with {status}");
     }
+    if let Err(err) = fs::rename(&temp, dest) {
+        let _ = fs::remove_file(&temp);
+        return Err(err)
+            .with_context(|| format!("installing universal dar binary at {}", dest.display()));
+    }
     Ok(())
+}
+
+/// Deploy `src` to `dest` via temp file + rename. Never overwrite `dest`
+/// in place: macOS caches code signatures per inode, and rewriting an
+/// already-executed inode makes every later exec SIGKILL.
+fn install_binary(src: &Path, dest: &Path) -> Result<()> {
+    let temp = temp_install_path(dest);
+    fs::copy(src, &temp).with_context(|| {
+        format!(
+            "copying built dar binary from {} to {}",
+            src.display(),
+            temp.display()
+        )
+    })?;
+    if let Err(err) = fs::rename(&temp, dest) {
+        let _ = fs::remove_file(&temp);
+        return Err(err)
+            .with_context(|| format!("installing built dar binary at {}", dest.display()));
+    }
+    Ok(())
+}
+
+/// Same-directory temp path for `install_binary`'s copy-then-rename, so the
+/// rename stays on one filesystem and is atomic.
+fn temp_install_path(dest: &Path) -> PathBuf {
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp-install");
+    dest.with_file_name(name)
 }
 
 pub fn lock_refresh(agent: &Path) -> Result<()> {

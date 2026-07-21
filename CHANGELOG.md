@@ -25,6 +25,7 @@ Breaking changes are marked **⚠ BREAKING**.
 - Workspace skill discovery now ignores skill directories and files whose symlinks resolve outside the agent folder, preventing external files from entering system context.
 - Abnormally exited orchestrator attempts are now closed in persisted run history before a retry is queued, so dashboards and restart cleanup no longer treat exited workers as live.
 - Web chat dashboard no longer froze the page for seconds on load when a session had a long transcript; repaint is now coalesced per animation frame instead of per replayed event.
+- Self-rebuild now deploys the binary via temp file + rename instead of overwriting `bin/dar`/`bin/dar.new` in place; in-place overwrite of an already-executed binary poisons macOS's per-inode code-signature cache, making every later launch (e.g. the MCP bridge) die with SIGKILL.
 
 ### Changed
 
