@@ -37,19 +37,20 @@
 
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::runner::RunOutcome;
 use cap_runner::ExitKind;
 use chrono::Utc;
-use host_api::{ServiceRegistry, ShutdownToken};
+use host_api::{assert_contained, ServiceRegistry, ShutdownToken};
 
 use crate::output::{write_cron_run_output, CronRunOutput, RunStatus};
 use crate::runner::{fire_runner, FireRunnerRequest};
 use crate::schedule::{compute_next_run_at_ms, format_schedule};
 use crate::state::{LastStatus, SchedulerState};
-use crate::store::{jobs_path, load_jobs, ScheduleJob};
+use crate::store::{jobs_path, load_jobs_checked, ScheduleJob};
 
 /// Floor so a misconfigured tiny poll interval cannot spin the loop.
 const MIN_POLL_INTERVAL_MS: u64 = 250;
@@ -210,7 +211,13 @@ fn maybe_reload(
     }
     *fingerprint_seen = current;
 
-    let jobs = load_jobs(&config.root, |m| tracing::warn!("{m}"));
+    let jobs = match load_jobs_checked(&config.root) {
+        Ok(jobs) => jobs,
+        Err(err) => {
+            tracing::warn!("[scheduler] Rejected cron/jobs.json reload: {err}");
+            return;
+        }
+    };
     tracing::info!("[scheduler] Reloaded cron/jobs.json: {} job(s)", jobs.len());
     // Push into shared state so the HTTP API and the loop observe the same jobs.
     // This wakes the loop via `changed`, which re-arms preserving in-flight
@@ -403,6 +410,198 @@ struct ExecutionOutput {
     error: Option<String>,
 }
 
+const MAX_SCRIPT_OUTPUT_BYTES: usize = 64 * 1024;
+const SCRIPT_OUTPUT_TRUNCATED: &str = "\n[output truncated]";
+
+#[derive(Debug)]
+struct ScriptOutput {
+    stdout: String,
+    final_stdout_line: Option<String>,
+}
+
+struct CapturedOutput {
+    text: String,
+    final_line: Option<String>,
+}
+
+/// Drain a script pipe while retaining only a bounded prefix. Draining after
+/// the cap is reached is important: otherwise a chatty child can block on a
+/// full pipe before it exits or can be reaped on timeout.
+async fn capture_script_output<R>(mut reader: R) -> std::io::Result<CapturedOutput>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    let mut retained = Vec::with_capacity(MAX_SCRIPT_OUTPUT_BYTES);
+    let mut final_line = Vec::new();
+    let mut completed_line = None;
+    let mut buffer = [0_u8; 8 * 1024];
+    let mut truncated = false;
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        let remaining = MAX_SCRIPT_OUTPUT_BYTES.saturating_sub(retained.len());
+        let keep = remaining.min(read);
+        retained.extend_from_slice(&buffer[..keep]);
+        truncated |= keep < read;
+        for byte in &buffer[..read] {
+            if *byte == b'\n' {
+                completed_line = Some(final_line.clone());
+                final_line.clear();
+            } else if final_line.len() < MAX_SCRIPT_OUTPUT_BYTES {
+                final_line.push(*byte);
+            }
+        }
+    }
+    let mut text = String::from_utf8_lossy(&retained).into_owned();
+    if truncated {
+        text.push_str(SCRIPT_OUTPUT_TRUNCATED);
+    }
+    Ok(CapturedOutput {
+        text,
+        final_line: (!final_line.is_empty())
+            .then(|| String::from_utf8_lossy(&final_line).into_owned())
+            .or_else(|| completed_line.map(|line| String::from_utf8_lossy(&line).into_owned())),
+    })
+}
+
+async fn run_script(
+    config: &SchedulerConfig,
+    job: &ScheduleJob,
+    timeout: Duration,
+) -> Result<ScriptOutput, String> {
+    let script = job
+        .payload
+        .script
+        .as_deref()
+        .ok_or_else(|| "missing script".to_string())?;
+    let path = assert_contained(&config.root, config.root.join(script))
+        .map_err(|e| format!("invalid script path: {e:#}"))?;
+    let metadata = std::fs::metadata(&path)
+        .map_err(|e| format!("cannot read script {}: {e}", path.display()))?;
+    let mut command = if matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("sh" | "bash")
+    ) {
+        let mut command = tokio::process::Command::new("bash");
+        command.arg(&path);
+        command
+    } else {
+        #[cfg(unix)]
+        if std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o111 == 0 {
+            return Err(format!("script {} is not executable", path.display()));
+        }
+        tokio::process::Command::new(&path)
+    };
+    command
+        .current_dir(&config.root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    // Put the script in its own process group. A shell script may have a
+    // foreground child which inherits its output pipes; killing only the shell
+    // would leave that child alive and keep capture readers blocked.
+    #[cfg(unix)]
+    {
+        unsafe {
+            command.pre_exec(|| {
+                nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))
+                    .map_err(std::io::Error::other)
+            });
+        }
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("failed to start script: {err}"))?;
+    let stdout = child.stdout.take().expect("stdout explicitly piped");
+    let stderr = child.stderr.take().expect("stderr explicitly piped");
+    let stdout_task = tokio::spawn(capture_script_output(stdout));
+    let stderr_task = tokio::spawn(capture_script_output(stderr));
+
+    let timed_out = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => Some(status),
+        Ok(Err(err)) => {
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            return Err(format!("failed while waiting for script: {err}"));
+        }
+        Err(_) => {
+            // `kill_on_drop` is a final backstop, but explicitly kill and reap
+            // here so timeout never leaves a live child behind. On Unix kill
+            // the dedicated process group as well, covering shell children.
+            #[cfg(unix)]
+            let kill_result = match child.id() {
+                Some(pid) => nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(pid as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                )
+                .map_err(std::io::Error::other),
+                None => child.start_kill(),
+            };
+            #[cfg(not(unix))]
+            let kill_result = child.start_kill();
+            if let Err(err) = kill_result {
+                tracing::warn!("[scheduler] Failed to kill timed-out script: {err}");
+            }
+            // Also use Tokio's child kill path. It is harmless if the process
+            // group signal already reaped the leader and provides a fallback
+            // if group setup was unavailable on a target platform.
+            let _ = child.start_kill();
+            if let Err(err) = child.wait().await {
+                tracing::warn!("[scheduler] Failed to reap timed-out script: {err}");
+            }
+            None
+        }
+    };
+    let stdout = stdout_task
+        .await
+        .map_err(|err| format!("failed to capture script stdout: {err}"))?
+        .map_err(|err| format!("failed to read script stdout: {err}"))?;
+    let stderr = stderr_task
+        .await
+        .map_err(|err| format!("failed to capture script stderr: {err}"))?
+        .map_err(|err| format!("failed to read script stderr: {err}"))?;
+
+    let Some(status) = timed_out else {
+        return Err(format!(
+            "script exceeded the {}ms timeout and was killed\nstderr:\n{}\nstdout:\n{}",
+            timeout.as_millis(),
+            stderr.text,
+            stdout.text
+        ));
+    };
+    if !status.success() {
+        return Err(format!(
+            "script failed (exit {})\nstderr:\n{}\nstdout:\n{}",
+            status
+                .code()
+                .map_or("signal".to_string(), |c| c.to_string()),
+            stderr.text,
+            stdout.text
+        ));
+    }
+    Ok(ScriptOutput {
+        stdout: stdout.text,
+        final_stdout_line: stdout.final_line,
+    })
+}
+
+fn wake_agent(final_line: Option<&str>) -> (bool, Option<String>) {
+    let Some(line) = final_line else {
+        return (true, None);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return (true, None);
+    };
+    if value.get("wakeAgent").and_then(serde_json::Value::as_bool) == Some(false) {
+        return (false, None);
+    }
+    (true, value.get("context").map(|v| v.to_string()))
+}
+
 /// Write the output file and update shared runtime state. Returns the
 /// [`ExecuteResult`] for the caller.
 fn persist_execute_result(
@@ -421,23 +620,50 @@ fn persist_execute_result(
     } = output;
     let schedule = format_schedule(&job.schedule);
 
-    let written = write_cron_run_output(&CronRunOutput {
-        root: &config.root,
-        job_id: &job.id,
-        name,
-        prompt: &job.payload.message,
-        schedule: &schedule,
-        fired_at,
-        finished_at,
-        status,
-        response,
-        error: error.clone(),
-    });
+    let uneventful = job.payload.quiet_output
+        && status == RunStatus::Ok
+        && response
+            .as_deref()
+            .is_some_and(|text| text.trim().is_empty() || text.trim() == "silent tick");
+    let run_kind = if job.payload.script.is_none() {
+        None
+    } else if response
+        .as_deref()
+        .is_some_and(|text| text.trim() == "silent tick")
+    {
+        Some("silent_tick".to_string())
+    } else if response
+        .as_deref()
+        .is_some_and(|text| text.starts_with("Gate output:\n"))
+    {
+        Some("woke_agent".to_string())
+    } else {
+        Some("script_only".to_string())
+    };
+    let written = if uneventful {
+        Ok(None)
+    } else {
+        write_cron_run_output(&CronRunOutput {
+            root: &config.root,
+            job_id: &job.id,
+            name,
+            prompt: job.payload.message.as_deref().unwrap_or(""),
+            schedule: &schedule,
+            fired_at,
+            finished_at,
+            status,
+            response,
+            error: error.clone(),
+        })
+        .map(Some)
+    };
 
     let (status, error, output_path) = match written {
         Ok(path) => {
-            tracing::info!("[scheduler] Wrote output {}", path.display());
-            (status, error, Some(path))
+            if let Some(path) = &path {
+                tracing::info!("[scheduler] Wrote output {}", path.display());
+            }
+            (status, error, path)
         }
         Err(write_error) => {
             tracing::error!(
@@ -456,7 +682,13 @@ fn persist_execute_result(
         RunStatus::Ok => LastStatus::Ok,
         RunStatus::Error => LastStatus::Error,
     };
-    state.mark_finished(&job.id, final_status, error.clone());
+    let exit_code = error.as_deref().and_then(|error| {
+        error
+            .strip_prefix("script failed (exit ")
+            .and_then(|rest| rest.split(')').next())
+            .and_then(|code| code.parse().ok())
+    });
+    state.mark_finished_details(&job.id, final_status, error.clone(), exit_code, run_kind);
 
     ExecuteResult {
         status,
@@ -516,6 +748,102 @@ async fn execute_job(
     };
 
     let timeout = config.timeout_for(job);
+    if job.payload.script.is_some() {
+        let script = match run_script(config, job, timeout).await {
+            Ok(script) => script,
+            Err(error) => {
+                return persist_execute_result(
+                    config,
+                    state,
+                    job,
+                    name,
+                    fired_at,
+                    ExecutionOutput {
+                        status: RunStatus::Error,
+                        response: None,
+                        error: Some(error),
+                    },
+                )
+            }
+        };
+        if job.payload.no_agent {
+            return persist_execute_result(
+                config,
+                state,
+                job,
+                name,
+                fired_at,
+                ExecutionOutput {
+                    status: RunStatus::Ok,
+                    response: Some(script.stdout),
+                    error: None,
+                },
+            );
+        }
+        let (wake, context) = wake_agent(script.final_stdout_line.as_deref());
+        if !wake {
+            return persist_execute_result(
+                config,
+                state,
+                job,
+                name,
+                fired_at,
+                ExecutionOutput {
+                    status: RunStatus::Ok,
+                    response: Some("silent tick".to_string()),
+                    error: None,
+                },
+            );
+        }
+        let mut prompt = job.payload.message.clone().unwrap_or_default();
+        if let Some(context) = context {
+            prompt.push_str("\n\nGate context:\n");
+            prompt.push_str(&context);
+        }
+        let host_http_addr = *config
+            .host_http_addr
+            .lock()
+            .expect("scheduler host address mutex poisoned");
+        let outcome = fire_runner(
+            FireRunnerRequest {
+                runner_kind: &config.runner_kind,
+                runner_command: &config.runner_command,
+                runner_model: config.runner_model.clone(),
+                runner_provider: config.runner_provider.clone(),
+                runner_thinking: config.runner_thinking.clone(),
+                system_prompt: config.system_context.clone(),
+                workspace: &workspace,
+                workspace_root: &config.root,
+                agent_root: &config.root,
+                workflow_root: &config.workflow_root,
+                host_http_addr,
+                prompt,
+                job_id: &job.id,
+                max_run_timeout_ms: config.max_run_timeout_ms,
+                job_timeout: timeout,
+            },
+            services,
+            shutdown,
+        )
+        .await;
+        let (status, response, error) = classify_outcome(outcome, timeout);
+        return persist_execute_result(
+            config,
+            state,
+            job,
+            name,
+            fired_at,
+            ExecutionOutput {
+                status,
+                response: Some(format!(
+                    "Gate output:\n{}\n\nAgent response:\n{}",
+                    script.stdout,
+                    response.unwrap_or_default()
+                )),
+                error,
+            },
+        );
+    }
     let host_http_addr = *config
         .host_http_addr
         .lock()
@@ -533,7 +861,7 @@ async fn execute_job(
             agent_root: &config.root,
             workflow_root: &config.workflow_root,
             host_http_addr,
-            prompt: job.payload.message.clone(),
+            prompt: job.payload.message.clone().unwrap_or_default(),
             job_id: &job.id,
             max_run_timeout_ms: config.max_run_timeout_ms,
             job_timeout: timeout,
@@ -650,7 +978,7 @@ pub async fn run_job_now(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{jobs_path, Payload, Schedule};
+    use crate::store::{jobs_path, load_jobs, Payload, Schedule};
     use cap_runner::{KillReason, Runner, RunnerHandle, SpawnParams};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration as StdDuration;
@@ -678,6 +1006,17 @@ mod tests {
         assert_eq!(status, RunStatus::Ok);
         assert_eq!(response.as_deref(), Some("hello"));
         assert!(error.is_none());
+    }
+
+    #[test]
+    fn wake_agent_honors_false_context_and_default() {
+        assert_eq!(wake_agent(Some(r#"{"wakeAgent":false}"#)), (false, None));
+        assert_eq!(
+            wake_agent(Some(r#"{"wakeAgent":true,"context":{"count":2}}"#)),
+            (true, Some(r#"{"count":2}"#.to_string()))
+        );
+        assert_eq!(wake_agent(Some("not json")), (true, None));
+        assert_eq!(wake_agent(None), (true, None));
     }
 
     #[test]
@@ -800,10 +1139,28 @@ mod tests {
                 start_at: None,
             },
             payload: Payload {
-                message: msg.to_string(),
+                message: Some(msg.to_string()),
+                script: None,
+                no_agent: false,
+                quiet_output: false,
             },
             timeout_ms,
         }
+    }
+
+    fn script_job(id: &str, script: &str, timeout_ms: u64) -> ScheduleJob {
+        let mut job = job_with(id, Some(timeout_ms), true, "unused");
+        job.payload.message = None;
+        job.payload.script = Some(script.to_string());
+        job.payload.no_agent = true;
+        job
+    }
+
+    fn write_script(root: &std::path::Path, name: &str, body: &str) {
+        let scripts = root.join("cron/scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        let path = scripts.join(name);
+        std::fs::write(&path, body).unwrap();
     }
 
     fn latest_output(root: &std::path::Path, job_id: &str) -> Option<String> {
@@ -898,6 +1255,50 @@ mod tests {
         let out = latest_output(dir.path(), "timeout-job").expect("output written");
         assert!(out.contains("status: error"), "recorded as error: {out}");
         assert!(out.contains("timeout"), "timeout message present: {out}");
+    }
+
+    #[tokio::test]
+    async fn script_failure_records_exit_code_and_bounded_streamed_output() {
+        let dir = tempfile::tempdir().unwrap();
+        write_script(
+            dir.path(),
+            "fail.sh",
+            "head -c 131072 /dev/zero | tr '\\0' x\necho stderr-detail >&2\nexit 17\n",
+        );
+        let config = test_config(dir.path().to_path_buf(), 60_000);
+        let job = script_job("script-failure", "cron/scripts/fail.sh", 60_000);
+
+        let error = run_script(&config, &job, Duration::from_secs(1))
+            .await
+            .expect_err("non-zero script must fail");
+        assert!(error.contains("exit 17"), "exit code retained: {error}");
+        assert!(error.contains("stderr-detail"), "stderr retained: {error}");
+        assert!(
+            error.contains(SCRIPT_OUTPUT_TRUNCATED),
+            "output capped: {error}"
+        );
+        assert!(
+            error.len() <= MAX_SCRIPT_OUTPUT_BYTES + 512,
+            "capture is bounded"
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_out_script_is_killed_and_reaped() {
+        let dir = tempfile::tempdir().unwrap();
+        write_script(dir.path(), "sleep.sh", "sleep 10\n");
+        let config = test_config(dir.path().to_path_buf(), 60_000);
+        let job = script_job("script-timeout", "cron/scripts/sleep.sh", 50);
+
+        let started = std::time::Instant::now();
+        let error = run_script(&config, &job, Duration::from_millis(50))
+            .await
+            .expect_err("timed-out script must fail");
+        assert!(
+            started.elapsed() < StdDuration::from_secs(2),
+            "child was reaped"
+        );
+        assert!(error.contains("timeout"), "timeout retained: {error}");
     }
 
     #[tokio::test]
@@ -1058,7 +1459,7 @@ mod tests {
 
         assert_eq!(rearmed.len(), 1);
         assert!(state.is_running("a"), "surviving job keeps its claim");
-        assert_eq!(rearmed[0].job.payload.message, "edited");
+        assert_eq!(rearmed[0].job.payload.message.as_deref(), Some("edited"));
     }
 
     #[test]
@@ -1084,7 +1485,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_reload_is_treated_as_empty_and_recovers() {
+    fn malformed_reload_keeps_last_valid_jobs_and_recovers() {
         let dir = tempfile::tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf(), 60_000);
         write_jobs(dir.path(), ONE_JOB);
@@ -1093,11 +1494,11 @@ mod tests {
         let mut fp = fingerprint(&config);
         assert_eq!(armed.len(), 1);
 
-        // Malformed write → empty, no panic.
+        // Malformed write is rejected; the last valid schedule keeps running.
         std::thread::sleep(Duration::from_millis(10));
         write_jobs(dir.path(), "not json");
         maybe_reload(&config, &state, &mut fp);
-        assert!(state.jobs().is_empty());
+        assert_eq!(state.jobs().len(), 1);
 
         // Next valid write recovers.
         std::thread::sleep(Duration::from_millis(10));

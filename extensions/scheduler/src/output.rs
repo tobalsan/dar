@@ -105,6 +105,30 @@ pub fn render_cron_run_output(input: &CronRunOutput<'_>) -> String {
         format!("**Job ID:** {}", input.job_id),
         format!("**Run Time:** {}", display_timestamp(input.fired_at)),
         format!("**Schedule:** {}", input.schedule),
+        format!(
+            "**Status:** {}",
+            match input.status {
+                RunStatus::Ok
+                    if input
+                        .response
+                        .as_deref()
+                        .is_some_and(|text| text.trim() == "silent tick") =>
+                    "ok (silent tick)",
+                RunStatus::Ok
+                    if input
+                        .response
+                        .as_deref()
+                        .is_some_and(|text| text.starts_with("Gate output:\n")) =>
+                    "woke agent",
+                RunStatus::Ok => "ok",
+                RunStatus::Error => input
+                    .error
+                    .as_deref()
+                    .and_then(|error| error.lines().next())
+                    .filter(|line| line.starts_with("script failed (exit "))
+                    .unwrap_or("error"),
+            }
+        ),
         String::new(),
         "## Prompt".to_string(),
         String::new(),

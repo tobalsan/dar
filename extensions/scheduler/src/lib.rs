@@ -45,7 +45,6 @@ use tool_registry::{ToolRegistryHandle, TOOL_REGISTRY_SERVICE};
 
 use crate::service::SchedulerConfig;
 use crate::state::SchedulerState;
-use crate::store::load_jobs;
 use crate::tab::CronTab;
 
 const DEFAULT_POLL_INTERVAL_MS: u64 = 2_000;
@@ -158,7 +157,8 @@ impl Extension for SchedulerExtension {
                 return Ok(());
             }
             let root = ctx.paths.root().to_path_buf();
-            let jobs = load_jobs(&root, |m| tracing::warn!("{m}"));
+            let jobs = crate::store::load_jobs_checked(&root)
+                .map_err(|err| anyhow::anyhow!("[scheduler] {err}"))?;
             let state = Arc::new(SchedulerState::new(jobs));
             let _ = self.state.set(Arc::clone(&state));
 

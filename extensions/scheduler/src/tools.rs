@@ -41,7 +41,10 @@ use tool_registry::{ToolContent, ToolExecutor, ToolOutcome, ToolRegistryHandle, 
 use crate::schedule::{compute_next_run_at_ms, format_schedule};
 use crate::service::{run_job_now, RunNowOutcome, SchedulerConfig};
 use crate::state::SchedulerState;
-use crate::store::{generate_job_id, is_safe_job_id, save_jobs, Payload, Schedule, ScheduleJob};
+use crate::store::{
+    generate_job_id, is_safe_job_id, save_jobs, validate_script_path, Payload, Schedule,
+    ScheduleJob,
+};
 
 /// Shared dependencies every scheduler tool executor needs. Mirrors the HTTP
 /// `ApiState` so tools and HTTP share one contract.
@@ -126,6 +129,8 @@ fn job_view(deps: &ToolDeps, job: &ScheduleJob, now_ms: i64) -> Value {
             json!(rt.last_status.map(|s| s.as_str())),
         );
         map.insert("lastError".to_string(), json!(rt.last_error));
+        map.insert("lastExitCode".to_string(), json!(rt.last_exit_code));
+        map.insert("lastRunKind".to_string(), json!(rt.last_run_kind));
         map.insert("runningForMs".to_string(), json!(running_for_ms));
         map.insert(
             "scheduleHuman".to_string(),
@@ -210,24 +215,36 @@ fn parse_and_validate_schedule(schedule: &Value) -> Result<Schedule, Box<ToolOut
     }
 }
 
-/// Build a `Payload` from a tool args `payload` object: a non-empty `message`.
 fn parse_and_validate_payload(payload: &Value) -> Result<Payload, Box<ToolOutcome>> {
-    let message = payload
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    if message.trim().is_empty() {
-        return Err(Box::new(ToolOutcome::error_code(
+    let result = Payload {
+        message: payload
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        script: payload
+            .get("script")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        no_agent: payload
+            .get("noAgent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        quiet_output: payload
+            .get("quietOutput")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
+    result.validate().map_err(|message| {
+        Box::new(ToolOutcome::error_code(
             "invalid_args",
-            "payload.message is required (the prompt the job runs)",
+            message,
             None::<String>,
-        )));
-    }
-    Ok(Payload { message })
+        ))
+    })?;
+    Ok(result)
 }
 
-fn validate_job(job: &ScheduleJob) -> Result<(), Box<ToolOutcome>> {
+fn validate_job(root: &std::path::Path, job: &ScheduleJob) -> Result<(), Box<ToolOutcome>> {
     job.validate(Utc::now().timestamp_millis())
         .map_err(|message| {
             Box::new(ToolOutcome::error_code(
@@ -235,7 +252,14 @@ fn validate_job(job: &ScheduleJob) -> Result<(), Box<ToolOutcome>> {
                 message,
                 None::<String>,
             ))
-        })
+        })?;
+    validate_script_path(root, job).map_err(|message| {
+        Box::new(ToolOutcome::error_code(
+            "invalid_args",
+            message,
+            None::<String>,
+        ))
+    })
 }
 
 /// Atomically mutate the shared job set and its file representation. Returns a
@@ -408,6 +432,8 @@ impl ToolExecutor for StatusTool {
             "lastRunAt": rt.last_run_at_ms.and_then(iso),
             "lastStatus": rt.last_status.map(|s| s.as_str()),
             "lastError": rt.last_error,
+            "lastExitCode": rt.last_exit_code,
+            "lastRunKind": rt.last_run_kind,
         });
         Ok(ToolOutcome::ok(render(&body)))
     }
@@ -598,8 +624,7 @@ impl ToolExecutor for RunNowTool {
 fn create_spec() -> ToolSpec {
     ToolSpec::new(
         "scheduler_create_job",
-        "Create a new scheduler job from a raw cron expression + IANA timezone \
-         and a prompt message. The job is enabled by default. Returns the \
+        "Create a scheduler job. Agent jobs use message only; script-only jobs use script + noAgent=true (exit code is authoritative); gated jobs use script + message and wake only when the final stdout JSON line has wakeAgent=true. quietOutput skips files only for uneventful script ticks. The job is enabled by default. Returns the \
          created job including its computed next fire time so you can confirm \
          the schedule. Use raw cron (e.g. \"0 8 * * *\"); natural-language \
          schedules are not supported. Non-destructive; no confirmation needed.",
@@ -621,9 +646,11 @@ fn create_spec() -> ToolSpec {
                 "payload": {
                     "type": "object",
                     "properties": {
-                        "message": { "type": "string", "description": "The prompt the job runs each fire." }
+                        "message": { "type": "string", "description": "Prompt for an agent or gated job." },
+                        "script": { "type": "string", "description": "Relative path under the agent root." },
+                        "noAgent": { "type": "boolean", "description": "Run script only; rejects message." },
+                        "quietOutput": { "type": "boolean", "description": "Skip output files for uneventful script ticks." }
                     },
-                    "required": ["message"],
                     "additionalProperties": false,
                 },
                 "timeoutMs": { "type": "integer", "minimum": 1, "description": "Optional per-job run timeout in ms." }
@@ -679,7 +706,7 @@ impl ToolExecutor for CreateTool {
                 payload,
                 timeout_ms: args.get("timeoutMs").and_then(Value::as_u64),
             };
-            validate_job(&job)?;
+            validate_job(&self.deps.root, &job)?;
             jobs.push(job.clone());
             Ok((jobs, job))
         }) {
@@ -720,8 +747,7 @@ fn update_spec() -> ToolSpec {
                 },
                 "payload": {
                     "type": "object",
-                    "properties": { "message": { "type": "string" } },
-                    "required": ["message"],
+                    "properties": { "message": { "type": "string" }, "script": { "type": "string" }, "noAgent": { "type": "boolean" }, "quietOutput": { "type": "boolean" } },
                     "additionalProperties": false,
                 },
                 "timeoutMs": { "type": ["integer", "null"], "minimum": 1, "description": "Per-job timeout in ms; null clears it (inherit the default)." },
@@ -780,7 +806,7 @@ impl ToolExecutor for UpdateTool {
                     v => v.as_u64(),
                 };
             }
-            validate_job(&job)?;
+            validate_job(&self.deps.root, &job)?;
             jobs[idx] = job.clone();
             Ok((jobs, job))
         });

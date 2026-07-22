@@ -224,8 +224,87 @@ overlap-skipped during the manual run), and `GET /scheduler/jobs/{id}/tail`
 returns the newest output file for a job — an operator test-and-inspect loop
 over HTTP.
 
-Parity gaps vs the aihub scheduler (later slices): no per-job model override, no
-`sessionId`, no CLI, no hot reload of `cron/jobs.json`. See
+### Cron scripts
+
+Jobs have three shapes, chosen by fields rather than a `kind` value:
+
+- **Agent job:** `message` only. The runner is started for every fire.
+- **Script-only job:** `script` with `noAgent: true`. The scheduler runs the
+  script and never starts a runner; exit code 0 is success, while a non-zero
+  exit or timeout is recorded mechanically as an error.
+- **Gated agent job:** `script` plus `message`. The script is a cheap gate that
+  decides whether to start the runner. Its final stdout line is parsed as JSON:
+  `{"wakeAgent":false}` is a successful silent tick; `{"wakeAgent":true,
+  "context":{...}}` starts the runner with the serialized context appended to
+  the message. A missing `wakeAgent` field or a non-JSON final line defaults to
+  waking the runner.
+
+This complete `cron/jobs.json` contains one job of each shape:
+
+```json
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "daily-digest",
+      "schedule": { "cron": "0 8 * * *", "tz": "UTC" },
+      "payload": { "message": "Write the daily digest." }
+    },
+    {
+      "id": "rotate-token",
+      "schedule": { "cron": "0 * * * *", "tz": "UTC" },
+      "payload": {
+        "script": "cron/scripts/rotate-token.sh",
+        "noAgent": true,
+        "quietOutput": true
+      }
+    },
+    {
+      "id": "changed-files",
+      "schedule": { "cron": "*/5 * * * *", "tz": "UTC" },
+      "payload": {
+        "script": "cron/scripts/changed-files.sh",
+        "message": "Review the changed files and report the important changes."
+      }
+    }
+  ]
+}
+```
+
+For example, create `cron/scripts/changed-files.sh`, make it executable, and
+use it as the gate above:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_file="cron/changed-files.last"
+current="$(git rev-parse HEAD)"
+previous="$(test -f "$state_file" && cat "$state_file" || true)"
+printf '%s\n' "$current" > "$state_file"
+
+if [ "$current" = "$previous" ]; then
+  printf '%s\n' '{"wakeAgent":false}'
+else
+  printf '{"wakeAgent":true,"context":{"previous":"%s","current":"%s"}}\n' \
+    "$previous" "$current"
+fi
+```
+
+Scripts must be relative to and resolve inside the agent root: absolute paths,
+`..` escapes, and symlink escapes are rejected when jobs load. `.sh` and
+`.bash` scripts run with `bash`; every other extension must be executable. The
+default working directory is the agent root.
+
+Every run normally writes `cron/output/<job_id>/<timestamp>.md`, with a
+`Status:` header of `ok`, `ok (silent tick)`, `woke agent`, or
+`script failed (exit N)`. `quietOutput: true` is for high-frequency script jobs:
+it omits only an empty-output successful script-only run or a gated silent tick.
+Errors, non-empty script output, and runs that wake the agent always keep an
+output file; runtime status still updates on every tick.
+
+Parity gaps vs the aihub scheduler (later slices): no per-job model override,
+no `sessionId`, or CLI. See
 [docs/extensions.md](docs/extensions.md#scheduler) for the job schema and output
 format.
 

@@ -46,6 +46,11 @@ pub struct JobRuntime {
     /// [`LastStatus::Error`]. Cleared on the next successful run. Surfaced by the
     /// dashboard Cron tab so a failed job shows *why* it failed.
     pub last_error: Option<String>,
+    /// Script process exit code for the last script failure, when available.
+    pub last_exit_code: Option<i32>,
+    /// Script execution disposition: `silent_tick`, `woke_agent`, or
+    /// `script_only`; absent for ordinary agent jobs.
+    pub last_run_kind: Option<String>,
     /// When the currently-executing run started (UTC epoch millis); `Some` only
     /// while a run is in flight, used to compute `running-for`.
     pub running_since_ms: Option<i64>,
@@ -194,7 +199,19 @@ impl SchedulerState {
 
     /// Mark a run as finished with its status and, for an error run, the error
     /// message (cleared on a subsequent `ok` run).
+    #[cfg(test)]
     pub fn mark_finished(&self, job_id: &str, status: LastStatus, error: Option<String>) {
+        self.mark_finished_details(job_id, status, error, None, None);
+    }
+
+    pub fn mark_finished_details(
+        &self,
+        job_id: &str,
+        status: LastStatus,
+        error: Option<String>,
+        exit_code: Option<i32>,
+        run_kind: Option<String>,
+    ) {
         let mut inner = self.lock();
         let rt = inner.runtime.entry(job_id.to_string()).or_default();
         rt.running_since_ms = None;
@@ -203,6 +220,8 @@ impl SchedulerState {
             LastStatus::Error => error,
             LastStatus::Ok => None,
         };
+        rt.last_exit_code = exit_code;
+        rt.last_run_kind = run_kind;
     }
 
     /// Release a run claim without recording a status. Idempotent: used by the
@@ -240,7 +259,10 @@ mod tests {
                 start_at: None,
             },
             payload: Payload {
-                message: "x".to_string(),
+                message: Some("x".to_string()),
+                script: None,
+                no_agent: false,
+                quiet_output: false,
             },
             timeout_ms: None,
         }

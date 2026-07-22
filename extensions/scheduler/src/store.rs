@@ -25,11 +25,18 @@ pub struct Schedule {
     pub start_at: Option<String>,
 }
 
-/// Prompt payload. Only `message` is used by the walking skeleton; `sessionId`
-/// is a documented parity gap (no session continuity yet).
+/// Job payload. A message-only payload runs the agent; a script-only payload
+/// runs deterministically; a script plus message is an agent wake gate.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Payload {
-    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub script: Option<String>,
+    #[serde(rename = "noAgent", default)]
+    pub no_agent: bool,
+    #[serde(rename = "quietOutput", default)]
+    pub quiet_output: bool,
 }
 
 /// One scheduled job. This is the on-disk shape: it holds *only* configuration.
@@ -69,8 +76,43 @@ impl Schedule {
 
 impl Payload {
     pub(crate) fn validate(&self) -> Result<(), String> {
-        if self.message.trim().is_empty() {
-            return Err("payload.message must not be empty".to_string());
+        let message = self.message.as_deref().filter(|s| !s.trim().is_empty());
+        let script = self.script.as_deref().filter(|s| !s.trim().is_empty());
+        if self.message.is_some() && message.is_none() {
+            return Err("payload.message is required and must not be empty".to_string());
+        }
+        if self.script.is_some() && script.is_none() {
+            return Err("payload.script must not be empty".to_string());
+        }
+        if self.no_agent && script.is_none() {
+            return Err("payload.noAgent requires payload.script".to_string());
+        }
+        if self.no_agent && self.message.is_some() {
+            return Err("payload.noAgent rejects payload.message".to_string());
+        }
+        if script.is_some() && !self.no_agent && message.is_none() {
+            return Err(
+                "payload.script requires payload.message unless noAgent is true".to_string(),
+            );
+        }
+        if script.is_none() && message.is_none() {
+            return Err("payload.message is required when payload.script is absent".to_string());
+        }
+        if self.quiet_output && script.is_none() {
+            return Err("payload.quietOutput requires payload.script".to_string());
+        }
+        if let Some(script) = script {
+            let path = Path::new(script);
+            if path.is_absolute()
+                || path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(
+                    "payload.script must be a relative path contained in the agent root"
+                        .to_string(),
+                );
+            }
         }
         Ok(())
     }
@@ -111,29 +153,33 @@ pub fn jobs_path(root: &Path) -> PathBuf {
 ///
 /// `warn` is invoked at most once, only for a malformed file. A missing file is
 /// silently treated as empty.
+#[cfg(test)]
 pub fn load_jobs(root: &Path, mut warn: impl FnMut(String)) -> Vec<ScheduleJob> {
+    match load_jobs_checked(root) {
+        Ok(jobs) => jobs,
+        Err(err) => {
+            warn(format!("[scheduler] {err}; treating as empty"));
+            Vec::new()
+        }
+    }
+}
+
+/// Strict loader used during scheduler boot and hot reload. Unlike
+/// [`load_jobs`], callers receive the error so boot can fail and a bad reload
+/// can leave the last known-good set installed.
+pub fn load_jobs_checked(root: &Path) -> Result<Vec<ScheduleJob>, String> {
     let path = jobs_path(root);
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => {
-            warn(format!(
-                "[scheduler] Failed to read {}; treating as empty: {err}",
-                path.display()
-            ));
-            return Vec::new();
+            return Err(format!("failed to read {}: {err}", path.display()));
         }
     };
 
     let jobs = match serde_json::from_str::<JobsFile>(&raw) {
         Ok(file) => file.jobs,
-        Err(err) => {
-            warn(format!(
-                "[scheduler] Invalid {}; treating as empty: {err}",
-                path.display()
-            ));
-            return Vec::new();
-        }
+        Err(err) => return Err(format!("invalid {}: {err}", path.display())),
     };
 
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -141,15 +187,58 @@ pub fn load_jobs(root: &Path, mut warn: impl FnMut(String)) -> Vec<ScheduleJob> 
         .iter()
         .find_map(|job| job.validate(now_ms).err().map(|err| (job, err)))
     {
-        warn(format!(
-            "[scheduler] Invalid {}; treating as empty: job {:?}: {err}",
+        return Err(format!(
+            "invalid {}: job {:?}: {err}",
             path.display(),
             job.id
         ));
-        return Vec::new();
     }
 
-    jobs
+    for job in &jobs {
+        validate_script_path(root, job)?;
+    }
+    Ok(jobs)
+}
+
+pub(crate) fn validate_script_path(root: &Path, job: &ScheduleJob) -> Result<(), String> {
+    let Some(script) = job.payload.script.as_deref() else {
+        return Ok(());
+    };
+    let root = root
+        .canonicalize()
+        .map_err(|err| format!("cannot resolve agent root: {err}"))?;
+    let path = root.join(script).canonicalize().map_err(|err| {
+        format!(
+            "job {:?}: script {:?} does not exist or cannot be resolved: {err}",
+            job.id, script
+        )
+    })?;
+    if !path.starts_with(&root) {
+        return Err(format!(
+            "job {:?}: script {:?} escapes the agent root",
+            job.id, script
+        ));
+    }
+    if !matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("sh" | "bash")
+    ) {
+        #[cfg(unix)]
+        if std::os::unix::fs::PermissionsExt::mode(
+            &path
+                .metadata()
+                .map_err(|err| err.to_string())?
+                .permissions(),
+        ) & 0o111
+            == 0
+        {
+            return Err(format!(
+                "job {:?}: script {:?} is not executable",
+                job.id, script
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Atomically persist `jobs` to `<root>/cron/jobs.json` using a temp file +
@@ -278,7 +367,10 @@ mod tests {
             jobs[0].schedule.start_at.as_deref(),
             Some("2026-05-19T07:00:00.000Z")
         );
-        assert_eq!(jobs[0].payload.message, "Summarize overnight events.");
+        assert_eq!(
+            jobs[0].payload.message.as_deref(),
+            Some("Summarize overnight events.")
+        );
         assert_eq!(jobs[0].timeout_ms, Some(120000));
         // Defaults: missing name → empty, missing enabled → true, missing
         // timeoutMs → None (inherit the extension/global default).
@@ -384,7 +476,10 @@ mod tests {
                 start_at: Some("2026-05-19T07:00:00.000Z".to_string()),
             },
             payload: Payload {
-                message: "do the thing".to_string(),
+                message: Some("do the thing".to_string()),
+                script: None,
+                no_agent: false,
+                quiet_output: false,
             },
             timeout_ms: Some(60_000),
         }
