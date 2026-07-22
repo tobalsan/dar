@@ -215,6 +215,12 @@ impl JobRow {
             ),
             None => format!("<span>last {status_label}</span>"),
         };
+        let execution = match (&rt.last_run_kind, rt.last_exit_code) {
+            (Some(kind), Some(code)) => format!(" · <span>{kind}, exit {code}</span>"),
+            (Some(kind), None) => format!(" · <span>{}</span>", escape_html(kind)),
+            (None, Some(code)) => format!(" · <span>exit {code}</span>"),
+            (None, None) => String::new(),
+        };
         JobRow {
             id: escape_html(&job.id),
             name: escape_html(display_name),
@@ -224,16 +230,28 @@ impl JobRow {
             running_for,
             schedule_human: escape_html(&schedule_human),
             schedule_raw: escape_html(&format!("{} · {}", job.schedule.cron, job.schedule.tz)),
-            meta_line: format!("{next_part} · {last_part}"),
+            meta_line: format!("{next_part} · {last_part}{execution}"),
             error: rt
                 .last_error
                 .as_deref()
                 .filter(|e| !e.trim().is_empty())
                 .map(escape_html),
-            message: escape_html(&job.payload.message),
+            message: escape_html(&format!(
+                "{} · {}",
+                job_shape(job),
+                job.payload.message.as_deref().unwrap_or("")
+            )),
             outputs,
             total_outputs,
         }
+    }
+}
+
+fn job_shape(job: &ScheduleJob) -> &'static str {
+    match (job.payload.script.is_some(), job.payload.no_agent) {
+        (false, _) => "agent",
+        (true, true) => "script-only",
+        (true, false) => "gated",
     }
 }
 
@@ -530,7 +548,10 @@ mod tests {
                 start_at: None,
             },
             payload: Payload {
-                message: "hi".to_string(),
+                message: Some("hi".to_string()),
+                script: None,
+                no_agent: false,
+                quiet_output: false,
             },
             timeout_ms: None,
         }

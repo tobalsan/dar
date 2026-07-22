@@ -9,6 +9,10 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+### Added
+
+- Scheduler jobs can run contained scripts directly, including script-only and wake-gated agent jobs, so deterministic scheduled work records process exit failures mechanically.
+
 ### Fixed
 
 - `WORKFLOW.md` `polling:` now accepts `poll_interval_ms` as an alias for `interval_ms` (matching agent.yaml's `orchestrator.poll_interval_ms`), and unrecognized `polling:` keys are logged as warnings instead of being silently dropped — a misnamed interval key previously fell back to the 1 s default and could exhaust tracker API rate limits.

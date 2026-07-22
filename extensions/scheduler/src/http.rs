@@ -35,7 +35,9 @@ use host_api::ServiceRegistry;
 use crate::schedule::compute_next_run_at_ms;
 use crate::service::{run_job_now, RunNowOutcome, SchedulerConfig};
 use crate::state::SchedulerState;
-use crate::store::{generate_job_id, save_jobs, Payload, Schedule, ScheduleJob};
+use crate::store::{
+    generate_job_id, save_jobs, validate_script_path, Payload, Schedule, ScheduleJob,
+};
 
 /// State shared with every handler.
 #[derive(Clone)]
@@ -100,6 +102,11 @@ struct ScheduleBody {
 #[derive(Debug, Deserialize)]
 struct PayloadBody {
     message: Option<String>,
+    script: Option<String>,
+    #[serde(rename = "noAgent")]
+    no_agent: Option<bool>,
+    #[serde(rename = "quietOutput")]
+    quiet_output: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +175,9 @@ async fn create_job(
         if let Err(msg) = job.validate(Utc::now().timestamp_millis()) {
             return Err(Box::new(bad_request(&msg)));
         }
+        if let Err(msg) = validate_script_path(&api.root, &job) {
+            return Err(Box::new(bad_request(&msg)));
+        }
         jobs.push(job.clone());
         Ok((jobs, job))
     }) {
@@ -218,6 +228,9 @@ async fn update_job(
             job.timeout_ms = timeout_ms;
         }
         if let Err(msg) = job.validate(Utc::now().timestamp_millis()) {
+            return Err(Box::new(bad_request(&msg)));
+        }
+        if let Err(msg) = validate_script_path(&api.root, &job) {
             return Err(Box::new(bad_request(&msg)));
         }
 
@@ -591,7 +604,7 @@ fn render_job_detail_drawer(
     html.push_str("<div class=\"cron-outputs-head\">Prompt</div>");
     html.push_str(&format!(
         "<pre style=\"white-space: pre-wrap; overflow-wrap: anywhere; overflow-y: auto; max-height: 10rem; margin: 0; padding: .5rem; background: var(--panel-2); border-radius: 6px; font: inherit; color: var(--fg);\">{}</pre>",
-        escape_html(&job.payload.message),
+        escape_html(job.payload.message.as_deref().unwrap_or("")),
     ));
 
     html.push_str(&format!(
@@ -657,14 +670,16 @@ fn validate_schedule(body: Option<ScheduleBody>) -> Result<Schedule, String> {
     Ok(schedule)
 }
 
-/// Validate a payload body: a non-empty `message`.
 fn validate_payload(body: Option<PayloadBody>) -> Result<Payload, String> {
     let body = body.ok_or("payload is required")?;
-    let message = body.message.unwrap_or_default();
-    if message.trim().is_empty() {
-        return Err("payload.message is required".to_string());
-    }
-    Ok(Payload { message })
+    let payload = Payload {
+        message: body.message,
+        script: body.script,
+        no_agent: body.no_agent.unwrap_or(false),
+        quiet_output: body.quiet_output.unwrap_or(false),
+    };
+    payload.validate()?;
+    Ok(payload)
 }
 
 // ---- helpers --------------------------------------------------------------
@@ -682,6 +697,8 @@ fn job_with_runtime(api: &ApiState, job: &ScheduleJob, now_ms: i64) -> Value {
             json!(rt.last_status.map(|s| s.as_str())),
         );
         map.insert("lastError".to_string(), json!(rt.last_error));
+        map.insert("lastExitCode".to_string(), json!(rt.last_exit_code));
+        map.insert("lastRunKind".to_string(), json!(rt.last_run_kind));
         map.insert("runningForMs".to_string(), json!(running_for_ms));
     }
     value
@@ -783,6 +800,9 @@ mod tests {
             }),
             payload: Some(PayloadBody {
                 message: Some(message.to_string()),
+                script: None,
+                no_agent: None,
+                quiet_output: None,
             }),
             timeout_ms: None,
         })
@@ -828,6 +848,9 @@ mod tests {
             }),
             payload: Some(PayloadBody {
                 message: Some("hi".to_string()),
+                script: None,
+                no_agent: None,
+                quiet_output: None,
             }),
             timeout_ms: None,
         });
@@ -1005,7 +1028,10 @@ mod tests {
                 start_at: None,
             },
             payload: Payload {
-                message: "x".to_string(),
+                message: Some("x".to_string()),
+                script: None,
+                no_agent: false,
+                quiet_output: false,
             },
             timeout_ms: None,
         }];
