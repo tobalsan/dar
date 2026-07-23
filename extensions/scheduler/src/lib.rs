@@ -36,8 +36,8 @@ mod tools;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{bail, Result};
-use cap_deliver::DeliverySink;
 use cap_dashboard_tab::DashboardTabs;
+use cap_deliver::DeliverySink;
 use host_api::{Extension, RegisterCtx, StartCtx};
 use serde::Deserialize;
 
@@ -70,13 +70,21 @@ pub fn extension() -> Box<dyn Extension> {
 
 /// Return non-fatal preflight warnings for configured delivery targets that
 /// have no registered communication sink.
-pub fn delivery_sink_warnings(root: &std::path::Path, services: &host_api::ServiceRegistry) -> Vec<String> {
+pub fn delivery_sink_warnings(
+    root: &std::path::Path,
+    services: &host_api::ServiceRegistry,
+) -> Vec<String> {
     match crate::store::load_jobs_checked(root) {
         Ok(jobs) => jobs
             .iter()
             .flat_map(|job| job.deliver.iter())
             .filter(|target| services.get::<dyn DeliverySink>(&target.target).is_err())
-            .map(|target| format!("scheduler delivery target '{}' has no registered sink", target.target))
+            .map(|target| {
+                format!(
+                    "scheduler delivery target '{}' has no registered sink",
+                    target.target
+                )
+            })
             .collect(),
         Err(_) => Vec::new(),
     }

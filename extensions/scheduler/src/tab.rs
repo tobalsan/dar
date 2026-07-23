@@ -243,9 +243,21 @@ impl JobRow {
                 job.payload.message.as_deref().unwrap_or("")
             )),
             delivery: (!job.deliver.is_empty() || !rt.last_delivery.is_empty()).then(|| {
-                let targets = job.deliver.iter().map(|target| target.target.as_str()).collect::<Vec<_>>().join(", ");
+                let targets = job
+                    .deliver
+                    .iter()
+                    .map(|target| target.target.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let last = rt.last_delivery.join("; ");
-                escape_html(&format!("deliver: {targets}{}", if last.is_empty() { String::new() } else { format!(" · {last}") }))
+                escape_html(&format!(
+                    "deliver: {targets}{}",
+                    if last.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {last}")
+                    }
+                ))
             }),
             outputs,
             total_outputs,

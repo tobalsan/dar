@@ -246,10 +246,16 @@ fn parse_and_validate_payload(payload: &Value) -> Result<Payload, Box<ToolOutcom
 }
 
 fn parse_deliver(value: Option<&Value>) -> Result<Vec<DeliverTarget>, Box<ToolOutcome>> {
-    let Some(value) = value else { return Ok(Vec::new()) };
-    serde_json::from_value(value.clone()).map_err(|err| Box::new(ToolOutcome::error_code(
-        "invalid_args", format!("invalid deliver targets: {err}"), None::<String>,
-    )))
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_value(value.clone()).map_err(|err| {
+        Box::new(ToolOutcome::error_code(
+            "invalid_args",
+            format!("invalid deliver targets: {err}"),
+            None::<String>,
+        ))
+    })
 }
 
 fn validate_job(root: &std::path::Path, job: &ScheduleJob) -> Result<(), Box<ToolOutcome>> {

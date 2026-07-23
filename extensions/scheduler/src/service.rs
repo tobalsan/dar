@@ -63,11 +63,25 @@ const TRUNCATION_MARKER: &str = "\n[truncated]";
 fn delivery_text(output: &ExecutionOutput) -> Option<String> {
     let text = match output.status {
         RunStatus::Ok => output.response.as_deref()?.trim(),
-        RunStatus::Error => output.error.as_deref().map(str::trim).filter(|text| !text.is_empty()).unwrap_or("Scheduler job failed"),
+        RunStatus::Error => output
+            .error
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .unwrap_or("Scheduler job failed"),
     };
     if text.is_empty() || text == "silent tick" {
         return None;
     }
+    // Keep gate stdout in the canonical run record, but deliver only the
+    // runner's response when the gate woke an agent.
+    let text = text
+        .strip_prefix("Gate output:\n")
+        .and_then(|text| {
+            text.split_once("\n\nAgent response:\n")
+                .map(|(_, response)| response)
+        })
+        .unwrap_or(text);
     let mut text = text.to_string();
     if text.len() > MAX_DELIVERY_BYTES {
         let boundary = text.floor_char_boundary(MAX_DELIVERY_BYTES - TRUNCATION_MARKER.len());
@@ -1675,10 +1689,17 @@ mod tests {
         let text = delivery_text(&output).unwrap();
         assert!(text.is_char_boundary(text.len()));
         assert!(text.ends_with("[truncated]"));
+
+        let error = ExecutionOutput {
+            status: RunStatus::Error,
+            response: Some("ignored response".into()),
+            error: Some("runner failed".into()),
+        };
+        assert_eq!(delivery_text(&error).as_deref(), Some("runner failed"));
     }
 
     #[tokio::test]
-    async fn delivery_calls_registered_sink_and_warns_for_missing_sink() {
+    async fn delivery_sends_only_runner_response_for_woken_gate_and_warns_for_missing_sink() {
         let sink = Arc::new(RecordingSink::default());
         let mut services = ServiceRegistry::default();
         services
@@ -1699,7 +1720,7 @@ mod tests {
         ];
         let output = ExecutionOutput {
             status: RunStatus::Ok,
-            response: Some("result".into()),
+            response: Some("Gate output:\ngate context\n\nAgent response:\nrunner result".into()),
             error: None,
         };
 
@@ -1712,8 +1733,12 @@ mod tests {
                     channel: Some("#alerts".into()),
                     user: None,
                 },
-                "result".into(),
+                "runner result".into(),
             )]
+        );
+        assert_eq!(
+            output.response.as_deref(),
+            Some("Gate output:\ngate context\n\nAgent response:\nrunner result")
         );
         assert_eq!(outcomes[0], "slack: delivered");
         assert!(outcomes[1].starts_with("missing: warning: sink unavailable"));
