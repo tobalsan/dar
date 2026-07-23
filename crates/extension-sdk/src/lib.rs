@@ -19,6 +19,11 @@ pub use host_api::{
     ENV_RELOAD_CONSUMERS_SERVICE,
 };
 
+/// Runtime result delivery for communication extensions.
+pub mod deliver {
+    pub use cap_deliver::{DeliverySink, Destination};
+}
+
 pub mod chat {
     use std::path::Path;
 

@@ -20,6 +20,7 @@ axum = "0.8"
 host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.4" }
 cap-runner = { package = "dar-cap-runner", path = "../../crates/cap-runner", version = "0.4" }
 cap-dashboard-tab = { package = "dar-cap-dashboard-tab", path = "../../crates/cap-dashboard-tab", version = "0.4" }
+cap-deliver = { package = "dar-cap-deliver", path = "../../crates/cap-deliver", version = "0.4" }
 runner-core = { package = "dar-runner-core", path = "../../crates/runner-core", version = "0.4" }
 system-context = { package = "dar-system-context", path = "../system-context", version = "0.4" }
 tool-registry = { package = "dar-tool-registry", path = "../../crates/tool-registry", version = "0.4" }

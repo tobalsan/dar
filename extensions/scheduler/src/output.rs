@@ -41,6 +41,8 @@ pub struct CronRunOutput<'a> {
     pub response: Option<String>,
     /// Error text for an `error` run.
     pub error: Option<String>,
+    /// Runtime delivery outcomes; failures are warnings, not run failures.
+    pub delivery: Vec<String>,
 }
 
 impl CronRunOutput<'_> {
@@ -162,6 +164,14 @@ pub fn render_cron_run_output(input: &CronRunOutput<'_>) -> String {
             lines.push("```".to_string());
         }
     }
+    if !input.delivery.is_empty() {
+        lines.push(String::new());
+        lines.push("## Delivery".to_string());
+        lines.push(String::new());
+        for outcome in &input.delivery {
+            lines.push(format!("- {outcome}"));
+        }
+    }
     lines.push(String::new());
     lines.join("\n")
 }
@@ -210,6 +220,7 @@ mod tests {
             status: RunStatus::Ok,
             response: Some("Done.".to_string()),
             error: None,
+            delivery: Vec::new(),
         });
 
         assert!(content.starts_with("---\njob_id: \"morning-digest\""));
@@ -238,6 +249,7 @@ mod tests {
             status: RunStatus::Error,
             response: None,
             error: Some("boom".to_string()),
+            delivery: Vec::new(),
         });
         assert!(content.contains("status: error"));
         assert!(content.contains("## Error"));
@@ -257,8 +269,30 @@ mod tests {
             status: RunStatus::Ok,
             response: Some("   ".to_string()),
             error: None,
+            delivery: Vec::new(),
         });
         assert!(content.contains("## Response\n\n[no response]"));
+    }
+
+    #[test]
+    fn renders_delivery_outcomes_as_notes() {
+        let content = render_cron_run_output(&CronRunOutput {
+            root: Path::new("/tmp/agent"),
+            job_id: "job",
+            name: "Job",
+            prompt: "Ping",
+            schedule: "* * * * * UTC",
+            fired_at: at("2026-05-19T07:00:00Z"),
+            finished_at: at("2026-05-19T07:00:01Z"),
+            status: RunStatus::Ok,
+            response: Some("Done".into()),
+            error: None,
+            delivery: vec![
+                "slack: delivered".into(),
+                "irc: warning: unavailable".into(),
+            ],
+        });
+        assert!(content.contains("## Delivery\n\n- slack: delivered\n- irc: warning: unavailable"));
     }
 
     #[test]
@@ -275,6 +309,7 @@ mod tests {
             status: RunStatus::Error,
             response: None,
             error: Some("boom".to_string()),
+            delivery: Vec::new(),
         })
         .unwrap();
 
@@ -303,6 +338,7 @@ mod tests {
             status: RunStatus::Error,
             response: None,
             error: Some(error.to_string()),
+            delivery: Vec::new(),
         };
         let first = write_cron_run_output(&input("first")).unwrap();
         let second = write_cron_run_output(&input("second")).unwrap();

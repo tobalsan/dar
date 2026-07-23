@@ -7,6 +7,7 @@ members = [
     "crates/artifacts",
     "crates/agent-env",
     "crates/cap-chat",
+    "crates/cap-deliver",
     "crates/cap-dashboard-tab",
     "crates/cap-tracker",
     "crates/cap-runner",
@@ -45,7 +46,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 license = "MIT"
 edition = "2021"
 repository = "https://github.com/tobalsan/dar"

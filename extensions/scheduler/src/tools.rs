@@ -42,8 +42,8 @@ use crate::schedule::{compute_next_run_at_ms, format_schedule};
 use crate::service::{run_job_now, RunNowOutcome, SchedulerConfig};
 use crate::state::SchedulerState;
 use crate::store::{
-    generate_job_id, is_safe_job_id, save_jobs, validate_script_path, Payload, Schedule,
-    ScheduleJob,
+    generate_job_id, is_safe_job_id, save_jobs, validate_script_path, DeliverTarget, Payload,
+    Schedule, ScheduleJob,
 };
 
 /// Shared dependencies every scheduler tool executor needs. Mirrors the HTTP
@@ -128,6 +128,7 @@ fn job_view(deps: &ToolDeps, job: &ScheduleJob, now_ms: i64) -> Value {
             "lastStatus".to_string(),
             json!(rt.last_status.map(|s| s.as_str())),
         );
+        map.insert("lastDelivery".to_string(), json!(rt.last_delivery));
         map.insert("lastError".to_string(), json!(rt.last_error));
         map.insert("lastExitCode".to_string(), json!(rt.last_exit_code));
         map.insert("lastRunKind".to_string(), json!(rt.last_run_kind));
@@ -242,6 +243,13 @@ fn parse_and_validate_payload(payload: &Value) -> Result<Payload, Box<ToolOutcom
         ))
     })?;
     Ok(result)
+}
+
+fn parse_deliver(value: Option<&Value>) -> Result<Vec<DeliverTarget>, Box<ToolOutcome>> {
+    let Some(value) = value else { return Ok(Vec::new()) };
+    serde_json::from_value(value.clone()).map_err(|err| Box::new(ToolOutcome::error_code(
+        "invalid_args", format!("invalid deliver targets: {err}"), None::<String>,
+    )))
 }
 
 fn validate_job(root: &std::path::Path, job: &ScheduleJob) -> Result<(), Box<ToolOutcome>> {
@@ -654,6 +662,7 @@ fn create_spec() -> ToolSpec {
                     "additionalProperties": false,
                 },
                 "timeoutMs": { "type": "integer", "minimum": 1, "description": "Optional per-job run timeout in ms." }
+                ,"deliver": { "type": "array", "description": "Runtime delivery targets; the job agent must not send its own result.", "items": { "type": "object", "properties": { "target": { "type": "string" }, "channel": { "type": "string" }, "user": { "type": "string" } }, "required": ["target"], "additionalProperties": false } }
             },
             "required": ["schedule", "payload"],
             "additionalProperties": false,
@@ -692,6 +701,10 @@ impl ToolExecutor for CreateTool {
             Err(out) => return Ok(*out),
         };
 
+        let deliver = match parse_deliver(args.get("deliver")) {
+            Ok(deliver) => deliver,
+            Err(out) => return Ok(*out),
+        };
         let job = match mutate_jobs(&self.deps, |current| {
             let mut jobs = current.to_vec();
             let job = ScheduleJob {
@@ -705,6 +718,7 @@ impl ToolExecutor for CreateTool {
                 schedule,
                 payload,
                 timeout_ms: args.get("timeoutMs").and_then(Value::as_u64),
+                deliver,
             };
             validate_job(&self.deps.root, &job)?;
             jobs.push(job.clone());
@@ -751,6 +765,7 @@ fn update_spec() -> ToolSpec {
                     "additionalProperties": false,
                 },
                 "timeoutMs": { "type": ["integer", "null"], "minimum": 1, "description": "Per-job timeout in ms; null clears it (inherit the default)." },
+                "deliver": { "type": "array", "description": "Runtime delivery targets; the job agent must not send its own result.", "items": { "type": "object", "properties": { "target": { "type": "string" }, "channel": { "type": "string" }, "user": { "type": "string" } }, "required": ["target"], "additionalProperties": false } },
                 "confirm": { "type": "boolean", "description": "Required only when setting enabled=false." }
             },
             "required": ["id"],
@@ -805,6 +820,15 @@ impl ToolExecutor for UpdateTool {
                     Value::Null => None,
                     v => v.as_u64(),
                 };
+            }
+            if let Some(deliver) = args.get("deliver") {
+                job.deliver = serde_json::from_value(deliver.clone()).map_err(|e| {
+                    Box::new(ToolOutcome::error_code(
+                        "invalid_args",
+                        e.to_string(),
+                        None::<String>,
+                    ))
+                })?;
             }
             validate_job(&self.deps.root, &job)?;
             jobs[idx] = job.clone();

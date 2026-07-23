@@ -226,6 +226,34 @@ over HTTP.
 
 ### Cron scripts
 
+### Deliver cron results
+
+Jobs keep their local output files as the canonical record. Add `deliver` to
+push a completed result from the runtime (not from the job's agent) to a
+registered communication extension:
+
+```json
+{
+  "version": 1,
+  "jobs": [{
+    "id": "status",
+    "name": "Status report",
+    "enabled": true,
+    "schedule": { "cron": "0 9 * * *", "tz": "Europe/Paris" },
+    "payload": { "message": "Report current status." },
+    "deliver": [
+      { "target": "slack", "channel": "#alerts" },
+      { "target": "telegram", "user": "12345" },
+      { "target": "discord", "channel": "ops" }
+    ]
+  }]
+}
+```
+
+Agent responses and non-empty script stdout are delivered. Silent gate ticks
+and empty script stdout are not; errors are always sent. A missing sink or send
+failure is recorded as a warning and does not change the job run's status.
+
 Jobs have three shapes, chosen by fields rather than a `kind` value:
 
 - **Agent job:** `message` only. The runner is started for every fire.

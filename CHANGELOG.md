@@ -9,6 +9,8 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Scheduler jobs can now deliver completed results to registered communication sinks using explicit `deliver` targets; delivery failures are recorded as warnings without changing the job result.
+
 ### Added
 
 - Scheduler jobs can run contained scripts directly, including script-only and wake-gated agent jobs, so deterministic scheduled work records process exit failures mechanically.
