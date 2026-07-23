@@ -126,6 +126,9 @@ pub fn run(
 
     // 3. Runner + loop checks (only if config parsed).
     if let Some(cfg) = cfg {
+        for warning in scheduler::delivery_sink_warnings(&paths.root, &services) {
+            eprintln!("doctor: warning: {warning}");
+        }
         // effective_cfg falls back to inline defaults when there is no
         // WORKFLOW.md (passive agents have none); the runner fields are taken
         // from agent.yaml `runner` regardless.

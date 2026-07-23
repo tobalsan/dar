@@ -42,6 +42,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::runner::RunOutcome;
+use cap_deliver::{DeliverySink, Destination};
 use cap_runner::ExitKind;
 use chrono::Utc;
 use host_api::{assert_contained, ServiceRegistry, ShutdownToken};
@@ -54,6 +55,79 @@ use crate::store::{jobs_path, load_jobs_checked, ScheduleJob};
 
 /// Floor so a misconfigured tiny poll interval cannot spin the loop.
 const MIN_POLL_INTERVAL_MS: u64 = 250;
+/// Fits the smallest supported channel message limits while leaving room for
+/// transport-specific metadata.
+const MAX_DELIVERY_BYTES: usize = 4_000;
+const TRUNCATION_MARKER: &str = "\n[truncated]";
+
+fn delivery_text(output: &ExecutionOutput) -> Option<String> {
+    let text = match output.status {
+        RunStatus::Ok => output.response.as_deref()?.trim(),
+        RunStatus::Error => output
+            .error
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .unwrap_or("Scheduler job failed"),
+    };
+    if text.is_empty() || text == "silent tick" {
+        return None;
+    }
+    // Keep gate stdout in the canonical run record, but deliver only the
+    // runner's response when the gate woke an agent.
+    let text = text
+        .strip_prefix("Gate output:\n")
+        .and_then(|text| {
+            text.split_once("\n\nAgent response:\n")
+                .map(|(_, response)| response)
+        })
+        .unwrap_or(text);
+    let mut text = text.to_string();
+    if text.len() > MAX_DELIVERY_BYTES {
+        let boundary = text.floor_char_boundary(MAX_DELIVERY_BYTES - TRUNCATION_MARKER.len());
+        text.truncate(boundary);
+        text.push_str(TRUNCATION_MARKER);
+    }
+    Some(text)
+}
+
+async fn deliver_result(
+    services: &ServiceRegistry,
+    job: &ScheduleJob,
+    output: &ExecutionOutput,
+) -> Vec<String> {
+    let Some(text) = delivery_text(output) else {
+        return Vec::new();
+    };
+    let mut outcomes = Vec::new();
+    for target in &job.deliver {
+        let destination = Destination {
+            channel: target.channel.clone(),
+            user: target.user.clone(),
+        };
+        match services.get::<dyn DeliverySink>(&target.target) {
+            Ok(sink) => {
+                if let Err(err) = sink.deliver(&destination, &text).await {
+                    tracing::warn!("[scheduler] Delivery to {} failed: {err:#}", target.target);
+                    outcomes.push(format!("{}: warning: {err:#}", target.target));
+                } else {
+                    outcomes.push(format!("{}: delivered", target.target));
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "[scheduler] Delivery sink {} is unavailable: {err:#}",
+                    target.target
+                );
+                outcomes.push(format!(
+                    "{}: warning: sink unavailable ({err:#})",
+                    target.target
+                ));
+            }
+        }
+    }
+    outcomes
+}
 
 /// Static configuration the runtime needs to fire runs, resolved once at start
 /// from `agent.yaml`.
@@ -604,7 +678,8 @@ fn wake_agent(final_line: Option<&str>) -> (bool, Option<String>) {
 
 /// Write the output file and update shared runtime state. Returns the
 /// [`ExecuteResult`] for the caller.
-fn persist_execute_result(
+async fn persist_execute_result(
+    services: &ServiceRegistry,
     config: &SchedulerConfig,
     state: &SchedulerState,
     job: &ScheduleJob,
@@ -618,6 +693,16 @@ fn persist_execute_result(
         response,
         error,
     } = output;
+    let delivery = deliver_result(
+        services,
+        job,
+        &ExecutionOutput {
+            status,
+            response: response.clone(),
+            error: error.clone(),
+        },
+    )
+    .await;
     let schedule = format_schedule(&job.schedule);
 
     let uneventful = job.payload.quiet_output
@@ -654,6 +739,7 @@ fn persist_execute_result(
             status,
             response,
             error: error.clone(),
+            delivery: delivery.clone(),
         })
         .map(Some)
     };
@@ -688,7 +774,14 @@ fn persist_execute_result(
             .and_then(|rest| rest.split(')').next())
             .and_then(|code| code.parse().ok())
     });
-    state.mark_finished_details(&job.id, final_status, error.clone(), exit_code, run_kind);
+    state.mark_finished_details(
+        &job.id,
+        final_status,
+        error.clone(),
+        exit_code,
+        run_kind,
+        delivery,
+    );
 
     ExecuteResult {
         status,
@@ -733,6 +826,7 @@ async fn execute_job(
             );
             let msg = format!("cannot create cron dir: {err:#}");
             return persist_execute_result(
+                services,
                 config,
                 state,
                 job,
@@ -743,7 +837,8 @@ async fn execute_job(
                     response: None,
                     error: Some(msg),
                 },
-            );
+            )
+            .await;
         }
     };
 
@@ -753,6 +848,7 @@ async fn execute_job(
             Ok(script) => script,
             Err(error) => {
                 return persist_execute_result(
+                    services,
                     config,
                     state,
                     job,
@@ -764,10 +860,12 @@ async fn execute_job(
                         error: Some(error),
                     },
                 )
+                .await
             }
         };
         if job.payload.no_agent {
             return persist_execute_result(
+                services,
                 config,
                 state,
                 job,
@@ -778,11 +876,13 @@ async fn execute_job(
                     response: Some(script.stdout),
                     error: None,
                 },
-            );
+            )
+            .await;
         }
         let (wake, context) = wake_agent(script.final_stdout_line.as_deref());
         if !wake {
             return persist_execute_result(
+                services,
                 config,
                 state,
                 job,
@@ -793,7 +893,8 @@ async fn execute_job(
                     response: Some("silent tick".to_string()),
                     error: None,
                 },
-            );
+            )
+            .await;
         }
         let mut prompt = job.payload.message.clone().unwrap_or_default();
         if let Some(context) = context {
@@ -828,6 +929,7 @@ async fn execute_job(
         .await;
         let (status, response, error) = classify_outcome(outcome, timeout);
         return persist_execute_result(
+            services,
             config,
             state,
             job,
@@ -842,7 +944,8 @@ async fn execute_job(
                 )),
                 error,
             },
-        );
+        )
+        .await;
     }
     let host_http_addr = *config
         .host_http_addr
@@ -873,6 +976,7 @@ async fn execute_job(
 
     let (status, response, error) = classify_outcome(outcome, timeout);
     persist_execute_result(
+        services,
         config,
         state,
         job,
@@ -884,6 +988,7 @@ async fn execute_job(
             error,
         },
     )
+    .await
 }
 
 /// Outcome of a `run-now` request, mapped to an HTTP status by the handler
@@ -979,9 +1084,26 @@ pub async fn run_job_now(
 mod tests {
     use super::*;
     use crate::store::{jobs_path, load_jobs, Payload, Schedule};
+    use async_trait::async_trait;
     use cap_runner::{KillReason, Runner, RunnerHandle, SpawnParams};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration as StdDuration;
+
+    #[derive(Default)]
+    struct RecordingSink {
+        deliveries: std::sync::Mutex<Vec<(Destination, String)>>,
+    }
+
+    #[async_trait]
+    impl DeliverySink for RecordingSink {
+        async fn deliver(&self, dest: &Destination, text: &str) -> anyhow::Result<()> {
+            self.deliveries
+                .lock()
+                .unwrap()
+                .push((dest.clone(), text.to_string()));
+            Ok(())
+        }
+    }
 
     // --- classify_outcome unit tests -----------------------------------------
 
@@ -1145,6 +1267,7 @@ mod tests {
                 quiet_output: false,
             },
             timeout_ms,
+            deliver: Vec::new(),
         }
     }
 
@@ -1548,5 +1671,76 @@ mod tests {
         maybe_reload(&config, &state, &mut fp);
         let rearmed = arm_jobs(&state);
         assert!(rearmed.is_empty(), "disabled job is not armed");
+    }
+
+    #[test]
+    fn delivery_text_skips_silent_results_and_preserves_utf8_when_capped() {
+        let silent = ExecutionOutput {
+            status: RunStatus::Ok,
+            response: Some(" silent tick ".into()),
+            error: None,
+        };
+        assert!(delivery_text(&silent).is_none());
+        let output = ExecutionOutput {
+            status: RunStatus::Ok,
+            response: Some("é".repeat(MAX_DELIVERY_BYTES)),
+            error: None,
+        };
+        let text = delivery_text(&output).unwrap();
+        assert!(text.is_char_boundary(text.len()));
+        assert!(text.ends_with("[truncated]"));
+
+        let error = ExecutionOutput {
+            status: RunStatus::Error,
+            response: Some("ignored response".into()),
+            error: Some("runner failed".into()),
+        };
+        assert_eq!(delivery_text(&error).as_deref(), Some("runner failed"));
+    }
+
+    #[tokio::test]
+    async fn delivery_sends_only_runner_response_for_woken_gate_and_warns_for_missing_sink() {
+        let sink = Arc::new(RecordingSink::default());
+        let mut services = ServiceRegistry::default();
+        services
+            .service::<dyn DeliverySink>("slack", sink.clone())
+            .unwrap();
+        let mut job = script_job("delivery", "echo ignored", 60_000);
+        job.deliver = vec![
+            crate::store::DeliverTarget {
+                target: "slack".into(),
+                channel: Some("#alerts".into()),
+                user: None,
+            },
+            crate::store::DeliverTarget {
+                target: "missing".into(),
+                channel: None,
+                user: Some("42".into()),
+            },
+        ];
+        let output = ExecutionOutput {
+            status: RunStatus::Ok,
+            response: Some("Gate output:\ngate context\n\nAgent response:\nrunner result".into()),
+            error: None,
+        };
+
+        let outcomes = deliver_result(&services, &job, &output).await;
+
+        assert_eq!(
+            sink.deliveries.lock().unwrap().as_slice(),
+            &[(
+                Destination {
+                    channel: Some("#alerts".into()),
+                    user: None,
+                },
+                "runner result".into(),
+            )]
+        );
+        assert_eq!(
+            output.response.as_deref(),
+            Some("Gate output:\ngate context\n\nAgent response:\nrunner result")
+        );
+        assert_eq!(outcomes[0], "slack: delivered");
+        assert!(outcomes[1].starts_with("missing: warning: sink unavailable"));
     }
 }

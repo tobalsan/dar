@@ -173,6 +173,7 @@ struct JobRow {
     /// Full job prompt, HTML-escaped. Shown as a single clamped line in the
     /// row (ellipsis + `title` tooltip) and in full in the job-detail drawer.
     message: String,
+    delivery: Option<String>,
     outputs: Vec<OutputEntry>,
     /// Total number of output files for this job (may exceed `outputs.len()`,
     /// which is capped at [`RECENT_OUTPUTS`]).
@@ -241,6 +242,23 @@ impl JobRow {
                 job_shape(job),
                 job.payload.message.as_deref().unwrap_or("")
             )),
+            delivery: (!job.deliver.is_empty() || !rt.last_delivery.is_empty()).then(|| {
+                let targets = job
+                    .deliver
+                    .iter()
+                    .map(|target| target.target.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let last = rt.last_delivery.join("; ");
+                escape_html(&format!(
+                    "deliver: {targets}{}",
+                    if last.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {last}")
+                    }
+                ))
+            }),
             outputs,
             total_outputs,
         }
@@ -310,6 +328,9 @@ fn render_job(row: &JobRow) -> String {
         id = row.id,
         name = row.name,
     ));
+    if let Some(delivery) = &row.delivery {
+        block.push_str(&format!("<div class=\"cron-meta\">{delivery}</div>"));
+    }
     block.push_str(&format!(
         " <span class=\"pill {}\">{}</span>{running}{disabled_pill}",
         row.status_class, row.status_label
@@ -554,6 +575,7 @@ mod tests {
                 quiet_output: false,
             },
             timeout_ms: None,
+            deliver: Vec::new(),
         }
     }
 

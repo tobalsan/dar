@@ -39,6 +39,35 @@ pub struct Payload {
     pub quiet_output: bool,
 }
 
+/// One runtime delivery destination for a completed job result.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DeliverTarget {
+    pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub user: Option<String>,
+}
+
+impl DeliverTarget {
+    fn validate(&self) -> Result<(), String> {
+        if self.target.trim().is_empty() {
+            return Err("deliver.target must not be empty".to_string());
+        }
+        if self.channel.as_deref().is_some_and(|v| v.trim().is_empty())
+            || self.user.as_deref().is_some_and(|v| v.trim().is_empty())
+        {
+            return Err("deliver channel and user must not be empty when supplied".to_string());
+        }
+        let channel = self.channel.is_some();
+        let user = self.user.is_some();
+        if channel == user {
+            return Err("deliver requires exactly one non-empty channel or user".to_string());
+        }
+        Ok(())
+    }
+}
+
 /// One scheduled job. This is the on-disk shape: it holds *only* configuration.
 /// Runtime state (next/last run, status, running-for) is never serialized here —
 /// it lives in-memory ([`crate::state`]) and is merged into list responses.
@@ -57,6 +86,8 @@ pub struct ScheduleJob {
     /// `None` so the persisted shape stays config-only.
     #[serde(rename = "timeoutMs", skip_serializing_if = "Option::is_none", default)]
     pub timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub deliver: Vec<DeliverTarget>,
 }
 
 fn default_enabled() -> bool {
@@ -127,6 +158,9 @@ impl ScheduleJob {
         self.payload.validate()?;
         if self.timeout_ms == Some(0) {
             return Err("timeoutMs must be greater than 0".to_string());
+        }
+        for target in &self.deliver {
+            target.validate()?;
         }
         Ok(())
     }
@@ -482,6 +516,7 @@ mod tests {
                 quiet_output: false,
             },
             timeout_ms: Some(60_000),
+            deliver: Vec::new(),
         }
     }
 
@@ -497,6 +532,41 @@ mod tests {
                 .unwrap_err(),
             "timeoutMs must be greater than 0"
         );
+    }
+
+    #[test]
+    fn deliver_target_requires_target_and_exactly_one_destination() {
+        for target in [
+            DeliverTarget {
+                target: String::new(),
+                channel: Some("ops".into()),
+                user: None,
+            },
+            DeliverTarget {
+                target: "slack".into(),
+                channel: None,
+                user: None,
+            },
+            DeliverTarget {
+                target: "slack".into(),
+                channel: Some("ops".into()),
+                user: Some("u".into()),
+            },
+            DeliverTarget {
+                target: "slack".into(),
+                channel: Some(" ".into()),
+                user: None,
+            },
+        ] {
+            assert!(target.validate().is_err());
+        }
+        assert!(DeliverTarget {
+            target: "slack".into(),
+            channel: Some("ops".into()),
+            user: None
+        }
+        .validate()
+        .is_ok());
     }
 
     #[test]

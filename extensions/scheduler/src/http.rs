@@ -36,7 +36,7 @@ use crate::schedule::compute_next_run_at_ms;
 use crate::service::{run_job_now, RunNowOutcome, SchedulerConfig};
 use crate::state::SchedulerState;
 use crate::store::{
-    generate_job_id, save_jobs, validate_script_path, Payload, Schedule, ScheduleJob,
+    generate_job_id, save_jobs, validate_script_path, DeliverTarget, Payload, Schedule, ScheduleJob,
 };
 
 /// State shared with every handler.
@@ -117,6 +117,7 @@ struct CreateBody {
     payload: Option<PayloadBody>,
     #[serde(rename = "timeoutMs")]
     timeout_ms: Option<u64>,
+    deliver: Option<Vec<DeliverTarget>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +128,7 @@ struct UpdateBody {
     payload: Option<PayloadBody>,
     #[serde(rename = "timeoutMs")]
     timeout_ms: Option<Option<u64>>,
+    deliver: Option<Vec<DeliverTarget>>,
 }
 
 // ---- handlers -------------------------------------------------------------
@@ -171,6 +173,7 @@ async fn create_job(
             schedule,
             payload,
             timeout_ms: body.timeout_ms,
+            deliver: body.deliver.unwrap_or_default(),
         };
         if let Err(msg) = job.validate(Utc::now().timestamp_millis()) {
             return Err(Box::new(bad_request(&msg)));
@@ -226,6 +229,9 @@ async fn update_job(
         }
         if let Some(timeout_ms) = body.timeout_ms {
             job.timeout_ms = timeout_ms;
+        }
+        if let Some(deliver) = body.deliver {
+            job.deliver = deliver;
         }
         if let Err(msg) = job.validate(Utc::now().timestamp_millis()) {
             return Err(Box::new(bad_request(&msg)));
@@ -699,6 +705,7 @@ fn job_with_runtime(api: &ApiState, job: &ScheduleJob, now_ms: i64) -> Value {
         map.insert("lastError".to_string(), json!(rt.last_error));
         map.insert("lastExitCode".to_string(), json!(rt.last_exit_code));
         map.insert("lastRunKind".to_string(), json!(rt.last_run_kind));
+        map.insert("lastDelivery".to_string(), json!(rt.last_delivery));
         map.insert("runningForMs".to_string(), json!(running_for_ms));
     }
     value
@@ -805,6 +812,7 @@ mod tests {
                 quiet_output: None,
             }),
             timeout_ms: None,
+            deliver: None,
         })
     }
 
@@ -853,6 +861,7 @@ mod tests {
                 quiet_output: None,
             }),
             timeout_ms: None,
+            deliver: None,
         });
         let resp = create_job(State(api), Ok(body)).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -915,6 +924,7 @@ mod tests {
             schedule: None,
             payload: None,
             timeout_ms: Some(Some(5000)),
+            deliver: None,
         });
         let resp = update_job(State(api.clone()), Path(id.clone()), Ok(body)).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -942,6 +952,7 @@ mod tests {
             schedule: None,
             payload: None,
             timeout_ms: Some(Some(0)),
+            deliver: None,
         });
         let resp = update_job(State(api.clone()), Path(id), Ok(body)).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -957,6 +968,7 @@ mod tests {
             schedule: None,
             payload: None,
             timeout_ms: None,
+            deliver: None,
         });
         let resp = update_job(State(api), Path("nope".to_string()), Ok(body)).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -984,6 +996,7 @@ mod tests {
             }),
             payload: None,
             timeout_ms: None,
+            deliver: None,
         });
         let resp = update_job(State(api), Path(id), Ok(body)).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -1034,6 +1047,7 @@ mod tests {
                 quiet_output: false,
             },
             timeout_ms: None,
+            deliver: Vec::new(),
         }];
         let id = generate_job_id(&existing);
         assert!(crate::store::is_safe_job_id(&id));
@@ -1124,6 +1138,7 @@ mod tests {
             schedule: None,
             payload: None,
             timeout_ms: None,
+            deliver: None,
         });
         update_job(State(api.clone()), Path(id.clone()), Ok(body)).await;
         let resp = run_now(State(api), Path(id)).await;
