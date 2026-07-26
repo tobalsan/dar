@@ -2,7 +2,7 @@
 
 This file provides guidance to coding agents when working with code in this repository.
 
-Dar v0: a folder-scoped agent runtime. Cargo workspace; the shipped binary is assembled in `dist/` from an explicit plugin list. Spec lives in `PRD.md` (+ `PRD-EXTENSIONS.md`). README has user-facing usage.
+Dar v0: a folder-scoped agent runtime. Cargo workspace; the shipped binary is assembled in `dist/` from an explicit plugin list. README + `docs/` have user-facing usage.
 
 **Three pillars.** (1) a small domain-free **core** (`crates/dar-host` + the contract crates) that knows nothing about trackers, runners, or chat; (2) a stable **SDK** (`crates/extension-sdk`, published as `dar-extension-sdk`) — the one crate a third-party extension author depends on; (3) an **ecosystem of extensions** under `extensions/`, each adding one capability. Everything below is an instance of one of these three.
 
