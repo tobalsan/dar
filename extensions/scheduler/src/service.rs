@@ -84,7 +84,10 @@ fn delivery_text(output: &ExecutionOutput) -> Option<String> {
         .unwrap_or(text);
     let mut text = text.to_string();
     if text.len() > MAX_DELIVERY_BYTES {
-        let boundary = text.floor_char_boundary(MAX_DELIVERY_BYTES - TRUNCATION_MARKER.len());
+        let mut boundary = MAX_DELIVERY_BYTES - TRUNCATION_MARKER.len();
+        while !text.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
         text.truncate(boundary);
         text.push_str(TRUNCATION_MARKER);
     }
