@@ -109,6 +109,13 @@ async fn run_host(
     let hitl = startup_hitl(&root);
     let hitl_for_hook = Arc::clone(&hitl);
     let artifact_root = artifact_root()?;
+    // Export the resolved path so every descendant process (runners, the MCP
+    // bridge child) resolves the identical vault, even when a child sandboxes
+    // its own XDG_DATA_HOME (e.g. opencode). Safe: boot is single-threaded and
+    // runs before any child process is spawned.
+    unsafe {
+        std::env::set_var("DAR_ARTIFACT_ROOT", &artifact_root);
+    }
     plugins.push(Arc::new(self_update::LiveRebuildExtension::new(
         root.clone(),
         run_args,
@@ -133,12 +140,42 @@ async fn run_host(
     result
 }
 
+/// Resolve the host's artifact vault.
+///
+/// Precedence:
+/// 1. `DAR_ARTIFACT_ROOT`, if set and non-empty — used verbatim.
+/// 2. `XDG_DATA_HOME` → `$XDG_DATA_HOME/dar/artifacts`.
+/// 3. `HOME` → `$HOME/.local/share/dar/artifacts`.
+///
+/// `DAR_ARTIFACT_ROOT` exists because some children sandbox their own
+/// `XDG_DATA_HOME` inside the agent root (e.g. opencode, for portable
+/// self-contained agents), which would otherwise make the child resolve a
+/// different — and invalid — artifact root than the host. `run_host` exports
+/// the value it resolves here back into `DAR_ARTIFACT_ROOT` so every
+/// descendant process (including the `dar __mcp-bridge` child, which executes
+/// `artifact_publish`) agrees on the same vault as the host.
 fn artifact_root() -> Result<std::path::PathBuf> {
-    let data_home = std::env::var_os("XDG_DATA_HOME")
+    resolve_artifact_root(
+        std::env::var_os("DAR_ARTIFACT_ROOT"),
+        std::env::var_os("XDG_DATA_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+fn resolve_artifact_root(
+    dar_override: Option<OsString>,
+    data_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<std::path::PathBuf> {
+    if let Some(o) = dar_override {
+        if !o.is_empty() {
+            return Ok(std::path::PathBuf::from(o));
+        }
+    }
+    let data_home = data_home
         .map(std::path::PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
+            home.map(std::path::PathBuf::from)
                 .map(|home| home.join(".local/share"))
         })
         .context("XDG_DATA_HOME or HOME is required for artifact storage")?;
@@ -432,6 +469,39 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
         let err = Cli::try_parse_from(["dar", "run", "--help"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn resolve_artifact_root_dar_override_wins_over_xdg_data_home() {
+        let root = resolve_artifact_root(
+            Some(OsString::from("/sandboxed/dar-artifacts")),
+            Some(OsString::from("/sandbox/xdg")),
+            Some(OsString::from("/home/user")),
+        )
+        .unwrap();
+        assert_eq!(root, std::path::PathBuf::from("/sandboxed/dar-artifacts"));
+    }
+
+    #[test]
+    fn resolve_artifact_root_empty_dar_override_falls_through_to_xdg_data_home() {
+        let root = resolve_artifact_root(
+            Some(OsString::new()),
+            Some(OsString::from("/sandbox/xdg")),
+            Some(OsString::from("/home/user")),
+        )
+        .unwrap();
+        assert_eq!(root, std::path::PathBuf::from("/sandbox/xdg/dar/artifacts"));
+    }
+
+    #[test]
+    fn resolve_artifact_root_no_override_uses_xdg_data_home() {
+        let root = resolve_artifact_root(
+            None,
+            Some(OsString::from("/sandbox/xdg")),
+            Some(OsString::from("/home/user")),
+        )
+        .unwrap();
+        assert_eq!(root, std::path::PathBuf::from("/sandbox/xdg/dar/artifacts"));
     }
 
     #[test]
