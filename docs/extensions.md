@@ -2,9 +2,60 @@
 
 How to build any kind of dar extension. Read this top-to-bottom once;
 `extensions/example/src/lib.rs` is the living reference. For enabling and
-configuring an already-written extension, see the README "Adding an extension"
-and "Enabling & configuring extensions" sections — this guide is about
-*authoring*.
+configuring an already-written extension, see
+[Enabling & configuring extensions](#enabling--configuring-extensions) — this
+guide is about *authoring*.
+
+## Enabling & configuring extensions
+
+The codebase is a cargo workspace: a domain-free host (`crates/dar-host`)
+plus small contract crates (`crates/host-api`, `crates/cap-tracker`,
+`crates/cap-runner`, `crates/cap-chat`, `crates/orchestrator-api`), with
+features living as one crate each under `extensions/`. The binary is assembled
+from an explicit plugin list in the composition root (`dist/`). Extensions
+import `host-api` (and optionally one cap/api crate) and read zero host
+internals.
+
+Editing `dist/` is the **build A** path (see the [README](../README.md)
+quickstart). In **build B**, each agent
+gets its own composition crate (`.dar/`) and can add agent-local
+extensions under its own `extensions/` folder — scaffold one with
+`cargo dar new my-extension --kind background` (or `service` /
+`foreground`). See [Self-contained agents (build B)](self-contained-agents.md).
+
+Linked is not the same as enabled. Runner and tracker extensions only
+*register* named services. `runner.use` is always required and selects the
+agent harness/model backend:
+
+```yaml
+runner:
+  use: pi               # pi | codex | cli | fake
+```
+
+The issue loop itself is a `WORKFLOW.md` concern, not `agent.yaml`: tracker
+(`tracker.kind`, `tracker.projects`, states, …), polling, and workspace config
+all live in `WORKFLOW.md` frontmatter — see [WORKFLOW.md](workflows.md) below.
+Background extensions in `plugins![]` (orchestrator, dashboard, frontend-log)
+start unconditionally. With no resolved `WORKFLOW.md`, or one whose
+frontmatter is missing `tracker.kind` or non-empty `active_states`/
+`terminal_states`, the orchestrator starts in passive mode: no issue loop, no
+tracker required. The foreground extension — the one that owns terminal
+output — is selected per agent via the top-level `foreground:` key in
+`agent.yaml` (default `"logs"`, the frontend-log extension; `"tui"` selects the
+[terminal UI](chat.md)). An unknown id causes a clean boot
+error and exit 1.
+
+Per-extension config is passed via the top-level `extensions:` map in
+`agent.yaml`, keyed by extension id. The host delivers each value to the
+matching extension via `ConfigStore`. Missing section = empty config.
+
+```yaml
+foreground: logs          # optional; default "logs"
+
+extensions:
+  dashboard:
+    port: 7878
+```
 
 ## What an extension is
 
@@ -38,7 +89,8 @@ cargo dar new my-extension --kind background   # or service | foreground
 
 This writes `extensions/my-extension/{Cargo.toml,src/lib.rs}` with a compiling
 skeleton for the chosen kind, then prints the two wiring lines. Wire it into the
-shipped binary (full detail in README):
+shipped binary (full detail in
+[Enabling & configuring extensions](#enabling--configuring-extensions) above):
 
 1. Add `my-extension = { path = "../extensions/my-extension" }` to `dist/Cargo.toml`.
 2. Add `my_extension::MyExtension,` to the `plugins![]` list in `dist/src/main.rs`.
@@ -308,233 +360,8 @@ tokio::spawn(async move {
 Most stock extensions (orchestrator, dashboard, trackers, runners, chats, tui)
 are baseline and always linked. A few are **opt-in**: they link into a composed
 per-agent binary only when their `extensions.<id>` section is present in
-`agent.yaml`, so a binary without the section behaves exactly as before.
-
-### `scheduler`
-
-Fires per-agent cron jobs and writes their output as markdown. On boot it loads
-`cron/jobs.json`, computes each enabled job's next fire from its cron expression
-+ IANA timezone (+ optional `startAt` anchor, anchored at `max(now, startAt)`),
-arms a single timer for the earliest, and when due spawns the agent's default
-runner (`runner.use`) with the job's `payload.message` as the prompt. The
-captured response is written to `cron/output/<job_id>/<timestamp>.md` with
-aihub-shape frontmatter (job id, run type, fired/finished, status, duration,
-schedule) plus a readable prompt/response body, for both ok and error runs. All
-jobs due at one tick run concurrently in their own tasks; the timer re-arms after
-every tick — including after a skipped, hung, erroring, or panicking job — so one
-bad job never wedges the schedule loop. A malformed `cron/jobs.json` logs one
-warning and is treated as empty; a missing file is empty.
-
-#### Execution guards
-
-The scheduler enforces three safety semantics so it is trustworthy unattended:
-
-- **Overlap-skip.** A scheduled fire of a job whose previous run is still in
-  flight is skipped: a warning is logged, the skip is bookmarked (so later
-  run-now logic can tell a skip from a normal completion), and the job's next
-  fire is recomputed so the timer re-arms forward. The same job never overlaps
-  itself.
-- **Timeout.** Every run is bounded by a timeout. The effective timeout is the
-  per-job `timeoutMs`, else `extensions.scheduler.jobTimeoutMs`, else a
-  10-minute default. On timeout the runner child is killed and the run is
-  recorded as an `error` output file with a timeout message; the job's next fire
-  is still computed.
-- **Kill switch (boot-time).** `extensions.scheduler.enabled: false` prevents
-  arming any timers — nothing fires — while `cron/jobs.json` stays
-  readable/writable. Because the host freezes the whole `extensions.*` config map
-  after boot (it is not live-reloaded), flipping `enabled` or changing
-  `jobTimeoutMs` takes effect only after a host **restart**. Per-job `enabled:
-  false` inside `cron/jobs.json`, by contrast, is read from the (hot-reloaded)
-  jobs file: a disabled job never fires and never gets a next-run.
-
-Invalid `extensions.scheduler` config (unknown field, wrong type, or a zero
-`jobTimeoutMs`) fails boot with a clean error naming the problem, rather than
-surfacing at first fire.
-
-Enable it by adding the section (presence selects it). `pollIntervalMs`
-(default `2000`, floored at `250`) tunes how quickly external edits to
-`cron/jobs.json` are hot-reloaded:
-
-```yaml
-extensions:
-  scheduler:
-    enabled: true        # `false` = boot-time kill switch (CRUD stays live, no fires)
-    jobTimeoutMs: 600000 # optional; default per-run timeout in ms (10 min)
-    pollIntervalMs: 2000 # optional; hot-reload poll cadence in ms (floored at 250)
-```
-
-```jsonc
-// cron/jobs.json
-{
-  "version": 1,
-  "jobs": [
-    {
-      "id": "morning-digest",
-      "name": "Morning digest",
-      "enabled": true,
-      "schedule": { "cron": "0 8 * * *", "tz": "Europe/Paris", "startAt": "2026-05-19T07:00:00.000Z" },
-      "payload": { "message": "Summarize overnight events." },
-      "timeoutMs": 300000
-    }
-  ]
-}
-```
-
-A per-job timeout override is set with `timeoutMs` on the job (milliseconds),
-taking precedence over `extensions.scheduler.jobTimeoutMs` and the default.
-
-#### Self-service hot reload (the file is the API)
-
-The scheduler polls `cron/jobs.json` on `pollIntervalMs` and refreshes its
-in-memory job set whenever the file changes (detected by modified-time + length).
-This makes the jobs file itself the self-service surface: a child agent — or a
-human — can add, remove, or edit a job by writing the file, and the schedule
-change is applied within the poll interval, **without restarting the host**. The
-file shape shown above *is* the API; there is no separate tool call to register
-a job. The same job set is also exposed over the Scheduler HTTP API (below);
-file edits and HTTP mutations feed the same in-memory state.
-
-Reload semantics:
-
-- **Add / change / remove** a job → reflected within the poll interval and the
-  timer is re-armed to the new earliest fire.
-- **Per-job `enabled: false`** inside `cron/jobs.json` is live-reloaded: flip it
-  and the job drops out (or back in) on the next poll. This is distinct from the
-  boot-time `extensions.scheduler.enabled` switch above, which is immutable at
-  runtime.
-- **Malformed edit** → one warning, the file is treated as empty (no jobs armed),
-  no crash; the scheduler recovers automatically on the next valid write.
-- **In-flight runs survive a reload.** Each job carries an overlap guard; a job
-  edited while one of its runs is in flight keeps that guard, so overlap-skip
-  still applies (a second fire is skipped until the first run returns). A job
-  deleted while running is dropped from the armed set but its in-flight run owns
-  its own guard handle and completes (and writes output) normally — it is never
-  orphan-tracked twice.
-- The poll loop selects on the shutdown token, so a shutdown during polling or
-  between fires stops the scheduler promptly.
-
-Parity gaps vs the aihub scheduler (tracked in follow-up slices): no per-job
-model override, no `sessionId` continuity, and no CLI. The captured response is
-the runner's last assistant-side output line, a best-effort proxy for plain
-runners. Job ids are validated to a single safe path segment at load (ids with
-`/`, `\`, `..`, or a leading dot are skipped with a warning) so output paths
-stay under the agent root.
-
-#### Scheduler HTTP API
-
-When the scheduler is enabled it mounts a job-management API on the host HTTP
-server under the `/scheduler` namespace. These are **single-agent** paths: the
-agent is implied by the host process, so there are no `agentId` segments (unlike
-the aihub multi-agent API). Mutations validate the request, persist the new job
-set atomically to `cron/jobs.json` (temp file + rename), and re-arm the timer
-immediately so a sooner schedule fires without waiting for the current sleep.
-Runtime state (next/last run, last status, running-for) lives in memory and is
-never written to disk; it is merged into list/create/update responses.
-
-| Method   | Path                   | Description                                                                  |
-| -------- | ---------------------- | ---------------------------------------------------------------------------- |
-| `GET`    | `/scheduler/jobs`      | List jobs, each merged with runtime state.                                   |
-| `POST`   | `/scheduler/jobs`      | Create a job. The id is generated server-side; `enabled` defaults to `true`. Returns `201` with the new job. |
-| `PATCH`  | `/scheduler/jobs/{id}` | Patch any of `name`, `enabled`, `schedule`, `payload`, `timeoutMs`. Re-arms when the schedule changes. |
-| `DELETE` | `/scheduler/jobs/{id}` | Remove a job. Returns `204`.                                                 |
-| `POST`   | `/scheduler/jobs/{id}/run-now` | Fire the job immediately without disturbing its schedule. See below. |
-| `GET`    | `/scheduler/jobs/{id}/tail`    | Return the newest output file for the job (path + content). |
-
-Request/response job shape (runtime fields are read-only and present only on
-responses):
-
-```jsonc
-{
-  "id": "job-1750000000000",      // server-generated on create
-  "name": "Morning digest",
-  "enabled": true,                  // defaults to true on create
-  "schedule": { "cron": "0 8 * * *", "tz": "Europe/Paris", "startAt": "2026-05-19T07:00:00.000Z" },
-  "payload": { "message": "Summarize overnight events." },
-  "timeoutMs": 60000,              // optional; falls back to runner.max_run_timeout_ms
-  // runtime-only (responses):
-  "nextRunAtMs": 1750000000000,
-  "lastRunAtMs": null,
-  "lastStatus": null,             // "ok" | "error" | null
-  "lastError": null,              // error message when lastStatus == "error", else null
-  "runningForMs": null
-}
-```
-
-Validation: a bad cron expression, a missing or unknown `tz`, an out-of-range
-`startAt`, or an empty `payload.message` returns `400` with an `{ "error": ... }`
-body; an unknown job id on update/delete returns `404`.
-
-##### Run now and tail (operator test-and-inspect loop)
-
-`POST /scheduler/jobs/{id}/run-now` fires a job **immediately** through the same
-path as a scheduled fire — the output file is written to
-`cron/output/<job_id>/<timestamp>.md` like any scheduled run — **without
-disturbing the schedule**. The job's previously computed next fire is restored
-after the manual run, _unless_ a scheduled fire was overlap-skipped while the
-manual run was in flight; in that case the loop's recomputed next fire stands
-(the skipped occurrence is consumed, not replayed — aihub's skipped-fire
-bookkeeping). The response carries the run result:
-
-| Outcome                          | Status | Body                                            |
-| -------------------------------- | ------ | ----------------------------------------------- |
-| Ran ok                           | `200`  | `{ status: "ok", firedAt, finishedAt, outputPath, error: null, job }` |
-| Ran with error                   | `500`  | `{ status: "error", ..., error: "<message>", job }` |
-| Job disabled (inactive)          | `500`  | `{ status: "inactive", error, job: null }`      |
-| Fire skipped before running      | `202`  | `{ status: "skipped", error, job: null }`       |
-| Job already running              | `409`  | `{ error: "job ... is already running" }`       |
-| Unknown job id                   | `404`  | `{ error: ... }`                                |
-
-`GET /scheduler/jobs/{id}/tail` returns the **newest** output file for the job —
-the lexicographically-greatest entry in `cron/output/<job_id>/` (filenames are
-`YYYY-MM-DD_HH-mm-ss.md`, so lexicographic order is timestamp order):
-
-| Outcome             | Status | Body                                  |
-| ------------------- | ------ | ------------------------------------- |
-| Newest output found | `200`  | `{ "path": "...", "content": "..." }` |
-| Job has no outputs  | `404`  | `{ "error": ... }`                    |
-| Unknown job id      | `404`  | `{ "error": ... }`                    |
-
-Example lifecycle with `curl` (replace `$PORT` with the agent's bound HTTP port):
-
-```bash
-# Create
-curl -sS -XPOST localhost:$PORT/scheduler/jobs \
-  -H content-type:application/json \
-  -d '{"name":"digest","schedule":{"cron":"0 8 * * *","tz":"UTC"},"payload":{"message":"hi"}}'
-# List
-curl -sS localhost:$PORT/scheduler/jobs
-# Update (patch)
-curl -sS -XPATCH localhost:$PORT/scheduler/jobs/<id> \
-  -H content-type:application/json -d '{"enabled":false}'
-# Run now, then read the fresh output
-curl -sS -XPOST localhost:$PORT/scheduler/jobs/<id>/run-now
-curl -sS localhost:$PORT/scheduler/jobs/<id>/tail
-# Delete
-curl -sS -XDELETE localhost:$PORT/scheduler/jobs/<id>
-```
-
-#### Cron dashboard tab (read-only)
-
-When the scheduler is enabled it contributes a read-only **"Cron"** tab to the
-web dashboard through the [dashboard-tab contract](#dashboard-tab). The tab lists
-each job with its schedule + timezone, enabled flag, next/last run times, last
-status (with the error message when the last run failed), running-for, and the
-most recent output files per job. It refreshes with the dashboard's existing
-self-poll: when the Cron tab is active the dashboard re-fetches its fragment
-into `#content` on the shared cadence (the same poller the orchestrator run view
-uses), so the fragment carries no inner poll of its own.
-
-The tab is **read-only** — there are no mutation controls. All mutation stays
-with the Scheduler HTTP API above and direct edits to `cron/jobs.json`. The tab
-is present only when the scheduler is linked and enabled: in the shipped `dist`
-binary that means an `extensions.scheduler` section that is not `enabled: false`;
-in an FSC per-agent binary it means the composer selected the scheduler crate
-(driven by the `agent.yaml` section). When the scheduler is absent or
-kill-switched, no tab is registered and the dashboard renders exactly as before.
-
-Cron activity is surfaced at the scheduler's own level: scheduled runs fire the
-runner service directly and **never** appear in the orchestrator's run list or
-its retained `RunSnapshot`. The orchestrator "Runs" view stays the default tab.
+`agent.yaml`, so a binary without the section behaves exactly as before. The
+scheduler is the stock opt-in example — see [Scheduler](scheduler.md).
 
 ## Rules and invariants
 
