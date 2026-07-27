@@ -53,7 +53,7 @@
 
   const agentName = () => (typeof document !== 'undefined' && document.getElementById('chat-root') && document.getElementById('chat-root').dataset.agentName) || 'Agent';
 
-  const html = blocks => blocks.map((block, i) => {
+  const html = (blocks, qsel = {}) => blocks.map((block, i) => {
     if (block.kind === 'tool') {
       let state = block.is_error ? 'bad' : block.done ? 'done' : 'live';
       let label = block.is_error ? 'error' : block.done ? 'done' : 'running';
@@ -62,10 +62,27 @@
     if (block.kind === 'question') {
       let state = block.done ? (block.rejected ? 'bad' : 'done') : 'live';
       let label = block.done ? (block.rejected ? 'dismissed' : 'answered') : 'question';
-      let body = block.questions.map((q, qi) => `<div class="chat-q"><div class="chat-q-header">${esc(q.header || '')}</div><div class="chat-q-text">${esc(q.question || '')}</div><div class="chat-q-opts">${(q.options || []).map(o => `<button type="button" class="chat-q-opt" data-qbi="${i}" data-qi="${qi}" data-label="${esc(o.label)}" title="${esc(o.description || '')}"${block.done ? ' disabled' : ''}>${esc(o.label)}</button>`).join('')}</div></div>`).join('');
-      let custom = !block.done && block.questions.length === 1 && block.questions[0].custom ? `<div class="chat-q-customrow"><input class="chat-q-custom" data-qbi="${i}" placeholder="Custom answer"><button type="button" class="chat-q-send" data-qbi="${i}">Answer</button></div>` : '';
+      let sel = qsel[block.id] || [];
+      let hasMultiple = block.questions.some(q => q.multiple);
+      let body = block.questions.map((q, qi) => {
+        let opts = q.options || [];
+        let optsHtml = opts.length
+          ? `<div class="chat-q-opts">${opts.map(o => {
+              let picks = sel[qi], selected = q.multiple ? (Array.isArray(picks) && picks.includes(o.label)) : picks === o.label;
+              return `<button type="button" class="chat-q-opt${selected ? ' is-selected' : ''}" data-qbi="${i}" data-qi="${qi}" data-label="${esc(o.label)}" title="${esc(o.description || '')}" aria-pressed="${selected}"${block.done ? ' disabled' : ''}>${esc(o.label)}</button>`;
+            }).join('')}</div>`
+          : (block.questions.length > 1 ? `<div class="chat-q-note">No options — this question needs a text answer, not supported in a multi-question request.</div>` : '');
+        return `<div class="chat-q"><div class="chat-q-header">${esc(q.header || '')}</div><div class="chat-q-text">${esc(q.question || '')}</div>${optsHtml}</div>`;
+      }).join('');
+      // A question with no options is implicitly free-text even if `custom`
+      // is false; the custom row stays limited to single-question blocks.
+      let q0 = block.questions[0], effectiveCustom = block.questions.length === 1 && (q0.custom || !(q0.options || []).length);
+      let custom = !block.done && effectiveCustom ? `<div class="chat-q-customrow"><input class="chat-q-custom" data-qbi="${i}" placeholder="Custom answer"><button type="button" class="chat-q-send" data-qbi="${i}">Answer</button></div>` : '';
+      // Any block containing a `multiple` question (pure or mixed) defers to
+      // an explicit Answer button instead of auto-submitting on first click.
+      let answerBtn = !block.done && !effectiveCustom && hasMultiple ? `<div class="chat-q-customrow"><button type="button" class="chat-q-answer-btn" data-qbi="${i}">Answer</button></div>` : '';
       let answered = block.done && block.answerText ? `<div class="chat-q-answer">${esc(block.answerText)}</div>` : '';
-      return `<div class="chat-question" data-question-id="${esc(block.id)}"><span class="chat-pill chat-pill-${state}">${label}</span>${body}${custom}${answered}</div>`;
+      return `<div class="chat-question" data-question-id="${esc(block.id)}"><span class="chat-pill chat-pill-${state}">${label}</span>${body}${custom}${answerBtn}${answered}</div>`;
     }
     if (block.kind === 'thinking') {
       return `<details class="chat-think" data-bi="${i}"><summary>Thinking</summary><pre>${esc(block.text)}</pre></details>`;
@@ -128,7 +145,7 @@
     let last = app.blocks[app.blocks.length - 1];
     let pending = app.turns > 0 && last && last.kind === 'user';
     let open = new Set(Array.from(transcript.querySelectorAll('details[open]'), d => d.dataset.bi));
-    transcript.innerHTML = (app.blocks.length ? html(app.blocks) : '<div class="chat-empty">No messages yet. Ask the agent anything.</div>') + (pending ? pendingHtml(app.workingWord || 'Working') : '');
+    transcript.innerHTML = (app.blocks.length ? html(app.blocks, app.qsel) : '<div class="chat-empty">No messages yet. Ask the agent anything.</div>') + (pending ? pendingHtml(app.workingWord || 'Working') : '');
     for (const d of transcript.querySelectorAll('details')) if (open.has(d.dataset.bi)) d.open = true;
     if (stick) transcript.scrollTop = transcript.scrollHeight;
   };
@@ -201,13 +218,21 @@
     try { await request(`/chat/${SESSION}/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ request_id: block.id, answers }) }); }
     catch (error) { delete app.qsent[block.id]; render(app, { type: 'error', error: `Answer not sent: ${error.message || 'request failed'}` }); }
   };
-  // Single-question requests (the dominant case) submit on first click;
-  // multi-question blocks auto-submit once every question has a pick.
+  // Single-select questions submit on first click (a block of several
+  // single-select questions auto-submits once every question has a pick).
+  // A question marked `multiple` toggles its option in-place instead, and
+  // any block containing one waits for the explicit Answer button — never
+  // auto-submits, even if the other questions in the block are single-select.
   const answerFlow = (app, bi, qi, label) => {
     let block = app.blocks[bi];
     if (!block || block.kind !== 'question' || block.done) return;
     let sel = app.qsel[block.id] || (app.qsel[block.id] = []);
-    sel[qi] = label;
+    let q = block.questions[qi];
+    if (q.multiple) {
+      let picks = sel[qi] || (sel[qi] = []), idx = picks.indexOf(label);
+      if (idx >= 0) picks.splice(idx, 1); else picks.push(label);
+    } else sel[qi] = label;
+    if (block.questions.some(q => q.multiple)) { schedulePaint(app); return; }
     if (block.questions.every((_, i) => sel[i] != null)) submitAnswer(app, block, sel.map(l => [l]));
     else schedulePaint(app);
   };
@@ -231,6 +256,12 @@
       if (opt) { answerFlow(app, Number(opt.dataset.qbi), Number(opt.dataset.qi), opt.dataset.label); return; }
       let qsend = e.target.closest('.chat-q-send');
       if (qsend) { let input = document.querySelector(`.chat-q-custom[data-qbi="${qsend.dataset.qbi}"]`); if (input && input.value.trim()) submitAnswer(app, app.blocks[Number(qsend.dataset.qbi)], [[input.value.trim()]]); return; }
+      let qanswer = e.target.closest('.chat-q-answer-btn');
+      if (qanswer) {
+        let block = app.blocks[Number(qanswer.dataset.qbi)];
+        if (block) { let sel = app.qsel[block.id] || []; submitAnswer(app, block, block.questions.map((q, qi) => q.multiple ? (sel[qi] || []) : (sel[qi] != null ? [sel[qi]] : []))); }
+        return;
+      }
     });
     document.addEventListener('scroll', e => { if (e.target.id === 'chat-transcript') { let t = e.target; app.stick = (t.scrollHeight - t.scrollTop - t.clientHeight) < 64; } }, true);
   };

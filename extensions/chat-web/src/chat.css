@@ -122,16 +122,19 @@
 }
 .chat-q-opt:hover:not(:disabled) { border-color: var(--accent); }
 .chat-q-opt:disabled { opacity: .45; cursor: default; }
+/* multi-select toggle state — same tint formula as .chat-pill-live */
+.chat-q-opt.is-selected { background: rgba(122,162,247,.15); color: var(--info); border-color: var(--accent); }
+.chat-q-note { color: var(--muted); font-style: italic; margin-top: .1rem; }
 .chat-q-customrow { display: flex; gap: .35rem; margin-top: .1rem; }
 .chat-q-custom {
   flex: 1 1 auto; min-width: 0; padding: .3rem .5rem; background: var(--panel-2);
   color: var(--fg); border: 1px solid var(--border); border-radius: 5px; font: inherit;
 }
-.chat-q-send {
+.chat-q-send, .chat-q-answer-btn {
   padding: .3rem .7rem; background: var(--panel-2); color: var(--fg);
   border: 1px solid var(--border); border-radius: 5px; font: inherit; cursor: pointer;
 }
-.chat-q-send:hover { border-color: var(--accent); }
+.chat-q-send:hover, .chat-q-answer-btn:hover { border-color: var(--accent); }
 .chat-q-answer { color: var(--muted); font-style: italic; }
 
 /* error turn: quiet block, red confined to the pill */

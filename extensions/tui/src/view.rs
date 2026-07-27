@@ -324,12 +324,7 @@ fn transcript_lines(chat: &ChatState, width: usize) -> Vec<Line<'static>> {
                     };
                     push_wrapped(&mut lines, "  ", &format!("-> {answer}"), style, width);
                 } else {
-                    let hint = if questions.len() > 1 {
-                        "one number per question, space-separated".to_string()
-                    } else {
-                        let count = questions.first().map_or(0, |q| q.options.len());
-                        format!("answer with a number (1-{count})")
-                    };
+                    let hint = question_hint(questions);
                     push_wrapped(
                         &mut lines,
                         "  ",
@@ -342,6 +337,41 @@ fn transcript_lines(chat: &ChatState, width: usize) -> Vec<Line<'static>> {
         }
     }
     lines
+}
+
+/// The answer-syntax hint shown under a pending question set. A lone
+/// option-less question is answered as free text (Finding C); a mixed set
+/// with an option-less question among others can't be answered from this
+/// input line at all, so the hint says so instead of a bogus number range.
+/// Otherwise the hint states the numbered syntax, calling out the
+/// comma-separated multi-select form when any pending question allows it
+/// (Finding B).
+fn question_hint(questions: &[cap_chat::QuestionInfo]) -> String {
+    if let [q] = questions {
+        if q.options.is_empty() {
+            return "no options offered — type your answer as free text".to_string();
+        }
+        return if q.multiple {
+            format!(
+                "answer with comma-separated numbers (1-{})",
+                q.options.len()
+            )
+        } else {
+            format!("answer with a number (1-{})", q.options.len())
+        };
+    }
+    if questions.iter().any(|q| q.options.is_empty()) {
+        return "this question set can't be answered from the input line (an option-less \
+                question needs to stand alone)"
+            .to_string();
+    }
+    if questions.iter().any(|q| q.multiple) {
+        "one number per question, space-separated (comma-separate several numbers for a \
+         multi-select question)"
+            .to_string()
+    } else {
+        "one number per question, space-separated".to_string()
+    }
 }
 
 fn push_wrapped(
@@ -829,6 +859,45 @@ mod tests {
         assert!(screen.contains("Pick a color"));
         assert!(screen.contains("1) "));
         assert!(screen.contains("answer with a number (1-2)"));
+    }
+
+    #[test]
+    fn multi_select_question_hint_calls_out_comma_syntax() {
+        let mut multi = question("Pick colors");
+        multi.multiple = true;
+        assert_eq!(
+            question_hint(&[multi.clone()]),
+            "answer with comma-separated numbers (1-2)"
+        );
+        // A mixed set of one single-select and one multi-select question.
+        let single = question("Pick one");
+        assert_eq!(
+            question_hint(&[single, multi]),
+            "one number per question, space-separated (comma-separate several numbers for a \
+             multi-select question)"
+        );
+    }
+
+    #[test]
+    fn option_less_question_hint_offers_free_text() {
+        let mut lone = question("Anything else?");
+        lone.options.clear();
+        assert_eq!(
+            question_hint(&[lone]),
+            "no options offered — type your answer as free text"
+        );
+    }
+
+    #[test]
+    fn option_less_question_among_others_is_explained_not_silently_dropped() {
+        let mut lone = question("Anything else?");
+        lone.options.clear();
+        let other = question("Pick one");
+        assert_eq!(
+            question_hint(&[other, lone]),
+            "this question set can't be answered from the input line (an option-less \
+             question needs to stand alone)"
+        );
     }
 
     #[test]

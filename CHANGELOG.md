@@ -14,6 +14,7 @@ Breaking changes are marked **⚠ BREAKING**.
 ### Added
 
 - Scheduler jobs can run contained scripts directly, including script-only and wake-gated agent jobs, so deterministic scheduled work records process exit failures mechanically.
+- Multi-select `question` prompts are now answerable: web chat toggles options and submits with an explicit Answer button, the TUI accepts comma-separated numbers for a multi-select question, and a question offering no options is answerable as free text in both surfaces.
 
 ### Added
 

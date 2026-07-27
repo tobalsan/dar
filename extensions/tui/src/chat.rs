@@ -191,30 +191,56 @@ fn issue_summary(path: &Path) -> Option<String> {
     Some(summary)
 }
 
-/// Parse numbered input against a pending question set: one whitespace/comma-
-/// separated token per question, each an option number (1-based). Any
-/// mismatch (wrong token count, non-numeric token, or a number out of range)
-/// yields `None` so the input falls through as a normal chat message instead
-/// of being swallowed as a malformed answer.
+/// Parse numbered input against a pending question set: one whitespace-
+/// separated token per question. A question with no options at all can't be
+/// answered by number — for that case the *whole set* must be exactly one
+/// question, and the raw trimmed input line is taken verbatim as its free-text
+/// answer (an empty line yields `None`). Otherwise each token is one or more
+/// 1-based option numbers: a `multiple: true` question accepts a comma-
+/// separated list (e.g. `1,3`), collapsing duplicate numbers to one label each
+/// in first-seen order; a `multiple: false` question must be exactly one
+/// number and rejects a comma list. Any mismatch (wrong token count,
+/// non-numeric token, a number out of range, or a comma list on a
+/// non-multiple question) yields `None` so the input falls through as a
+/// normal chat message instead of being swallowed as a malformed answer.
 pub fn parse_answer(input: &str, questions: &[cap_chat::QuestionInfo]) -> Option<Vec<Vec<String>>> {
-    let tokens: Vec<&str> = input
-        .split(|c: char| c.is_whitespace() || c == ',')
-        .filter(|t| !t.is_empty())
-        .collect();
+    if let [question] = questions {
+        if question.options.is_empty() {
+            let text = input.trim();
+            return (!text.is_empty()).then(|| vec![vec![text.to_string()]]);
+        }
+    }
+    let tokens: Vec<&str> = input.split_whitespace().collect();
     if tokens.len() != questions.len() {
         return None;
     }
     tokens
         .iter()
         .zip(questions)
-        .map(|(token, question)| {
-            let n: usize = token.parse().ok()?;
-            if n == 0 || n > question.options.len() {
-                return None;
-            }
-            Some(vec![question.options[n - 1].label.clone()])
-        })
+        .map(|(token, question)| parse_question_token(token, question))
         .collect()
+}
+
+/// Parse one token (a single question's share of the input line) against its
+/// question: see [`parse_answer`] for the comma/multiple rules. `None` on any
+/// invalid or out-of-range number, or a comma list against a non-multiple
+/// question.
+fn parse_question_token(token: &str, question: &cap_chat::QuestionInfo) -> Option<Vec<String>> {
+    if !question.multiple && token.contains(',') {
+        return None;
+    }
+    let mut labels: Vec<String> = Vec::new();
+    for part in token.split(',') {
+        let n: usize = part.parse().ok()?;
+        if n == 0 || n > question.options.len() {
+            return None;
+        }
+        let label = question.options[n - 1].label.clone();
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    Some(labels)
 }
 
 /// One rendered transcript unit. Streamed deltas append to the last block of
@@ -1255,6 +1281,63 @@ mod tests {
         assert_eq!(parse_answer("4", &single), None);
         assert_eq!(parse_answer("x", &single), None);
         assert_eq!(parse_answer("1 2", &single), None);
+    }
+
+    fn multi_question(labels: &[&str]) -> cap_chat::QuestionInfo {
+        let mut q = question(labels);
+        q.multiple = true;
+        q
+    }
+
+    #[test]
+    fn parse_answer_multi_select_accepts_comma_separated_numbers() {
+        let one = vec![multi_question(&["a1", "a2", "a3"])];
+        assert_eq!(
+            parse_answer("1,3", &one),
+            Some(vec![vec!["a1".to_string(), "a3".to_string()]])
+        );
+
+        // Duplicates collapse to a single label, first-seen order kept.
+        assert_eq!(
+            parse_answer("2,2,1", &one),
+            Some(vec![vec!["a2".to_string(), "a1".to_string()]])
+        );
+
+        // Mixed set: a single-select token alongside a multi-select token,
+        // space-separated (one token per question).
+        let mixed = vec![question(&["x1", "x2"]), multi_question(&["y1", "y2", "y3"])];
+        assert_eq!(
+            parse_answer("2 1,3", &mixed),
+            Some(vec![
+                vec!["x2".to_string()],
+                vec!["y1".to_string(), "y3".to_string()]
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_answer_rejects_comma_list_for_non_multiple_question() {
+        let single = vec![question(&["a1", "a2", "a3"])];
+        assert_eq!(parse_answer("1,2", &single), None);
+
+        let multi = vec![multi_question(&["a1", "a2", "a3"])];
+        // Out-of-range/non-numeric entries in a comma list still fail.
+        assert_eq!(parse_answer("1,9", &multi), None);
+        assert_eq!(parse_answer("1,x", &multi), None);
+    }
+
+    #[test]
+    fn parse_answer_free_text_for_an_option_less_question() {
+        // `question(&[])` already carries `custom: false` — this is exactly
+        // the degenerate shape Finding C covers: no options to pick a number
+        // for, answerable only as free text.
+        let questions = vec![question(&[])];
+        assert_eq!(
+            parse_answer("  it's the third one, actually  ", &questions),
+            Some(vec![vec!["it's the third one, actually".to_string()]])
+        );
+        // An empty line still falls through as no answer.
+        assert_eq!(parse_answer("   ", &questions), None);
     }
 
     #[test]
