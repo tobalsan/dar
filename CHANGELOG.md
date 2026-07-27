@@ -21,6 +21,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Fixed
 
+- Ctrl-C now stops `dar run` promptly even while a browser tab holds the web chat stream open: SSE responses end on host shutdown (with a 2 s backstop before the HTTP server is aborted) instead of graceful shutdown waiting for the tab to disconnect.
 - Opencode chat sessions now survive dar restarts: the opencode backend resumes the same underlying opencode session (verified against its persisted store, falling back to a fresh session when gone) instead of silently starting a new one, while `/new` still forks fresh and pi/opencode backend switches never cross-resume each other's sessions.
 - The opencode chat backend no longer echoes the user's own prompt back as an assistant message: opencode's SSE stream emits `message.part.updated` events for the user's prompt parts too, and these were previously mapped to assistant deltas like any other text part.
 - The `dar __mcp-bridge` child spawned by opencode chat/runner agents no longer fails to start: the host now resolves its artifact vault once at boot and exports it as `DAR_ARTIFACT_ROOT` so descendants agree on the same path even when opencode sandboxes their `XDG_DATA_HOME` inside the agent root; previously the bridge exited immediately with "artifact root must be outside agent root" and opencode agents never saw any dar host tools.

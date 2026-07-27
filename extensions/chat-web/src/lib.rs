@@ -1056,7 +1056,22 @@ async fn stream(
                     }
                 },
             );
-            let stream = replay.chain(live).map(sse_event);
+            // Terminate the SSE response on host shutdown: the `live` unfold
+            // above only ends when the session's broadcast sender closes,
+            // which never happens on its own, so without this a browser tab
+            // holding the stream open blocks `dar-host`'s graceful shutdown
+            // until the tab disconnects. When `start` is unset (unit tests
+            // that build `AppState` directly), fall back to a future that
+            // never resolves so behavior is unchanged.
+            let shutdown_signal: dar_extension_sdk::BoxFuture<'static, ()> =
+                match state.start.get().map(|start| start.shutdown.clone()) {
+                    Some(mut token) => Box::pin(async move { token.cancelled().await }),
+                    None => Box::pin(std::future::pending()),
+                };
+            let stream = replay
+                .chain(live)
+                .map(sse_event)
+                .take_until(shutdown_signal);
             Sse::new(stream)
                 .keep_alive(KeepAlive::default())
                 .into_response()
@@ -1679,7 +1694,12 @@ mod tests {
 
     fn start_ctx(services: dar_extension_sdk::ServiceRegistry) -> StartCtx {
         let paths = host_api::HostPaths::new(std::env::current_dir().unwrap()).unwrap();
-        let (_, shutdown) = watch::channel(false);
+        let (shutdown_tx, shutdown) = watch::channel(false);
+        // Leak the sender so the channel never closes: a dropped sender makes
+        // `ShutdownToken::cancelled()` resolve immediately (as if shutdown had
+        // fired), which would end every SSE stream in tests using this helper
+        // as soon as `stream()`'s shutdown-signal future is polled.
+        std::mem::forget(shutdown_tx);
         let register = host_api::RegisterCtx {
             bus: host_api::EventBus::new(),
             http: host_api::HttpRegistry::default(),
@@ -1839,6 +1859,56 @@ mod tests {
             StatusCode::ACCEPTED
         );
         assert_eq!(opens.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stream_ends_when_host_shutdown_fires() {
+        let paths = host_api::HostPaths::new(std::env::current_dir().unwrap()).unwrap();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let register = host_api::RegisterCtx {
+            bus: host_api::EventBus::new(),
+            http: host_api::HttpRegistry::default(),
+            foreground: host_api::ForegroundRegistry::default(),
+            services: dar_extension_sdk::ServiceRegistry::default(),
+            paths: paths.clone(),
+            config: host_api::ConfigStore::default(),
+            shutdown: host_api::ShutdownToken::new(shutdown_rx),
+        };
+        let start = StartCtx {
+            shutdown: register.shutdown.clone(),
+            paths,
+            config: register.config.clone(),
+            host: register.into_start_services().unwrap(),
+        };
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: test_root(),
+            start: std::sync::OnceLock::from(start),
+            sessions: Mutex::new(HashMap::new()),
+        });
+
+        let response = stream(
+            Path("test".into()),
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+
+        // Nothing has been published, so absent the shutdown signal this
+        // stream would sit open indefinitely (mirroring a browser tab
+        // holding it open). Flipping the host's shutdown watch channel must
+        // end it promptly.
+        shutdown_tx.send(true).unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(1), body.frame())
+            .await
+            .expect("stream must end promptly once host shutdown fires");
+        assert!(
+            frame.is_none(),
+            "stream should terminate with no further frames"
+        );
     }
 
     #[tokio::test]

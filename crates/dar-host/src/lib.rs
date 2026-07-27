@@ -291,7 +291,19 @@ async fn boot_inner(
 
     let _ = shutdown_tx.send(true);
     if let Some(task) = http_task {
-        let _ = task.await?;
+        // `with_graceful_shutdown` stops accepting new connections but still
+        // waits for in-flight responses (e.g. a browser tab holding an SSE
+        // stream open) to finish on their own. Extensions are expected to end
+        // their streams promptly on shutdown, but as a backstop, don't let a
+        // slow or unresponsive connection hang the whole process — abort the
+        // HTTP task after a short grace period and continue shutting down.
+        let abort = task.abort_handle();
+        match tokio::time::timeout(std::time::Duration::from_secs(2), task).await {
+            Ok(joined) => {
+                let _ = joined?;
+            }
+            Err(_) => abort.abort(),
+        }
     }
     Ok(())
 }
