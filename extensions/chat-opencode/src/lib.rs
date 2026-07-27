@@ -1,5 +1,6 @@
 //! OpenCode chat backend — one `opencode serve` child per TUI chat session.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -91,6 +92,7 @@ impl OpenCodeChatSession {
         let pump_session = session_id.clone();
         let artifact_ready = params.artifact_ready.clone();
         let pump = tokio::spawn(async move {
+            let mut user_messages: HashSet<String> = HashSet::new();
             loop {
                 match events.next_event().await {
                     Ok(Some(event)) => {
@@ -105,7 +107,7 @@ impl OpenCodeChatSession {
                         {
                             let _ = sink.send(ready).await;
                         }
-                        if let Some(chat_event) = map_event(&event) {
+                        if let Some(chat_event) = map_event(&event, &mut user_messages) {
                             if tx.send(chat_event).await.is_err() {
                                 return;
                             }
@@ -285,10 +287,27 @@ fn artifact_ready_from_opencode(event: &OpenCodeEvent) -> Option<ArtifactReady> 
         .find_map(|resource| ArtifactReady::from_publish_resource("artifact_publish", resource))
 }
 
-fn map_event(event: &OpenCodeEvent) -> Option<ChatEvent> {
+fn map_event(event: &OpenCodeEvent, user_messages: &mut HashSet<String>) -> Option<ChatEvent> {
     let value = event_payload(event)?;
     match value.get("type").and_then(|v| v.as_str()) {
-        Some("message.part.updated") => map_part(value.get("properties")?.get("part")?),
+        Some("message.updated") => {
+            let info = value.get("properties")?.get("info")?;
+            if info.get("role").and_then(|v| v.as_str()) == Some("user") {
+                if let Some(id) = info.get("id").and_then(|v| v.as_str()) {
+                    user_messages.insert(id.to_string());
+                }
+            }
+            None
+        }
+        Some("message.part.updated") => {
+            let part = value.get("properties")?.get("part")?;
+            if let Some(message_id) = part.get("messageID").and_then(|v| v.as_str()) {
+                if user_messages.contains(message_id) {
+                    return None;
+                }
+            }
+            map_part(part)
+        }
         Some("session.idle") => Some(ChatEvent::TurnFinished {
             ok: true,
             error: None,
@@ -436,10 +455,14 @@ mod tests {
     use tokio::sync::mpsc::Receiver;
 
     fn mapped_event(data: &str) -> Option<ChatEvent> {
-        map_event(&OpenCodeEvent {
-            event: None,
-            data: data.to_string(),
-        })
+        let mut user_messages = std::collections::HashSet::new();
+        map_event(
+            &OpenCodeEvent {
+                event: None,
+                data: data.to_string(),
+            },
+            &mut user_messages,
+        )
     }
 
     #[test]
@@ -588,6 +611,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn suppresses_user_echo_but_still_maps_assistant_text() {
+        let mut user_messages = std::collections::HashSet::new();
+
+        let update = map_event(
+            &OpenCodeEvent {
+                event: None,
+                data: r#"{"payload":{"type":"message.updated","properties":{"info":{"id":"msg_u","role":"user"}}}}"#.to_string(),
+            },
+            &mut user_messages,
+        );
+        assert!(update.is_none());
+
+        let echo = map_event(
+            &OpenCodeEvent {
+                event: None,
+                data: r#"{"payload":{"type":"message.part.updated","properties":{"part":{"type":"text","messageID":"msg_u","text":"echo"}}}}"#.to_string(),
+            },
+            &mut user_messages,
+        );
+        assert!(echo.is_none());
+
+        match map_event(
+            &OpenCodeEvent {
+                event: None,
+                data: r#"{"payload":{"type":"message.part.updated","properties":{"part":{"type":"text","messageID":"msg_a","text":"hi"}}}}"#.to_string(),
+            },
+            &mut user_messages,
+        )
+        .unwrap()
+        {
+            ChatEvent::Delta { role, text } => {
+                assert_eq!(role, ChatRole::Assistant);
+                assert_eq!(text, "hi");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn registers_chat_backend_under_opencode() {
         let temp = tempfile::tempdir().unwrap();
@@ -680,6 +742,8 @@ class H(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 while prompt_count > sent:
                     sent += 1
+                    self.wfile.write(b'data: {"payload":{"type":"message.updated","properties":{"info":{"id":"msg-user-1","role":"user"}}}}\n\n')
+                    self.wfile.write(b'data: {"payload":{"type":"message.part.updated","properties":{"part":{"type":"text","messageID":"msg-user-1","text":"ECHO"}}}}\n\n')
                     self.wfile.write(b'data: {"payload":{"type":"message.part.updated","properties":{"part":{"type":"reasoning","text":"hmm"}}}}\n\n')
                     self.wfile.write(b'data: {"payload":{"type":"message.part.updated","properties":{"part":{"type":"text","text":"pong"}}}}\n\n')
                     self.wfile.write(b'data: {"payload":{"type":"message.part.updated","properties":{"part":{"id":"tool-1","type":"tool","tool":"bash","state":{"input":{"cmd":"pwd"}}}}}}\n\n')

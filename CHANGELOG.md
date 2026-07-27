@@ -17,6 +17,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Fixed
 
+- The opencode chat backend no longer echoes the user's own prompt back as an assistant message: opencode's SSE stream emits `message.part.updated` events for the user's prompt parts too, and these were previously mapped to assistant deltas like any other text part.
 - The `dar __mcp-bridge` child spawned by opencode chat/runner agents no longer fails to start: the host now resolves its artifact vault once at boot and exports it as `DAR_ARTIFACT_ROOT` so descendants agree on the same path even when opencode sandboxes their `XDG_DATA_HOME` inside the agent root; previously the bridge exited immediately with "artifact root must be outside agent root" and opencode agents never saw any dar host tools.
 - `WORKFLOW.md` `polling:` now accepts `poll_interval_ms` as an alias for `interval_ms` (matching agent.yaml's `orchestrator.poll_interval_ms`), and unrecognized `polling:` keys are logged as warnings instead of being silently dropped — a misnamed interval key previously fell back to the 1 s default and could exhaust tracker API rate limits.
 - An older overlapping dashboard process can no longer remove a newer same-agent/workflow fleet presence entry during shutdown.
