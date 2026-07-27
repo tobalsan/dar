@@ -42,14 +42,14 @@
 
   const agentName = () => (typeof document !== 'undefined' && document.getElementById('chat-root') && document.getElementById('chat-root').dataset.agentName) || 'Agent';
 
-  const html = blocks => blocks.map(block => {
+  const html = blocks => blocks.map((block, i) => {
     if (block.kind === 'tool') {
       let state = block.is_error ? 'bad' : block.done ? 'done' : 'live';
       let label = block.is_error ? 'error' : block.done ? 'done' : 'running';
-      return `<details class="chat-tool" data-tool-id="${esc(block.id)}"><summary><span class="chat-pill chat-pill-${state}">${label}</span><span class="chat-tool-name">${esc(block.name)}</span></summary><pre class="chat-tool-args">${esc(block.args)}</pre><pre class="chat-tool-output${block.is_error ? ' is-error' : ''}${block.done ? ' is-done' : ''}">${esc(block.text)}</pre></details>`;
+      return `<details class="chat-tool" data-tool-id="${esc(block.id)}" data-bi="${i}"><summary><span class="chat-pill chat-pill-${state}">${label}</span><span class="chat-tool-name">${esc(block.name)}</span></summary><pre class="chat-tool-args">${esc(block.args)}</pre><pre class="chat-tool-output${block.is_error ? ' is-error' : ''}${block.done ? ' is-done' : ''}">${esc(block.text)}</pre></details>`;
     }
     if (block.kind === 'thinking') {
-      return `<details class="chat-think"><summary>Thinking</summary><pre>${esc(block.text)}</pre></details>`;
+      return `<details class="chat-think" data-bi="${i}"><summary>Thinking</summary><pre>${esc(block.text)}</pre></details>`;
     }
     if (block.kind === 'error') {
       return `<div class="chat-turn chat-error"><span class="chat-pill chat-pill-bad">error</span><div class="chat-error-body">${markdown(block.text)}</div></div>`;
@@ -108,7 +108,9 @@
     let stick = app.stick;
     let last = app.blocks[app.blocks.length - 1];
     let pending = app.turns > 0 && last && last.kind === 'user';
+    let open = new Set(Array.from(transcript.querySelectorAll('details[open]'), d => d.dataset.bi));
     transcript.innerHTML = (app.blocks.length ? html(app.blocks) : '<div class="chat-empty">No messages yet. Ask the agent anything.</div>') + (pending ? pendingHtml(app.workingWord || 'Working') : '');
+    for (const d of transcript.querySelectorAll('details')) if (open.has(d.dataset.bi)) d.open = true;
     if (stick) transcript.scrollTop = transcript.scrollHeight;
   };
 
