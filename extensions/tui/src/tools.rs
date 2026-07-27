@@ -258,6 +258,12 @@ mod tests {
         fs::write(dir.join(name), contents).unwrap();
     }
 
+    /// A minimal user-message line: `archive::list` excludes sessions with no
+    /// renderable messages (opencode resume markers have none), so fixtures
+    /// meant to be listed need at least one.
+    const MSG_LINE: &str =
+        "{\"type\":\"message_end\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n";
+
     #[test]
     fn spec_is_read_only_with_an_empty_args_schema() {
         let spec = session_list_spec();
@@ -275,12 +281,12 @@ mod tests {
         write_session(
             &sessions,
             "2024-01-01T00:00:00Z_a.jsonl",
-            "{\"type\":\"session\",\"id\":\"old\"}\n",
+            &format!("{{\"type\":\"session\",\"id\":\"old\"}}\n{MSG_LINE}"),
         );
         write_session(
             &sessions,
             "2024-06-15T12:30:00Z_b.jsonl",
-            "{\"type\":\"session\",\"id\":\"newest\",\"label\":\"Recent\"}\n",
+            &format!("{{\"type\":\"session\",\"id\":\"newest\",\"label\":\"Recent\"}}\n{MSG_LINE}"),
         );
 
         let reg = ToolRegistry::new();
@@ -465,7 +471,7 @@ mod tests {
         write_session(
             &sessions,
             "2024-01-01T00:00:00Z_good.jsonl",
-            "{\"type\":\"session\",\"id\":\"good\"}\n",
+            &format!("{{\"type\":\"session\",\"id\":\"good\"}}\n{MSG_LINE}"),
         );
         write_session(&sessions, "2024-02-02T00:00:00Z_bad.jsonl", "not json\n");
 

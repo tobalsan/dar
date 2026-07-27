@@ -44,6 +44,7 @@ Breaking changes are marked **⚠ BREAKING**.
 - Expanded thinking/tool blocks in web chat no longer collapse when new stream updates arrive.
 - Ctrl-C no longer leaves an `opencode serve` child process running: extensions are now stopped on host shutdown (reverse registration order, best-effort under a short timeout) and web chat closes its live chat sessions there, so the opencode server is disposed and signalled instead of surviving the agent; the shutdown sequence also runs when a foreground exits with an error.
 - An opencode `question` event whose payload cannot be read now surfaces as a chat error instead of being silently dropped, so a turn no longer stalls on a question the UI never showed.
+- The TUI archive no longer lists opencode resume-marker files as selectable empty sessions.
 
 ### Changed
 

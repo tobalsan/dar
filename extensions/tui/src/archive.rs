@@ -56,10 +56,12 @@ pub struct SessionInfo {
 /// the listing.
 const LABEL_MAX: usize = 120;
 
-/// List persisted sessions newest-first, reading only each file's header line
-/// (never any message body). A missing/unreadable dir yields an empty list; a
-/// malformed or header-less file is skipped, not fatal. The result is bounded
-/// to [`LIST_LIMIT`] entries.
+/// List persisted sessions newest-first. A missing/unreadable dir yields an
+/// empty list; a malformed or header-less file is skipped, not fatal. So are
+/// files with no renderable messages — the opencode resume-marker files this
+/// same sessions dir also holds (header line only, no message lines) would
+/// otherwise surface as bogus, unrecallable empty transcripts. The result is
+/// bounded to [`LIST_LIMIT`] entries.
 pub fn list(sessions_dir: &Path) -> Vec<SessionInfo> {
     let mut files = match fs::read_dir(sessions_dir) {
         Ok(entries) => entries
@@ -74,6 +76,7 @@ pub fn list(sessions_dir: &Path) -> Vec<SessionInfo> {
     files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
     files
         .into_iter()
+        .filter(|path| !read_messages(path).is_empty())
         .filter_map(|path| read_session_info(&path))
         .take(LIST_LIMIT)
         .collect()
@@ -487,6 +490,13 @@ mod tests {
         fs::write(dir.join(name), contents).unwrap();
     }
 
+    /// A minimal user-message line, appended to header-only fixtures below so
+    /// they represent an ordinary (non-marker) session: `list` now excludes
+    /// sessions with no renderable messages at all (Finding A), so a fixture
+    /// meant to still be listed needs at least one.
+    const MSG_LINE: &str =
+        "{\"type\":\"message_end\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n";
+
     #[test]
     fn reads_id_from_header_line() {
         let temp = tempfile::tempdir().unwrap();
@@ -619,17 +629,17 @@ mod tests {
         write(
             temp.path(),
             "2024-01-01T00:00:00Z_aaa.jsonl",
-            "{\"type\":\"session\",\"id\":\"old\"}\n",
+            &format!("{{\"type\":\"session\",\"id\":\"old\"}}\n{MSG_LINE}"),
         );
         write(
             temp.path(),
             "2024-06-15T12:30:00Z_bbb.jsonl",
-            "{\"type\":\"session\",\"id\":\"newest\"}\n",
+            &format!("{{\"type\":\"session\",\"id\":\"newest\"}}\n{MSG_LINE}"),
         );
         write(
             temp.path(),
             "2024-03-10T08:00:00Z_ccc.jsonl",
-            "{\"type\":\"session\",\"id\":\"middle\"}\n",
+            &format!("{{\"type\":\"session\",\"id\":\"middle\"}}\n{MSG_LINE}"),
         );
         let ids: Vec<String> = list(temp.path()).into_iter().map(|s| s.id).collect();
         assert_eq!(ids, vec!["newest", "middle", "old"]);
@@ -641,7 +651,7 @@ mod tests {
         write(
             temp.path(),
             "2024-06-15T12:30:00Z_bbb.jsonl",
-            "{\"type\":\"session\",\"id\":\"x\",\"label\":\"My chat\"}\n",
+            &format!("{{\"type\":\"session\",\"id\":\"x\",\"label\":\"My chat\"}}\n{MSG_LINE}"),
         );
         let entries = list(temp.path());
         assert_eq!(entries.len(), 1);
@@ -659,7 +669,7 @@ mod tests {
         write(
             temp.path(),
             "2024-06-15T12:30:00Z_bbb.jsonl",
-            "{\"type\":\"session\",\"id\":\"x\"}\n",
+            &format!("{{\"type\":\"session\",\"id\":\"x\"}}\n{MSG_LINE}"),
         );
         let entries = list(temp.path());
         assert_eq!(entries[0].label, "2024-06-15T12:30:00Z_bbb");
@@ -673,8 +683,11 @@ mod tests {
         write(
             temp.path(),
             "2024-06-15T12:30:00Z_bbb.jsonl",
-            "{\"type\":\"session\",\"id\":\"header-id\"}\n\
-             {\"type\":\"message_update\",\"id\":\"body-id\"}\n",
+            &format!(
+                "{{\"type\":\"session\",\"id\":\"header-id\"}}\n\
+                 {{\"type\":\"message_update\",\"id\":\"body-id\"}}\n\
+                 {MSG_LINE}"
+            ),
         );
         let entries = list(temp.path());
         assert_eq!(entries[0].id, "header-id");
@@ -686,7 +699,7 @@ mod tests {
         write(
             temp.path(),
             "2024-01-01T00:00:00Z_good.jsonl",
-            "{\"type\":\"session\",\"id\":\"good\"}\n",
+            &format!("{{\"type\":\"session\",\"id\":\"good\"}}\n{MSG_LINE}"),
         );
         write(
             temp.path(),
@@ -704,12 +717,33 @@ mod tests {
     }
 
     #[test]
+    fn list_excludes_opencode_resume_marker_files() {
+        let temp = tempfile::tempdir().unwrap();
+        // A real, recallable session with a message.
+        write(
+            temp.path(),
+            "2024-01-01T00:00:00Z_real.jsonl",
+            &format!("{{\"type\":\"session\",\"id\":\"real-sess\"}}\n{MSG_LINE}"),
+        );
+        // An opencode resume-marker: header line only, no messages ever
+        // written to it (the actual transcript lives in opencode's own data
+        // dir) — must never surface as a selectable empty session.
+        write(
+            temp.path(),
+            "2024-06-15T12:30:00Z_marker.jsonl",
+            "{\"type\":\"session\",\"id\":\"opc-1\",\"backend\":\"opencode\"}\n",
+        );
+        let ids: Vec<String> = list(temp.path()).into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec!["real-sess"]);
+    }
+
+    #[test]
     fn list_ignores_non_jsonl_files() {
         let temp = tempfile::tempdir().unwrap();
         write(
             temp.path(),
             "2024-01-01T00:00:00Z_a.jsonl",
-            "{\"id\":\"win\"}\n",
+            &format!("{{\"id\":\"win\"}}\n{MSG_LINE}"),
         );
         write(temp.path(), "zzzz-not-a-session.log", "garbage\n");
         let ids: Vec<String> = list(temp.path()).into_iter().map(|s| s.id).collect();
@@ -735,7 +769,7 @@ mod tests {
             write(
                 temp.path(),
                 &format!("2024-01-01T00:00:{i:02}Z_s.jsonl"),
-                "{\"type\":\"session\",\"id\":\"s\"}\n",
+                &format!("{{\"type\":\"session\",\"id\":\"s\"}}\n{MSG_LINE}"),
             );
         }
         assert_eq!(list(temp.path()).len(), LIST_LIMIT);
@@ -748,7 +782,7 @@ mod tests {
         write(
             temp.path(),
             "2024-06-15T12:30:00Z_bbb.jsonl",
-            &format!("{{\"type\":\"session\",\"id\":\"x\",\"label\":\"{long}\"}}\n"),
+            &format!("{{\"type\":\"session\",\"id\":\"x\",\"label\":\"{long}\"}}\n{MSG_LINE}"),
         );
         let entries = list(temp.path());
         assert_eq!(entries[0].label.chars().count(), LABEL_MAX);
