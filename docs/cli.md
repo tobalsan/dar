@@ -27,7 +27,7 @@ dar self rebuild my-agent --workflow ./my-agent/workflows/release
 dar init-workflow --dir ./my-agent
 dar init-workflow --dir ./my-agent --force                      # overwrite existing
 dar init-workflow --dir ./my-agent --linear-project-slug abc123 # seed Linear frontmatter
-dar init-workflow --dir ./my-agent --expose-graphql-tool        # enable linear_graphql tool
+dar init-workflow --dir ./my-agent --expose-graphql-tool        # deprecated no-op; seeds worker_tool: true only
 
 # Validate agent.yaml. If the resolved WORKFLOW.md has a valid loop config,
 # also validates the tracker. Exit code only.

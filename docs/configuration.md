@@ -90,7 +90,6 @@ the subset applicable to their lifecycle point.
 | `AGENT_WORKER_PROMPT` | Same as `AGENT_PROMPT` (alias) |
 | `AGENT_MODEL` | Model name (only when configured) |
 | `AGENT_WORKER_MODEL` | Same as `AGENT_MODEL` (alias, only when configured) |
-| `AGENT_LINEAR_GRAPHQL_TOOL` | `1` when the Linear GraphQL tool is enabled |
 | `AGENT_SESSION_DIR` | Per-issue session directory (Pi runner only) |
 
 `workspace.root` in WORKFLOW.md supports `$AGENT_HOME` (expands to the agent

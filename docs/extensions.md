@@ -39,7 +39,11 @@ Background extensions in `plugins![]` (orchestrator, dashboard, frontend-log)
 start unconditionally. With no resolved `WORKFLOW.md`, or one whose
 frontmatter is missing `tracker.kind` or non-empty `active_states`/
 `terminal_states`, the orchestrator starts in passive mode: no issue loop, no
-tracker required. The foreground extension — the one that owns terminal
+tracker required. A tracker selected via agent.yaml `tracker.use` still links
+and registers unconditionally at boot regardless of passive mode, exposing its
+host tool (e.g. `linear_graphql`, `plane_api`) to agents — see
+[Trackers](trackers.md#tracker-tools-without-the-issue-loop). The foreground
+extension — the one that owns terminal
 output — is selected per agent via the top-level `foreground:` key in
 `agent.yaml` (default `"logs"`, the frontend-log extension; `"tui"` selects the
 [terminal UI](chat.md)). An unknown id causes a clean boot
