@@ -17,6 +17,12 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
 const CLOSE_GRACE: Duration = Duration::from_secs(5);
+/// How long to wait for `opencode serve` to exit on its own after a dispose
+/// before signalling it. `POST /instance/dispose` answers `true` but does not
+/// terminate the server (opencode 1.18.x), so this window is always spent in
+/// full — keep it short: SIGTERM stops the server promptly, and host shutdown
+/// gives each extension only a few seconds to stop.
+const DISPOSE_GRACE: Duration = Duration::from_secs(1);
 
 pub struct ChatOpenCodeExtension;
 
@@ -244,7 +250,7 @@ impl ChatSession for OpenCodeChatSession {
         Box::pin(async move {
             this.pump.abort();
             if let Some(mut server) = this.server.take() {
-                if let Err(e) = server.dispose_then_wait(CLOSE_GRACE).await {
+                if let Err(e) = server.dispose_then_wait(DISPOSE_GRACE).await {
                     server.kill_and_wait(CLOSE_GRACE).await;
                     return Err(e);
                 }

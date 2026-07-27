@@ -41,6 +41,7 @@ Breaking changes are marked **⚠ BREAKING**.
 - Web chat dashboard no longer froze the page for seconds on load when a session had a long transcript; repaint is now coalesced per animation frame instead of per replayed event.
 - Self-rebuild now deploys the binary via temp file + rename instead of overwriting `bin/dar`/`bin/dar.new` in place; in-place overwrite of an already-executed binary poisons macOS's per-inode code-signature cache, making every later launch (e.g. the MCP bridge) die with SIGKILL.
 - Expanded thinking/tool blocks in web chat no longer collapse when new stream updates arrive.
+- Ctrl-C no longer leaves an `opencode serve` child process running: extensions are now stopped on host shutdown (reverse registration order, best-effort under a short timeout) and web chat closes its live chat sessions there, so the opencode server is disposed and signalled instead of surviving the agent; the shutdown sequence also runs when a foreground exits with an error.
 
 ### Changed
 

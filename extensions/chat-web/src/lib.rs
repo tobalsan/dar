@@ -121,6 +121,25 @@ impl Extension for ChatWebExtension {
             Ok(())
         })
     }
+
+    fn stop<'a>(&'a self) -> dar_extension_sdk::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let Some(state) = self.state.get() else {
+                return Ok(());
+            };
+            let sessions: Vec<Arc<Session>> =
+                state.sessions.lock().await.values().cloned().collect();
+            for session in sessions {
+                let backend = session.inner.lock().await.take();
+                if let Some(backend) = backend {
+                    // Best-effort: one session's close failing must not skip
+                    // closing the rest.
+                    let _ = backend.close().await;
+                }
+            }
+            Ok(())
+        })
+    }
 }
 
 struct ChatTab {
@@ -1629,6 +1648,50 @@ mod tests {
             pause_after_send: std::sync::Mutex::new(None),
             pause_after_subscribe: std::sync::Mutex::new(None),
         })
+    }
+
+    struct ClosingSession {
+        closed: Arc<AtomicBool>,
+    }
+    impl ChatSession for ClosingSession {
+        fn send_turn(&mut self, _prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn close(self: Box<Self>) -> cap_chat::BoxFuture<'static, Result<()>> {
+            let closed = self.closed;
+            Box::pin(async move {
+                closed.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_closes_open_sessions() {
+        let closed = Arc::new(AtomicBool::new(false));
+        let session = session(Box::new(ClosingSession {
+            closed: Arc::clone(&closed),
+        }));
+        let mut sessions = HashMap::new();
+        sessions.insert("main".to_owned(), session);
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: test_root(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(sessions),
+        });
+        let extension = ChatWebExtension::default();
+        extension
+            .state
+            .set(state)
+            .unwrap_or_else(|_| panic!("state set once"));
+
+        extension.stop().await.unwrap();
+
+        assert!(closed.load(Ordering::SeqCst));
     }
 
     struct FakeBackend {

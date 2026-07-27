@@ -255,38 +255,53 @@ async fn boot_inner(
         None
     };
 
-    for extension in extensions {
+    // Captured rather than propagated immediately with `?` so a failing
+    // extension start or foreground run still runs the shutdown/stop
+    // sequence below (otherwise children spawned by earlier extensions are
+    // orphaned) — the error is returned only once cleanup has run.
+    let mut boot_error: Option<anyhow::Error> = None;
+
+    for extension in &extensions {
         let ctx = host_api::StartCtx {
             shutdown: shutdown.clone(),
             paths: paths.clone(),
             config: config.clone(),
             host: host.clone(),
         };
-        extension
-            .start(ctx)
-            .await
-            .inspect_err(|e| report(extension.id(), e))?;
+        if let Err(e) = extension.start(ctx).await {
+            report(extension.id(), &e);
+            boot_error = Some(e);
+            break;
+        }
     }
 
-    if let Some(provider) = foreground {
-        let mut foreground = (provider.factory)();
-        let ctx = host_api::StartCtx {
-            shutdown: shutdown.clone(),
-            paths: paths.clone(),
-            config: config.clone(),
-            host: host.clone(),
-        };
-        let interactive = options.interactive.unwrap_or_else(stdout_is_terminal);
-        // Only foregrounds that asked for raw mode (e.g. the TUI) get a
-        // raw-mode/alt-screen terminal. A cooked foreground (the logs line
-        // stream) stays in cooked mode even on a tty so the terminal driver
-        // keeps turning Ctrl-C into SIGINT for the host's shutdown path.
-        let terminal = acquire_terminal(interactive && provider.raw_mode)
-            .inspect_err(|e| report(&provider.id, e))?;
-        foreground
-            .run(ctx, terminal)
-            .await
-            .inspect_err(|e| report(&provider.id, e))?;
+    if boot_error.is_none() {
+        if let Some(provider) = foreground {
+            let mut foreground = (provider.factory)();
+            let ctx = host_api::StartCtx {
+                shutdown: shutdown.clone(),
+                paths: paths.clone(),
+                config: config.clone(),
+                host: host.clone(),
+            };
+            let interactive = options.interactive.unwrap_or_else(stdout_is_terminal);
+            // Only foregrounds that asked for raw mode (e.g. the TUI) get a
+            // raw-mode/alt-screen terminal. A cooked foreground (the logs line
+            // stream) stays in cooked mode even on a tty so the terminal driver
+            // keeps turning Ctrl-C into SIGINT for the host's shutdown path.
+            match acquire_terminal(interactive && provider.raw_mode) {
+                Ok(terminal) => {
+                    if let Err(e) = foreground.run(ctx, terminal).await {
+                        report(&provider.id, &e);
+                        boot_error = Some(e);
+                    }
+                }
+                Err(e) => {
+                    report(&provider.id, &e);
+                    boot_error = Some(e);
+                }
+            }
+        }
     }
 
     let _ = shutdown_tx.send(true);
@@ -300,10 +315,32 @@ async fn boot_inner(
         let abort = task.abort_handle();
         match tokio::time::timeout(std::time::Duration::from_secs(2), task).await {
             Ok(joined) => {
-                let _ = joined?;
+                if let Err(join_error) = joined {
+                    if boot_error.is_none() {
+                        boot_error = Some(join_error.into());
+                    }
+                }
             }
             Err(_) => abort.abort(),
         }
+    }
+
+    // Release resources extensions own outside a bare drop (child processes,
+    // sockets), in reverse registration order, each best-effort under a short
+    // timeout so one stuck extension can't hang host shutdown.
+    for extension in extensions.iter().rev() {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), extension.stop()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => report(extension.id(), &e),
+            Err(_) => {
+                let timeout_err = anyhow::anyhow!("stop timed out after 5s");
+                report(extension.id(), &timeout_err);
+            }
+        }
+    }
+
+    if let Some(e) = boot_error {
+        return Err(e);
     }
     Ok(())
 }
@@ -819,6 +856,113 @@ mod tests {
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].0, "failing");
         assert!(captured[0].1.contains("boom on start"));
+    }
+
+    struct StoppingExt {
+        id: &'static str,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Extension for StoppingExt {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn start<'a>(&'a self, _ctx: StartCtx) -> host_api::BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.log.lock().unwrap().push(format!("start:{}", self.id));
+                Ok(())
+            })
+        }
+
+        fn stop<'a>(&'a self) -> host_api::BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.log.lock().unwrap().push(format!("stop:{}", self.id));
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_runs_for_every_extension_in_reverse_order_after_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        boot(
+            vec![
+                Arc::new(StoppingExt {
+                    id: "a",
+                    log: Arc::clone(&log),
+                }),
+                Arc::new(StoppingExt {
+                    id: "b",
+                    log: Arc::clone(&log),
+                }),
+            ],
+            test_options(temp.path()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["start:a", "start:b", "stop:b", "stop:a"]
+        );
+    }
+
+    struct FailingForeground;
+
+    impl Foreground for FailingForeground {
+        fn run<'a>(
+            &'a mut self,
+            _ctx: StartCtx,
+            _terminal: ExclusiveTerminal,
+        ) -> host_api::BoxFuture<'a, Result<()>> {
+            Box::pin(async move { Err(anyhow::anyhow!("boom on foreground")) })
+        }
+    }
+
+    struct FailingForegroundExt {
+        foreground_id: &'static str,
+    }
+
+    impl Extension for FailingForegroundExt {
+        fn id(&self) -> &'static str {
+            "failing-foreground-ext"
+        }
+
+        fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> host_api::BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                let id = self.foreground_id;
+                ctx.foreground.foreground(
+                    id,
+                    Arc::new(|| Box::new(FailingForeground) as Box<dyn Foreground>),
+                )?;
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_still_runs_when_foreground_returns_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let err = boot(
+            vec![
+                Arc::new(StoppingExt {
+                    id: "a",
+                    log: Arc::clone(&log),
+                }),
+                Arc::new(FailingForegroundExt {
+                    foreground_id: "logs",
+                }),
+            ],
+            test_options(temp.path()).interactive(false),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("boom on foreground"));
+        assert_eq!(*log.lock().unwrap(), vec!["start:a", "stop:a"]);
     }
 
     #[tokio::test]

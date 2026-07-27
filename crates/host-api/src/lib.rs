@@ -129,6 +129,14 @@ pub trait Extension: Send + Sync {
     fn start<'a>(&'a self, _ctx: StartCtx) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Ok(()) })
     }
+
+    /// Called once after the shutdown signal, in reverse registration order,
+    /// to release external resources (child processes, sockets) that outlive
+    /// a bare drop. Best-effort — errors are reported, never fatal to host
+    /// shutdown. Must be prompt: the host applies a timeout and moves on.
+    fn stop<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 impl Extension for Box<dyn Extension> {
@@ -146,6 +154,10 @@ impl Extension for Box<dyn Extension> {
 
     fn start<'a>(&'a self, ctx: StartCtx) -> BoxFuture<'a, Result<()>> {
         self.as_ref().start(ctx)
+    }
+
+    fn stop<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
+        self.as_ref().stop()
     }
 }
 
