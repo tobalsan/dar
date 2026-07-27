@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::ffi::OsString;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -182,13 +183,10 @@ fn ensure_marker(shared_dir: &Path, session_id: &str) -> Option<PathBuf> {
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
             }
-            let Ok(contents) = std::fs::read_to_string(&path) else {
+            let Some(first_line) = read_first_line(&path) else {
                 continue;
             };
-            let Some(first_line) = contents.lines().next() else {
-                continue;
-            };
-            let Ok(header) = serde_json::from_str::<serde_json::Value>(first_line) else {
+            let Ok(header) = serde_json::from_str::<serde_json::Value>(&first_line) else {
                 continue;
             };
             if header.get("id").and_then(|v| v.as_str()) == Some(session_id)
@@ -206,6 +204,18 @@ fn ensure_marker(shared_dir: &Path, session_id: &str) -> Option<PathBuf> {
     let header = serde_json::json!({ "type": "session", "id": session_id, "backend": "opencode" });
     std::fs::write(&path, format!("{header}\n")).ok()?;
     Some(path)
+}
+
+/// Read only the first line of `path`, without loading the rest of the file
+/// into memory — candidate marker files share a dir with full pi/codex
+/// transcripts, which can be large.
+fn read_first_line(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut line = String::new();
+    BufReader::new(file).read_line(&mut line).ok()?;
+    let trimmed_len = line.trim_end_matches(['\n', '\r']).len();
+    line.truncate(trimmed_len);
+    Some(line)
 }
 
 /// Freshen the marker mtime so chat-web's mtime-based idle expiry counts
@@ -551,9 +561,15 @@ fn question_event(event: &OpenCodeEvent, session_id: &str) -> Option<ChatEvent> 
         .to_string();
     match type_name {
         "question.asked" | "question.v2.asked" => {
-            match serde_json::from_value::<Vec<QuestionInfo>>(properties.get("questions")?.clone())
-            {
-                Ok(questions) if !questions.is_empty() => Some(ChatEvent::QuestionAsked {
+            // A missing or unparseable `questions` payload must still surface
+            // as an Error (not None) — otherwise the agent is left waiting on
+            // a question the UI never showed.
+            let parsed = properties
+                .get("questions")
+                .cloned()
+                .map(serde_json::from_value::<Vec<QuestionInfo>>);
+            match parsed {
+                Some(Ok(questions)) if !questions.is_empty() => Some(ChatEvent::QuestionAsked {
                     request_id,
                     questions,
                 }),
@@ -782,6 +798,20 @@ mod tests {
     }
 
     #[test]
+    fn question_asked_missing_questions_key_maps_to_error() {
+        // No "questions" field at all — must not silently drop the event,
+        // else the agent is left waiting on a question never shown.
+        let event = OpenCodeEvent {
+            event: None,
+            data: r#"{"payload":{"type":"question.asked","properties":{"id":"req-1","sessionID":"sess-1"}}}"#.to_string(),
+        };
+        match question_event(&event, "sess-1").unwrap() {
+            ChatEvent::Error(text) => assert!(text.contains("req-1"), "{text}"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
     fn question_replied_and_rejected_map_to_resolved() {
         let replied = OpenCodeEvent {
             event: None,
@@ -859,6 +889,29 @@ mod tests {
             serde_json::json!({ "type": "session", "id": "sess-1", "backend": "opencode" })
         );
 
+        let second = ensure_marker(dir.path(), "sess-1").unwrap();
+        assert_eq!(second, path);
+    }
+
+    #[test]
+    fn ensure_marker_finds_match_among_large_sibling_transcripts() {
+        // The shared sessions dir also holds full pi/codex transcripts, which
+        // can be large; ensure_marker must only need each file's first line
+        // to find the right session, not the whole contents.
+        let dir = tempfile::tempdir().unwrap();
+
+        let other_header =
+            serde_json::json!({ "type": "session", "id": "other-sess", "backend": "pi" });
+        let mut other = format!("{other_header}\n");
+        other.push_str(&"x".repeat(8 * 1024 * 1024));
+        std::fs::write(dir.path().join("0000000000001_other-sess.jsonl"), other).unwrap();
+
+        let path = ensure_marker(dir.path(), "sess-1").unwrap();
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        assert!(filename.ends_with("_sess-1.jsonl"), "{filename}");
+
+        // Calling again must find (not recreate) the marker just written,
+        // even with the large sibling file still present.
         let second = ensure_marker(dir.path(), "sess-1").unwrap();
         assert_eq!(second, path);
     }
