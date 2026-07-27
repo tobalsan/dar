@@ -289,6 +289,56 @@ fn transcript_lines(chat: &ChatState, width: usize) -> Vec<Line<'static>> {
             ChatBlock::Notice(text) => {
                 push_wrapped(&mut lines, "~ ", text, Style::new().fg(Color::Blue), width)
             }
+            ChatBlock::Question {
+                questions,
+                done,
+                rejected,
+                answer,
+                ..
+            } => {
+                let marker = if *done { "[question]" } else { "[question...]" };
+                for q in questions {
+                    push_wrapped(
+                        &mut lines,
+                        "",
+                        &format!("{marker} {}", q.header),
+                        Style::new().fg(Color::Magenta),
+                        width,
+                    );
+                    push_wrapped(&mut lines, "  ", &q.question, Style::new(), width);
+                    for (i, opt) in q.options.iter().enumerate() {
+                        push_wrapped(
+                            &mut lines,
+                            "  ",
+                            &format!("{}) {} — {}", i + 1, opt.label, opt.description),
+                            Style::new().add_modifier(Modifier::DIM),
+                            width,
+                        );
+                    }
+                }
+                if *done {
+                    let style = if *rejected {
+                        Style::new().fg(Color::Red)
+                    } else {
+                        Style::new().add_modifier(Modifier::DIM)
+                    };
+                    push_wrapped(&mut lines, "  ", &format!("-> {answer}"), style, width);
+                } else {
+                    let hint = if questions.len() > 1 {
+                        "one number per question, space-separated".to_string()
+                    } else {
+                        let count = questions.first().map_or(0, |q| q.options.len());
+                        format!("answer with a number (1-{count})")
+                    };
+                    push_wrapped(
+                        &mut lines,
+                        "  ",
+                        &hint,
+                        Style::new().add_modifier(Modifier::DIM),
+                        width,
+                    );
+                }
+            }
         }
     }
     lines
@@ -329,7 +379,7 @@ fn wrap_chunks(text: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use cap_chat::ChatEvent;
+    use cap_chat::{ChatEvent, QuestionInfo, QuestionOption};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -743,6 +793,57 @@ mod tests {
         app.chat.scroll_up(5);
         let screen = rendered(&app);
         assert!(screen.contains("End: follow"), "got: {screen}");
+    }
+
+    fn question(header: &str) -> QuestionInfo {
+        QuestionInfo {
+            header: header.to_string(),
+            question: "Which one?".to_string(),
+            options: vec![
+                QuestionOption {
+                    label: "A".to_string(),
+                    description: "first option".to_string(),
+                },
+                QuestionOption {
+                    label: "B".to_string(),
+                    description: String::new(),
+                },
+            ],
+            multiple: false,
+            custom: false,
+        }
+    }
+
+    #[test]
+    fn pending_question_renders_marker_header_options_and_hint() {
+        let mut app = App::new();
+        app.chat.blocks = vec![ChatBlock::Question {
+            request_id: "req-1".to_string(),
+            questions: vec![question("Pick a color")],
+            done: false,
+            rejected: false,
+            answer: String::new(),
+        }];
+        let screen = rendered(&app);
+        assert!(screen.contains("[question...]"));
+        assert!(screen.contains("Pick a color"));
+        assert!(screen.contains("1) "));
+        assert!(screen.contains("answer with a number (1-2)"));
+    }
+
+    #[test]
+    fn resolved_question_renders_answered_marker_and_summary() {
+        let mut app = App::new();
+        app.chat.blocks = vec![ChatBlock::Question {
+            request_id: "req-1".to_string(),
+            questions: vec![question("Pick a color")],
+            done: true,
+            rejected: false,
+            answer: "A".to_string(),
+        }];
+        let screen = rendered(&app);
+        assert!(screen.contains("[question]"));
+        assert!(screen.contains("-> A"));
     }
 
     #[test]

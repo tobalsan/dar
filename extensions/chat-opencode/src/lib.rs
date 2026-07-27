@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use cap_chat::{ArtifactReady, ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams};
+use cap_chat::{
+    ArtifactReady, ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams, QuestionInfo,
+};
 use host_api::{Extension, RegisterCtx};
 use opencode_client::{OpenCodeEvent, OpenCodeServer};
 use runner_core::{effective_command, opencode_config, write_opencode_config};
@@ -116,6 +118,12 @@ impl OpenCodeChatSession {
                         {
                             let _ = sink.send(ready).await;
                         }
+                        if let Some(chat_event) = question_event(&event, &pump_session) {
+                            if tx.send(chat_event).await.is_err() {
+                                return;
+                            }
+                            continue;
+                        }
                         if let Some(chat_event) = map_event(&event, &mut user_messages) {
                             if tx.send(chat_event).await.is_err() {
                                 return;
@@ -217,6 +225,14 @@ impl ChatSession for OpenCodeChatSession {
                 )
                 .await
         })
+    }
+
+    fn answer_question(
+        &mut self,
+        request_id: String,
+        answers: Vec<Vec<String>>,
+    ) -> cap_chat::BoxFuture<'_, Result<()>> {
+        Box::pin(async move { self.client.reply_question(&request_id, &answers).await })
     }
 
     fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
@@ -422,6 +438,9 @@ fn map_tool(part: &serde_json::Value) -> Option<ChatEvent> {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
+    if name == "question" {
+        return None;
+    }
     let state = part.get("state").unwrap_or(part);
     if let Some(input) = state.get("input") {
         return Some(ChatEvent::ToolCall {
@@ -503,6 +522,58 @@ fn permission_request_id(event: &OpenCodeEvent, session_id: &str) -> Option<Stri
         .or_else(|| properties.get("id"))
         .and_then(|id| id.as_str())
         .map(str::to_string)
+}
+
+fn question_event(event: &OpenCodeEvent, session_id: &str) -> Option<ChatEvent> {
+    let value = event_payload(event)?;
+    let type_name = value.get("type").and_then(|v| v.as_str())?;
+    if !type_name.starts_with("question.") {
+        return None;
+    }
+    let properties = value.get("properties").unwrap_or(&value);
+    let event_session = properties
+        .get("sessionID")
+        .or_else(|| properties.get("sessionId"))
+        .and_then(|v| v.as_str());
+    if event_session.is_some() && event_session != Some(session_id) {
+        return None;
+    }
+    let request_id = properties
+        .get("requestID")
+        .or_else(|| properties.get("id"))
+        .and_then(|v| v.as_str())?
+        .to_string();
+    match type_name {
+        "question.asked" | "question.v2.asked" => {
+            match serde_json::from_value::<Vec<QuestionInfo>>(properties.get("questions")?.clone())
+            {
+                Ok(questions) if !questions.is_empty() => Some(ChatEvent::QuestionAsked {
+                    request_id,
+                    questions,
+                }),
+                _ => Some(ChatEvent::Error(format!(
+                    "question {request_id} could not be parsed; answer it in opencode's own UI"
+                ))),
+            }
+        }
+        "question.replied" | "question.v2.replied" => Some(ChatEvent::QuestionResolved {
+            request_id,
+            answers: serde_json::from_value(
+                properties
+                    .get("answers")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .unwrap_or_default(),
+            rejected: false,
+        }),
+        "question.rejected" | "question.v2.rejected" => Some(ChatEvent::QuestionResolved {
+            request_id,
+            answers: vec![],
+            rejected: true,
+        }),
+        _ => None,
+    }
 }
 
 fn event_payload(event: &OpenCodeEvent) -> Option<serde_json::Value> {
@@ -657,6 +728,115 @@ mod tests {
     }
 
     #[test]
+    fn question_asked_maps_to_chat_event() {
+        let event = OpenCodeEvent {
+            event: None,
+            data: r#"{"payload":{"type":"question.asked","properties":{"id":"req-1","sessionID":"sess-1","questions":[{"header":"Pick","question":"Which one?","options":[{"label":"A","description":"first"},{"label":"B","description":"second"}]}]}}}"#.to_string(),
+        };
+        match question_event(&event, "sess-1").unwrap() {
+            ChatEvent::QuestionAsked {
+                request_id,
+                questions,
+            } => {
+                assert_eq!(request_id, "req-1");
+                assert_eq!(questions.len(), 1);
+                let q = &questions[0];
+                assert_eq!(q.header, "Pick");
+                assert_eq!(q.question, "Which one?");
+                assert!(!q.multiple);
+                assert!(!q.custom);
+                assert_eq!(q.options[0].label, "A");
+                assert_eq!(q.options[0].description, "first");
+                assert_eq!(q.options[1].label, "B");
+                assert_eq!(q.options[1].description, "second");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn question_asked_for_other_session_is_none() {
+        let event = OpenCodeEvent {
+            event: None,
+            data: r#"{"payload":{"type":"question.asked","properties":{"id":"req-1","sessionID":"other","questions":[{"header":"Pick","question":"Which?","options":[]}]}}}"#.to_string(),
+        };
+        assert!(question_event(&event, "sess-1").is_none());
+    }
+
+    #[test]
+    fn question_asked_malformed_questions_maps_to_error() {
+        let event = OpenCodeEvent {
+            event: None,
+            data: r#"{"payload":{"type":"question.asked","properties":{"id":"req-1","sessionID":"sess-1","questions":"nope"}}}"#.to_string(),
+        };
+        match question_event(&event, "sess-1").unwrap() {
+            ChatEvent::Error(text) => assert!(text.contains("req-1"), "{text}"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn question_replied_and_rejected_map_to_resolved() {
+        let replied = OpenCodeEvent {
+            event: None,
+            data: r#"{"payload":{"type":"question.replied","properties":{"sessionID":"sess-1","requestID":"req-1","answers":[["A"]]}}}"#.to_string(),
+        };
+        match question_event(&replied, "sess-1").unwrap() {
+            ChatEvent::QuestionResolved {
+                request_id,
+                answers,
+                rejected,
+            } => {
+                assert_eq!(request_id, "req-1");
+                assert_eq!(answers, vec![vec!["A".to_string()]]);
+                assert!(!rejected);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let rejected = OpenCodeEvent {
+            event: None,
+            data: r#"{"payload":{"type":"question.rejected","properties":{"sessionID":"sess-1","requestID":"req-1"}}}"#.to_string(),
+        };
+        match question_event(&rejected, "sess-1").unwrap() {
+            ChatEvent::QuestionResolved {
+                request_id,
+                answers,
+                rejected,
+            } => {
+                assert_eq!(request_id, "req-1");
+                assert!(answers.is_empty());
+                assert!(rejected);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn question_v2_alias_still_maps() {
+        let event = OpenCodeEvent {
+            event: None,
+            data: r#"{"payload":{"type":"question.v2.asked","properties":{"id":"req-1","sessionID":"sess-1","questions":[{"header":"Pick","question":"Which one?","options":[{"label":"A","description":"first"}]}]}}}"#.to_string(),
+        };
+        match question_event(&event, "sess-1").unwrap() {
+            ChatEvent::QuestionAsked { request_id, .. } => assert_eq!(request_id, "req-1"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn question_tool_part_is_suppressed() {
+        assert!(mapped_event(
+            r#"{"payload":{"type":"message.part.updated","properties":{"part":{"id":"q-1","type":"tool","tool":"question","state":{"input":{}}}}}}"#,
+        )
+        .is_none());
+        assert!(mapped_event(
+            r#"{"payload":{"type":"message.part.updated","properties":{"part":{"id":"q-1","type":"tool","tool":"question","state":{"output":"ignored","status":"completed"}}}}}"#,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn ensure_marker_writes_header_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let path = ensure_marker(dir.path(), "sess-1").unwrap();
@@ -798,6 +978,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 port = int(sys.argv[1])
 prompt_count = 0
 dispose = False
+question_replied = False
 
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -829,10 +1010,15 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             sent = 0
             permission_sent = False
+            replied_sent = False
             while not dispose:
                 if prompt_count and not permission_sent:
                     permission_sent = True
                     self.wfile.write(b'data: {"payload":{"type":"permission.updated","properties":{"sessionID":"sess-1","permissionID":"perm-1"}}}\n\n')
+                    self.wfile.flush()
+                if question_replied and not replied_sent:
+                    replied_sent = True
+                    self.wfile.write(b'data: {"payload":{"type":"question.replied","properties":{"sessionID":"sess-1","requestID":"req-1","answers":[["A"]]}}}\n\n')
                     self.wfile.flush()
                 while prompt_count > sent:
                     sent += 1
@@ -842,13 +1028,14 @@ class H(BaseHTTPRequestHandler):
                     self.wfile.write(b'data: {"payload":{"type":"message.part.updated","properties":{"part":{"type":"text","text":"pong"}}}}\n\n')
                     self.wfile.write(b'data: {"payload":{"type":"message.part.updated","properties":{"part":{"id":"tool-1","type":"tool","tool":"bash","state":{"input":{"cmd":"pwd"}}}}}}\n\n')
                     self.wfile.write(b'data: {"payload":{"type":"message.part.updated","properties":{"part":{"id":"tool-1","type":"tool","tool":"bash","state":{"output":"ok","status":"completed"}}}}}\n\n')
+                    self.wfile.write(b'data: {"payload":{"type":"question.asked","properties":{"id":"req-1","sessionID":"sess-1","questions":[{"header":"Pick","question":"Which one?","options":[{"label":"A","description":"first"},{"label":"B","description":"second"}]}]}}}\n\n')
                     self.wfile.write(b'data: {"payload":{"type":"session.idle","properties":{"sessionID":"sess-1"}}}\n\n')
                     self.wfile.flush()
                 time.sleep(0.02)
             return
         self.send_error(404)
     def do_POST(self):
-        global prompt_count, dispose
+        global prompt_count, dispose, question_replied
         length = int(self.headers.get("content-length", "0") or "0")
         body = self.rfile.read(length).decode()
         if self.path == "/session":
@@ -869,6 +1056,13 @@ class H(BaseHTTPRequestHandler):
             with open("permission.log", "a") as f:
                 f.write(body + "\n")
             return self._empty()
+        if self.path == "/question/req-1/reply":
+            data = json.loads(body)
+            assert data["answers"] == [["A"]]
+            with open("question.log", "a") as f:
+                f.write(body + "\n")
+            question_replied = True
+            return self._json(True)
         if self.path == "/instance/dispose":
             dispose = True
             self._json(True)
@@ -949,7 +1143,9 @@ PY"#;
         session.abort().await.unwrap();
 
         let mut finished = 0;
-        while finished < 2 {
+        let mut answered = false;
+        let mut question_resolved = false;
+        while finished < 2 || !question_resolved {
             match next_event(&mut rx).await {
                 ChatEvent::Delta {
                     role: ChatRole::Thinking,
@@ -963,6 +1159,31 @@ PY"#;
                 ChatEvent::ToolOutput { text, done, .. } => {
                     assert_eq!(text, "ok");
                     assert!(done);
+                }
+                ChatEvent::QuestionAsked {
+                    request_id,
+                    questions,
+                } => {
+                    assert_eq!(request_id, "req-1");
+                    assert_eq!(questions.len(), 1);
+                    assert_eq!(questions[0].options.len(), 2);
+                    if !answered {
+                        answered = true;
+                        session
+                            .answer_question(request_id, vec![vec!["A".to_string()]])
+                            .await
+                            .unwrap();
+                    }
+                }
+                ChatEvent::QuestionResolved {
+                    request_id,
+                    answers,
+                    rejected,
+                } => {
+                    assert_eq!(request_id, "req-1");
+                    assert_eq!(answers, vec![vec!["A".to_string()]]);
+                    assert!(!rejected);
+                    question_resolved = true;
                 }
                 ChatEvent::TurnFinished { ok, error } => {
                     assert!(ok, "{error:?}");
@@ -990,6 +1211,7 @@ PY"#;
             "abort\n"
         );
         assert!(temp.path().join("permission.log").exists());
+        assert!(temp.path().join("question.log").exists());
         let marker_count = std::fs::read_dir(&sessions)
             .unwrap()
             .filter(|e| {

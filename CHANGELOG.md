@@ -15,6 +15,10 @@ Breaking changes are marked **⚠ BREAKING**.
 
 - Scheduler jobs can run contained scripts directly, including script-only and wake-gated agent jobs, so deterministic scheduled work records process exit failures mechanically.
 
+### Added
+
+- The opencode `question` tool is now supported end to end in operator chat: web chat renders each question as an interactive block (click an option or type a custom answer) and the TUI renders numbered options answerable from the input line; answers are delivered back to opencode and the block settles to answered/dismissed, including across page reloads and turn aborts.
+
 ### Fixed
 
 - Opencode chat sessions now survive dar restarts: the opencode backend resumes the same underlying opencode session (verified against its persisted store, falling back to a fresh session when gone) instead of silently starting a new one, while `/new` still forks fresh and pi/opencode backend switches never cross-resume each other's sessions.

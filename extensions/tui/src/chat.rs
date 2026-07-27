@@ -191,6 +191,32 @@ fn issue_summary(path: &Path) -> Option<String> {
     Some(summary)
 }
 
+/// Parse numbered input against a pending question set: one whitespace/comma-
+/// separated token per question, each an option number (1-based). Any
+/// mismatch (wrong token count, non-numeric token, or a number out of range)
+/// yields `None` so the input falls through as a normal chat message instead
+/// of being swallowed as a malformed answer.
+pub fn parse_answer(input: &str, questions: &[cap_chat::QuestionInfo]) -> Option<Vec<Vec<String>>> {
+    let tokens: Vec<&str> = input
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tokens.len() != questions.len() {
+        return None;
+    }
+    tokens
+        .iter()
+        .zip(questions)
+        .map(|(token, question)| {
+            let n: usize = token.parse().ok()?;
+            if n == 0 || n > question.options.len() {
+                return None;
+            }
+            Some(vec![question.options[n - 1].label.clone()])
+        })
+        .collect()
+}
+
 /// One rendered transcript unit. Streamed deltas append to the last block of
 /// the matching role; a role change starts a new block.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,6 +236,18 @@ pub enum ChatBlock {
     /// Operational note (backend fallback, disabled-chat banner) — not an
     /// error and not part of the conversation.
     Notice(String),
+    /// An interactive question the backend's agent asked the operator (e.g.
+    /// opencode's `question` tool). Answered via numbered input; `done` flips
+    /// only on the matching `ChatEvent::QuestionResolved` (or a dismissal on
+    /// turn/session end), never locally on submit.
+    Question {
+        request_id: String,
+        questions: Vec<cap_chat::QuestionInfo>,
+        done: bool,
+        rejected: bool,
+        /// Rendered answer summary once resolved ("A; custom text" / "dismissed").
+        answer: String,
+    },
 }
 
 #[derive(Default)]
@@ -373,6 +411,44 @@ impl ChatState {
                 is_error,
                 done,
             } => self.set_tool_output(&id, text, is_error, done),
+            ChatEvent::QuestionAsked {
+                request_id,
+                questions,
+            } => self.blocks.push(ChatBlock::Question {
+                request_id,
+                questions,
+                done: false,
+                rejected: false,
+                answer: String::new(),
+            }),
+            ChatEvent::QuestionResolved {
+                request_id,
+                answers,
+                rejected,
+            } => {
+                let block = self.blocks.iter_mut().rev().find(|block| {
+                    matches!(block, ChatBlock::Question { request_id: id, done: false, .. } if *id == request_id)
+                });
+                if let Some(ChatBlock::Question {
+                    done,
+                    rejected: block_rejected,
+                    answer,
+                    ..
+                }) = block
+                {
+                    *done = true;
+                    *block_rejected = rejected;
+                    *answer = if rejected {
+                        "dismissed".to_string()
+                    } else {
+                        answers
+                            .iter()
+                            .map(|a| a.join(", "))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    };
+                }
+            }
             ChatEvent::Error(message) => self.blocks.push(ChatBlock::Error(message)),
             ChatEvent::ContextUsage {
                 tokens_used,
@@ -384,6 +460,9 @@ impl ChatState {
                 });
             }
             ChatEvent::TurnFinished { ok, error } => {
+                // A pending question cannot outlive its turn; this also
+                // covers a rejected-question event lost to an abort.
+                self.dismiss_pending_questions();
                 if self.stale_finishes > 0 {
                     // The finish of a turn the TUI already timed out and
                     // abandoned; consuming it re-opens the submit gate.
@@ -416,6 +495,7 @@ impl ChatState {
                 }
             }
             ChatEvent::SessionClosed { error } => {
+                self.dismiss_pending_questions();
                 self.in_flight = false;
                 self.pending_turns = 0;
                 self.turn_started_at = None;
@@ -444,6 +524,40 @@ impl ChatState {
             ChatRole::Assistant => ChatBlock::Assistant(text.to_string()),
             ChatRole::Thinking => ChatBlock::Thinking(text.to_string()),
         });
+    }
+
+    /// Dismiss every still-pending question block: a pending question cannot
+    /// outlive its turn, and this also covers a rejected-question event lost
+    /// to an abort.
+    fn dismiss_pending_questions(&mut self) {
+        for block in self.blocks.iter_mut() {
+            if let ChatBlock::Question {
+                done,
+                rejected,
+                answer,
+                ..
+            } = block
+            {
+                if !*done {
+                    *done = true;
+                    *rejected = true;
+                    *answer = "dismissed".to_string();
+                }
+            }
+        }
+    }
+
+    /// The newest unanswered question, if any: (request_id, questions).
+    pub fn pending_question(&self) -> Option<(&str, &[cap_chat::QuestionInfo])> {
+        self.blocks.iter().rev().find_map(|b| match b {
+            ChatBlock::Question {
+                request_id,
+                questions,
+                done: false,
+                ..
+            } => Some((request_id.as_str(), questions.as_slice())),
+            _ => None,
+        })
     }
 
     fn set_tool_output(&mut self, id: &str, text: String, is_error: bool, done: bool) {
@@ -983,6 +1097,164 @@ mod tests {
             chat.blocks,
             vec![ChatBlock::Notice("— started a fresh session —".to_string())]
         );
+    }
+
+    fn question(labels: &[&str]) -> cap_chat::QuestionInfo {
+        cap_chat::QuestionInfo {
+            header: "Pick one".to_string(),
+            question: "Which one?".to_string(),
+            options: labels
+                .iter()
+                .map(|label| cap_chat::QuestionOption {
+                    label: label.to_string(),
+                    description: String::new(),
+                })
+                .collect(),
+            multiple: false,
+            custom: false,
+        }
+    }
+
+    #[test]
+    fn question_asked_pushes_a_pending_block() {
+        let mut chat = ChatState::default();
+        chat.apply_event(ChatEvent::QuestionAsked {
+            request_id: "req-1".to_string(),
+            questions: vec![question(&["A", "B"])],
+        });
+        assert_eq!(
+            chat.blocks,
+            vec![ChatBlock::Question {
+                request_id: "req-1".to_string(),
+                questions: vec![question(&["A", "B"])],
+                done: false,
+                rejected: false,
+                answer: String::new(),
+            }]
+        );
+    }
+
+    #[test]
+    fn question_resolved_marks_the_matching_block_answered() {
+        let mut chat = ChatState::default();
+        chat.apply_event(ChatEvent::QuestionAsked {
+            request_id: "req-1".to_string(),
+            questions: vec![question(&["A", "B"])],
+        });
+        chat.apply_event(ChatEvent::QuestionResolved {
+            request_id: "req-1".to_string(),
+            answers: vec![
+                vec!["A".to_string(), "B".to_string()],
+                vec!["custom".to_string()],
+            ],
+            rejected: false,
+        });
+        match &chat.blocks[0] {
+            ChatBlock::Question {
+                done,
+                rejected,
+                answer,
+                ..
+            } => {
+                assert!(*done);
+                assert!(!*rejected);
+                assert_eq!(answer, "A, B; custom");
+            }
+            other => panic!("expected a Question block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn turn_finished_dismisses_only_pending_questions() {
+        let mut chat = ChatState::default();
+        chat.apply_event(ChatEvent::QuestionAsked {
+            request_id: "answered".to_string(),
+            questions: vec![question(&["A"])],
+        });
+        chat.apply_event(ChatEvent::QuestionResolved {
+            request_id: "answered".to_string(),
+            answers: vec![vec!["A".to_string()]],
+            rejected: false,
+        });
+        chat.apply_event(ChatEvent::QuestionAsked {
+            request_id: "pending".to_string(),
+            questions: vec![question(&["A"])],
+        });
+        chat.apply_event(ChatEvent::TurnFinished {
+            ok: false,
+            error: Some("aborted".to_string()),
+        });
+        match &chat.blocks[0] {
+            ChatBlock::Question {
+                done,
+                rejected,
+                answer,
+                ..
+            } => {
+                assert!(*done);
+                assert!(!*rejected);
+                assert_eq!(answer, "A");
+            }
+            other => panic!("expected the answered block untouched, got {other:?}"),
+        }
+        match &chat.blocks[1] {
+            ChatBlock::Question {
+                done,
+                rejected,
+                answer,
+                ..
+            } => {
+                assert!(*done);
+                assert!(*rejected);
+                assert_eq!(answer, "dismissed");
+            }
+            other => panic!("expected the pending block dismissed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_closed_dismisses_pending_questions() {
+        let mut chat = ChatState::default();
+        chat.apply_event(ChatEvent::QuestionAsked {
+            request_id: "pending".to_string(),
+            questions: vec![question(&["A"])],
+        });
+        chat.apply_event(ChatEvent::SessionClosed { error: None });
+        match &chat.blocks[0] {
+            ChatBlock::Question {
+                done,
+                rejected,
+                answer,
+                ..
+            } => {
+                assert!(*done);
+                assert!(*rejected);
+                assert_eq!(answer, "dismissed");
+            }
+            other => panic!("expected the pending block dismissed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_answer_maps_numbers_to_option_labels() {
+        let single = vec![question(&["opt1-label", "opt2-label", "opt3-label"])];
+        assert_eq!(
+            parse_answer("2", &single),
+            Some(vec![vec!["opt2-label".to_string()]])
+        );
+
+        let two = vec![question(&["a1", "a2"]), question(&["b1", "b2", "b3"])];
+        assert_eq!(
+            parse_answer("1 3", &two),
+            Some(vec![vec!["a1".to_string()], vec!["b3".to_string()]])
+        );
+
+        // Out-of-range, non-numeric, and count-mismatch inputs all fall
+        // through as None (the input becomes a normal chat message).
+        assert_eq!(parse_answer("0", &single), None);
+        assert_eq!(parse_answer("4", &single), None);
+        assert_eq!(parse_answer("x", &single), None);
+        assert_eq!(parse_answer("1 2", &single), None);
     }
 
     #[test]

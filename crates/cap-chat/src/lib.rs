@@ -28,6 +28,18 @@ pub trait ChatCoordinator: Send + Sync {
     fn abort<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>>;
     fn new_session<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>>;
     fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ChatEvent>;
+    /// Answer a pending question on the shared session. Default fails so
+    /// coordinators predating questions stay source-compatible.
+    fn answer_question<'a>(
+        &'a self,
+        request_id: String,
+        answers: Vec<Vec<String>>,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        let _ = (request_id, answers);
+        Box::pin(async {
+            anyhow::bail!("this chat coordinator does not support interactive questions")
+        })
+    }
 }
 
 /// Backend id used when no configured/followed backend is available.
@@ -132,12 +144,102 @@ mod artifact_tests {
     }
 }
 
+#[cfg(test)]
+mod question_tests {
+    use super::*;
+
+    #[test]
+    fn question_info_deserializes_opencode_shape() {
+        let value = serde_json::json!([{
+            "header": "Pick",
+            "question": "Which?",
+            "options": [{"label": "A", "description": "first"}],
+        }]);
+        let questions: Vec<QuestionInfo> = serde_json::from_value(value).unwrap();
+        assert_eq!(questions.len(), 1);
+        let q = &questions[0];
+        assert_eq!(q.header, "Pick");
+        assert_eq!(q.question, "Which?");
+        assert!(!q.multiple);
+        assert!(!q.custom);
+        assert_eq!(q.options[0].label, "A");
+        assert_eq!(q.options[0].description, "first");
+
+        let round_tripped: Vec<QuestionInfo> =
+            serde_json::from_value(serde_json::to_value(&questions).unwrap()).unwrap();
+        assert_eq!(round_tripped, questions);
+    }
+
+    struct MinimalSession;
+
+    impl ChatSession for MinimalSession {
+        fn send_turn(&mut self, _prompt: String) -> BoxFuture<'_, anyhow::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn abort(&mut self) -> BoxFuture<'_, anyhow::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn close(self: Box<Self>) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[test]
+    fn default_answer_question_bails() {
+        let mut session = MinimalSession;
+        let fut = session.answer_question("req".to_string(), vec![vec!["A".to_string()]]);
+        let err = block_on(fut).unwrap_err();
+        assert!(err.to_string().contains("does not support"));
+    }
+
+    /// Poll a future to completion without pulling in an async runtime. The
+    /// futures exercised here (default trait method bodies) never actually
+    /// yield, so a single poll always resolves.
+    fn block_on<T>(mut fut: BoxFuture<'_, T>) -> T {
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+        fn noop(_: *const ()) {}
+        fn clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+        let mut cx = Context::from_waker(&waker);
+        loop {
+            if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
+                return v;
+            }
+        }
+    }
+}
+
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChatRole {
     Assistant,
     Thinking,
+}
+
+/// One interactive question in a backend "question" request. Field names and
+/// JSON shape mirror opencode's QuestionV2Info so backends can deserialize the
+/// wire payload directly.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct QuestionInfo {
+    pub header: String,
+    pub question: String,
+    #[serde(default)]
+    pub options: Vec<QuestionOption>,
+    #[serde(default)]
+    pub multiple: bool,
+    #[serde(default)]
+    pub custom: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +263,21 @@ pub enum ChatEvent {
         text: String,
         is_error: bool,
         done: bool,
+    },
+    /// The backend's agent asked the operator an interactive question (e.g.
+    /// opencode's `question` tool). The UI renders options and answers via
+    /// `ChatSession::answer_question`; `request_id` keys the exchange.
+    QuestionAsked {
+        request_id: String,
+        questions: Vec<QuestionInfo>,
+    },
+    /// A pending question was answered (from any surface) or rejected.
+    /// `answers` is one Vec<String> of selected labels / custom text per
+    /// question, in question order; empty when `rejected`.
+    QuestionResolved {
+        request_id: String,
+        answers: Vec<Vec<String>>,
+        rejected: bool,
     },
     /// Backend-side error line (stderr, protocol error).
     Error(String),
@@ -317,4 +434,18 @@ pub trait ChatSession: Send {
     fn abort(&mut self) -> BoxFuture<'_, anyhow::Result<()>>;
     /// Close stdin, wait briefly, term-then-kill the process group on overrun.
     fn close(self: Box<Self>) -> BoxFuture<'static, anyhow::Result<()>>;
+    /// Deliver the operator's answer to a pending `QuestionAsked` request.
+    /// `answers` is one array of selected option labels (or custom text) per
+    /// question, in question order. Backends without interactive questions
+    /// keep this default, which fails the call without touching the session.
+    fn answer_question(
+        &mut self,
+        request_id: String,
+        answers: Vec<Vec<String>>,
+    ) -> BoxFuture<'_, anyhow::Result<()>> {
+        let _ = (request_id, answers);
+        Box::pin(async {
+            anyhow::bail!("this chat backend does not support interactive questions")
+        })
+    }
 }

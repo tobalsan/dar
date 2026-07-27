@@ -105,6 +105,35 @@
    (Tinted Pill Rule); a finished tool reads normally. The banned
    `.is-done { border-left: 2px solid var(--ok) }` side-stripe stays removed. */
 
+/* question: opencode's interactive question tool, plain block (not <details>
+   — nothing to collapse, and it keeps the data-bi open-state preservation
+   in paint() scoped to <details>). */
+.chat-question {
+  display: flex; flex-direction: column; gap: .4rem; min-width: 0;
+  padding: .5rem .6rem; background: #171b21;
+  border: 1px solid var(--border); border-radius: 5px;
+}
+.chat-q-header { font-weight: 700; }
+.chat-q-text { color: var(--muted); }
+.chat-q-opts { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .1rem; }
+.chat-q-opt {
+  padding: .25rem .6rem; background: var(--panel-2); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 999px; font: inherit; cursor: pointer;
+}
+.chat-q-opt:hover:not(:disabled) { border-color: var(--accent); }
+.chat-q-opt:disabled { opacity: .45; cursor: default; }
+.chat-q-customrow { display: flex; gap: .35rem; margin-top: .1rem; }
+.chat-q-custom {
+  flex: 1 1 auto; min-width: 0; padding: .3rem .5rem; background: var(--panel-2);
+  color: var(--fg); border: 1px solid var(--border); border-radius: 5px; font: inherit;
+}
+.chat-q-send {
+  padding: .3rem .7rem; background: var(--panel-2); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 5px; font: inherit; cursor: pointer;
+}
+.chat-q-send:hover { border-color: var(--accent); }
+.chat-q-answer { color: var(--muted); font-style: italic; }
+
 /* error turn: quiet block, red confined to the pill */
 .chat-error { display: flex; flex-direction: column; gap: .3rem; min-width: 0; }
 .chat-error-body { color: var(--muted); max-width: 75ch; line-height: 1.5; overflow-wrap: anywhere; }

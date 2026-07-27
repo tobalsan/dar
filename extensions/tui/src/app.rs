@@ -43,6 +43,11 @@ pub enum Action {
     /// The `/new` slash command: close the live session and fork a fresh one.
     NewSession,
     AbortTurn,
+    /// Numbered answer to the pending interactive question.
+    AnswerQuestion {
+        request_id: String,
+        answers: Vec<Vec<String>>,
+    },
     /// Publish this control on `orchestrator.control` (fire-and-forget).
     Control(Control),
 }
@@ -180,10 +185,24 @@ impl App {
                 input.insert_newline();
                 Action::None
             }
-            KeyCode::Enter => match self.chat.submit() {
-                Some(prompt) => Action::Submit(prompt),
-                None => Action::None,
-            },
+            KeyCode::Enter => {
+                if let Some((request_id, questions)) = self.chat.pending_question() {
+                    if let Some(answers) =
+                        crate::chat::parse_answer(self.chat.input.text().trim(), questions)
+                    {
+                        let request_id = request_id.to_string();
+                        self.chat.input.clear();
+                        return Action::AnswerQuestion {
+                            request_id,
+                            answers,
+                        };
+                    }
+                }
+                match self.chat.submit() {
+                    Some(prompt) => Action::Submit(prompt),
+                    None => Action::None,
+                }
+            }
             KeyCode::Esc if self.chat.in_flight => Action::AbortTurn,
             // -- transcript scroll (kept on the same keys as before) --------
             KeyCode::PageUp => {
@@ -621,6 +640,61 @@ mod tests {
         assert_eq!(app.logs.scroll_back, 0, "End re-engages follow-tail");
         // Logs scrolling never touches the chat transcript's scroll state.
         assert_eq!(app.chat.scroll_back, 0);
+    }
+
+    fn question(label_a: &str, label_b: &str) -> cap_chat::QuestionInfo {
+        cap_chat::QuestionInfo {
+            header: "Pick one".to_string(),
+            question: "Which one?".to_string(),
+            options: vec![
+                cap_chat::QuestionOption {
+                    label: label_a.to_string(),
+                    description: String::new(),
+                },
+                cap_chat::QuestionOption {
+                    label: label_b.to_string(),
+                    description: String::new(),
+                },
+            ],
+            multiple: false,
+            custom: false,
+        }
+    }
+
+    #[test]
+    fn numbered_answer_is_intercepted_while_a_question_is_pending() {
+        let mut app = App::new();
+        app.chat.apply_event(cap_chat::ChatEvent::QuestionAsked {
+            request_id: "req-1".to_string(),
+            questions: vec![question("A-label", "B-label")],
+        });
+        type_str(&mut app, "2");
+        assert_eq!(
+            app.handle_event(key(KeyCode::Enter)),
+            Action::AnswerQuestion {
+                request_id: "req-1".to_string(),
+                answers: vec![vec!["B-label".to_string()]],
+            }
+        );
+        assert!(app.chat.input.is_empty());
+
+        // Non-numeric text while a question is pending falls through to a
+        // normal submit, exactly as if no question were pending.
+        type_str(&mut app, "hello");
+        assert_eq!(
+            app.handle_event(key(KeyCode::Enter)),
+            Action::Submit("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn numbered_text_submits_normally_with_no_pending_question() {
+        let mut app = App::new();
+        type_str(&mut app, "1");
+        assert_eq!(
+            app.handle_event(key(KeyCode::Enter)),
+            Action::Submit("1".to_string())
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use cap_chat::QuestionInfo;
 use cap_dashboard_tab::{DashboardTab, DashboardTabs};
 use dar_extension_sdk::{
     chat::{self, ChatBackend, ChatEvent, ChatRole, ChatSession},
@@ -101,6 +102,7 @@ impl Extension for ChatWebExtension {
                     "/{session}/abort".into(),
                     "/{session}/compact".into(),
                     "/{session}/new".into(),
+                    "/{session}/answer".into(),
                 ],
                 claim_root: false,
             })?;
@@ -248,6 +250,8 @@ struct WireEvent {
     context_window: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     attachments: Vec<Attachment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    questions: Option<Vec<QuestionInfo>>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Attachment {
@@ -271,6 +275,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/{session}/abort", post(abort))
         .route("/{session}/compact", post(compact))
         .route("/{session}/new", post(new_session_route))
+        .route("/{session}/answer", post(answer))
         .layer(middleware::map_response(mark_prefix_aware))
         // `/{session}/history` is a standalone page, never spliced into the
         // dashboard shell, so no `window.__dashPrefix`/patched
@@ -436,6 +441,7 @@ impl AppState {
                 tokens_used: None,
                 context_window: None,
                 attachments: vec![],
+                questions: None,
             };
             append_transcript(&session.transcript, &event)?;
             session
@@ -560,6 +566,19 @@ impl chat::ChatCoordinator for AppState {
             })
             .expect("main chat session is initialized at registration")
     }
+
+    fn answer_question<'a>(
+        &'a self,
+        request_id: String,
+        answers: Vec<Vec<String>>,
+    ) -> dar_extension_sdk::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let session = self.session("main").await?;
+            let mut inner = session.inner.lock().await;
+            let backend = inner.as_mut().context("no active chat session")?;
+            backend.answer_question(request_id, answers).await
+        })
+    }
 }
 impl Session {
     async fn accept_turn(
@@ -609,6 +628,7 @@ impl Session {
             tokens_used: None,
             context_window: None,
             attachments,
+            questions: None,
         };
         append_transcript(&self.transcript, &event)?;
         self.history
@@ -626,111 +646,170 @@ impl Session {
     }
 
     fn publish(&self, event: ChatEvent) -> bool {
-        let (kind, text, error, id, name, args, is_error, done, tokens_used, context_window) =
-            match event {
-                ChatEvent::User { .. } | ChatEvent::SessionReset => return true,
-                ChatEvent::Delta {
-                    role: ChatRole::Assistant,
-                    text,
-                } => (
-                    "delta",
-                    Some(text),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                ChatEvent::Delta {
-                    role: ChatRole::Thinking,
-                    text,
-                } => (
-                    "thinking",
-                    Some(text),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                ChatEvent::ToolCall { id, name, args } => (
-                    "tool_call",
-                    None,
-                    None,
-                    Some(id),
-                    Some(name),
-                    Some(args),
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                ChatEvent::ToolOutput {
-                    id,
-                    text,
-                    is_error,
-                    done,
-                } => (
-                    "tool_output",
-                    Some(text),
-                    None,
-                    Some(id),
-                    None,
-                    None,
-                    Some(is_error),
-                    Some(done),
-                    None,
-                    None,
-                ),
-                ChatEvent::Error(error) => (
-                    "error",
-                    None,
-                    Some(error),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                ChatEvent::TurnFinished { ok, error } => (
-                    if ok { "finished" } else { "aborted" },
-                    None,
-                    error,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                ChatEvent::ContextUsage {
-                    tokens_used,
-                    context_window,
-                } => (
-                    "context_usage",
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(tokens_used),
-                    context_window,
-                ),
-                ChatEvent::SessionClosed { error } => (
-                    "closed", None, error, None, None, None, None, None, None, None,
-                ),
-            };
+        let (
+            kind,
+            text,
+            error,
+            id,
+            name,
+            args,
+            is_error,
+            done,
+            tokens_used,
+            context_window,
+            questions,
+        ) = match event {
+            ChatEvent::User { .. } | ChatEvent::SessionReset => return true,
+            ChatEvent::Delta {
+                role: ChatRole::Assistant,
+                text,
+            } => (
+                "delta",
+                Some(text),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            ChatEvent::Delta {
+                role: ChatRole::Thinking,
+                text,
+            } => (
+                "thinking",
+                Some(text),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            ChatEvent::ToolCall { id, name, args } => (
+                "tool_call",
+                None,
+                None,
+                Some(id),
+                Some(name),
+                Some(args),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            ChatEvent::ToolOutput {
+                id,
+                text,
+                is_error,
+                done,
+            } => (
+                "tool_output",
+                Some(text),
+                None,
+                Some(id),
+                None,
+                None,
+                Some(is_error),
+                Some(done),
+                None,
+                None,
+                None,
+            ),
+            ChatEvent::QuestionAsked {
+                request_id,
+                questions,
+            } => (
+                "question",
+                None,
+                None,
+                Some(request_id),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(questions),
+            ),
+            ChatEvent::QuestionResolved {
+                request_id,
+                answers,
+                rejected,
+            } => (
+                "question_done",
+                Some(if rejected {
+                    "dismissed".to_owned()
+                } else {
+                    answers
+                        .iter()
+                        .map(|answer| answer.join(", "))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                }),
+                None,
+                Some(request_id),
+                None,
+                None,
+                Some(rejected),
+                None,
+                None,
+                None,
+                None,
+            ),
+            ChatEvent::Error(error) => (
+                "error",
+                None,
+                Some(error),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            ChatEvent::TurnFinished { ok, error } => (
+                if ok { "finished" } else { "aborted" },
+                None,
+                error,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            ChatEvent::ContextUsage {
+                tokens_used,
+                context_window,
+            } => (
+                "context_usage",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(tokens_used),
+                context_window,
+                None,
+            ),
+            ChatEvent::SessionClosed { error } => (
+                "closed", None, error, None, None, None, None, None, None, None, None,
+            ),
+        };
         let terminal = matches!(kind, "finished" | "aborted" | "closed");
         if terminal && self.active_turns.load(std::sync::atomic::Ordering::SeqCst) == 0 {
             return true;
@@ -756,6 +835,7 @@ impl Session {
             tokens_used,
             context_window,
             attachments: vec![],
+            questions,
         };
         let mut history = self
             .history
@@ -847,6 +927,7 @@ impl Session {
             tokens_used: None,
             context_window: None,
             attachments: vec![],
+            questions: None,
         };
         history.push_back(event.clone());
         let _ = self.tx.send(event);
@@ -1370,6 +1451,58 @@ async fn new_session_route(
     }
 }
 
+#[derive(Deserialize)]
+struct Answer {
+    request_id: String,
+    answers: Vec<Vec<String>>,
+}
+
+// Deliberately no lazy `open_session` here: after a restart the pending
+// question died with the old backend process, so answering must fail
+// cleanly (409), not spawn a fresh backend.
+async fn answer(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Answer>,
+) -> impl IntoResponse {
+    if body.request_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"accepted":false})),
+        )
+            .into_response();
+    }
+    match state.session(&id).await {
+        Ok(s) => {
+            let mut inner = s.inner.lock().await;
+            let Some(backend) = inner.as_mut() else {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({"accepted":false,"error":"no active chat session"})),
+                )
+                    .into_response();
+            };
+            match backend.answer_question(body.request_id, body.answers).await {
+                Ok(()) => (
+                    StatusCode::ACCEPTED,
+                    Json(serde_json::json!({"accepted":true})),
+                )
+                    .into_response(),
+                Err(e) => (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({"accepted":false,"error":e.to_string()})),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"accepted":false,"error":e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1413,6 +1546,37 @@ mod tests {
         }
         fn close(self: Box<Self>) -> cap_chat::BoxFuture<'static, Result<()>> {
             Box::pin(async { Ok(()) })
+        }
+    }
+    type AnswerCalls = Arc<std::sync::Mutex<Vec<(String, Vec<Vec<String>>)>>>;
+    struct AnsweringSession {
+        calls: AnswerCalls,
+        fails: bool,
+    }
+    impl ChatSession for AnsweringSession {
+        fn send_turn(&mut self, _prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn close(self: Box<Self>) -> cap_chat::BoxFuture<'static, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn answer_question(
+            &mut self,
+            request_id: String,
+            answers: Vec<Vec<String>>,
+        ) -> cap_chat::BoxFuture<'_, Result<()>> {
+            let calls = Arc::clone(&self.calls);
+            let fails = self.fails;
+            Box::pin(async move {
+                if fails {
+                    anyhow::bail!("backend rejected answer");
+                }
+                calls.lock().unwrap().push((request_id, answers));
+                Ok(())
+            })
         }
     }
     struct HangingAbortSession;
@@ -2643,6 +2807,117 @@ mod tests {
         assert!(events[0].seq > user_seq);
     }
 
+    #[tokio::test]
+    async fn publish_maps_question_events() {
+        let s = session(Box::new(FakeSession {
+            aborted: Arc::new(AtomicBool::new(false)),
+            sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            abort_fails: false,
+        }));
+        s.publish(ChatEvent::QuestionAsked {
+            request_id: "req-1".into(),
+            questions: vec![QuestionInfo {
+                header: "Pick".into(),
+                question: "Which?".into(),
+                options: vec![cap_chat::QuestionOption {
+                    label: "A".into(),
+                    description: "first".into(),
+                }],
+                multiple: false,
+                custom: true,
+            }],
+        });
+        s.publish(ChatEvent::QuestionResolved {
+            request_id: "req-1".into(),
+            answers: vec![vec!["A".into()]],
+            rejected: false,
+        });
+
+        let events = load_transcript(&s.transcript).unwrap();
+        assert_eq!(events[0].kind, "question");
+        assert_eq!(events[0].id.as_deref(), Some("req-1"));
+        assert_eq!(
+            events[0].questions.as_ref().unwrap()[0].options[0].label,
+            "A"
+        );
+        assert_eq!(events[1].kind, "question_done");
+        assert_eq!(events[1].text.as_deref(), Some("A"));
+        assert_eq!(events[1].is_error, Some(false));
+
+        let wire = serde_json::to_string(&events[0]).unwrap();
+        assert!(wire.contains(r#""type":"question""#));
+        assert!(wire.contains(r#""questions":[{"header":"Pick""#));
+    }
+
+    #[tokio::test]
+    async fn answer_route_forwards_to_backend_and_409s_without_session() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s = session(Box::new(AnsweringSession {
+            calls: Arc::clone(&calls),
+            fails: false,
+        }));
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: test_root(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+        });
+        let request = || {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/test/answer")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"request_id":"req-1","answers":[["A"]]}"#))
+                .unwrap()
+        };
+
+        assert_eq!(
+            router(Arc::clone(&state))
+                .oneshot(request())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [("req-1".to_owned(), vec![vec!["A".to_owned()]])]
+        );
+
+        *s.inner.lock().await = None;
+        assert_eq!(
+            router(state).oneshot(request()).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[tokio::test]
+    async fn answer_route_conflicts_on_backend_error() {
+        let s = session(Box::new(RejectingSession));
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: test_root(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+        });
+
+        let response = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/test/answer")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"request_id":"req-1","answers":[["A"]]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("does not support"));
+    }
+
     #[test]
     fn attachment_prompt_paths_include_the_session_segment() {
         // Uploads land at data/chat/uploads/{session}/{command}/{file}; the
@@ -2723,6 +2998,28 @@ mod tests {
     }
 
     #[test]
+    fn browser_renderer_renders_question_lifecycle() {
+        let renderer = format!("{}/src/renderer.js", env!("CARGO_MANIFEST_DIR"));
+        let script = r#"const r=require(process.argv[1]);let b=r.reduce([],{type:'question',id:'req-1',questions:[{header:'Pick',question:'Which?',options:[{label:'A',description:'first'},{label:'B',description:''}],multiple:false,custom:false}]});let h=r.html(b);if(!h.includes('chat-q-opt')||!h.includes('data-label="A"')||!h.includes('>question<'))process.exit(1);b=r.reduce(b,{type:'question_done',id:'req-1',text:'A',is_error:false});h=r.html(b);if(!h.includes('answered')||!h.includes('disabled')||!h.includes('>A<'))process.exit(1);let d=r.reduce(r.reduce([],{type:'question',id:'req-2',questions:[{header:'H',question:'Q',options:[{label:'A'}]}]}),{type:'aborted',error:'aborted'});if(!r.html(d).includes('dismissed'))process.exit(1);"#;
+        let status = std::process::Command::new("node")
+            .args(["-e", script, &renderer])
+            .status()
+            .expect("node is available for browser renderer tests");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn browser_renderer_posts_answer_on_option_click() {
+        let renderer = format!("{}/src/renderer.js", env!("CARGO_MANIFEST_DIR"));
+        let script = r#"const handlers={},style={setProperty(){}};const element=(id)=>({id,style:{...style},dataset:{},value:'',disabled:false,hidden:false,innerHTML:'',scrollHeight:10,scrollTop:0,clientHeight:10,getBoundingClientRect:()=>({top:0}),querySelectorAll:()=>[]});const elements=Object.fromEntries(['chat-root','chat-transcript','chat-input','chat-chips','chat-send','chat-abort','chat-token-meter'].map(id=>[id,element(id)]));elements['chat-root'].dataset.agentName='Agent';global.document={getElementById:id=>elements[id]||null,addEventListener:(type,fn)=>handlers[type]=fn,querySelector:()=>null};global.window={innerHeight:1000,addEventListener(){}};global.EventSource=function(){};global.crypto={randomUUID:()=>'command-id'};let calls=0,captured=null;global.fetch=async(url,opts)=>{calls++;captured={url,body:opts.body};return{ok:true,status:202,text:async()=>'{}'}};require(process.argv[1]);window.renderChatEvent({type:'question',id:'req-1',questions:[{header:'H',question:'Q',options:[{label:'A',description:''}]}]});const target={closest:sel=>sel==='.chat-q-opt'?{dataset:{qbi:'0',qi:'0',label:'A'}}:null};handlers.click({target});handlers.click({target});setTimeout(()=>{if(calls!==1)process.exit(1);if(!captured||captured.url!=='/chat/main/answer')process.exit(1);const body=JSON.parse(captured.body);if(body.request_id!=='req-1'||JSON.stringify(body.answers)!=='[["A"]]')process.exit(1);},0);"#;
+        let status = std::process::Command::new("node")
+            .args(["-e", script, &renderer])
+            .status()
+            .expect("node is available for browser renderer tests");
+        assert!(status.success());
+    }
+
+    #[test]
     fn transcripts_are_ordered_and_isolated() {
         let root = test_root();
         let first = root.join("one.jsonl");
@@ -2743,6 +3040,7 @@ mod tests {
                     tokens_used: None,
                     context_window: None,
                     attachments: vec![],
+                    questions: None,
                 },
             )
             .unwrap();

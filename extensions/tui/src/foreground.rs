@@ -326,6 +326,26 @@ async fn run_interactive(
                             }
                         }
                     }
+                    // Never marks the block answered locally — the
+                    // QuestionResolved event (via shared_events or chat_rx)
+                    // flips it, keeping every attached surface consistent. A
+                    // stale answer simply errors into a red line; block state
+                    // unchanged; no crash.
+                    Action::AnswerQuestion { request_id, answers } => {
+                        if let Some(coordinator) = coordinator.as_ref() {
+                            if let Err(error) = coordinator.answer_question(request_id, answers).await {
+                                app.chat.push_error(format!("answer failed: {error:#}"));
+                            }
+                            continue;
+                        }
+                        if let Some(session) = session.as_mut() {
+                            if let Err(e) = session.answer_question(request_id, answers).await {
+                                app.chat.push_error(format!("answer failed: {e:#}"));
+                            }
+                        } else {
+                            app.chat.push_error("no active chat session to answer".to_string());
+                        }
+                    }
                     // Fire-and-forget, no local state mutation: the paused
                     // badge etc. only change via the next retained snapshot
                     // (the orchestrator is the single writer of run state).

@@ -32,12 +32,23 @@
         if (!tool) { tool = { kind: 'tool', id: event.id, name: event.id, args: '', text: '', is_error: false, done: false }; next.push(tool); }
         tool.text = text; tool.is_error = !!event.is_error; tool.done = !!event.done; break;
       }
+      case 'question': next.push({ kind: 'question', id: event.id, questions: event.questions || [], done: false, rejected: false, answerText: '' }); break;
+      case 'question_done': { let q = [...next].reverse().find(b => b.kind === 'question' && b.id === event.id); if (q) { q.done = true; q.rejected = !!event.is_error; q.answerText = event.text || ''; } break; }
       case 'error': next.push({ kind: 'error', text: event.error || 'unknown error' }); break;
       case 'context_usage': break;
-      case 'aborted': next.push({ kind: 'error', text: event.error === 'aborted' ? 'turn aborted' : `turn failed: ${event.error || 'unknown error'}` }); break;
-      case 'closed': next.push({ kind: 'error', text: `chat session closed${event.error ? `: ${event.error}` : ''}` }); break;
+      case 'aborted': dismissPendingQuestions(next); next.push({ kind: 'error', text: event.error === 'aborted' ? 'turn aborted' : `turn failed: ${event.error || 'unknown error'}` }); break;
+      case 'closed': dismissPendingQuestions(next); next.push({ kind: 'error', text: `chat session closed${event.error ? `: ${event.error}` : ''}` }); break;
+      case 'finished': dismissPendingQuestions(next); break;
     }
     return next;
+  };
+
+  // Pending questions can't outlive their turn: any terminal turn event marks
+  // them dismissed so the UI never sticks on "pending" (e.g. when an abort
+  // discards a late opencode rejected event). 'reset' already replaces every
+  // block wholesale.
+  const dismissPendingQuestions = blocks => {
+    for (const block of blocks) if (block.kind === 'question' && !block.done) { block.done = true; block.rejected = true; block.answerText = 'dismissed'; }
   };
 
   const agentName = () => (typeof document !== 'undefined' && document.getElementById('chat-root') && document.getElementById('chat-root').dataset.agentName) || 'Agent';
@@ -47,6 +58,14 @@
       let state = block.is_error ? 'bad' : block.done ? 'done' : 'live';
       let label = block.is_error ? 'error' : block.done ? 'done' : 'running';
       return `<details class="chat-tool" data-tool-id="${esc(block.id)}" data-bi="${i}"><summary><span class="chat-pill chat-pill-${state}">${label}</span><span class="chat-tool-name">${esc(block.name)}</span></summary><pre class="chat-tool-args">${esc(block.args)}</pre><pre class="chat-tool-output${block.is_error ? ' is-error' : ''}${block.done ? ' is-done' : ''}">${esc(block.text)}</pre></details>`;
+    }
+    if (block.kind === 'question') {
+      let state = block.done ? (block.rejected ? 'bad' : 'done') : 'live';
+      let label = block.done ? (block.rejected ? 'dismissed' : 'answered') : 'question';
+      let body = block.questions.map((q, qi) => `<div class="chat-q"><div class="chat-q-header">${esc(q.header || '')}</div><div class="chat-q-text">${esc(q.question || '')}</div><div class="chat-q-opts">${(q.options || []).map(o => `<button type="button" class="chat-q-opt" data-qbi="${i}" data-qi="${qi}" data-label="${esc(o.label)}" title="${esc(o.description || '')}"${block.done ? ' disabled' : ''}>${esc(o.label)}</button>`).join('')}</div></div>`).join('');
+      let custom = !block.done && block.questions.length === 1 && block.questions[0].custom ? `<div class="chat-q-customrow"><input class="chat-q-custom" data-qbi="${i}" placeholder="Custom answer"><button type="button" class="chat-q-send" data-qbi="${i}">Answer</button></div>` : '';
+      let answered = block.done && block.answerText ? `<div class="chat-q-answer">${esc(block.answerText)}</div>` : '';
+      return `<div class="chat-question" data-question-id="${esc(block.id)}"><span class="chat-pill chat-pill-${state}">${label}</span>${body}${custom}${answered}</div>`;
     }
     if (block.kind === 'thinking') {
       return `<details class="chat-think" data-bi="${i}"><summary>Thinking</summary><pre>${esc(block.text)}</pre></details>`;
@@ -174,6 +193,25 @@
     }
   };
 
+  // Deliver an answer for a pending question block. No optimistic done-flip:
+  // the block re-renders as done only when the server pushes "question_done".
+  const submitAnswer = async (app, block, answers) => {
+    if (!block || block.done || app.qsent[block.id]) return;
+    app.qsent[block.id] = true;
+    try { await request(`/chat/${SESSION}/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ request_id: block.id, answers }) }); }
+    catch (error) { delete app.qsent[block.id]; render(app, { type: 'error', error: `Answer not sent: ${error.message || 'request failed'}` }); }
+  };
+  // Single-question requests (the dominant case) submit on first click;
+  // multi-question blocks auto-submit once every question has a pick.
+  const answerFlow = (app, bi, qi, label) => {
+    let block = app.blocks[bi];
+    if (!block || block.kind !== 'question' || block.done) return;
+    let sel = app.qsel[block.id] || (app.qsel[block.id] = []);
+    sel[qi] = label;
+    if (block.questions.every((_, i) => sel[i] != null)) submitAnswer(app, block, sel.map(l => [l]));
+    else schedulePaint(app);
+  };
+
   const bindDocument = app => {
     document.addEventListener('submit', e => { if (e.target.id === 'chat-composer') { e.preventDefault(); sendFlow(app); } });
     document.addEventListener('keydown', e => { if (e.target.id === 'chat-input' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendFlow(app); } });
@@ -188,7 +226,11 @@
       if (chip) { app.pending.splice(Number(chip.dataset.chip), 1); renderChips(app); refreshBusy(app); return; }
       if (e.target.closest('#chat-attach')) { let f = $('chat-attachments'); if (f) f.click(); return; }
       let abort = e.target.closest('#chat-abort');
-      if (abort && !abort.disabled) fetch(`/chat/${SESSION}/abort`, { method: 'POST' });
+      if (abort && !abort.disabled) { fetch(`/chat/${SESSION}/abort`, { method: 'POST' }); return; }
+      let opt = e.target.closest('.chat-q-opt');
+      if (opt) { answerFlow(app, Number(opt.dataset.qbi), Number(opt.dataset.qi), opt.dataset.label); return; }
+      let qsend = e.target.closest('.chat-q-send');
+      if (qsend) { let input = document.querySelector(`.chat-q-custom[data-qbi="${qsend.dataset.qbi}"]`); if (input && input.value.trim()) submitAnswer(app, app.blocks[Number(qsend.dataset.qbi)], [[input.value.trim()]]); return; }
     });
     document.addEventListener('scroll', e => { if (e.target.id === 'chat-transcript') { let t = e.target; app.stick = (t.scrollHeight - t.scrollTop - t.clientHeight) < 64; } }, true);
   };
@@ -203,7 +245,7 @@
   };
 
   if (!window.__chatWeb) {
-    let app = { blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false };
+    let app = { blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false, qsel: {}, qsent: {} };
     window.__chatWeb = app;
     window.renderChatEvent = event => render(app, event);
     app.es = new EventSource(`/chat/${SESSION}/stream`);

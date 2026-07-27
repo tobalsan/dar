@@ -18,5 +18,6 @@ tempfile = "3"
 anyhow = "1"
 cap-runner = { package = "dar-cap-runner", path = "../cap-runner", version = "0.4" }
 dar-artifacts = { path = "../artifacts", version = "0.4" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.43", features = ["sync"] }

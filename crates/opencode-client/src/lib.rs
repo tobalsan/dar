@@ -282,6 +282,28 @@ impl OpenCodeClient {
             .is_success())
     }
 
+    /// opencode serve hosts a web UI with an SPA fallback, so an unknown route
+    /// (e.g. a stale path) returns 200 with HTML rather than an error. Parse the
+    /// body as JSON so a route regression fails loudly instead of no-oping.
+    pub async fn reply_question(&self, request_id: &str, answers: &[Vec<String>]) -> Result<()> {
+        let body = self
+            .client
+            .post(self.url(&format!("/question/{request_id}/reply")))
+            .json(&serde_json::json!({ "answers": answers }))
+            .send()
+            .await
+            .context("answering opencode question")?
+            .error_for_status()
+            .context("answering opencode question")?
+            .text()
+            .await
+            .context("reading opencode question reply response")?;
+        serde_json::from_str::<serde_json::Value>(&body).with_context(|| {
+            format!("opencode question reply returned non-JSON response (got: {body:.200})")
+        })?;
+        Ok(())
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }
@@ -510,6 +532,31 @@ mod tests {
         let client = OpenCodeClient::new(format!("http://{addr}"));
         assert!(client.session_exists("sess-1").await.unwrap());
         assert!(!client.session_exists("missing").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn reply_question_posts_answers() {
+        async fn reply(Path(request): Path<String>, Json(body): Json<Value>) -> Json<Value> {
+            assert_eq!(request, "req-1");
+            assert_eq!(body["answers"], serde_json::json!([["A"], ["custom"]]));
+            Json(serde_json::json!(true))
+        }
+
+        let app = Router::new().route("/question/:request/reply", post(reply));
+        let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = OpenCodeClient::new(format!("http://{addr}"));
+        client
+            .reply_question(
+                "req-1",
+                &[vec!["A".to_string()], vec!["custom".to_string()]],
+            )
+            .await
+            .unwrap();
     }
 
     fn write_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {

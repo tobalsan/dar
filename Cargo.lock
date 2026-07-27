@@ -563,6 +563,7 @@ dependencies = [
  "anyhow",
  "dar-artifacts",
  "dar-cap-runner",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
