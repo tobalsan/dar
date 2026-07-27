@@ -54,6 +54,7 @@ pub struct OpenCodeChatSession {
     system_prompt: Option<String>,
     server: Option<OpenCodeServer>,
     pump: JoinHandle<()>,
+    marker: Option<PathBuf>,
 }
 
 impl OpenCodeChatSession {
@@ -74,13 +75,21 @@ impl OpenCodeChatSession {
         )
         .await?;
         let client = server.client();
-        let session_id = match client.create_session("tui-chat").await {
-            Ok(id) => id,
-            Err(e) => {
-                server.kill_and_wait(CLOSE_GRACE).await;
-                return Err(e);
-            }
+        let session_id = match resume_session(&client, params.resume_session_id.as_deref()).await {
+            Some(id) => id,
+            None => match client.create_session("tui-chat").await {
+                Ok(id) => id,
+                Err(e) => {
+                    server.kill_and_wait(CLOSE_GRACE).await;
+                    return Err(e);
+                }
+            },
         };
+        // Marker in the SHARED session dir (params.session_dir, sibling to
+        // pi's files) so the generic newest-wins resume resolution finds this
+        // opencode session after a restart. Best-effort: a failed write only
+        // costs resume, never the session.
+        let marker = ensure_marker(&params.session_dir, &session_id);
         let mut events = match client.events().await {
             Ok(events) => events,
             Err(e) => {
@@ -133,13 +142,72 @@ impl OpenCodeChatSession {
             system_prompt: params.system_prompt.clone(),
             server: Some(server),
             pump,
+            marker,
         })
+    }
+}
+
+/// Reuse `resume` when the server still knows it; any miss or error falls
+/// back to fresh (None) — resume is always optional.
+async fn resume_session(
+    client: &opencode_client::OpenCodeClient,
+    resume: Option<&str>,
+) -> Option<String> {
+    let id = resume?;
+    matches!(client.session_exists(id).await, Ok(true)).then(|| id.to_string())
+}
+
+/// Find the existing marker whose header id matches, else write a new one:
+/// `{millis:013}_{id}.jsonl`, first line
+/// {"type":"session","id":"<id>","backend":"opencode"}. Returns the path.
+fn ensure_marker(shared_dir: &Path, session_id: &str) -> Option<PathBuf> {
+    std::fs::create_dir_all(shared_dir).ok()?;
+    if let Ok(entries) = std::fs::read_dir(shared_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some(first_line) = contents.lines().next() else {
+                continue;
+            };
+            let Ok(header) = serde_json::from_str::<serde_json::Value>(first_line) else {
+                continue;
+            };
+            if header.get("id").and_then(|v| v.as_str()) == Some(session_id)
+                && header.get("backend").and_then(|v| v.as_str()) == Some("opencode")
+            {
+                return Some(path);
+            }
+        }
+    }
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let path = shared_dir.join(format!("{millis:013}_{session_id}.jsonl"));
+    let header = serde_json::json!({ "type": "session", "id": session_id, "backend": "opencode" });
+    std::fs::write(&path, format!("{header}\n")).ok()?;
+    Some(path)
+}
+
+/// Freshen the marker mtime so chat-web's mtime-based idle expiry counts
+/// this session as active. (`File::set_modified`, MSRV 1.83-ok.)
+fn touch_marker(marker: Option<&Path>) {
+    if let Some(p) = marker {
+        if let Ok(f) = std::fs::File::options().append(true).open(p) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
     }
 }
 
 impl ChatSession for OpenCodeChatSession {
     fn send_turn(&mut self, prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
         Box::pin(async move {
+            touch_marker(self.marker.as_deref());
             self.client
                 .send_prompt_with_system(
                     &self.session_id,
@@ -589,6 +657,27 @@ mod tests {
     }
 
     #[test]
+    fn ensure_marker_writes_header_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = ensure_marker(dir.path(), "sess-1").unwrap();
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        assert!(filename.ends_with("_sess-1.jsonl"), "{filename}");
+        let (millis, _) = filename.split_once('_').unwrap();
+        assert_eq!(millis.len(), 13);
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let header: serde_json::Value =
+            serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            header,
+            serde_json::json!({ "type": "session", "id": "sess-1", "backend": "opencode" })
+        );
+
+        let second = ensure_marker(dir.path(), "sess-1").unwrap();
+        assert_eq!(second, path);
+    }
+
+    #[test]
     fn maps_turn_finished_and_errors() {
         match mapped_event(r#"{"payload":{"type":"session.idle","properties":{"sessionID":"s1"}}}"#)
             .unwrap()
@@ -728,6 +817,11 @@ class H(BaseHTTPRequestHandler):
         global dispose
         if self.path == "/global/health":
             return self._json({"healthy": True, "version": "fake"})
+        if self.path == "/session/sess-1":
+            return self._json({"id": "sess-1"})
+        if self.path.startswith("/session/") and self.path.count("/") == 2:
+            self.send_error(404)
+            return
         if self.path == "/global/event":
             self.send_response(200)
             self.send_header("content-type", "text/event-stream")
@@ -896,6 +990,98 @@ PY"#;
             "abort\n"
         );
         assert!(temp.path().join("permission.log").exists());
+        let marker_count = std::fs::read_dir(&sessions)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    == Some("jsonl")
+            })
+            .count();
+        assert_eq!(marker_count, 1, "expected exactly one opencode marker file");
+        let marker_path = std::fs::read_dir(&sessions)
+            .unwrap()
+            .find_map(|e| {
+                let path = e.unwrap().path();
+                (path.extension().and_then(|e| e.to_str()) == Some("jsonl")).then_some(path)
+            })
+            .unwrap();
+        let header: serde_json::Value = serde_json::from_str(
+            std::fs::read_to_string(&marker_path)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(header["backend"], "opencode");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resume_reuses_existing_session_and_touches_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_script(temp.path(), FAKE_SERVER);
+        let sessions = temp.path().join("data").join("tui").join("sessions");
+
+        let params =
+            ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions).build();
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let session = OpenCodeChatSession::spawn(&params, tx).await.unwrap();
+        let marker = session.marker.clone().expect("marker written on spawn");
+        ChatSession::close(Box::new(session)).await.unwrap();
+        let mtime_before = std::fs::metadata(&marker).unwrap().modified().unwrap();
+
+        let params = ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions)
+            .resume_session_id(Some("sess-1".to_string()))
+            .build();
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut session = OpenCodeChatSession::spawn(&params, tx).await.unwrap();
+        assert_eq!(session.session_id, "sess-1");
+
+        let marker_count = std::fs::read_dir(&sessions)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    == Some("jsonl")
+            })
+            .count();
+        assert_eq!(marker_count, 1, "resume must not create a second marker");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        session.send_turn("hi".to_string()).await.unwrap();
+        let mtime_after = std::fs::metadata(&marker).unwrap().modified().unwrap();
+        assert!(
+            mtime_after > mtime_before,
+            "marker mtime should advance on send_turn"
+        );
+
+        ChatSession::close(Box::new(session)).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resume_unknown_id_falls_back_to_create() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_script(temp.path(), FAKE_SERVER);
+        let sessions = temp.path().join("data").join("tui").join("sessions");
+        let params = ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions)
+            .resume_session_id(Some("missing".to_string()))
+            .build();
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut session = OpenCodeChatSession::spawn(&params, tx).await.unwrap();
+
+        session.send_turn("hello".to_string()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let received = std::fs::read_to_string(temp.path().join("received.log")).unwrap();
+        assert!(received.contains("hello"), "{received}");
+
+        ChatSession::close(Box::new(session)).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

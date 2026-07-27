@@ -220,7 +220,10 @@ async fn run_interactive(
     // restart's resume target, so the following launch hydrates nothing.
     // Best-effort: any read failure simply yields no hydration.
     if let Ok(session_dir) = sessions_dir(&config, &ctx) {
-        if let Some(id) = crate::archive::newest_session_id(&session_dir) {
+        // Launch hydration replays pi-format archive Messages only:
+        // backend-tagged marker files (e.g. opencode's) carry no messages, so
+        // they must never be picked for hydration.
+        if let Some(id) = crate::archive::newest_session_id(&session_dir, "pi") {
             let (messages, truncated) = crate::archive::read_recent(&session_dir, &id);
             app.chat.hydrate(&messages, truncated);
         }
@@ -474,7 +477,7 @@ async fn open_session(
     // archive exists: the newest session is the one we just closed, and the
     // human asked to leave it behind.
     let resume_session_id = (!suppress_resume)
-        .then(|| crate::archive::newest_session_id(&session_dir))
+        .then(|| crate::archive::newest_session_id(&session_dir, backend_id))
         .flatten();
     // Build params through the shared SDK helper so the TUI talks to the same
     // agent identity (model/provider from the retained RunSnapshot, retained

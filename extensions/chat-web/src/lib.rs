@@ -354,7 +354,7 @@ impl AppState {
         let resume_session_id = (!session
             .suppress_resume
             .swap(false, std::sync::atomic::Ordering::SeqCst))
-        .then(|| newest_session(&session_dir))
+        .then(|| newest_session(&session_dir, &backend_id))
         .flatten()
         .filter(|session| !self.session_is_idle(session))
         .map(|session| session.id);
@@ -480,7 +480,7 @@ struct PersistedSession {
     modified: std::time::SystemTime,
 }
 
-fn newest_session(dir: &std::path::Path) -> Option<PersistedSession> {
+fn newest_session(dir: &std::path::Path, backend_id: &str) -> Option<PersistedSession> {
     fs::read_dir(dir)
         .ok()?
         .filter_map(Result::ok)
@@ -495,6 +495,12 @@ fn newest_session(dir: &std::path::Path) -> Option<PersistedSession> {
                     .and_then(Result::ok)
                     .and_then(|line| serde_json::from_str::<serde_json::Value>(&line).ok())?;
                 (header.get("type")?.as_str()? == "session").then_some(())?;
+                (header
+                    .get("backend")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("pi")
+                    == backend_id)
+                    .then_some(())?;
                 let id = header.get("id")?.as_str()?.to_owned();
                 Some(PersistedSession {
                     id,
@@ -1541,8 +1547,21 @@ mod tests {
             r#"{"type":"session","id":"resume-me"}"#,
         )
         .unwrap();
-        let mut persisted = newest_session(&sessions).unwrap();
-        assert_eq!(persisted.id, "resume-me");
+        fs::write(
+            sessions.join("2026-01-02_b.jsonl"),
+            r#"{"type":"session","id":"resume-oc","backend":"opencode"}"#,
+        )
+        .unwrap();
+
+        // The pi<->opencode cross-resume guard: an untagged (legacy pi)
+        // header resumes only under "pi", a "backend":"opencode" header only
+        // under "opencode" — never the other way around.
+        let pi_pick = newest_session(&sessions, "pi").unwrap();
+        assert_eq!(pi_pick.id, "resume-me");
+        let opencode_pick = newest_session(&sessions, "opencode").unwrap();
+        assert_eq!(opencode_pick.id, "resume-oc");
+
+        let mut persisted = pi_pick;
         persisted.modified = std::time::SystemTime::UNIX_EPOCH;
         let state = AppState {
             config: Config {

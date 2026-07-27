@@ -84,7 +84,7 @@ pub fn list(sessions_dir: &Path) -> Vec<SessionInfo> {
 /// when the file can't be read or its header is malformed / carries no `id` —
 /// the caller skips it.
 fn read_session_info(path: &Path) -> Option<SessionInfo> {
-    let header = read_header_value(path)?;
+    let header = read_session_header(path)?;
     let id = header.get("id").and_then(Value::as_str)?;
     if id.is_empty() {
         return None;
@@ -271,10 +271,10 @@ fn session_file_by_id(sessions_dir: &Path, session_id: &str) -> Option<std::path
         .find(|path| read_session_id_opt(path).as_deref() == Some(session_id))
 }
 
-/// Like [`read_session_id`] but kept distinct so `search`/`read` can resolve a
-/// file's id without coupling to the resume path.
+/// Read a file's header `id`, kept distinct so `search`/`read` can resolve a
+/// file's id without coupling to the resume path's backend filter.
 fn read_session_id_opt(path: &Path) -> Option<String> {
-    let header = read_header_value(path)?;
+    let header = read_session_header(path)?;
     let id = header.get("id").and_then(Value::as_str)?;
     if id.is_empty() {
         return None;
@@ -432,7 +432,7 @@ fn lower_aligned_char(c: char) -> char {
 
 /// Read and parse a session file's header line (the first non-empty line, a
 /// JSON object). `None` on any read/parse failure.
-fn read_header_value(path: &Path) -> Option<Value> {
+fn read_session_header(path: &Path) -> Option<Value> {
     let file = fs::File::open(path).ok()?;
     let mut reader = BufReader::new(file);
     let mut line = String::new();
@@ -449,50 +449,34 @@ fn read_header_value(path: &Path) -> Option<Value> {
     }
 }
 
-/// Resolve the id of the newest persisted session under `sessions_dir`, or
-/// `None` when there is nothing resumable: the dir is missing/empty, the newest
-/// file can't be read, or its header is malformed / carries no `id`. Never
-/// errors — resume is always optional.
-pub fn newest_session_id(sessions_dir: &Path) -> Option<String> {
-    let newest = newest_session_file(sessions_dir)?;
-    read_session_id(&newest)
-}
-
-/// The lexically-greatest `*.jsonl` filename in `sessions_dir` (== newest given
-/// the `<ISO-timestamp>_<uuid>.jsonl` naming), as a full path. `None` when the
-/// dir is missing/unreadable or holds no `.jsonl` files.
-fn newest_session_file(sessions_dir: &Path) -> Option<std::path::PathBuf> {
+/// Resolve the id of the newest persisted session under `sessions_dir` that is
+/// eligible for `backend_id`, or `None` when nothing resumable exists: the dir
+/// is missing/empty, or no file has a readable header with a non-empty `id`
+/// whose `backend` (defaulting to `"pi"` when the field is absent — the
+/// pre-tag marker shape) matches `backend_id`. Filters eligible files first,
+/// then takes the lexically-greatest (== newest) name among them, so a
+/// foreign-backend or malformed newer file can never shadow an eligible older
+/// one. Never errors — resume is always optional.
+pub fn newest_session_id(sessions_dir: &Path, backend_id: &str) -> Option<String> {
     let entries = fs::read_dir(sessions_dir).ok()?;
     entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
-        .max_by(|a, b| a.file_name().cmp(&b.file_name()))
-}
-
-/// Read the `id` from a session file's header line (the first non-empty line, a
-/// JSON object with an `id` string). `None` on any read/parse failure or a
-/// missing/empty id — the caller treats that as "not resumable".
-fn read_session_id(path: &Path) -> Option<String> {
-    let file = fs::File::open(path).ok()?;
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let read = reader.read_line(&mut line).ok()?;
-        if read == 0 {
-            return None; // EOF before any non-empty line.
-        }
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_str(line.trim()).ok()?;
-        let id = value.get("id").and_then(Value::as_str)?;
-        if id.is_empty() {
-            return None;
-        }
-        return Some(id.to_string());
-    }
+        .filter_map(|path| {
+            let header = read_session_header(&path)?;
+            let id = header.get("id").and_then(Value::as_str)?;
+            if id.is_empty() {
+                return None;
+            }
+            let backend = header
+                .get("backend")
+                .and_then(Value::as_str)
+                .unwrap_or("pi");
+            (backend == backend_id).then(|| (path, id.to_string()))
+        })
+        .max_by(|(a, _), (b, _)| a.file_name().cmp(&b.file_name()))
+        .map(|(_, id)| id)
 }
 
 #[cfg(test)]
@@ -513,7 +497,8 @@ mod tests {
              {\"type\":\"message_update\"}\n",
         )
         .unwrap();
-        assert_eq!(read_session_id(&path).as_deref(), Some("abc-123"));
+        let header = read_session_header(&path).unwrap();
+        assert_eq!(header.get("id").and_then(Value::as_str), Some("abc-123"));
     }
 
     #[test]
@@ -521,7 +506,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("session.jsonl");
         fs::write(&path, "\n   \n{\"id\":\"xyz\"}\n").unwrap();
-        assert_eq!(read_session_id(&path).as_deref(), Some("xyz"));
+        let header = read_session_header(&path).unwrap();
+        assert_eq!(header.get("id").and_then(Value::as_str), Some("xyz"));
     }
 
     #[test]
@@ -529,7 +515,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("session.jsonl");
         fs::write(&path, "not json at all\n").unwrap();
-        assert_eq!(read_session_id(&path), None);
+        assert_eq!(read_session_header(&path), None);
     }
 
     #[test]
@@ -537,7 +523,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("session.jsonl");
         fs::write(&path, "{\"type\":\"session\",\"version\":3}\n").unwrap();
-        assert_eq!(read_session_id(&path), None);
+        let header = read_session_header(&path).unwrap();
+        assert_eq!(header.get("id"), None);
     }
 
     #[test]
@@ -545,7 +532,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("session.jsonl");
         fs::write(&path, "").unwrap();
-        assert_eq!(read_session_id(&path), None);
+        assert_eq!(read_session_header(&path), None);
     }
 
     #[test]
@@ -567,7 +554,10 @@ mod tests {
             "2024-03-10T08:00:00Z_ccc.jsonl",
             "{\"id\":\"middle\"}\n",
         );
-        assert_eq!(newest_session_id(temp.path()).as_deref(), Some("newest"));
+        assert_eq!(
+            newest_session_id(temp.path(), "pi").as_deref(),
+            Some("newest")
+        );
     }
 
     #[test]
@@ -581,20 +571,46 @@ mod tests {
         );
         write(temp.path(), "zzzz-not-a-session.log", "garbage\n");
         write(temp.path(), "README.txt", "hi\n");
-        assert_eq!(newest_session_id(temp.path()).as_deref(), Some("win"));
+        assert_eq!(newest_session_id(temp.path(), "pi").as_deref(), Some("win"));
     }
 
     #[test]
     fn empty_dir_yields_none() {
         let temp = tempfile::tempdir().unwrap();
-        assert_eq!(newest_session_id(temp.path()), None);
+        assert_eq!(newest_session_id(temp.path(), "pi"), None);
     }
 
     #[test]
     fn missing_dir_yields_none() {
         let temp = tempfile::tempdir().unwrap();
         let missing = temp.path().join("does-not-exist");
-        assert_eq!(newest_session_id(&missing), None);
+        assert_eq!(newest_session_id(&missing, "pi"), None);
+    }
+
+    #[test]
+    fn resume_backend_filter_picks_the_newest_eligible_file_per_backend() {
+        let temp = tempfile::tempdir().unwrap();
+        // Untagged header defaults to "pi" and is lexically the oldest name.
+        write(
+            temp.path(),
+            "2024-01-01T00-00-00_aaa.jsonl",
+            "{\"type\":\"session\",\"id\":\"aaa-id\"}\n",
+        );
+        // A lexically-greater opencode marker must not shadow the pi session.
+        write(
+            temp.path(),
+            "9999999999999_opc.jsonl",
+            "{\"type\":\"session\",\"id\":\"opc-1\",\"backend\":\"opencode\"}\n",
+        );
+        assert_eq!(
+            newest_session_id(temp.path(), "pi").as_deref(),
+            Some("aaa-id")
+        );
+        assert_eq!(
+            newest_session_id(temp.path(), "opencode").as_deref(),
+            Some("opc-1")
+        );
+        assert_eq!(newest_session_id(temp.path(), "codex"), None);
     }
 
     #[test]
@@ -1080,20 +1096,24 @@ mod tests {
     }
 
     #[test]
-    fn malformed_newest_file_yields_none_even_with_valid_older() {
+    fn malformed_newest_file_is_skipped_falling_back_to_valid_older() {
         let temp = tempfile::tempdir().unwrap();
         write(
             temp.path(),
             "2024-01-01T00:00:00Z_old.jsonl",
             "{\"id\":\"valid-old\"}\n",
         );
-        // Newest by name is corrupt: we must NOT silently fall back to the older
-        // session — the caller opens a fresh session instead.
+        // Newest by name is corrupt: filter-then-max excludes it from
+        // consideration entirely, so the valid older file wins rather than
+        // the whole lookup failing.
         write(
             temp.path(),
             "2024-09-09T09:09:09Z_new.jsonl",
             "totally broken\n",
         );
-        assert_eq!(newest_session_id(temp.path()), None);
+        assert_eq!(
+            newest_session_id(temp.path(), "pi").as_deref(),
+            Some("valid-old")
+        );
     }
 }

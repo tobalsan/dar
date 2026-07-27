@@ -263,6 +263,25 @@ impl OpenCodeClient {
         Ok(())
     }
 
+    /// True when the server knows `session_id` (persisted in its sqlite store,
+    /// so ids survive server restarts). 404 is "no", not an error.
+    pub async fn session_exists(&self, session_id: &str) -> Result<bool> {
+        let resp = self
+            .client
+            .get(self.url(&format!("/session/{session_id}")))
+            .send()
+            .await
+            .context("checking opencode session")?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        Ok(resp
+            .error_for_status()
+            .context("checking opencode session")?
+            .status()
+            .is_success())
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }
@@ -469,6 +488,28 @@ mod tests {
             .respond_permission("sess-1", "perm-1", "once", false)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_exists_reports_found_and_missing() {
+        async fn session(Path(session): Path<String>) -> impl IntoResponse {
+            if session == "sess-1" {
+                Json(serde_json::json!({ "id": "sess-1" })).into_response()
+            } else {
+                axum::http::StatusCode::NOT_FOUND.into_response()
+            }
+        }
+
+        let app = Router::new().route("/session/:session", get(session));
+        let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = OpenCodeClient::new(format!("http://{addr}"));
+        assert!(client.session_exists("sess-1").await.unwrap());
+        assert!(!client.session_exists("missing").await.unwrap());
     }
 
     fn write_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
