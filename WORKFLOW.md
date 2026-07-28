@@ -4,6 +4,7 @@ tracker:
   team: ALG
   label: 
     - repo:dar
+    - repo:dar-extensions
   active_states: [Todo, In Progress]
   terminal_states: [In Review, Done, Cancelled]
   needs_human: "Needs Human"
@@ -57,6 +58,7 @@ Reference repos:
 - DAR main repo: https://github.com/tobalsan/dar.git (local: {{ workflow.dir }})
 - DAR extensions repo: https://github.com/agentropie/dar-extensions.git 
 
+Refer to the issue label for repo identification.
 If it's not perfectly clear which repo to use, do not make unreliable assumptions, instead park the issue to "Needs Human" and add a comment signaling you need human input to specify which repo to use.
 
 **Never work directly in the referenced repository.** Any local repo path in the issue description (or its parent/siblings) is provided **for reference only** — to help you identify the repo and read existing code. It is NOT your working directory. Treat it as read-only: do not create branches, commit, or make edits there. Editing the referenced clone directly corrupts a shared checkout and is a hard failure of this workflow.
