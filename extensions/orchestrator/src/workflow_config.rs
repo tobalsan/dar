@@ -179,6 +179,7 @@ impl WfAgentConfig {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct WfHooksConfig {
+    pub timeout_ms: Option<u64>,
     pub after_create: Option<String>,
     pub before_run: Option<String>,
     pub after_run: Option<String>,
@@ -380,8 +381,7 @@ pub struct EffectiveLoopConfig {
     pub dashboard_bind: IpAddr,
     pub dashboard_port: u16,
     pub webhook_secret: Option<String>,
-    // Extension points (parsed; not yet acted on in v0)
-    #[allow(dead_code)]
+    // Lifecycle hook configuration from WORKFLOW.md.
     pub hooks: WfHooksConfig,
     #[allow(dead_code)]
     pub linear: WfLinearConfig,
@@ -452,6 +452,13 @@ impl WorkflowFrontmatter {
             if agent.max_turns == Some(0) {
                 bail!("WORKFLOW.md frontmatter `agent.max_turns` must be > 0");
             }
+        }
+        if self
+            .hooks
+            .as_ref()
+            .is_some_and(|hooks| hooks.timeout_ms == Some(0))
+        {
+            bail!("WORKFLOW.md frontmatter `hooks.timeout_ms` must be > 0");
         }
         Ok(())
     }
@@ -724,6 +731,7 @@ agent:
   model: fake-model
   max_run_timeout_ms: 900000
 hooks:
+  timeout_ms: 120000
   after_create: ./after-create.sh
   before_run: ./before-run.sh
   after_run: ./after-run.sh
@@ -760,6 +768,7 @@ body"#;
             fm.hooks.as_ref().unwrap().after_create,
             Some("./after-create.sh".into())
         );
+        assert_eq!(fm.hooks.as_ref().unwrap().timeout_ms, Some(120000));
         assert_eq!(
             fm.hooks.as_ref().unwrap().before_run,
             Some("./before-run.sh".into())
@@ -895,6 +904,7 @@ body"#;
             ("agent:\n  turn_timeout_ms: 0", "agent.turn_timeout_ms"),
             ("agent:\n  stall_timeout_ms: 0", "agent.stall_timeout_ms"),
             ("agent:\n  max_turns: 0", "agent.max_turns"),
+            ("hooks:\n  timeout_ms: 0", "hooks.timeout_ms"),
         ];
 
         for (section, field) in cases {
@@ -919,6 +929,15 @@ body"#;
         .unwrap();
 
         workflow.frontmatter.validate_loop().unwrap();
+    }
+
+    #[test]
+    fn hooks_timeout_is_optional() {
+        let workflow = parse_workflow_md(
+            "---\ntracker:\n  kind: files\n  active_states: [todo]\n  terminal_states: [done]\nhooks:\n  before_run: echo ready\n---",
+        )
+        .unwrap();
+        assert_eq!(workflow.frontmatter.hooks.unwrap().timeout_ms, None);
     }
 
     #[test]

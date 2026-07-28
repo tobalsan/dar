@@ -9,6 +9,8 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Lifecycle hooks now run asynchronously with a default two-minute timeout; configure `hooks.timeout_ms` in `WORKFLOW.md` to change it.
+
 - Scheduler jobs can now deliver completed results to registered communication sinks using explicit `deliver` targets; delivery failures are recorded as warnings without changing the job result.
 
 ### Added
