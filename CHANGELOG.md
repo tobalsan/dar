@@ -22,6 +22,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Fixed
 
+- Cron jobs run by the opencode runner no longer show up as `error` in the Cron dashboard tab when they actually succeeded: `opencode serve` doesn't exit on `/instance/dispose`, so the runner's finish path force-kills it, and that forced shutdown is now classified as a normal exit instead of an abnormal one.
 - Ctrl-C now stops `dar run` promptly even while a browser tab holds the web chat stream open: SSE responses end on host shutdown (with a 2 s backstop before the HTTP server is aborted) instead of graceful shutdown waiting for the tab to disconnect.
 - Opencode chat sessions now survive dar restarts: the opencode backend resumes the same underlying opencode session (verified against its persisted store, falling back to a fresh session when gone) instead of silently starting a new one, while `/new` still forks fresh and pi/opencode backend switches never cross-resume each other's sessions.
 - The opencode chat backend no longer echoes the user's own prompt back as an assistant message: opencode's SSE stream emits `message.part.updated` events for the user's prompt parts too, and these were previously mapped to assistant deltas like any other text part.

@@ -405,7 +405,23 @@ fn classify_child_exit(issue_id: &str, status: Result<std::process::ExitStatus>)
 
 async fn finish(issue_id: &str, server: &mut OpenCodeServer) -> ExitKind {
     log_ev(issue_id, "finish", "disposing opencode server");
-    classify_child_exit(issue_id, server.dispose_then_wait(SHUTDOWN_GRACE).await)
+    classify_finish_exit(issue_id, server.dispose_then_wait(SHUTDOWN_GRACE).await)
+}
+
+/// Classifies the exit status from the finish path, where `dispose_then_wait`
+/// may fall through to `term_then_kill` (SIGTERM, then SIGKILL) after
+/// `opencode serve` fails to exit on `/instance/dispose`. On that path we are
+/// the only thing that can signal the child, so a signal-terminated exit is
+/// a clean shutdown at a turn boundary, not a run failure. A genuine
+/// non-zero exit code is still abnormal.
+fn classify_finish_exit(issue_id: &str, status: Result<std::process::ExitStatus>) -> ExitKind {
+    match status {
+        Ok(status) if status.code().is_none() => {
+            log_ev(issue_id, "exit", "forced shutdown after dispose (normal)");
+            ExitKind::Normal
+        }
+        other => classify_child_exit(issue_id, other),
+    }
 }
 
 async fn kill_exit(
@@ -1185,6 +1201,34 @@ PY"#;
         handle.send_turn_decision(TurnDecision::Finish);
         let exit = handle.wait().await;
         assert_eq!(exit, ExitKind::Normal, "got {exit:?}");
+    }
+
+    #[test]
+    fn classify_finish_exit_treats_signal_terminated_as_normal() {
+        use std::os::unix::process::ExitStatusExt;
+        // Raw wait() status for "terminated by SIGTERM (15), no core dump":
+        // low 7 bits carry the signal, so status.code() is None.
+        let status = std::process::ExitStatus::from_raw(15);
+        assert!(
+            status.code().is_none(),
+            "sanity: status should be signal-terminated"
+        );
+        let exit = classify_finish_exit("ISSUE-1", Ok(status));
+        assert_eq!(exit, ExitKind::Normal, "got {exit:?}");
+    }
+
+    #[test]
+    fn classify_finish_exit_still_treats_nonzero_exit_code_as_abnormal() {
+        use std::os::unix::process::ExitStatusExt;
+        // Raw wait() status for "exited normally with code 1".
+        let status = std::process::ExitStatus::from_raw(1 << 8);
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "sanity: status should carry exit code 1"
+        );
+        let exit = classify_finish_exit("ISSUE-1", Ok(status));
+        assert_eq!(exit, ExitKind::Abnormal(Some(1)), "got {exit:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
