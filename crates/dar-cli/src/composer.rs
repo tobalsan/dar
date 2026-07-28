@@ -35,6 +35,9 @@ const STANDARD_GITIGNORE: &str = "\
 /claude-sessions/
 /opencode-sessions/
 /pi-sessions/
+
+# scheduled job output
+/cron/output/
 ";
 
 const GENERATED_TOML_HEADER: &str = "# generated - do not hand-edit\n";
@@ -1742,6 +1745,7 @@ requires_stock = ["chat-pi"]
             "/claude-sessions/",
             "/opencode-sessions/",
             "/pi-sessions/",
+            "/cron/output/",
         ] {
             assert!(
                 contents.lines().any(|line| line == entry),
@@ -1775,6 +1779,7 @@ requires_stock = ["chat-pi"]
             "/claude-sessions/",
             "/opencode-sessions/",
             "/pi-sessions/",
+            "/cron/output/",
         ] {
             assert_eq!(
                 contents.lines().filter(|line| *line == entry).count(),
