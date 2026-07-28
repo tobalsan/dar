@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::{DefaultBodyLimit, Multipart, Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware,
     response::{
@@ -94,6 +94,8 @@ impl Extension for ChatWebExtension {
                 router: router(state),
                 routes: vec![
                     "/".into(),
+                    "/sessions".into(),
+                    "/sessions/{id}".into(),
                     "/{session}/stream".into(),
                     "/{session}/history".into(),
                     "/{session}/send".into(),
@@ -287,6 +289,8 @@ struct Send {
 fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/sessions", get(session_index))
+        .route("/sessions/{id}", get(session_transcript))
         .route("/{session}/stream", get(stream))
         .route("/{session}/send", post(send))
         .route("/{session}/upload", post(upload))
@@ -307,6 +311,26 @@ fn router(state: Arc<AppState>) -> Router {
 }
 async fn index() -> Html<&'static str> {
     Html("chat web is available from the Chat dashboard tab")
+}
+
+#[derive(Deserialize)]
+struct SessionPage { offset: Option<usize>, count: Option<usize> }
+
+/// Archive routes are deliberately read-only.  They do not resolve or open a
+/// live backend session, so browsing cannot affect streaming chat state.
+async fn session_index(State(state): State<Arc<AppState>>) -> Json<Vec<chat::archive::SessionInfo>> {
+    let live = newest_session(&state.root.join("data/chat/sessions"), &state.config.backend.clone().unwrap_or_else(|| "pi".into())).map(|session| session.id);
+    let sessions = chat::archive::list(&state.root.join("data/chat/sessions"))
+        .into_iter().filter(|session| Some(&session.id) != live.as_ref()).collect();
+    Json(sessions)
+}
+
+async fn session_transcript(Path(id): Path<String>, Query(page): Query<SessionPage>, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if id.is_empty() || id.contains('/') || id.contains('\\') { return StatusCode::NOT_FOUND.into_response(); }
+    match chat::archive::read_events(&state.root.join("data/chat/sessions"), &id, page.offset.unwrap_or(0), page.count.unwrap_or(100)) {
+        Some(page) => Json(page).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 // Tells the fleet proxy (`dar dash`) this response's URLs are already
@@ -3081,6 +3105,22 @@ mod tests {
 
         let missing = test_root();
         assert_eq!(agent_display_name(&missing), "Agent");
+    }
+
+    #[tokio::test]
+    async fn history_routes_list_and_page_archived_sessions() {
+        let root = test_root();
+        let dir = root.join("data/chat/sessions");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("2026-01-01_a.jsonl"), "{\"type\":\"session\",\"id\":\"past\"}\n{\"type\":\"message_end\",\"message\":{\"role\":\"user\",\"content\":\"remember this\"}}\n").unwrap();
+        let state = Arc::new(AppState { config: Config::default(), root, start: std::sync::OnceLock::new(), sessions: Mutex::new(HashMap::new()) });
+        let app = router(state);
+        let index = app.clone().oneshot(axum::http::Request::builder().uri("/sessions").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(index.status(), StatusCode::OK);
+        let transcript = app.oneshot(axum::http::Request::builder().uri("/sessions/past?count=1").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(transcript.status(), StatusCode::OK);
+        let bytes = transcript.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8(bytes.to_vec()).unwrap().contains("remember this"));
     }
 
     #[test]
