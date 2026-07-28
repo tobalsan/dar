@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Context, Error, Result};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -43,6 +43,17 @@ struct Session {
     id: String,
 }
 
+/// Number of times `spawn` will retry after the child exits before becoming
+/// healthy (e.g. because another process grabbed the reserved port first).
+const SPAWN_ATTEMPTS: u32 = 3;
+
+/// Distinguishes "child exited before the health check passed" (retryable,
+/// since it's usually a port race) from any other spawn failure.
+enum SpawnOnceError {
+    ExitedBeforeHealthy(Error),
+    Other(Error),
+}
+
 impl OpenCodeServer {
     pub async fn spawn(
         command: impl Into<OsString>,
@@ -50,14 +61,36 @@ impl OpenCodeServer {
         env: impl IntoIterator<Item = (OsString, OsString)>,
         cwd: &Path,
     ) -> Result<Self> {
-        let port = reserve_local_port()?;
+        let command = command.into();
+        let args = args.into_iter().collect::<Vec<_>>();
+        let env = env.into_iter().collect::<Vec<_>>();
+        for attempt in 1..=SPAWN_ATTEMPTS {
+            match Self::spawn_once(command.clone(), args.clone(), env.clone(), cwd).await {
+                Ok(server) => return Ok(server),
+                Err(SpawnOnceError::ExitedBeforeHealthy(_)) if attempt < SPAWN_ATTEMPTS => {
+                    continue;
+                }
+                Err(SpawnOnceError::ExitedBeforeHealthy(e)) => return Err(e),
+                Err(SpawnOnceError::Other(e)) => return Err(e),
+            }
+        }
+        unreachable!("loop always returns on its last iteration")
+    }
+
+    async fn spawn_once(
+        command: OsString,
+        args: Vec<OsString>,
+        env: Vec<(OsString, OsString)>,
+        cwd: &Path,
+    ) -> Result<Self, SpawnOnceError> {
+        let port = reserve_local_port().map_err(SpawnOnceError::Other)?;
         let base_url = format!("http://127.0.0.1:{port}");
         let port_arg = OsString::from(port.to_string());
         let args = args
             .into_iter()
             .map(|arg| if arg == "0" { port_arg.clone() } else { arg })
             .collect::<Vec<_>>();
-        let mut cmd = Command::new(command.into());
+        let mut cmd = Command::new(command);
         runner_core::scrub_loaded_env(&mut cmd);
         cmd.args(args)
             .current_dir(cwd)
@@ -66,7 +99,10 @@ impl OpenCodeServer {
             .stderr(Stdio::null());
         cmd.envs(env);
         runner_core::setup_process_group(&mut cmd);
-        let child = cmd.spawn().context("spawning opencode serve")?;
+        let child = cmd
+            .spawn()
+            .context("spawning opencode serve")
+            .map_err(SpawnOnceError::Other)?;
         let mut server = Self { base_url, child };
         let client = server.client();
         let health = client.wait_for_health(Duration::from_secs(20));
@@ -75,12 +111,16 @@ impl OpenCodeServer {
             result = &mut health => {
                 if let Err(e) = result {
                     server.kill_and_wait(Duration::from_secs(1)).await;
-                    return Err(e);
+                    return Err(SpawnOnceError::Other(e));
                 }
             }
             status = server.child.wait() => {
-                let status = status.context("waiting for opencode serve during health check")?;
-                return Err(anyhow!("opencode server exited before becoming healthy: {status}"));
+                let status = status
+                    .context("waiting for opencode serve during health check")
+                    .map_err(SpawnOnceError::Other)?;
+                return Err(SpawnOnceError::ExitedBeforeHealthy(anyhow!(
+                    "opencode server exited before becoming healthy: {status}"
+                )));
             }
         }
         Ok(server)

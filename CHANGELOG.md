@@ -22,6 +22,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ### Fixed
 
+- Opencode chat/runner sessions no longer fail to start when the local port reserved for the opencode server is claimed by another process in the brief window before the server binds it: the server spawn now retries with a freshly reserved port instead of surfacing "opencode server exited before becoming healthy".
 - `dar create` / `dar init-build` now include `/cron/output/` in the generated agent `.gitignore`, so scheduled job output is not versioned.
 - Cron jobs run by the opencode runner no longer show up as `error` in the Cron dashboard tab when they actually succeeded: `opencode serve` doesn't exit on `/instance/dispose`, so the runner's finish path force-kills it, and that forced shutdown is now classified as a normal exit instead of an abnormal one.
 - Ctrl-C now stops `dar run` promptly even while a browser tab holds the web chat stream open: SSE responses end on host shutdown (with a 2 s backstop before the HTTP server is aborted) instead of graceful shutdown waiting for the tab to disconnect.
