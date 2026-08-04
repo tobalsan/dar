@@ -55,8 +55,8 @@ use crate::store::{
 };
 use crate::workflow_config::EffectiveLoopConfig;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Mutex;
+use tokio::process::Command;
 
 pub mod agent_config_reload;
 pub mod config;
@@ -1310,7 +1310,8 @@ impl Orchestrator {
                 note,
                 None,
                 slot.claim_id,
-            );
+            )
+            .await;
             // Not retried: terminal = done, missing/non-active = cancelled.
         }
     }
@@ -1395,7 +1396,8 @@ impl Orchestrator {
                                 "terminal after normal exit",
                                 Some(0),
                                 claim_id,
-                            );
+                            )
+                            .await;
                         }
                         Ok(Some(ref st)) if needs_human.as_deref() == Some(st.as_str()) => {
                             logging::ev(
@@ -1414,7 +1416,8 @@ impl Orchestrator {
                                 "needs-human after normal exit",
                                 Some(0),
                                 claim_id,
-                            );
+                            )
+                            .await;
                         }
                         Ok(Some(ref st)) if active.contains(st) => {
                             logging::ev(&id, "continuation", "still active after exit 0; retry 1s");
@@ -1431,7 +1434,8 @@ impl Orchestrator {
                                 ACTIVE_CONTINUATION_MARKER,
                                 Some(0),
                                 claim_id,
-                            );
+                            )
+                            .await;
                             self.retries.push(Retry {
                                 identifier: id.clone(),
                                 attempt: slot.attempt,
@@ -1458,7 +1462,8 @@ impl Orchestrator {
                                 "non-active after normal exit",
                                 Some(0),
                                 claim_id,
-                            );
+                            )
+                            .await;
                         }
                     }
                 }
@@ -1475,7 +1480,8 @@ impl Orchestrator {
                         reason,
                         None,
                         claim_id,
-                    );
+                    )
+                    .await;
                 }
                 ExitKind::Abnormal(exit_code) => {
                     let state_now = self.tracker.fetch_one(&id).ok().flatten().map(|i| i.state);
@@ -1499,7 +1505,8 @@ impl Orchestrator {
                             "needs-human after abnormal exit",
                             exit_code,
                             claim_id,
-                        );
+                        )
+                        .await;
                     } else if slot.attempt >= max_retries {
                         logging::ev(
                             &id,
@@ -1521,7 +1528,8 @@ impl Orchestrator {
                             "abnormal exit; retries exhausted",
                             exit_code,
                             claim_id,
-                        );
+                        )
+                        .await;
                     } else {
                         let next = slot.attempt + 1;
                         let delay = backoff(self.effective_cfg.retry_backoff_ms, next);
@@ -1854,7 +1862,10 @@ impl Orchestrator {
             }
         };
         if !existed {
-            if let Err(e) = self.run_lifecycle_hook("after_create", &issue, &workspace) {
+            if let Err(e) = self
+                .run_lifecycle_hook("after_create", &issue, &workspace)
+                .await
+            {
                 logging::ev(
                     &issue.identifier,
                     "hook_error",
@@ -1863,7 +1874,10 @@ impl Orchestrator {
             }
         }
 
-        if let Err(e) = self.run_lifecycle_hook("before_run", &issue, &workspace) {
+        if let Err(e) = self
+            .run_lifecycle_hook("before_run", &issue, &workspace)
+            .await
+        {
             let msg = format!("before_run failed: {e:#}");
             let ended_at = Utc::now();
             logging::ev(&issue.identifier, "hook_failed", &msg);
@@ -1908,7 +1922,8 @@ impl Orchestrator {
                 payload: &format!("HookFailed {msg}"),
                 ts: ended_at,
             });
-            self.cleanup_workspace_if_needed(&issue, &workspace, RunStatus::HookFailed);
+            self.cleanup_workspace_if_needed(&issue, &workspace, RunStatus::HookFailed)
+                .await;
             self.claims.remove(&issue.id);
             return;
         }
@@ -1992,7 +2007,8 @@ impl Orchestrator {
                             &issue,
                             &workspace,
                             RunStatus::DispatchFailed,
-                        );
+                        )
+                        .await;
                         self.claims.remove(&issue.id);
                         return;
                     }
@@ -2238,7 +2254,8 @@ impl Orchestrator {
             note,
             None,
             slot.claim_id,
-        );
+        )
+        .await;
         self.publish_snapshots(&[]).await;
         ControlReply::ok(note)
     }
@@ -2254,7 +2271,14 @@ impl Orchestrator {
         }
         let mut notes = Vec::new();
         if let Some(cmd) = self.effective_cfg.hooks.before_remove.as_deref() {
-            if let Err(e) = run_before_remove(cmd, &slot.workspace, &slot.identifier, &slot.run_id)
+            if let Err(e) = run_before_remove(
+                cmd,
+                &slot.workspace,
+                &slot.identifier,
+                &slot.run_id,
+                self.effective_cfg.hooks.timeout_ms.unwrap_or(120_000),
+            )
+            .await
             {
                 let message = format!("before_remove failed: {e:#}");
                 self.persist_system_event(&message);
@@ -2284,7 +2308,8 @@ impl Orchestrator {
             &note,
             None,
             slot.claim_id,
-        );
+        )
+        .await;
         self.publish_snapshots(&[]).await;
         if notes.is_empty() {
             ControlReply::ok("killed")
@@ -2424,7 +2449,7 @@ impl Orchestrator {
     /// Record a finished run: update the in-memory history ring, write outcome
     /// to SQLite, release the claim, and persist a terminal lifecycle event.
     #[allow(clippy::too_many_arguments)]
-    fn record_history(
+    async fn record_history(
         &mut self,
         run_id: &str,
         identifier: &str,
@@ -2439,7 +2464,7 @@ impl Orchestrator {
     ) {
         let ended_at = Utc::now();
         if status != RunStatus::Killed {
-            if let Err(e) = self.run_lifecycle_hook("after_run", issue, workspace) {
+            if let Err(e) = self.run_lifecycle_hook("after_run", issue, workspace).await {
                 logging::ev(
                     identifier,
                     "hook_error",
@@ -2477,10 +2502,11 @@ impl Orchestrator {
             payload: &format!("{:?} {note}", status),
             ts: ended_at,
         });
-        self.cleanup_workspace_if_needed(issue, workspace, status);
+        self.cleanup_workspace_if_needed(issue, workspace, status)
+            .await;
     }
 
-    fn run_lifecycle_hook(
+    async fn run_lifecycle_hook(
         &self,
         name: &str,
         issue: &Issue,
@@ -2506,9 +2532,10 @@ impl Orchestrator {
                     .map(String::as_str)
             })
             .unwrap_or(&self.agent_cfg.id);
+        let timeout_ms = self.effective_cfg.hooks.timeout_ms.unwrap_or(120_000);
         let mut command = Command::new("sh");
-        dotenv::scrub_loaded_env(&mut command);
-        let status = command
+        dotenv::scrub_loaded_env(command.as_std_mut());
+        let mut child = command
             .arg("-c")
             .arg(script)
             .current_dir(workspace)
@@ -2517,15 +2544,35 @@ impl Orchestrator {
             .env("AGENT_ISSUE_IDENTIFIER", &issue.identifier)
             .env("AGENT_WORKSPACE", workspace)
             .env_remove("LINEAR_API_KEY")
-            .status()
+            .spawn()
             .with_context(|| format!("running {name} hook"))?;
+        let status =
+            match tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait()).await {
+                Ok(status) => status.with_context(|| format!("waiting for {name} hook"))?,
+                Err(_) => {
+                    let kill_error = child.kill().await.err();
+                    child
+                        .wait()
+                        .await
+                        .with_context(|| format!("reaping timed out {name} hook"))?;
+                    if let Some(error) = kill_error {
+                        tracing::debug!("killing timed out {name} hook: {error}");
+                    }
+                    anyhow::bail!("{name} hook timed out after {timeout_ms}ms");
+                }
+            };
         if !status.success() {
             anyhow::bail!("{name} hook exited with {status}");
         }
         Ok(())
     }
 
-    fn cleanup_workspace_if_needed(&self, issue: &Issue, workspace: &Path, outcome: RunStatus) {
+    async fn cleanup_workspace_if_needed(
+        &self,
+        issue: &Issue,
+        workspace: &Path,
+        outcome: RunStatus,
+    ) {
         if !self.effective_cfg.cleanup_on_terminal {
             return;
         }
@@ -2535,7 +2582,10 @@ impl Orchestrator {
         ) {
             return;
         }
-        if let Err(e) = self.run_lifecycle_hook("before_remove", issue, workspace) {
+        if let Err(e) = self
+            .run_lifecycle_hook("before_remove", issue, workspace)
+            .await
+        {
             logging::ev(
                 &issue.identifier,
                 "hook_error",
@@ -2938,22 +2988,37 @@ pub(crate) fn backoff(retry_backoff_ms: u64, attempt: u32) -> Duration {
     }
 }
 
-fn run_before_remove(
+async fn run_before_remove(
     command: &str,
     workspace: &str,
     identifier: &str,
     run_id: &str,
+    timeout_ms: u64,
 ) -> anyhow::Result<()> {
-    let mut hook = std::process::Command::new("sh");
-    dotenv::scrub_loaded_env(&mut hook);
-    let status = hook
+    let mut hook = Command::new("sh");
+    dotenv::scrub_loaded_env(hook.as_std_mut());
+    let mut child = hook
         .arg("-c")
         .arg(command)
         .env("AGENT_WORKSPACE", workspace)
         .env("AGENT_ISSUE_IDENTIFIER", identifier)
         .env("AGENT_RUN_ID", run_id)
-        .status()
+        .spawn()
         .map_err(|e| anyhow::anyhow!("running before_remove hook: {e}"))?;
+    let status = match tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait()).await {
+        Ok(status) => status.map_err(|e| anyhow::anyhow!("waiting for before_remove hook: {e}"))?,
+        Err(_) => {
+            let kill_error = child.kill().await.err();
+            child
+                .wait()
+                .await
+                .map_err(|e| anyhow::anyhow!("reaping timed out before_remove hook: {e}"))?;
+            if let Some(error) = kill_error {
+                tracing::debug!("killing timed out before_remove hook: {error}");
+            }
+            anyhow::bail!("before_remove timed out after {timeout_ms}ms");
+        }
+    };
     if status.success() {
         Ok(())
     } else {
@@ -5068,8 +5133,8 @@ dashboard:
         task.await.unwrap().unwrap();
     }
 
-    #[test]
-    fn run_before_remove_scrubs_dotenv_loaded_keys() {
+    #[tokio::test]
+    async fn run_before_remove_scrubs_dotenv_loaded_keys() {
         let temp = TempDir::new().unwrap();
         std::fs::write(
             temp.path().join(".env"),
@@ -5084,10 +5149,51 @@ dashboard:
             temp.path().to_str().unwrap(),
             "ISSUE-1",
             "run-1",
+            120_000,
         )
+        .await
         .unwrap();
 
         std::env::remove_var("DAR_TEST_BEFORE_REMOVE_SECRET");
+    }
+
+    #[tokio::test]
+    async fn run_before_remove_times_out() {
+        let temp = TempDir::new().unwrap();
+        let pid_file = temp.path().join("hook.pid");
+        let error = run_before_remove(
+            &format!("echo $$ > {}; exec sleep 30", pid_file.display()),
+            temp.path().to_str().unwrap(),
+            "ISSUE-1",
+            "run-1",
+            200,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "before_remove timed out after 200ms");
+        let pid = std::fs::read_to_string(pid_file).unwrap();
+        assert!(!std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    #[tokio::test]
+    async fn run_before_remove_reports_nonzero_exit() {
+        let temp = TempDir::new().unwrap();
+        let error = run_before_remove(
+            "exit 1",
+            temp.path().to_str().unwrap(),
+            "ISSUE-1",
+            "run-1",
+            200,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.starts_with("before_remove exited with exit status:"));
     }
 
     // ---------------------------------------------------------------------------
@@ -5151,6 +5257,108 @@ dashboard:
         // A retry must be queued (attempt < max_retries).
         assert_eq!(orchestrator.retries.len(), 1);
         assert_eq!(orchestrator.retries[0].identifier, "ISSUE-1");
+    }
+
+    #[tokio::test]
+    async fn before_run_timeout_records_hook_failed_without_launching_runner() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("logs")).unwrap();
+        let workflow = format!(
+            "{}hooks:\n  timeout_ms: 200\n  before_run: exec sleep 30\n---\nrun",
+            TEST_WF_FM.trim_end_matches("---\n")
+        );
+        std::fs::write(temp.path().join("WORKFLOW.md"), workflow).unwrap();
+        let active_issue = issue("ISSUE-1", None, None);
+        let parks = Arc::new(Mutex::new(Vec::new()));
+        let tracker = Arc::new(CandidateTracker {
+            issue: active_issue.clone(),
+            parks,
+            park_ok: true,
+        });
+        let agent_cfg = test_agent_config();
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let frontmatter =
+            parse_workflow_md(&std::fs::read_to_string(temp.path().join("WORKFLOW.md")).unwrap())
+                .unwrap()
+                .frontmatter;
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &frontmatter);
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let (state, control_rx) = test_state(Arc::clone(&store));
+        let mut orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state.clone(),
+            control_rx,
+        );
+
+        orchestrator.try_dispatch(active_issue, 0).await;
+
+        assert!(orchestrator.slots.is_empty());
+        assert_eq!(state.history.snapshot()[0].status, RunStatus::HookFailed);
+        assert_eq!(
+            store.list_runs_paged(0, 10).unwrap()[0].outcome.as_deref(),
+            Some("hook_failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_before_remove_timeout_preserves_workspace() {
+        let temp = TempDir::new().unwrap();
+        let workflow = "---\ntracker:\n  kind: files\n  active_states: [todo]\n  terminal_states: [done]\nworkspace:\n  cleanup_on_terminal: true\nhooks:\n  timeout_ms: 200\n  before_remove: exec sleep 30\n---\nrun";
+        std::fs::write(temp.path().join("WORKFLOW.md"), workflow).unwrap();
+        let active_issue = issue("ISSUE-1", None, None);
+        let tracker = Arc::new(CandidateTracker {
+            issue: active_issue.clone(),
+            parks: Arc::new(Mutex::new(Vec::new())),
+            park_ok: true,
+        });
+        let agent_cfg = test_agent_config();
+        let prompt = PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap();
+        let frontmatter = parse_workflow_md(workflow).unwrap().frontmatter;
+        let effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &frontmatter);
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let (state, control_rx) = test_state(store);
+        let orchestrator = Orchestrator::new(
+            agent_cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            prompt,
+            effective_cfg,
+            state,
+            control_rx,
+        );
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+
+        orchestrator
+            .cleanup_workspace_if_needed(&active_issue, &workspace, RunStatus::Terminal)
+            .await;
+
+        assert!(workspace.exists());
+    }
+
+    #[tokio::test]
+    async fn control_kill_before_remove_timeout_removes_workspace() {
+        let temp = TempDir::new().unwrap();
+        let active_issue = issue("ISSUE-1", None, None);
+        let tracker = Arc::new(MutableTracker::new(active_issue.clone()));
+        let agent_cfg = test_agent_config();
+        let mut effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
+        effective_cfg.hooks.before_remove = Some("exec sleep 30".into());
+        effective_cfg.hooks.timeout_ms = Some(200);
+        let (mut orchestrator, _state, _harness, _store, run_id) =
+            turn_loop_fixture(&temp, tracker, &active_issue, effective_cfg).await;
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        orchestrator.slots[0].workspace = workspace.display().to_string();
+
+        let reply = orchestrator.control_kill(&run_id).await;
+
+        assert!(!reply.ok);
+        assert!(!workspace.exists());
     }
 
     // ---------------------------------------------------------------------------
