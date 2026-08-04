@@ -1863,7 +1863,7 @@ impl Orchestrator {
         };
         if !existed {
             if let Err(e) = self
-                .run_lifecycle_hook("after_create", &issue, &workspace)
+                .run_lifecycle_hook("after_create", &issue, &workspace, &run_id)
                 .await
             {
                 logging::ev(
@@ -1875,7 +1875,7 @@ impl Orchestrator {
         }
 
         if let Err(e) = self
-            .run_lifecycle_hook("before_run", &issue, &workspace)
+            .run_lifecycle_hook("before_run", &issue, &workspace, &run_id)
             .await
         {
             let msg = format!("before_run failed: {e:#}");
@@ -1922,7 +1922,7 @@ impl Orchestrator {
                 payload: &format!("HookFailed {msg}"),
                 ts: ended_at,
             });
-            self.cleanup_workspace_if_needed(&issue, &workspace, RunStatus::HookFailed)
+            self.cleanup_workspace_if_needed(&issue, &workspace, &run_id, RunStatus::HookFailed)
                 .await;
             self.claims.remove(&issue.id);
             return;
@@ -2006,6 +2006,7 @@ impl Orchestrator {
                         self.cleanup_workspace_if_needed(
                             &issue,
                             &workspace,
+                            &run_id,
                             RunStatus::DispatchFailed,
                         )
                         .await;
@@ -2270,32 +2271,39 @@ impl Orchestrator {
             let _ = handle.request_kill_and_wait(KillReason::OperatorStop).await;
         }
         let mut notes = Vec::new();
-        if let Some(cmd) = self.effective_cfg.hooks.before_remove.as_deref() {
-            if let Err(e) = run_before_remove(
-                cmd,
-                &slot.workspace,
-                &slot.identifier,
-                &slot.run_id,
-                self.effective_cfg.hooks.timeout_ms.unwrap_or(120_000),
-            )
-            .await
+        let preserve_workspace = if self.effective_cfg.hooks.before_remove.is_some() {
+            if let Err(e) = self
+                .run_lifecycle_hook(
+                    "before_remove",
+                    &slot.issue,
+                    Path::new(&slot.workspace),
+                    &slot.run_id,
+                )
+                .await
             {
                 let message = format!("before_remove failed: {e:#}");
                 self.persist_system_event(&message);
                 notes.push(message);
+                true
+            } else {
+                false
             }
-        }
-        if let Err(e) = std::fs::remove_dir_all(&slot.workspace) {
-            if std::path::Path::new(&slot.workspace).exists() {
-                let message = format!("workspace remove failed: {e}");
-                self.persist_system_event(&message);
-                notes.push(message);
+        } else {
+            false
+        };
+        if !preserve_workspace {
+            if let Err(e) = std::fs::remove_dir_all(&slot.workspace) {
+                if std::path::Path::new(&slot.workspace).exists() {
+                    let message = format!("workspace remove failed: {e}");
+                    self.persist_system_event(&message);
+                    notes.push(message);
+                }
             }
         }
         let note = if notes.is_empty() {
             "killed".to_string()
         } else {
-            format!("killed; {}", notes.join("; "))
+            format!("killed; {}; workspace preserved", notes.join("; "))
         };
         self.record_history(
             &slot.run_id,
@@ -2464,7 +2472,10 @@ impl Orchestrator {
     ) {
         let ended_at = Utc::now();
         if status != RunStatus::Killed {
-            if let Err(e) = self.run_lifecycle_hook("after_run", issue, workspace).await {
+            if let Err(e) = self
+                .run_lifecycle_hook("after_run", issue, workspace, run_id)
+                .await
+            {
                 logging::ev(
                     identifier,
                     "hook_error",
@@ -2502,7 +2513,7 @@ impl Orchestrator {
             payload: &format!("{:?} {note}", status),
             ts: ended_at,
         });
-        self.cleanup_workspace_if_needed(issue, workspace, status)
+        self.cleanup_workspace_if_needed(issue, workspace, run_id, status)
             .await;
     }
 
@@ -2511,6 +2522,7 @@ impl Orchestrator {
         name: &str,
         issue: &Issue,
         workspace: &Path,
+        run_id: &str,
     ) -> anyhow::Result<()> {
         let script = match name {
             "after_create" => self.effective_cfg.hooks.after_create.as_deref(),
@@ -2543,6 +2555,7 @@ impl Orchestrator {
             .env("AGENT_ISSUE_ID", &issue.id)
             .env("AGENT_ISSUE_IDENTIFIER", &issue.identifier)
             .env("AGENT_WORKSPACE", workspace)
+            .env("AGENT_RUN_ID", run_id)
             .env_remove("LINEAR_API_KEY")
             .spawn()
             .with_context(|| format!("running {name} hook"))?;
@@ -2571,6 +2584,7 @@ impl Orchestrator {
         &self,
         issue: &Issue,
         workspace: &Path,
+        run_id: &str,
         outcome: RunStatus,
     ) {
         if !self.effective_cfg.cleanup_on_terminal {
@@ -2583,7 +2597,7 @@ impl Orchestrator {
             return;
         }
         if let Err(e) = self
-            .run_lifecycle_hook("before_remove", issue, workspace)
+            .run_lifecycle_hook("before_remove", issue, workspace, run_id)
             .await
         {
             logging::ev(
@@ -2985,44 +2999,6 @@ pub(crate) fn backoff(retry_backoff_ms: u64, attempt: u32) -> Duration {
         BACKOFF_CAP
     } else {
         d
-    }
-}
-
-async fn run_before_remove(
-    command: &str,
-    workspace: &str,
-    identifier: &str,
-    run_id: &str,
-    timeout_ms: u64,
-) -> anyhow::Result<()> {
-    let mut hook = Command::new("sh");
-    dotenv::scrub_loaded_env(hook.as_std_mut());
-    let mut child = hook
-        .arg("-c")
-        .arg(command)
-        .env("AGENT_WORKSPACE", workspace)
-        .env("AGENT_ISSUE_IDENTIFIER", identifier)
-        .env("AGENT_RUN_ID", run_id)
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("running before_remove hook: {e}"))?;
-    let status = match tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait()).await {
-        Ok(status) => status.map_err(|e| anyhow::anyhow!("waiting for before_remove hook: {e}"))?,
-        Err(_) => {
-            let kill_error = child.kill().await.err();
-            child
-                .wait()
-                .await
-                .map_err(|e| anyhow::anyhow!("reaping timed out before_remove hook: {e}"))?;
-            if let Some(error) = kill_error {
-                tracing::debug!("killing timed out before_remove hook: {error}");
-            }
-            anyhow::bail!("before_remove timed out after {timeout_ms}ms");
-        }
-    };
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!("before_remove exited with {status}"))
     }
 }
 
@@ -5134,7 +5110,7 @@ dashboard:
     }
 
     #[tokio::test]
-    async fn run_before_remove_scrubs_dotenv_loaded_keys() {
+    async fn lifecycle_hook_scrubs_dotenv_loaded_keys() {
         let temp = TempDir::new().unwrap();
         std::fs::write(
             temp.path().join(".env"),
@@ -5144,34 +5120,45 @@ dashboard:
         std::env::remove_var("DAR_TEST_BEFORE_REMOVE_SECRET");
         crate::dotenv::load_agent_env(temp.path()).unwrap();
 
-        run_before_remove(
-            "test -z \"${DAR_TEST_BEFORE_REMOVE_SECRET:-}\"",
-            temp.path().to_str().unwrap(),
-            "ISSUE-1",
-            "run-1",
-            120_000,
-        )
-        .await
-        .unwrap();
+        let active_issue = issue("ISSUE-1", None, None);
+        let tracker = Arc::new(MutableTracker::new(active_issue.clone()));
+        let mut effective_cfg =
+            EffectiveLoopConfig::resolve(&test_agent_config(), &test_frontmatter());
+        effective_cfg.hooks.before_remove =
+            Some("test -z \"${DAR_TEST_BEFORE_REMOVE_SECRET:-}\"".into());
+        let (orchestrator, _state, _harness, _store, run_id) =
+            turn_loop_fixture(&temp, tracker, &active_issue, effective_cfg).await;
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        orchestrator
+            .run_lifecycle_hook("before_remove", &active_issue, &workspace, &run_id)
+            .await
+            .unwrap();
 
         std::env::remove_var("DAR_TEST_BEFORE_REMOVE_SECRET");
     }
 
     #[tokio::test]
-    async fn run_before_remove_times_out() {
+    async fn lifecycle_hook_times_out() {
         let temp = TempDir::new().unwrap();
         let pid_file = temp.path().join("hook.pid");
-        let error = run_before_remove(
-            &format!("echo $$ > {}; exec sleep 30", pid_file.display()),
-            temp.path().to_str().unwrap(),
-            "ISSUE-1",
-            "run-1",
-            200,
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-        assert_eq!(error, "before_remove timed out after 200ms");
+        let active_issue = issue("ISSUE-1", None, None);
+        let tracker = Arc::new(MutableTracker::new(active_issue.clone()));
+        let mut effective_cfg =
+            EffectiveLoopConfig::resolve(&test_agent_config(), &test_frontmatter());
+        effective_cfg.hooks.before_remove =
+            Some(format!("echo $$ > {}; exec sleep 30", pid_file.display()));
+        effective_cfg.hooks.timeout_ms = Some(200);
+        let (orchestrator, _state, _harness, _store, run_id) =
+            turn_loop_fixture(&temp, tracker, &active_issue, effective_cfg).await;
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let error = orchestrator
+            .run_lifecycle_hook("before_remove", &active_issue, &workspace, &run_id)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "before_remove hook timed out after 200ms");
         let pid = std::fs::read_to_string(pid_file).unwrap();
         assert!(!std::process::Command::new("kill")
             .args(["-0", pid.trim()])
@@ -5181,19 +5168,23 @@ dashboard:
     }
 
     #[tokio::test]
-    async fn run_before_remove_reports_nonzero_exit() {
+    async fn lifecycle_hook_reports_nonzero_exit() {
         let temp = TempDir::new().unwrap();
-        let error = run_before_remove(
-            "exit 1",
-            temp.path().to_str().unwrap(),
-            "ISSUE-1",
-            "run-1",
-            200,
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-        assert!(error.starts_with("before_remove exited with exit status:"));
+        let active_issue = issue("ISSUE-1", None, None);
+        let tracker = Arc::new(MutableTracker::new(active_issue.clone()));
+        let mut effective_cfg =
+            EffectiveLoopConfig::resolve(&test_agent_config(), &test_frontmatter());
+        effective_cfg.hooks.before_remove = Some("exit 1".into());
+        let (orchestrator, _state, _harness, _store, run_id) =
+            turn_loop_fixture(&temp, tracker, &active_issue, effective_cfg).await;
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let error = orchestrator
+            .run_lifecycle_hook("before_remove", &active_issue, &workspace, &run_id)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("before_remove hook exited with exit status:"));
     }
 
     // ---------------------------------------------------------------------------
@@ -5334,14 +5325,14 @@ dashboard:
         std::fs::create_dir(&workspace).unwrap();
 
         orchestrator
-            .cleanup_workspace_if_needed(&active_issue, &workspace, RunStatus::Terminal)
+            .cleanup_workspace_if_needed(&active_issue, &workspace, "run-1", RunStatus::Terminal)
             .await;
 
         assert!(workspace.exists());
     }
 
     #[tokio::test]
-    async fn control_kill_before_remove_timeout_removes_workspace() {
+    async fn control_kill_before_remove_timeout_preserves_workspace() {
         let temp = TempDir::new().unwrap();
         let active_issue = issue("ISSUE-1", None, None);
         let tracker = Arc::new(MutableTracker::new(active_issue.clone()));
@@ -5358,7 +5349,45 @@ dashboard:
         let reply = orchestrator.control_kill(&run_id).await;
 
         assert!(!reply.ok);
+        assert!(reply
+            .message
+            .contains("before_remove hook timed out after 200ms"));
+        assert!(reply.message.contains("workspace preserved"));
+        assert!(workspace.exists());
+    }
+
+    #[tokio::test]
+    async fn control_kill_before_remove_success_removes_workspace_with_full_env() {
+        let temp = TempDir::new().unwrap();
+        let active_issue = issue("ISSUE-1", None, None);
+        let tracker = Arc::new(MutableTracker::new(active_issue.clone()));
+        let agent_cfg = test_agent_config();
+        let output = temp.path().join("hook-output");
+        let mut effective_cfg = EffectiveLoopConfig::resolve(&agent_cfg, &test_frontmatter());
+        effective_cfg.hooks.before_remove = Some(format!(
+            "printf '%s\\n%s\\n%s\\n%s\\n' \"$AGENT_RUN_ID\" \"$AGENT_PROJECT_ID\" \"$AGENT_ISSUE_ID\" \"$PWD\" > {}",
+            output.display()
+        ));
+        let (mut orchestrator, _state, _harness, _store, run_id) =
+            turn_loop_fixture(&temp, tracker, &active_issue, effective_cfg).await;
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let expected_workspace = std::fs::canonicalize(&workspace).unwrap();
+        orchestrator.slots[0].workspace = workspace.display().to_string();
+
+        let reply = orchestrator.control_kill(&run_id).await;
+
+        assert!(reply.ok);
         assert!(!workspace.exists());
+        let values: Vec<_> = std::fs::read_to_string(output)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(values[0], run_id);
+        assert_eq!(values[1], "test-agent");
+        assert_eq!(values[2], active_issue.id);
+        assert_eq!(values[3], expected_workspace.display().to_string());
     }
 
     // ---------------------------------------------------------------------------

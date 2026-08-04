@@ -9,6 +9,8 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- A failing or timing-out `before_remove` hook now preserves the workspace for operator kills; hooks now consistently run in the workspace with the full hook environment, including `AGENT_RUN_ID`.
+
 - Lifecycle hooks now run asynchronously with a default two-minute timeout; configure `hooks.timeout_ms` in `WORKFLOW.md` to change it.
 
 - Scheduler jobs can now deliver completed results to registered communication sinks using explicit `deliver` targets; delivery failures are recorded as warnings without changing the job result.
