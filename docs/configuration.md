@@ -76,7 +76,8 @@ environment until they exit. The `reload_secrets` MCP tool refreshes only its
 bridge-local process; the live host converges on its next poll.
 
 Every runner receives the following `AGENT_*` variables. Hook scripts receive
-the subset applicable to their lifecycle point.
+`AGENT_PROJECT_ID`, `AGENT_ISSUE_ID`, `AGENT_ISSUE_IDENTIFIER`,
+`AGENT_WORKSPACE`, and `AGENT_RUN_ID`.
 
 | Variable | Value |
 |---|---|
