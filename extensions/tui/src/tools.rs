@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(value["count"], 2);
         assert_eq!(value["sessions"][0]["id"], "newest");
         assert_eq!(value["sessions"][0]["startTime"], "2024-06-15T12:30:00Z");
-        assert_eq!(value["sessions"][0]["label"], "Recent");
+        assert_eq!(value["sessions"][0]["label"], "hi");
         assert_eq!(value["sessions"][1]["id"], "old");
     }
 

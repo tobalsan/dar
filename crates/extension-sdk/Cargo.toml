@@ -18,6 +18,7 @@ dar-artifacts = { path = "../artifacts", version = "0.4" }
 host-api = { package = "dar-host-api", path = "../host-api", version = "0.4" }
 orchestrator-api = { package = "dar-orchestrator-api", path = "../orchestrator-api", version = "0.4" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 serde_yaml = "0.9"
 tool-registry = { package = "dar-tool-registry", path = "../tool-registry", version = "0.4" }
 tracing = "0.1"

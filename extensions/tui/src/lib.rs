@@ -24,7 +24,9 @@
 //! working byte-for-byte.
 
 mod app;
-mod archive;
+mod archive {
+    pub use dar_extension_sdk::chat::archive::*;
+}
 mod backend;
 mod chat;
 mod dash;

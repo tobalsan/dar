@@ -11,6 +11,13 @@
   padding: 0 1.25rem;       /* the shell's #content sits outside <main>, so this fragment gets none for free */
   padding-bottom: .8rem;    /* keep the composer off the window's bottom edge */
 }
+.chat-history-head { display:flex; gap:.4rem; align-items:center; width:min(100%,48rem); align-self:center; }
+.chat-history-button, .chat-history-entry { background:var(--panel-2); color:var(--fg); border:1px solid var(--border); border-radius:5px; font:inherit; cursor:pointer; }
+.chat-history-button { padding:.25rem .55rem; }
+.chat-history-list { width:min(100%,48rem); align-self:center; max-height:12rem; overflow:auto; border:1px solid var(--border); border-radius:5px; }
+.chat-history-entry { display:flex; width:100%; justify-content:space-between; gap:.8rem; padding:.45rem .55rem; border:0; border-bottom:1px solid var(--border); text-align:left; }
+.chat-history-entry:last-child { border-bottom:0; }
+.chat-history-entry small { color:var(--muted); white-space:nowrap; }
 
 /* transcript: the one scroll region; the page body never scrolls */
 .chat-transcript {

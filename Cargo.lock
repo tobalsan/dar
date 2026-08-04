@@ -783,6 +783,7 @@ dependencies = [
  "dar-orchestrator-api",
  "dar-tool-registry",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tempfile",
  "tokio",
