@@ -25,6 +25,7 @@ pub mod deliver {
 }
 
 pub mod chat {
+    pub mod archive;
     use std::path::Path;
 
     use host_api::StartCtx;

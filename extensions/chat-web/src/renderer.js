@@ -16,30 +16,41 @@
     return html.replace(/\0(\d+)\0/g, (_, i) => code[i]);
   };
 
-  const reduce = (blocks, event) => {
-    let next = blocks.map(block => ({ ...block })), text = event.text || '';
+  // Mutate a private transcript buffer and report the changed block. Live
+  // rendering keeps the copy-on-write wrapper below, while history can append
+  // pages without repeatedly copying its complete archive.
+  const reduceInto = (blocks, event) => {
+    let next = blocks, text = event.text || '';
     switch (event.type) {
-      case 'user': next.push({ kind: 'user', text, attachments: event.attachments || [] }); break;
-      case 'reset': return [{ kind: 'notice', text: 'Context cleared, started a new session.' }];
+      case 'user': next.push({ kind: 'user', text, attachments: event.attachments || [] }); return next.length - 1;
+      case 'reset': next.splice(0, next.length, { kind: 'notice', text: 'Context cleared, started a new session.' }); return null;
       case 'delta': case 'thinking': {
         let kind = event.type === 'thinking' ? 'thinking' : 'assistant', last = next.at(-1);
-        if (last && last.kind === kind) last.text += text; else next.push({ kind, text });
-        break;
+        if (last && last.kind === kind) { last.text += text; return next.length - 1; }
+        next.push({ kind, text }); return next.length - 1;
       }
-      case 'tool_call': next.push({ kind: 'tool', id: event.id, name: event.name || event.id, args: event.args || '', text: '', is_error: false, done: false }); break;
+      case 'tool_call': next.push({ kind: 'tool', id: event.id, name: event.name || event.id, args: event.args || '', text: '', is_error: false, done: false }); return next.length - 1;
       case 'tool_output': {
-        let tool = [...next].reverse().find(block => block.kind === 'tool' && block.id === event.id);
-        if (!tool) { tool = { kind: 'tool', id: event.id, name: event.id, args: '', text: '', is_error: false, done: false }; next.push(tool); }
-        tool.text = text; tool.is_error = !!event.is_error; tool.done = !!event.done; break;
+        let index = next.length - 1;
+        while (index >= 0 && (next[index].kind !== 'tool' || next[index].id !== event.id)) index--;
+        let tool = next[index];
+        if (!tool) { tool = { kind: 'tool', id: event.id, name: event.id, args: '', text: '', is_error: false, done: false }; next.push(tool); index = next.length - 1; }
+        tool.text = text; tool.is_error = !!event.is_error; tool.done = !!event.done; return index;
       }
-      case 'question': next.push({ kind: 'question', id: event.id, questions: event.questions || [], done: false, rejected: false, answerText: '' }); break;
-      case 'question_done': { let q = [...next].reverse().find(b => b.kind === 'question' && b.id === event.id); if (q) { q.done = true; q.rejected = !!event.is_error; q.answerText = event.text || ''; } break; }
-      case 'error': next.push({ kind: 'error', text: event.error || 'unknown error' }); break;
-      case 'context_usage': break;
-      case 'aborted': dismissPendingQuestions(next); next.push({ kind: 'error', text: event.error === 'aborted' ? 'turn aborted' : `turn failed: ${event.error || 'unknown error'}` }); break;
-      case 'closed': dismissPendingQuestions(next); next.push({ kind: 'error', text: `chat session closed${event.error ? `: ${event.error}` : ''}` }); break;
-      case 'finished': dismissPendingQuestions(next); break;
+      case 'question': next.push({ kind: 'question', id: event.id, questions: event.questions || [], done: false, rejected: false, answerText: '' }); return next.length - 1;
+      case 'question_done': { let index = next.length - 1; while (index >= 0 && (next[index].kind !== 'question' || next[index].id !== event.id)) index--; let q = next[index]; if (q) { q.done = true; q.rejected = !!event.is_error; q.answerText = event.text || ''; } return index >= 0 ? index : next.length - 1; }
+      case 'error': next.push({ kind: 'error', text: event.error || 'unknown error' }); return next.length - 1;
+      case 'context_usage': return -1;
+      case 'aborted': { let dismissed = dismissPendingQuestions(next); next.push({ kind: 'error', text: event.error === 'aborted' ? 'turn aborted' : `turn failed: ${event.error || 'unknown error'}` }); return dismissed ? null : next.length - 1; }
+      case 'closed': { let dismissed = dismissPendingQuestions(next); next.push({ kind: 'error', text: `chat session closed${event.error ? `: ${event.error}` : ''}` }); return dismissed ? null : next.length - 1; }
+      case 'finished': return dismissPendingQuestions(next) ? null : -1;
     }
+    return next.length - 1;
+  };
+
+  const reduce = (blocks, event) => {
+    let next = blocks.slice();
+    reduceInto(next, event);
     return next;
   };
 
@@ -48,12 +59,14 @@
   // discards a late opencode rejected event). 'reset' already replaces every
   // block wholesale.
   const dismissPendingQuestions = blocks => {
-    for (const block of blocks) if (block.kind === 'question' && !block.done) { block.done = true; block.rejected = true; block.answerText = 'dismissed'; }
+    let changed = false;
+    for (const block of blocks) if (block.kind === 'question' && !block.done) { block.done = true; block.rejected = true; block.answerText = 'dismissed'; changed = true; }
+    return changed;
   };
 
   const agentName = () => (typeof document !== 'undefined' && document.getElementById('chat-root') && document.getElementById('chat-root').dataset.agentName) || 'Agent';
 
-  const html = (blocks, qsel = {}) => blocks.map((block, i) => {
+  const html = (blocks, qsel = {}, readOnly = false) => blocks.map((block, i) => {
     if (block.kind === 'tool') {
       let state = block.is_error ? 'bad' : block.done ? 'done' : 'live';
       let label = block.is_error ? 'error' : block.done ? 'done' : 'running';
@@ -69,7 +82,7 @@
         let optsHtml = opts.length
           ? `<div class="chat-q-opts">${opts.map(o => {
               let picks = sel[qi], selected = q.multiple ? (Array.isArray(picks) && picks.includes(o.label)) : picks === o.label;
-              return `<button type="button" class="chat-q-opt${selected ? ' is-selected' : ''}" data-qbi="${i}" data-qi="${qi}" data-label="${esc(o.label)}" title="${esc(o.description || '')}" aria-pressed="${selected}"${block.done ? ' disabled' : ''}>${esc(o.label)}</button>`;
+              return `<button type="button" class="chat-q-opt${selected ? ' is-selected' : ''}" data-qbi="${i}" data-qi="${qi}" data-label="${esc(o.label)}" title="${esc(o.description || '')}" aria-pressed="${selected}"${block.done || readOnly ? ' disabled' : ''}>${esc(o.label)}</button>`;
             }).join('')}</div>`
           : (block.questions.length > 1 ? `<div class="chat-q-note">No options — this question needs a text answer, not supported in a multi-question request.</div>` : '');
         return `<div class="chat-q"><div class="chat-q-header">${esc(q.header || '')}</div><div class="chat-q-text">${esc(q.question || '')}</div>${optsHtml}</div>`;
@@ -77,10 +90,10 @@
       // A question with no options is implicitly free-text even if `custom`
       // is false; the custom row stays limited to single-question blocks.
       let q0 = block.questions[0], effectiveCustom = block.questions.length === 1 && (q0.custom || !(q0.options || []).length);
-      let custom = !block.done && effectiveCustom ? `<div class="chat-q-customrow"><input class="chat-q-custom" data-qbi="${i}" placeholder="Custom answer"><button type="button" class="chat-q-send" data-qbi="${i}">Answer</button></div>` : '';
+      let custom = !block.done && effectiveCustom ? `<div class="chat-q-customrow"><input class="chat-q-custom" data-qbi="${i}" placeholder="Custom answer"${readOnly ? ' readonly' : ''}><button type="button" class="chat-q-send" data-qbi="${i}"${readOnly ? ' disabled' : ''}>Answer</button></div>` : '';
       // Any block containing a `multiple` question (pure or mixed) defers to
       // an explicit Answer button instead of auto-submitting on first click.
-      let answerBtn = !block.done && !effectiveCustom && hasMultiple ? `<div class="chat-q-customrow"><button type="button" class="chat-q-answer-btn" data-qbi="${i}">Answer</button></div>` : '';
+      let answerBtn = !block.done && !effectiveCustom && hasMultiple ? `<div class="chat-q-customrow"><button type="button" class="chat-q-answer-btn" data-qbi="${i}"${readOnly ? ' disabled' : ''}>Answer</button></div>` : '';
       let answered = block.done && block.answerText ? `<div class="chat-q-answer">${esc(block.answerText)}</div>` : '';
       return `<div class="chat-question" data-question-id="${esc(block.id)}"><span class="chat-pill chat-pill-${state}">${label}</span>${body}${custom}${answerBtn}${answered}</div>`;
     }
@@ -140,6 +153,7 @@
   const pendingHtml = word => `<div class="chat-turn chat-assistant chat-pending"><div class="chat-role">${esc(agentName())}</div><div class="chat-body"><span class="chat-loader" role="status" aria-label="Working"><em class="chat-loader-word">${esc(word)}</em><span></span><span></span><span></span></span></div></div>`;
 
   const paint = app => {
+    if (app.viewingHistory) return;
     let transcript = $('chat-transcript'); if (!transcript) return;
     let stick = app.stick;
     let last = app.blocks[app.blocks.length - 1];
@@ -247,6 +261,15 @@
       e.target.value = ''; renderChips(app); refreshBusy(app);
     });
     document.addEventListener('click', e => {
+      let history = e.target.closest('#chat-history');
+      if (history) { showHistoryList(app); return; }
+      let live = e.target.closest('#chat-live');
+      if (live) { returnToLive(app); return; }
+      let session = e.target.closest('[data-history-session]');
+      if (session) { openHistorySession(app, session.dataset.historySession); return; }
+      // A historical transcript is strictly read-only: question controls are
+      // rendered for fidelity, but must never answer against the live session.
+      if (app.viewingHistory) return;
       let chip = e.target.closest('.chat-chip-x');
       if (chip) { app.pending.splice(Number(chip.dataset.chip), 1); renderChips(app); refreshBusy(app); return; }
       if (e.target.closest('#chat-attach')) { let f = $('chat-attachments'); if (f) f.click(); return; }
@@ -273,10 +296,60 @@
     input.value = app.draft; autogrow(input);
     renderChips(app); refreshBusy(app); sizeViewport();
     transcript.scrollTop = transcript.scrollHeight;
+    mountHistoryControls();
+  };
+
+  // History is deliberately view-only. The EventSource remains attached and
+  // continues reducing live events into `liveBlocks` while a transcript is open.
+  const mountHistoryControls = () => {
+    let root = $('chat-root');
+    if (!root || $('chat-history') || !document.createElement) return;
+    let bar = document.createElement('div'); bar.className = 'chat-history-head';
+    bar.innerHTML = '<button type="button" id="chat-history" class="chat-history-button">History</button><button type="button" id="chat-live" class="chat-history-button" hidden>Back to live</button><div id="chat-history-list" class="chat-history-list" hidden></div>';
+    root.insertBefore(bar, root.firstChild);
+  };
+  const historyUi = () => ({ list: $('chat-history-list'), live: $('chat-live'), composer: $('chat-composer') });
+  const showHistoryList = async app => {
+    let ui = historyUi(); if (!ui.list) return;
+    try {
+      let sessions = await request('/chat/sessions').then(r => r.json());
+      ui.list.hidden = false;
+      ui.list.innerHTML = sessions.length ? sessions.map(s => `<button type="button" class="chat-history-entry" data-history-session="${esc(s.id)}"><span>${esc(s.label)}</span><small>${esc(s.start_time || '')}</small></button>`).join('') : '<div class="chat-empty">No previous sessions.</div>';
+    } catch (error) { ui.list.hidden = false; ui.list.textContent = `History unavailable: ${error.message}`; }
+  };
+  const openHistorySession = async (app, id) => {
+    app.historyController?.abort();
+    let controller = new AbortController(), ui = historyUi(), load = ++app.historyLoad, transcript = $('chat-transcript');
+    app.historyController = controller;
+    app.viewingHistory = true; app.historyBlocks = [];
+    if (ui.list) ui.list.hidden = true; if (ui.live) ui.live.hidden = false; if (ui.composer) ui.composer.hidden = true;
+    if (transcript) transcript.innerHTML = '';
+    try {
+      let offset = 0;
+      do {
+        let page = await request(`/chat/sessions/${encodeURIComponent(id)}?offset=${offset}&count=20`, { signal: controller.signal }).then(r => r.json());
+        if (load !== app.historyLoad || !app.viewingHistory) return;
+        for (let event of page.events) {
+          let changed = reduceInto(app.historyBlocks, event);
+          if (!transcript || changed < 0) continue;
+          if (changed === null) transcript.innerHTML = html(app.historyBlocks, {}, true);
+          else if (changed < transcript.children.length) transcript.children[changed].outerHTML = html([app.historyBlocks[changed]], {}, true);
+          else transcript.insertAdjacentHTML('beforeend', html([app.historyBlocks[changed]], {}, true));
+        }
+        offset = page.next_offset;
+        // Let the browser paint between bounded archive pages instead of
+        // blocking on a months-old transcript.
+        if (offset != null) await new Promise(resolve => raf(resolve));
+      } while (offset != null);
+      if (load === app.historyLoad && transcript && !app.historyBlocks.length) transcript.innerHTML = '<div class="chat-empty">No messages.</div>';
+    } catch (error) { if (error.name !== 'AbortError' && load === app.historyLoad && ui.list) ui.list.textContent = `Transcript unavailable: ${error.message}`; }
+  };
+  const returnToLive = app => {
+    let ui = historyUi(); app.historyController?.abort(); app.historyController = null; app.historyLoad++; app.viewingHistory = false; if (ui.live) ui.live.hidden = true; if (ui.composer) ui.composer.hidden = false; paint(app);
   };
 
   if (!window.__chatWeb) {
-    let app = { blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false, qsel: {}, qsent: {} };
+    let app = { blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false, qsel: {}, qsent: {}, viewingHistory: false, historyLoad: 0, historyController: null };
     window.__chatWeb = app;
     window.renderChatEvent = event => render(app, event);
     app.es = new EventSource(`/chat/${SESSION}/stream`);

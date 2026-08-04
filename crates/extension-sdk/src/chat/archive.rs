@@ -19,6 +19,14 @@ use std::path::Path;
 
 use serde_json::Value;
 
+/// A bounded, renderer-ready transcript page.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct EventPage {
+    pub events: Vec<Value>,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+}
+
 /// Upper bound on how many sessions `list` returns, so the tool output stays
 /// bounded regardless of how many `.jsonl` files have accumulated.
 pub const LIST_LIMIT: usize = 50;
@@ -39,7 +47,7 @@ pub const READ_MAX: usize = 20;
 /// One entry in the session listing: enough for the agent to recognize and
 /// later recall a prior conversation, drawn entirely from a file's name and its
 /// single header line — never any message body.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct SessionInfo {
     /// Session id from the header line (`{"type":"session",...,"id":...}`).
     pub id: String,
@@ -76,7 +84,6 @@ pub fn list(sessions_dir: &Path) -> Vec<SessionInfo> {
     files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
     files
         .into_iter()
-        .filter(|path| !read_messages(path).is_empty())
         .filter_map(|path| read_session_info(&path))
         .take(LIST_LIMIT)
         .collect()
@@ -98,12 +105,14 @@ fn read_session_info(path: &Path) -> Option<SessionInfo> {
         .unwrap_or_default()
         .to_string();
     let start_time = file_stem.split_once('_').map(|(ts, _)| ts.to_string());
-    let label = header
+    let (has_message, first_user) = first_user_message(path);
+    if !has_message { return None; }
+    let label = first_user.as_deref().or_else(|| header
         .get("label")
         .or_else(|| header.get("title"))
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty()))
         .unwrap_or(&file_stem)
         .chars()
         .take(LABEL_MAX)
@@ -113,6 +122,22 @@ fn read_session_info(path: &Path) -> Option<SessionInfo> {
         start_time,
         label,
     })
+}
+
+/// Scan just enough of a transcript to decide whether it is a real session and
+/// obtain its first user label. It retains no message bodies and tolerates
+/// malformed trailing data.
+fn first_user_message(path: &Path) -> (bool, Option<String>) {
+    let Ok(file) = fs::File::open(path) else { return (false, None) };
+    let mut has_message = false;
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { continue };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
+        let Some((role, text)) = message_role_text(&value) else { continue };
+        has_message = true;
+        if role == "user" { return (true, Some(text)); }
+    }
+    (has_message, None)
 }
 
 /// One message extracted from a session file: its position in the file
@@ -202,6 +227,55 @@ pub fn read(sessions_dir: &Path, session_id: &str, start: usize, count: usize) -
         .skip(start)
         .take(capped)
         .collect()
+}
+
+/// Read normalized chat-web events without retaining a whole transcript. This
+/// is the web projection of the archive; TUI recall continues to project the
+/// same file through [`read`] into its role/text DTO.
+pub fn read_events(sessions_dir: &Path, session_id: &str, start: usize, count: usize) -> Option<EventPage> {
+    let path = session_file_by_id(sessions_dir, session_id)?;
+    let count = count.min(READ_MAX);
+    if count == 0 { return Some(EventPage { events: Vec::new(), offset: start, next_offset: None }); }
+    let file = fs::File::open(path).ok()?;
+    let mut events = Vec::with_capacity(count);
+    let mut index = 0;
+    let mut more = false;
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { continue };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
+        let normalized = normalize_events(value);
+        for event in normalized {
+            if index >= start && events.len() < count { events.push(event); }
+            else if index >= start { more = true; break; }
+            index += 1;
+        }
+        if more { break; }
+    }
+    Some(EventPage { next_offset: more.then_some(start + events.len()), events, offset: start })
+}
+
+fn normalize_events(value: Value) -> Vec<Value> {
+    if value.get("type").and_then(Value::as_str).is_some_and(|kind| matches!(kind, "user" | "delta" | "thinking" | "tool_call" | "tool_output" | "question" | "question_done" | "error" | "notice" | "finished" | "aborted" | "closed" | "context_usage" | "reset")) { return vec![value]; }
+    let message = value.get("message").unwrap_or(&value);
+    let Some(role) = message.get("role").and_then(Value::as_str) else { return vec![] };
+    let Some(content) = message.get("content") else { return vec![] };
+    if let Some(text) = content.as_str() { return match role { "user" => vec![serde_json::json!({"type":"user","text":text})], "assistant" => vec![serde_json::json!({"type":"delta","text":text})], _ => vec![] }; }
+    let Some(parts) = content.as_array() else { return vec![] };
+    let mut events = Vec::new();
+    for part in parts {
+        let kind = part.get("type").and_then(Value::as_str).unwrap_or("text");
+        match kind {
+            "thinking" => events.push(serde_json::json!({"type":"thinking","text":part.get("thinking").or_else(|| part.get("text")).and_then(Value::as_str).unwrap_or_default()})),
+            "tool_use" => events.push(serde_json::json!({"type":"tool_call","id":part.get("id").and_then(Value::as_str).unwrap_or_default(),"name":part.get("name").and_then(Value::as_str).unwrap_or_default(),"args":part.get("input").map(Value::to_string).unwrap_or_default()})),
+            "tool_result" => events.push(serde_json::json!({"type":"tool_output","id":part.get("tool_use_id").and_then(Value::as_str).unwrap_or_default(),"text":content_text(part.get("content").unwrap_or(&Value::Null)),"is_error":part.get("is_error").and_then(Value::as_bool).unwrap_or(false),"done":true})),
+            "image" | "image_url" => {
+                let url = part.get("url").or_else(|| part.get("image_url").and_then(|v| v.get("url"))).and_then(Value::as_str).unwrap_or_default();
+                if !url.is_empty() { events.push(serde_json::json!({"type":"user","text":"","attachments":[{"name":part.get("name").and_then(Value::as_str).unwrap_or("image"),"url":url,"image":true}]})); }
+            }
+            _ => { let text = part.as_str().or_else(|| part.get("text").and_then(Value::as_str)).unwrap_or_default(); if !text.is_empty() { events.push(serde_json::json!({"type":if role == "user" { "user" } else { "delta" },"text":text})); } }
+        }
+    }
+    events
 }
 
 /// The most-recent user/assistant messages of a session, bounded to
@@ -646,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn list_reads_start_time_from_filename_and_header_label() {
+    fn list_reads_start_time_and_prefers_first_user_label() {
         let temp = tempfile::tempdir().unwrap();
         write(
             temp.path(),
@@ -660,11 +734,11 @@ mod tests {
             entries[0].start_time.as_deref(),
             Some("2024-06-15T12:30:00Z")
         );
-        assert_eq!(entries[0].label, "My chat");
+        assert_eq!(entries[0].label, "hi");
     }
 
     #[test]
-    fn list_falls_back_to_file_stem_label_when_header_has_none() {
+    fn list_uses_first_user_label_without_header_label() {
         let temp = tempfile::tempdir().unwrap();
         write(
             temp.path(),
@@ -672,7 +746,7 @@ mod tests {
             &format!("{{\"type\":\"session\",\"id\":\"x\"}}\n{MSG_LINE}"),
         );
         let entries = list(temp.path());
-        assert_eq!(entries[0].label, "2024-06-15T12:30:00Z_bbb");
+        assert_eq!(entries[0].label, "hi");
     }
 
     #[test]
@@ -782,7 +856,7 @@ mod tests {
         write(
             temp.path(),
             "2024-06-15T12:30:00Z_bbb.jsonl",
-            &format!("{{\"type\":\"session\",\"id\":\"x\",\"label\":\"{long}\"}}\n{MSG_LINE}"),
+            &session_with_messages("x", &[("user", &long)]),
         );
         let entries = list(temp.path());
         assert_eq!(entries[0].label.chars().count(), LABEL_MAX);
@@ -1149,5 +1223,56 @@ mod tests {
             newest_session_id(temp.path(), "pi").as_deref(),
             Some("valid-old")
         );
+    }
+
+    #[test]
+    fn read_events_normalizes_and_pages_without_malformed_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "2024-06-15T12:30:00Z_a.jsonl",
+            concat!(
+                "{\"type\":\"session\",\"id\":\"sess\"}\n",
+                "{\"type\":\"message_end\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+                "bad json\n",
+                "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":\"world\"}}\n"
+            ),
+        );
+        let first = read_events(temp.path(), "sess", 0, 1).unwrap();
+        assert_eq!(first.events[0]["type"], "user");
+        assert_eq!(first.events[0]["text"], "hello");
+        assert_eq!(first.next_offset, Some(1));
+        let second = read_events(temp.path(), "sess", 1, 1).unwrap();
+        assert_eq!(second.events[0]["type"], "delta");
+        assert_eq!(second.events[0]["text"], "world");
+        assert_eq!(second.next_offset, None);
+    }
+
+    #[test]
+    fn read_events_preserves_thinking_and_tool_blocks() {
+        let temp = tempfile::tempdir().unwrap();
+        write(temp.path(), "2024-06-15T12:30:00Z_a.jsonl", concat!(
+            "{\"type\":\"session\",\"id\":\"sess\"}\n",
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"plan\"},{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"lookup\",\"input\":{\"q\":\"x\"}}]}}\n",
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"call-1\",\"content\":\"result\"}]}}\n"
+        ));
+        let page = read_events(temp.path(), "sess", 0, READ_MAX).unwrap();
+        assert_eq!(page.events[0]["type"], "thinking");
+        assert_eq!(page.events[1]["type"], "tool_call");
+        assert_eq!(page.events[1]["args"], "{\"q\":\"x\"}");
+        assert_eq!(page.events[2]["type"], "tool_output");
+        assert_eq!(page.events[2]["text"], "result");
+    }
+
+    #[test]
+    fn read_events_preserves_inline_image_attachment() {
+        let temp = tempfile::tempdir().unwrap();
+        write(temp.path(), "2024-06-15T12:30:00Z_a.jsonl", concat!(
+            "{\"type\":\"session\",\"id\":\"sess\"}\n",
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"name\":\"diagram.png\",\"image_url\":{\"url\":\"/chat/main/attachment/a/diagram.png\"}}]}}\n"
+        ));
+        let page = read_events(temp.path(), "sess", 0, READ_MAX).unwrap();
+        assert_eq!(page.events[0]["attachments"][0]["name"], "diagram.png");
+        assert_eq!(page.events[0]["attachments"][0]["image"], true);
     }
 }
