@@ -21,37 +21,25 @@ jobs:
         run: cargo test --workspace
 
   # Each workspace member must build and test on its own so a break is
-  # localized to one crate (includes extensions/example, the living reference
-  # extension kept green in CI).
+  # localized to one crate. The matrix is generated from cargo metadata so
+  # new crates are covered automatically; dar-cli is excluded because it
+  # depends on every extension, so the workspace job already covers it.
+  members:
+    runs-on: ubuntu-latest
+    outputs:
+      crates: ${{ steps.list.outputs.crates }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: echo "crates=$(cargo metadata --no-deps --format-version 1 | jq -c '[.packages[].name] - ["dar-cli"]')" >> "$GITHUB_OUTPUT"
+
   crate:
+    needs: members
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        crate:
-          - dar-cli
-          - dar-host
-          - dar-host-api
-          - dar-cap-chat
-          - dar-cap-runner
-          - dar-cap-tracker
-          - dar-orchestrator-api
-          - dar-runner-core
-          - dar-chat-pi
-          - dar-dashboard
-          - example
-          - dar-frontend-log
-          - dar-orchestrator
-          - dar-system-files
-          - dar-system-context
-          - dar-runner-cli
-          - dar-runner-codex
-          - dar-runner-fake
-          - dar-runner-pi
-          - dar-tracker-files
-          - dar-tracker-linear
-          - dar-tracker-plane
-          - dar-tui
+        crate: ${{ fromJson(needs.members.outputs.crates) }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
