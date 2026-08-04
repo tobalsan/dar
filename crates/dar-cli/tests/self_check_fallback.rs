@@ -10,10 +10,15 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 fn probe_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_self_check_probe"))
 }
+
+/// Serializes copy+spawn across the tests: a concurrent `fs::copy` write fd
+/// inherited across another thread's fork makes exec fail with ETXTBSY.
+static SPAWN_LOCK: Mutex<()> = Mutex::new(());
 
 /// Copy the probe binary to `dest` so `current_exe()` resolves there and the
 /// guard looks for `<dest>.prev` next to it.
@@ -35,6 +40,7 @@ fn install_prev_marker(prev: &Path, marker: &Path) {
 
 #[test]
 fn failing_self_check_execs_into_prev() {
+    let _guard = SPAWN_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let bin = temp.path().join("bin");
     let current = bin.join("dar");
@@ -61,6 +67,7 @@ fn failing_self_check_execs_into_prev() {
 
 #[test]
 fn failing_self_check_without_prev_errors_clearly() {
+    let _guard = SPAWN_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let current = temp.path().join("bin").join("dar");
     install_current(&current);
@@ -81,6 +88,7 @@ fn failing_self_check_without_prev_errors_clearly() {
 
 #[test]
 fn healthy_self_check_boots_without_rollback() {
+    let _guard = SPAWN_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let bin = temp.path().join("bin");
     let current = bin.join("dar");
