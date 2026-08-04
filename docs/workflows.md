@@ -57,6 +57,7 @@ agent:
   max_active_runs: 3              # park barrier: runs completed in a row w/o leaving active state (default 3)
 
 hooks:
+  timeout_ms: 120000                # maximum hook duration (default: 2 min)
   after_create: ./scripts/setup.sh    # new workspace created
   before_run: ./scripts/pre-run.sh    # before each dispatch
   after_run: ./scripts/post-run.sh    # after each run (not called on kill)
