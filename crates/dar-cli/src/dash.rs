@@ -230,11 +230,38 @@ fn render_shell(agents: &[PresenceEntry]) -> Result<String> {
   .empty {{ padding: 8px; opacity: .5; font-size: 13px; }}
   .content {{ height: 100%; }}
   .content iframe {{ width: 100%; height: 100%; border: 0; }}
+  .drawer-toggle {{ display: none; }}
+  .scrim {{ display: none; }}
+  @media (max-width: 760px) {{
+    .layout {{ grid-template-columns: 1fr; }}
+    .drawer-toggle {{
+      display: block; position: fixed; top: 8px; left: 8px; z-index: 30;
+      width: 40px; height: 40px; border-radius: 8px; border: 1px solid #8884;
+      background: Canvas; color: CanvasText; font-size: 18px; line-height: 1; cursor: pointer;
+    }}
+    .sidebar {{
+      position: fixed; top: 0; left: 0; bottom: 0; z-index: 20;
+      width: min(80vw, 260px); background: Canvas; color: CanvasText;
+      transform: translateX(-100%); transition: transform .2s ease;
+    }}
+    .sidebar.open {{ transform: none; }}
+    .scrim {{
+      display: block; position: fixed; inset: 0; z-index: 10; background: #0008;
+      opacity: 0; pointer-events: none; transition: opacity .2s ease;
+    }}
+    .scrim.show {{ opacity: 1; pointer-events: auto; }}
+  }}
+  @media (prefers-reduced-motion: reduce) {{
+    .sidebar {{ transition: none; }}
+    .scrim {{ transition: none; }}
+  }}
 </style>
 </head>
 <body>
+<button id="drawerToggle" class="drawer-toggle" aria-label="Toggle agent list" onclick="toggleDrawer()">&#9776;</button>
+<div id="scrim" class="scrim" onclick="closeDrawer()"></div>
 <div class="layout">
-  <nav class="sidebar">
+  <nav id="sidebar" class="sidebar">
     <h1>Agents</h1>
     <ul id="agents">{items}</ul>
   </nav>
@@ -243,10 +270,26 @@ fn render_shell(agents: &[PresenceEntry]) -> Result<String> {
   </main>
 </div>
 <script>
+  function openDrawer() {{
+    document.getElementById('sidebar').classList.add('open');
+    document.getElementById('scrim').classList.add('show');
+  }}
+  function closeDrawer() {{
+    document.getElementById('sidebar').classList.remove('open');
+    document.getElementById('scrim').classList.remove('show');
+  }}
+  function toggleDrawer() {{
+    var sb = document.getElementById('sidebar');
+    if (sb.classList.contains('open')) {{ closeDrawer(); }} else {{ openDrawer(); }}
+  }}
+  document.addEventListener('keydown', function (e) {{
+    if (e.key === 'Escape') closeDrawer();
+  }});
   function pick(btn) {{
     document.querySelectorAll('.agent').forEach(function (b) {{ b.classList.remove('active'); }});
     btn.classList.add('active');
     document.getElementById('view').src = btn.dataset.src;
+    closeDrawer();
   }}
   // Mark the first agent active to match the initial iframe src.
   var first = document.querySelector('.agent');
@@ -430,6 +473,18 @@ mod tests {
         let html = render_shell(&[a, b]).unwrap();
         assert!(html.contains(&a_label));
         assert!(html.contains(&b_label));
+    }
+
+    #[test]
+    fn render_shell_has_mobile_drawer() {
+        let agents = vec![entry("ALG-1", "/agents/one", "0.0.0.0:50001", 1)];
+        let html = render_shell(&agents).unwrap();
+        assert!(html.contains("@media (max-width: 760px)"));
+        assert!(html.contains("id=\"drawerToggle\""));
+        assert!(html.contains("id=\"scrim\""));
+        assert!(html.contains("id=\"sidebar\""));
+        assert!(html.contains("function toggleDrawer()"));
+        assert!(html.contains("function closeDrawer()"));
     }
 
     #[test]
