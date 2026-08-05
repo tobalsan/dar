@@ -162,7 +162,7 @@ impl DashboardTab for ChatTab {
     }
     fn render(&self) -> Result<String> {
         Ok(format!(
-            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite" aria-label="Conversation"></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips" aria-label="Pending attachments"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files" title="Attach files"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button><input type="file" id="chat-attachments" multiple hidden aria-hidden="true" tabindex="-1"><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message the agent" aria-label="Message" enterkeyhint="send"></textarea><button type="button" id="chat-abort" class="chat-icon chat-icon-stop" aria-label="Stop the running turn" title="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon chat-icon-send" aria-label="Send message" title="Send" disabled><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg></button></div><div class="chat-bar"><span class="chat-spacer"></span><span class="chat-meter" id="chat-token-meter" aria-live="polite"></span></div></form></section><script>{}</script>"#,
+            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"><div class="chat-dropzone" id="chat-dropzone" hidden aria-hidden="true">Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite" aria-label="Conversation"></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips" aria-label="Pending attachments"></div><div class="chat-cap-hint" id="chat-cap-hint" aria-live="polite"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files" title="Attach files"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button><input type="file" id="chat-attachments" multiple hidden aria-hidden="true" tabindex="-1"><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message the agent" aria-label="Message" enterkeyhint="send"></textarea><button type="button" id="chat-abort" class="chat-icon chat-icon-stop" aria-label="Stop the running turn" title="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon chat-icon-send" aria-label="Send message" title="Send" disabled><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg></button></div><div class="chat-bar"><span class="chat-spacer"></span><span class="chat-meter" id="chat-token-meter" aria-live="polite"></span></div></form></section><script>{}</script>"#,
             include_str!("chat.css"),
             escape_html_attr(&self.agent_name),
             include_str!("renderer.js"),
@@ -2898,6 +2898,15 @@ mod tests {
         assert!(html.contains("id=\"chat-input\"") && html.contains("<textarea"));
         assert!(html.contains("id=\"chat-attachments\"") && html.contains("hidden"));
         assert!(html.contains("id=\"chat-attach\""));
+        // Drag-and-drop overlay + cap-exceeded hint (ALG-411).
+        assert!(html.contains("id=\"chat-dropzone\"") && html.contains("Drop files to attach"));
+        let dropzone_pos = html.find("id=\"chat-dropzone\"").unwrap();
+        let dropzone_tag_end = dropzone_pos + html[dropzone_pos..].find('>').unwrap();
+        assert!(html[dropzone_pos..dropzone_tag_end].contains("hidden"));
+        assert!(html.contains("id=\"chat-cap-hint\""));
+        assert!(html.contains(".chat-dropzone") && html.contains(".chat-dropzone[hidden]"));
+        assert!(html.contains(".chat-cap-hint"));
+        assert!(html.contains("position: relative;      /* anchors .chat-dropzone */"));
         assert!(html.contains("id=\"chat-send\""));
         // Guards against the renderer losing the fleet-proxy prefix read.
         assert!(html.contains("window.__dashPrefix"));
@@ -3185,6 +3194,33 @@ mod tests {
     fn browser_renderer_posts_answer_on_option_click() {
         let renderer = format!("{}/src/renderer.js", env!("CARGO_MANIFEST_DIR"));
         let script = r#"const handlers={},style={setProperty(){}};const element=(id)=>({id,style:{...style},dataset:{},value:'',disabled:false,hidden:false,innerHTML:'',scrollHeight:10,scrollTop:0,clientHeight:10,getBoundingClientRect:()=>({top:0}),querySelectorAll:()=>[]});const elements=Object.fromEntries(['chat-root','chat-transcript','chat-input','chat-chips','chat-send','chat-abort','chat-token-meter'].map(id=>[id,element(id)]));elements['chat-root'].dataset.agentName='Agent';global.document={getElementById:id=>elements[id]||null,addEventListener:(type,fn)=>handlers[type]=fn,querySelector:()=>null};global.window={innerHeight:1000,addEventListener(){}};global.EventSource=function(){};global.crypto={randomUUID:()=>'command-id'};let calls=0,captured=null;global.fetch=async(url,opts)=>{calls++;captured={url,body:opts.body};return{ok:true,status:202,text:async()=>'{}'}};require(process.argv[1]);window.renderChatEvent({type:'question',id:'req-1',questions:[{header:'H',question:'Q',options:[{label:'A',description:''}]}]});const target={closest:sel=>sel==='.chat-q-opt'?{dataset:{qbi:'0',qi:'0',label:'A'}}:null};handlers.click({target});handlers.click({target});setTimeout(()=>{if(calls!==1)process.exit(1);if(!captured||captured.url!=='/chat/main/answer')process.exit(1);const body=JSON.parse(captured.body);if(body.request_id!=='req-1'||JSON.stringify(body.answers)!=='[["A"]]')process.exit(1);},0);"#;
+        let status = std::process::Command::new("node")
+            .args(["-e", script, &renderer])
+            .status()
+            .expect("node is available for browser renderer tests");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn browser_renderer_handles_drag_drop_and_paste() {
+        let renderer = format!("{}/src/renderer.js", env!("CARGO_MANIFEST_DIR"));
+        let script = r#"const handlers={},style={setProperty(){}};const element=(id)=>({id,style:{...style},dataset:{},value:'',disabled:false,hidden:false,innerHTML:'',textContent:'',scrollHeight:10,scrollTop:0,clientHeight:10,getBoundingClientRect:()=>({top:0}),querySelectorAll:()=>[]});const elements=Object.fromEntries(['chat-root','chat-transcript','chat-input','chat-chips','chat-send','chat-abort','chat-token-meter','chat-dropzone','chat-cap-hint'].map(id=>[id,element(id)]));elements['chat-root'].dataset.agentName='Agent';elements['chat-dropzone'].hidden=true;global.document={getElementById:id=>elements[id]||null,addEventListener:(type,fn)=>handlers[type]=fn};global.window={innerHeight:1000,addEventListener(){}};global.EventSource=function(){};global.crypto={randomUUID:()=>'command-id'};require(process.argv[1]);const app=window.__chatWeb;const zone={closest:sel=>sel==='#chat-root'?elements['chat-root']:null};const outside={closest:()=>null};const filesDt=n=>({types:{includes:()=>true},files:Array.from({length:n},(_,i)=>({name:`f${i}.txt`}))});
+handlers.dragenter({target:zone,dataTransfer:filesDt(1),preventDefault(){}});
+if(app.dragDepth!==1||elements['chat-dropzone'].hidden!==false)process.exit(1);
+handlers.dragleave({target:zone,dataTransfer:filesDt(1)});
+if(app.dragDepth!==0||elements['chat-dropzone'].hidden!==true)process.exit(1);
+let navigated=false;
+handlers.dragover({target:outside,dataTransfer:filesDt(1),preventDefault(){navigated=true;}});
+if(!navigated)process.exit(1);
+handlers.drop({target:zone,dataTransfer:filesDt(9),preventDefault(){}});
+if(app.pending.length!==8||elements['chat-dropzone'].hidden!==true)process.exit(1);
+if(!elements['chat-cap-hint'].textContent.includes('1 file skipped'))process.exit(1);
+app.pending=[];
+let pasted=false;
+handlers.paste({target:elements['chat-input'],clipboardData:{files:[new File(['x'],'image.png',{type:'image/png'})]},preventDefault(){pasted=true;}});
+if(!pasted||app.pending.length!==1||!/^pasted-\d+-\d+\.png$/.test(app.pending[0].name))process.exit(1);
+if(elements['chat-cap-hint'].textContent.includes('skipped'))process.exit(1);
+"#;
         let status = std::process::Command::new("node")
             .args(["-e", script, &renderer])
             .status()

@@ -2,6 +2,7 @@
    :root tokens; no shadows, no side-stripes, accent only on hover/active,
    status color only as a 15%-alpha tinted pill. */
 .chat-web {
+  position: relative;      /* anchors .chat-dropzone */
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -11,6 +12,16 @@
   padding: 0 1.25rem;       /* the shell's #content sits outside <main>, so this fragment gets none for free */
   padding-bottom: .8rem;    /* keep the composer off the window's bottom edge */
 }
+/* drag-and-drop overlay, covers transcript + composer; armed by JS only when
+   the drag carries files */
+.chat-dropzone {
+  position: absolute; inset: 0; z-index: 5;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--panel-2); border: 2px dashed var(--border); border-radius: 8px;
+  color: var(--fg); font-size: .9rem; letter-spacing: .02em;
+  pointer-events: none;
+}
+.chat-dropzone[hidden] { display: none; }
 .chat-history-head { display:flex; gap:.4rem; align-items:center; width:min(100%,48rem); align-self:center; }
 .chat-history-button, .chat-history-entry { background:var(--panel-2); color:var(--fg); border:1px solid var(--border); border-radius:5px; font:inherit; cursor:pointer; }
 .chat-history-button { padding:.25rem .55rem; }
@@ -191,6 +202,8 @@
   padding: 0 .15rem; font: inherit; line-height: 1;
 }
 .chat-chip-x:hover { color: var(--bad); }
+.chat-cap-hint { color: var(--muted); font-size: .72rem; font-style: italic; }
+.chat-cap-hint:empty { display: none; }
 
 .chat-row { display: flex; align-items: flex-end; gap: .45rem; min-width: 0; }
 

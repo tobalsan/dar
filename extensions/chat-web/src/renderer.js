@@ -128,6 +128,7 @@
 
   const SESSION = 'main', MAX_ATTACHMENTS = 8;
   const $ = id => document.getElementById(id);
+  let pasteSeq = 0;
 
   const sendEnabled = app => app.draft.trim() !== '' || app.pending.length > 0;
 
@@ -139,6 +140,26 @@
     let host = $('chat-chips'); if (!host) return;
     host.innerHTML = app.pending.map((file, i) => `<span class="chat-chip"><span class="chat-chip-name">${esc(file.name)}</span><button type="button" class="chat-chip-x" data-chip="${i}" aria-label="Remove attachment">×</button></span>`).join('');
   };
+
+  const capHint = (app, dropped) => {
+    let host = $('chat-cap-hint'); if (!host) return;
+    host.textContent = dropped > 0 ? `Only ${MAX_ATTACHMENTS} attachments per message — ${dropped} file${dropped === 1 ? '' : 's'} skipped.` : '';
+  };
+
+  // Single intake point for the file input, drag-and-drop, and clipboard
+  // paste: caps at MAX_ATTACHMENTS and surfaces how many were dropped.
+  const addFiles = (app, fileList) => {
+    let files = Array.from(fileList), room = Math.max(MAX_ATTACHMENTS - app.pending.length, 0);
+    for (const file of files.slice(0, room)) app.pending.push(file);
+    capHint(app, Math.max(files.length - room, 0));
+    renderChips(app); refreshBusy(app);
+  };
+
+  const toggleDropzone = (app, show) => { let el = $('chat-dropzone'); if (el) el.hidden = !show; };
+
+  // Clipboard screenshots all arrive as a generic "image.png"; give repeated
+  // pastes distinct names so they don't collide in the chip row.
+  const pasteName = name => /^image\.\w+$/i.test(name) ? name.replace(/^image/i, `pasted-${Date.now()}-${++pasteSeq}`) : name;
 
   const refreshBusy = app => {
     let busy = app.turns > 0, abort = $('chat-abort'), send = $('chat-send');
@@ -257,8 +278,37 @@
     document.addEventListener('input', e => { if (e.target.id === 'chat-input') { app.draft = e.target.value; autogrow(e.target); refreshBusy(app); } });
     document.addEventListener('change', e => {
       if (e.target.id !== 'chat-attachments') return;
-      for (const file of e.target.files) if (app.pending.length < MAX_ATTACHMENTS) app.pending.push(file);
-      e.target.value = ''; renderChips(app); refreshBusy(app);
+      addFiles(app, e.target.files);
+      e.target.value = '';
+    });
+    document.addEventListener('paste', e => {
+      if (e.target.id !== 'chat-input' || app.viewingHistory) return;
+      let files = e.clipboardData && e.clipboardData.files;
+      if (!files || !files.length) return;
+      e.preventDefault();
+      addFiles(app, Array.from(files).map(file => new File([file], pasteName(file.name), { type: file.type })));
+    });
+    // dragover must preventDefault() unconditionally wherever a file is over
+    // the document, not just the drop zone — otherwise a near-miss drop
+    // outside #chat-root navigates the whole page to the file.
+    document.addEventListener('dragover', e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault(); });
+    document.addEventListener('dragenter', e => {
+      if (app.viewingHistory || !e.dataTransfer.types.includes('Files') || !e.target.closest('#chat-root')) return;
+      e.preventDefault();
+      app.dragDepth++; toggleDropzone(app, true);
+    });
+    // Enter/leave depth counter (not bare dragleave) so moving over child
+    // elements inside the zone doesn't flicker the overlay.
+    document.addEventListener('dragleave', e => {
+      if (app.viewingHistory || !e.dataTransfer.types.includes('Files') || !e.target.closest('#chat-root')) return;
+      app.dragDepth = Math.max(0, app.dragDepth - 1);
+      if (!app.dragDepth) toggleDropzone(app, false);
+    });
+    document.addEventListener('drop', e => {
+      if (!e.dataTransfer.types.includes('Files')) return;
+      e.preventDefault();
+      app.dragDepth = 0; toggleDropzone(app, false);
+      if (!app.viewingHistory && e.target.closest('#chat-root')) addFiles(app, e.dataTransfer.files);
     });
     document.addEventListener('click', e => {
       let history = e.target.closest('#chat-history');
@@ -349,7 +399,7 @@
   };
 
   if (!window.__chatWeb) {
-    let app = { blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false, qsel: {}, qsent: {}, viewingHistory: false, historyLoad: 0, historyController: null };
+    let app = { blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false, qsel: {}, qsent: {}, viewingHistory: false, historyLoad: 0, historyController: null, dragDepth: 0 };
     window.__chatWeb = app;
     window.renderChatEvent = event => render(app, event);
     app.es = new EventSource(`/chat/${SESSION}/stream`);
