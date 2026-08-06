@@ -234,6 +234,7 @@ fn render_shell(agents: &[PresenceEntry]) -> Result<String> {
   .scrim {{ display: none; }}
   @media (max-width: 760px) {{
     .layout {{ grid-template-columns: 1fr; }}
+    .content {{ padding-top: 48px; }}
     .drawer-toggle {{
       display: block; position: fixed; top: 8px; left: 8px; z-index: 30;
       width: 40px; height: 40px; border-radius: 8px; border: 1px solid #8884;
@@ -485,6 +486,8 @@ mod tests {
         assert!(html.contains("id=\"sidebar\""));
         assert!(html.contains("function toggleDrawer()"));
         assert!(html.contains("function closeDrawer()"));
+        // the toggle is fixed-position, so mobile content must reserve room for it
+        assert!(html.contains(".content { padding-top: 48px; }"));
     }
 
     #[test]
