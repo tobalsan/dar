@@ -242,8 +242,19 @@ pub struct QuestionOption {
     pub description: String,
 }
 
+/// What initiated a backend run. Submitted runs consume accepted input in FIFO
+/// order; autonomous runs do not consume a caller's pending message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnOrigin {
+    Submitted,
+    Autonomous,
+}
+
 #[derive(Clone, Debug)]
 pub enum ChatEvent {
+    /// Begins an attributed run before its visible output and single completion.
+    /// Backends without this event retain submitted-only completion semantics.
+    TurnStarted { origin: TurnOrigin },
     /// A user turn accepted by another attached surface.
     User { text: String },
     /// The shared session was reset by another attached surface.
@@ -290,7 +301,8 @@ pub enum ChatEvent {
         tokens_used: u64,
         context_window: Option<u64>,
     },
-    /// Exactly one per turn. aborted turns: ok=false, error=Some("aborted").
+    /// Exactly one per run, including autonomous runs. Aborted runs use
+    /// ok=false, error=Some("aborted").
     TurnFinished { ok: bool, error: Option<String> },
     /// Backend process died outside a clean close; session is unusable.
     SessionClosed { error: Option<String> },
@@ -425,7 +437,10 @@ pub trait ChatSession: Send {
     /// Accept a user message. This must also accept messages while a turn is
     /// already in flight: backends either inject immediately or queue until
     /// the next turn boundary. Completion arrives as one
-    /// `ChatEvent::TurnFinished` per accepted message on tx. If `abort`
+    /// `ChatEvent::TurnFinished` per accepted message on tx. Backends may also
+    /// emit autonomous start/completion pairs, which do not settle accepted
+    /// messages. Backends supporting autonomy must emit `TurnStarted` for both
+    /// submitted and autonomous runs. If `abort`
     /// cancels backend-held queued messages, those accepted messages finish
     /// as aborted.
     fn send_turn(&mut self, prompt: String) -> BoxFuture<'_, anyhow::Result<()>>;

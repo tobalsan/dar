@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use cap_chat::{ChatEvent, ChatRole};
+use cap_chat::{ChatEvent, ChatRole, TurnOrigin};
 use orchestrator_api::RunSnapshot;
 
 use crate::editor::TextArea;
@@ -285,6 +285,9 @@ pub struct ChatState {
     pub usage: Option<ContextUsage>,
     pub in_flight: bool,
     pub pending_turns: usize,
+    /// Backend turns currently in flight, in start order. Autonomous turns
+    /// share the event stream but do not consume submitted-turn accounting.
+    turn_origin: Option<TurnOrigin>,
     pub turn_started_at: Option<Instant>,
     /// Turns abandoned TUI-side (timeout) whose backend `TurnFinished` has not
     /// arrived yet. While non-zero, `submit` stays gated and `apply_event`
@@ -327,6 +330,7 @@ impl ChatState {
     pub fn fail_turn(&mut self, message: String) {
         self.in_flight = false;
         self.pending_turns = 0;
+        self.turn_origin = None;
         self.turn_started_at = None;
         self.blocks.push(ChatBlock::Error(message));
     }
@@ -348,6 +352,7 @@ impl ChatState {
         self.disabled = true;
         self.in_flight = false;
         self.pending_turns = 0;
+        self.turn_origin = None;
         self.turn_started_at = None;
         self.blocks.push(ChatBlock::Notice(banner));
     }
@@ -413,11 +418,13 @@ impl ChatState {
 
     pub fn apply_event(&mut self, event: ChatEvent) {
         match event {
+            ChatEvent::TurnStarted { origin } => self.turn_origin = Some(origin),
             ChatEvent::User { text } => self.blocks.push(ChatBlock::User(text)),
             ChatEvent::SessionReset => {
                 self.clear_transcript();
                 self.in_flight = false;
                 self.pending_turns = 0;
+                self.turn_origin = None;
                 self.turn_started_at = None;
                 self.stale_finishes = 0;
                 self.push_notice("— started a fresh session —".to_string());
@@ -489,6 +496,10 @@ impl ChatState {
                 // A pending question cannot outlive its turn; this also
                 // covers a rejected-question event lost to an abort.
                 self.dismiss_pending_questions();
+                let origin = self.turn_origin.take();
+                if origin == Some(TurnOrigin::Autonomous) {
+                    return;
+                }
                 if self.stale_finishes > 0 {
                     // The finish of a turn the TUI already timed out and
                     // abandoned; consuming it re-opens the submit gate.
@@ -500,10 +511,17 @@ impl ChatState {
                 }
                 if !ok {
                     let remaining = self.pending_turns.saturating_sub(1);
-                    self.pending_turns = 0;
-                    self.in_flight = false;
-                    self.turn_started_at = None;
-                    self.stale_finishes += remaining;
+                    if origin == Some(TurnOrigin::Submitted) {
+                        // Attributed failures settle only this accepted input.
+                        self.pending_turns = remaining;
+                        self.in_flight = remaining > 0;
+                        self.turn_started_at = self.in_flight.then(Instant::now);
+                    } else {
+                        self.pending_turns = 0;
+                        self.in_flight = false;
+                        self.turn_started_at = None;
+                        self.stale_finishes += remaining;
+                    }
                     let error = error.unwrap_or_else(|| "unknown error".to_string());
                     self.blocks.push(ChatBlock::Error(if error == "aborted" {
                         "turn aborted".to_string()
@@ -525,6 +543,7 @@ impl ChatState {
                 self.in_flight = false;
                 self.pending_turns = 0;
                 self.turn_started_at = None;
+                self.turn_origin = None;
                 // The process is gone; no stale TurnFinished is coming.
                 self.stale_finishes = 0;
                 self.blocks.push(ChatBlock::Error(match error {
@@ -995,6 +1014,71 @@ mod tests {
     }
 
     #[test]
+    fn attributed_failure_preserves_next_submitted_turn() {
+        let mut chat = ChatState {
+            input: ta("first"),
+            ..Default::default()
+        };
+        chat.submit().unwrap();
+        chat.input = ta("second");
+        chat.submit().unwrap();
+        chat.apply_event(ChatEvent::TurnStarted {
+            origin: TurnOrigin::Submitted,
+        });
+        chat.apply_event(ChatEvent::TurnFinished {
+            ok: false,
+            error: Some("rejected".into()),
+        });
+        assert!(chat.in_flight);
+        assert_eq!(chat.pending_turns, 1);
+        assert_eq!(chat.stale_finishes, 0);
+        chat.apply_event(ChatEvent::TurnStarted {
+            origin: TurnOrigin::Submitted,
+        });
+        chat.apply_event(ChatEvent::TurnFinished {
+            ok: true,
+            error: None,
+        });
+        assert!(!chat.in_flight);
+        assert_eq!(chat.pending_turns, 0);
+    }
+
+    #[test]
+    fn autonomous_failure_does_not_consume_submitted_turn_or_stale_finish() {
+        let mut chat = ChatState {
+            input: ta("submitted"),
+            ..Default::default()
+        };
+        chat.submit().unwrap();
+        chat.apply_event(ChatEvent::TurnStarted {
+            origin: TurnOrigin::Autonomous,
+        });
+
+        chat.apply_event(ChatEvent::TurnFinished {
+            ok: false,
+            error: Some("autonomous failed".into()),
+        });
+
+        assert!(chat.in_flight);
+        assert_eq!(chat.pending_turns, 1);
+        assert_eq!(chat.stale_finishes, 0);
+        assert!(chat
+            .blocks
+            .iter()
+            .all(|block| !matches!(block, ChatBlock::Error(_))));
+        chat.abandon_turn("timeout".into());
+        assert_eq!(chat.stale_finishes, 1);
+        chat.apply_event(ChatEvent::TurnStarted {
+            origin: TurnOrigin::Autonomous,
+        });
+        chat.apply_event(ChatEvent::TurnFinished {
+            ok: true,
+            error: None,
+        });
+        assert_eq!(chat.stale_finishes, 1);
+    }
+
+    #[test]
     fn timeout_with_queued_turns_gates_submit_until_all_stale_finishes_arrive() {
         let mut chat = ChatState {
             input: ta("first"),
@@ -1027,8 +1111,12 @@ mod tests {
         };
         chat.submit().unwrap();
         chat.abandon_turn("turn timed out".to_string());
+        chat.apply_event(ChatEvent::TurnStarted {
+            origin: TurnOrigin::Autonomous,
+        });
         chat.apply_event(ChatEvent::SessionClosed { error: None });
         assert_eq!(chat.stale_finishes, 0);
+        assert!(chat.turn_origin.is_none());
 
         // The dead session can never deliver the stale finish; a new submit
         // (which reopens a fresh session) must not be blocked forever.

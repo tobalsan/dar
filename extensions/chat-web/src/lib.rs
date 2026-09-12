@@ -24,7 +24,7 @@ use axum::{
 use cap_chat::QuestionInfo;
 use cap_dashboard_tab::{DashboardTab, DashboardTabs};
 use dar_extension_sdk::{
-    chat::{self, ChatBackend, ChatEvent, ChatRole, ChatSession},
+    chat::{self, ChatBackend, ChatEvent, ChatRole, ChatSession, TurnOrigin},
     Extension, RegisterCtx, StartCtx,
 };
 use futures_util::StreamExt;
@@ -273,6 +273,8 @@ struct WireEvent {
     attachments: Vec<Attachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     questions: Option<Vec<QuestionInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Attachment {
@@ -485,6 +487,7 @@ impl AppState {
                 context_window: None,
                 attachments: vec![],
                 questions: None,
+                origin: None,
             };
             append_transcript(&session.transcript, &event)?;
             session
@@ -672,6 +675,7 @@ impl Session {
             context_window: None,
             attachments,
             questions: None,
+            origin: None,
         };
         append_transcript(&self.transcript, &event)?;
         self.history
@@ -701,14 +705,39 @@ impl Session {
             tokens_used,
             context_window,
             questions,
+            origin,
         ) = match event {
             ChatEvent::User { .. } | ChatEvent::SessionReset => return true,
+            ChatEvent::TurnStarted { origin } => {
+                if origin == TurnOrigin::Autonomous {
+                    self.active_turns
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                (
+                    "started",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(match origin {
+                        TurnOrigin::Submitted => "submitted".to_owned(),
+                        TurnOrigin::Autonomous => "autonomous".to_owned(),
+                    }),
+                )
+            }
             ChatEvent::Delta {
                 role: ChatRole::Assistant,
                 text,
             } => (
                 "delta",
                 Some(text),
+                None,
                 None,
                 None,
                 None,
@@ -734,6 +763,7 @@ impl Session {
                 None,
                 None,
                 None,
+                None,
             ),
             ChatEvent::ToolCall { id, name, args } => (
                 "tool_call",
@@ -742,6 +772,7 @@ impl Session {
                 Some(id),
                 Some(name),
                 Some(args),
+                None,
                 None,
                 None,
                 None,
@@ -765,6 +796,7 @@ impl Session {
                 None,
                 None,
                 None,
+                None,
             ),
             ChatEvent::QuestionAsked {
                 request_id,
@@ -781,6 +813,7 @@ impl Session {
                 None,
                 None,
                 Some(questions),
+                None,
             ),
             ChatEvent::QuestionResolved {
                 request_id,
@@ -806,6 +839,7 @@ impl Session {
                 None,
                 None,
                 None,
+                None,
             ),
             ChatEvent::Error(error) => (
                 "error",
@@ -819,11 +853,13 @@ impl Session {
                 None,
                 None,
                 None,
+                None,
             ),
             ChatEvent::TurnFinished { ok, error } => (
                 if ok { "finished" } else { "aborted" },
                 None,
                 error,
+                None,
                 None,
                 None,
                 None,
@@ -848,9 +884,10 @@ impl Session {
                 Some(tokens_used),
                 context_window,
                 None,
+                None,
             ),
             ChatEvent::SessionClosed { error } => (
-                "closed", None, error, None, None, None, None, None, None, None, None,
+                "closed", None, error, None, None, None, None, None, None, None, None, None,
             ),
         };
         let terminal = matches!(kind, "finished" | "aborted" | "closed");
@@ -879,6 +916,7 @@ impl Session {
             context_window,
             attachments: vec![],
             questions,
+            origin,
         };
         let mut history = self
             .history
@@ -971,6 +1009,7 @@ impl Session {
             context_window: None,
             attachments: vec![],
             questions: None,
+            origin: None,
         };
         history.push_back(event.clone());
         let _ = self.tx.send(event);
@@ -2393,6 +2432,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn autonomous_start_and_finish_preserve_submitted_active_turn() {
+        let s = session(Box::new(FakeSession {
+            aborted: Arc::new(AtomicBool::new(false)),
+            sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            abort_fails: false,
+        }));
+        s.active_turns.store(1, Ordering::SeqCst);
+        let generation = s.generation.load(Ordering::SeqCst);
+        let mut wire = s.tx.subscribe();
+
+        assert!(s.publish_if_current(
+            generation,
+            ChatEvent::TurnStarted {
+                origin: TurnOrigin::Autonomous,
+            },
+        ));
+        assert_eq!(s.active_turns.load(Ordering::SeqCst), 2);
+        let started = wire.recv().await.unwrap();
+        assert_eq!(started.kind, "started");
+        assert_eq!(started.origin.as_deref(), Some("autonomous"));
+
+        assert!(s.publish_if_current(
+            generation,
+            ChatEvent::TurnFinished {
+                ok: false,
+                error: Some("autonomous failed".into()),
+            },
+        ));
+        assert_eq!(s.active_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(wire.recv().await.unwrap().kind, "aborted");
+    }
+
+    #[tokio::test]
     async fn abort_is_server_authoritative_and_emits_terminal_event() {
         let flag = Arc::new(AtomicBool::new(false));
         let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -3250,6 +3322,7 @@ if(elements['chat-cap-hint'].textContent.includes('skipped'))process.exit(1);
                     context_window: None,
                     attachments: vec![],
                     questions: None,
+                    origin: None,
                 },
             )
             .unwrap();

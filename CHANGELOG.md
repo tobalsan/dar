@@ -9,6 +9,12 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- **⚠ BREAKING SDK 0.5.0:** `dar-cap-chat` and `dar-extension-sdk` add attributed turn starts; exhaustive chat-event matches must handle `TurnStarted`. Other workspace crates retain their existing versions.
+- Local agent builds now validate each SDK/contract dependency against that crate's version, allowing SDK releases independent of the CLI version.
+
+- Pi chat now distinguishes background continuations from submitted messages, preserving queued input and response order when autonomous work starts or fails.
+- The chat SDK exposes turn origin so messaging extensions can deliver proactive replies without consuming a pending message's acknowledgement.
+
 - Web chat now accepts attachments by dragging files onto the chat pane or pasting them from the clipboard, alongside the existing upload button; a hint reports files skipped past the eight-attachment cap.
 - The `dar dash` fleet view is now usable on phones: below 760px the agent sidebar collapses into a drawer opened by a hamburger button (closed by picking an agent, tapping outside, or pressing Escape) so the agent dashboard gets the full viewport width.
 - A failing or timing-out `before_remove` hook now preserves the workspace for operator kills; hooks now consistently run in the workspace with the full hook environment, including `AGENT_RUN_ID`.

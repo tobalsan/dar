@@ -47,7 +47,6 @@ const STOCK_CRATE_VERSION_REQ: &str = concat!(
     ".",
     env!("CARGO_PKG_VERSION_MINOR")
 );
-const LOCAL_CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const PATCHED_REGISTRY_CRATES: &[(&str, &str)] = &[
     ("dar-host-api", "crates/host-api"),
@@ -669,9 +668,8 @@ fn validate_patched_registry_deps(
     manifest: &toml::Value,
     source_root: &Path,
 ) -> Result<()> {
-    let local_version = Version::parse(LOCAL_CRATE_VERSION)
-        .with_context(|| format!("parsing local dar version {LOCAL_CRATE_VERSION}"))?;
     for (dep_name, req) in registry_dar_dependency_reqs(manifest) {
+        let local_version = patched_registry_version(source_root, &dep_name)?;
         if VersionReq::parse(&req)
             .with_context(|| {
                 format!(
@@ -684,12 +682,53 @@ fn validate_patched_registry_deps(
             continue;
         }
         bail!(
-            "{} depends on {dep_name} {req:?}, but local dar checkout {} provides {LOCAL_CRATE_VERSION}; use a matching dar checkout or update the extension dependency",
+            "{} depends on {dep_name} {req:?}, but local dar checkout {} provides {local_version}; use a matching dar checkout or update the extension dependency",
             manifest_path.display(),
             source_root.display()
         );
     }
     Ok(())
+}
+
+/// Patched contracts can release independently of the CLI/stock crate version.
+fn patched_registry_version(source_root: &Path, name: &str) -> Result<Version> {
+    let (_, relative) = PATCHED_REGISTRY_CRATES
+        .iter()
+        .find(|(package, _)| *package == name)
+        .with_context(|| format!("unknown patched registry crate {name}"))?;
+    let path = source_root.join(relative).join("Cargo.toml");
+    let manifest: toml::Value = fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?
+        .parse()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let declared = manifest
+        .get("package")
+        .and_then(|package| package.get("version"))
+        .with_context(|| format!("missing package version in {}", path.display()))?;
+    let version = if let Some(version) = declared.as_str() {
+        version.to_owned()
+    } else if declared.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
+        let workspace_path = source_root.join("Cargo.toml");
+        let workspace: toml::Value = fs::read_to_string(&workspace_path)
+            .with_context(|| format!("reading {}", workspace_path.display()))?
+            .parse()
+            .with_context(|| format!("parsing {}", workspace_path.display()))?;
+        workspace
+            .get("workspace")
+            .and_then(|workspace| workspace.get("package"))
+            .and_then(|package| package.get("version"))
+            .and_then(toml::Value::as_str)
+            .with_context(|| {
+                format!(
+                    "missing workspace package version in {}",
+                    workspace_path.display()
+                )
+            })?
+            .to_owned()
+    } else {
+        bail!("unsupported package version in {}", path.display());
+    };
+    Version::parse(&version).with_context(|| format!("parsing {name} version {version:?}"))
 }
 
 fn registry_dar_dependency_reqs(manifest: &toml::Value) -> Vec<(String, String)> {
@@ -1079,13 +1118,49 @@ mod tests {
     }
 
     #[test]
+    fn validates_independently_versioned_sdk_and_workspace_host_together() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(
+            source.path().join("Cargo.toml"),
+            "[workspace.package]\nversion = \"0.4.1\"\n",
+        )
+        .unwrap();
+        for (directory, version) in [
+            ("extension-sdk", "version = \"0.5.0\""),
+            ("host-api", "version.workspace = true"),
+        ] {
+            let path = source.path().join("crates").join(directory);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("Cargo.toml"), format!("[package]\n{version}\n")).unwrap();
+        }
+        let manifest: toml::Value =
+            "[dependencies]\ndar-extension-sdk = \"0.5\"\ndar-host-api = \"0.4\"\n"
+                .parse()
+                .unwrap();
+        let extension = source.path().join("extension/Cargo.toml");
+        validate_patched_registry_deps(&extension, &manifest, source.path()).unwrap();
+
+        let incompatible: toml::Value = "[dependencies]\ndar-extension-sdk = \"0.4\"\n"
+            .parse()
+            .unwrap();
+        let error =
+            validate_patched_registry_deps(&extension, &incompatible, source.path()).unwrap_err();
+        assert!(error.to_string().contains("provides 0.5.0"));
+        assert!(error
+            .to_string()
+            .contains("update the extension dependency"));
+    }
+
+    #[test]
     fn compose_accepts_registry_sdk_dep_when_version_matches() {
+        let local_version =
+            patched_registry_version(&dar_source_root().unwrap(), "dar-extension-sdk").unwrap();
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
         write_test_agent_yaml(agent);
         write_test_extension_with_dependency(
             agent,
-            &format!("dar-extension-sdk = \"{LOCAL_CRATE_VERSION}\""),
+            &format!("dar-extension-sdk = \"{local_version}\""),
         );
 
         compose(agent).unwrap();
@@ -1097,6 +1172,8 @@ mod tests {
 
     #[test]
     fn compose_rejects_registry_sdk_dep_when_version_mismatches() {
+        let local_version =
+            patched_registry_version(&dar_source_root().unwrap(), "dar-extension-sdk").unwrap();
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
         write_test_agent_yaml(agent);
@@ -1106,19 +1183,19 @@ mod tests {
 
         let message = format!("{err:#}");
         assert!(message.contains("depends on dar-extension-sdk \"=0.2.0\""));
-        assert!(message.contains(&format!("provides {LOCAL_CRATE_VERSION}")));
+        assert!(message.contains(&format!("provides {local_version}")));
     }
 
     #[test]
     fn compose_validates_renamed_registry_sdk_dep() {
+        let local_version =
+            patched_registry_version(&dar_source_root().unwrap(), "dar-extension-sdk").unwrap();
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
         write_test_agent_yaml(agent);
         write_test_extension_with_dependency(
             agent,
-            &format!(
-                "sdk = {{ package = \"dar-extension-sdk\", version = \"{LOCAL_CRATE_VERSION}\" }}"
-            ),
+            &format!("sdk = {{ package = \"dar-extension-sdk\", version = \"{local_version}\" }}"),
         );
 
         compose(agent).unwrap();

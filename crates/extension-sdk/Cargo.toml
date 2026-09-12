@@ -1,6 +1,6 @@
 [package]
 name = "dar-extension-sdk"
-version.workspace = true
+version = "0.5.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -12,7 +12,7 @@ name = "dar_extension_sdk"
 
 [dependencies]
 anyhow = "1"
-cap-chat = { package = "dar-cap-chat", path = "../cap-chat", version = "0.4" }
+cap-chat = { package = "dar-cap-chat", path = "../cap-chat", version = "0.5" }
 cap-deliver = { package = "dar-cap-deliver", path = "../cap-deliver", version = "0.4" }
 dar-artifacts = { path = "../artifacts", version = "0.4" }
 host-api = { package = "dar-host-api", path = "../host-api", version = "0.4" }

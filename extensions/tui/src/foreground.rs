@@ -709,6 +709,9 @@ mod tests {
 while IFS= read -r line; do
   case "$line" in
     *'"type":"prompt"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^" ]*\)".*/\1/p')
+      printf '{"type":"response","id":"%s","success":true}\n' "$id"
+      printf '%s\n' '{"type":"agent_start"}' '{"type":"message_start","message":{"role":"user"}}'
       printf '%s\n' "$line" >> prompts.log
       printf '%s\n' '{"type":"message_update","message":{},"assistantMessageEvent":{"type":"thinking_delta","delta":"hmm"}}'
       printf '%s\n' '{"type":"message_update","message":{},"assistantMessageEvent":{"type":"text_delta","delta":"pong"}}'
@@ -716,6 +719,7 @@ while IFS= read -r line; do
       ;;
     *'"type":"abort"'*)
       printf '%s\n' '{"type":"message_update","message":{},"assistantMessageEvent":{"type":"error","reason":"aborted"}}'
+      printf '%s\n' '{"type":"agent_end"}'
       ;;
   esac
 done"#;
@@ -959,6 +963,9 @@ for a in "$@"; do printf '%s\n' "$a" >> argv.log; done
 while IFS= read -r line; do
   case "$line" in
     *'"type":"prompt"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^" ]*\)".*/\1/p')
+      printf '{"type":"response","id":"%s","success":true}\n' "$id"
+      printf '%s\n' '{"type":"agent_start"}' '{"type":"message_start","message":{"role":"user"}}'
       printf '%s\n' '{"type":"agent_end"}'
       ;;
   esac
@@ -1095,6 +1102,9 @@ printf '%s\n' '{"type":"session","id":"fresh-id"}' \
 while IFS= read -r line; do
   case "$line" in
     *'"type":"prompt"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^" ]*\)".*/\1/p')
+      printf '{"type":"response","id":"%s","success":true}\n' "$id"
+      printf '%s\n' '{"type":"agent_start"}' '{"type":"message_start","message":{"role":"user"}}'
       printf '%s\n' '{"type":"agent_end"}'
       ;;
   esac

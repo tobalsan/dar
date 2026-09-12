@@ -18,7 +18,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use cap_chat::{ArtifactReady, ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams};
+use cap_chat::{
+    ArtifactReady, ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams, TurnOrigin,
+};
 use host_api::{Extension, RegisterCtx};
 use runner_core::{
     effective_command, scrub_loaded_env, setup_process_group, strip_ansi, term_then_kill,
@@ -70,7 +72,6 @@ impl ChatBackend for PiChatBackend {
 pub struct PiChatSession {
     pid: u32,
     next_turn: u64,
-    tx: Sender<ChatEvent>,
     /// Shared with the stdout pump (extension_ui_request auto-answers).
     /// `close` takes it; dropping the writer is pi's clean-quit signal.
     stdin: Arc<Mutex<Option<ChildStdin>>>,
@@ -83,8 +84,124 @@ pub struct PiChatSession {
 
 #[derive(Default)]
 struct TurnQueue {
+    /// Actual Pi run activity, independent of submitted command admission.
     busy: bool,
-    pending: VecDeque<String>,
+    completed_runs: u64,
+    origin: Option<TurnOrigin>,
+    error: Option<String>,
+    in_flight: Option<Prompt>,
+    pending: VecDeque<Prompt>,
+}
+
+struct Prompt {
+    line: String,
+    id: String,
+    admitted: bool,
+    completed_before_dispatch: u64,
+    failure: Option<String>,
+}
+
+impl Prompt {
+    fn new(line: String) -> Self {
+        let value: Value = serde_json::from_str(&line).expect("internal prompt JSON");
+        Self {
+            id: value["id"].as_str().expect("internal prompt ID").to_owned(),
+            line,
+            admitted: false,
+            completed_before_dispatch: 0,
+            failure: None,
+        }
+    }
+}
+
+impl TurnQueue {
+    fn start(&mut self, role: Option<&str>) -> ChatEvent {
+        let submitted = role == Some("user")
+            && self
+                .in_flight
+                .as_ref()
+                .is_some_and(|prompt| prompt.admitted);
+        let origin = if submitted {
+            self.in_flight.take();
+            TurnOrigin::Submitted
+        } else {
+            TurnOrigin::Autonomous
+        };
+        self.origin = Some(origin);
+        ChatEvent::TurnStarted { origin }
+    }
+
+    /// Admission responses are correlated by command ID; initial input roles
+    /// distinguish user prompts from extension custom-message continuations.
+    fn observe(&mut self, value: &Value, mapped: Mapped) -> Vec<ChatEvent> {
+        let kind = value["type"].as_str();
+        match kind {
+            Some("agent_start") => {
+                self.busy = true;
+                self.origin = None;
+                self.error = None;
+                return Vec::new();
+            }
+            Some("response") => {
+                let Some(prompt) = self
+                    .in_flight
+                    .as_mut()
+                    .filter(|prompt| value["id"].as_str() == Some(prompt.id.as_str()))
+                else {
+                    return Vec::new();
+                };
+                if value["success"].as_bool() == Some(true) {
+                    prompt.admitted = true;
+                } else if value["success"].as_bool() == Some(false) {
+                    let error = value["error"]
+                        .as_str()
+                        .unwrap_or("backend rejected command");
+                    // Stock Pi emits agent_start before a concurrent prompt is
+                    // rejected. Match its busy rejection too, to cover a run
+                    // ending before the correlated rejection is read.
+                    let busy_rejection = error.starts_with("Agent is already processing")
+                        && (self.busy || self.completed_runs > prompt.completed_before_dispatch);
+                    let mut prompt = self.in_flight.take().unwrap();
+                    if !busy_rejection {
+                        prompt.failure = Some(error.to_owned());
+                    }
+                    self.pending.push_front(prompt);
+                }
+                return Vec::new();
+            }
+            _ => {}
+        }
+        let mut events = Vec::new();
+        if self.busy && self.origin.is_none() && kind == Some("message_start") {
+            events.push(self.start(value["message"]["role"].as_str()));
+        }
+        match mapped {
+            Mapped::Emit(ChatEvent::TurnFinished { ok, error }) => {
+                if kind != Some("agent_end") {
+                    self.error = error.or_else(|| (!ok).then(|| "backend error".to_owned()));
+                } else if self.busy {
+                    if self.origin.is_none() {
+                        events.push(self.start(None));
+                    }
+                    events.push(ChatEvent::TurnFinished {
+                        ok: self.error.is_none(),
+                        error: self.error.take(),
+                    });
+                    self.busy = false;
+                    self.completed_runs += 1;
+                    self.origin = None;
+                }
+            }
+            Mapped::Emit(event) => {
+                if self.busy && self.origin.is_none() {
+                    events.push(self.start(None));
+                }
+                events.push(event);
+            }
+            _ => {}
+        }
+        events
+    }
 }
 
 impl PiChatSession {
@@ -155,7 +272,6 @@ impl PiChatSession {
         Ok(Self {
             pid,
             next_turn: 0,
-            tx,
             stdin,
             queue,
             closing,
@@ -168,16 +284,16 @@ impl PiChatSession {
     }
 
     async fn accept_turn(&self, line: String) -> Result<()> {
-        {
-            let mut queue = self.queue.lock().await;
-            if queue.busy {
-                queue.pending.push_back(line);
-                return Ok(());
-            }
-            queue.busy = true;
+        let mut queue = self.queue.lock().await;
+        if queue.busy || queue.in_flight.is_some() || !queue.pending.is_empty() {
+            queue.pending.push_back(Prompt::new(line));
+            return Ok(());
         }
+        let mut prompt = Prompt::new(line.clone());
+        prompt.completed_before_dispatch = queue.completed_runs;
+        queue.in_flight = Some(prompt);
         if let Err(error) = self.write_line(line).await {
-            self.queue.lock().await.busy = false;
+            queue.in_flight = None;
             return Err(error);
         }
         Ok(())
@@ -209,9 +325,8 @@ impl ChatSession for PiChatSession {
 
     fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            self.write_line(abort_command()).await?;
-            abort_queued_turns(&self.queue, &self.tx, false).await;
-            Ok(())
+            abort_queued_turns(&self.queue).await;
+            self.write_line(abort_command()).await
         })
     }
 
@@ -219,11 +334,13 @@ impl ChatSession for PiChatSession {
         let this = *self;
         Box::pin(async move {
             this.closing.store(true, Ordering::SeqCst);
-            this.stdin.lock().await.take(); // drop writer -> EOF -> clean pi quit
-            if tokio::time::timeout(CLOSE_WAIT, this.wait_handle)
-                .await
-                .is_err()
-            {
+            // Include the writer lock: a blocked dialog response must not
+            // prevent close from escalating to process-group termination.
+            let clean_exit = async {
+                this.stdin.lock().await.take(); // EOF -> clean pi quit
+                this.wait_handle.await
+            };
+            if tokio::time::timeout(CLOSE_WAIT, clean_exit).await.is_err() {
                 term_then_kill(this.pid, KILL_GRACE);
             }
             Ok(())
@@ -546,73 +663,65 @@ fn spawn_stdout_pump(
         let mut artifact_calls = HashSet::new();
         while let Ok(Some(line)) = lines.next_line().await {
             let clean = strip_ansi(line.trim_end_matches('\r'));
-            match map_stdout_line(&clean, context_window) {
-                Mapped::Emit(event) => {
-                    if let ChatEvent::ToolCall { id, name, .. } = &event {
-                        if name == "artifact_publish" {
-                            artifact_calls.insert(id.clone());
-                        }
+            let mapped = map_stdout_line(&clean, context_window);
+            if let Mapped::AutoRespond { reply, notice } = mapped {
+                let _ = write_line_to(&stdin, reply).await;
+                if tx.send(ChatEvent::Error(notice)).await.is_err() {
+                    return;
+                }
+                continue;
+            }
+            let value = serde_json::from_str::<Value>(&clean).unwrap_or(Value::Null);
+            let events = queue.lock().await.observe(&value, mapped);
+            for event in events {
+                if let ChatEvent::ToolCall { id, name, .. } = &event {
+                    if name == "artifact_publish" {
+                        artifact_calls.insert(id.clone());
                     }
-                    if let ChatEvent::ToolOutput { id, done: true, .. } = &event {
-                        if artifact_calls.remove(id) {
-                            if let Some(ready) = artifact_ready_from_pi(&clean) {
-                                if let Some(sink) = &artifact_ready {
-                                    let _ = sink.send(ready).await;
-                                }
+                }
+                if let ChatEvent::ToolOutput { id, done: true, .. } = &event {
+                    if artifact_calls.remove(id) {
+                        if let Some(ready) = artifact_ready_from_pi(&clean) {
+                            if let Some(sink) = &artifact_ready {
+                                let _ = sink.send(ready).await;
                             }
                         }
                     }
-                    let turn_finished = match &event {
-                        ChatEvent::TurnFinished { ok, .. } => Some(*ok),
-                        _ => None,
-                    };
-                    if tx.send(event).await.is_err() {
-                        return;
-                    }
-                    match turn_finished {
-                        Some(true) => send_next_queued_turn(&stdin, &queue, &tx).await,
-                        Some(false) => abort_queued_turns(&queue, &tx, true).await,
-                        None => {}
-                    }
                 }
-                Mapped::AutoRespond { reply, notice } => {
-                    let _ = write_line_to(&stdin, reply).await;
-                    if tx.send(ChatEvent::Error(notice)).await.is_err() {
-                        return;
-                    }
+                if tx.send(event).await.is_err() {
+                    return;
                 }
-                Mapped::Ignore => {}
             }
+            send_next_queued_turn(&stdin, &queue, &tx).await;
         }
     });
 }
 
-async fn abort_queued_turns(
-    queue: &Arc<Mutex<TurnQueue>>,
-    tx: &Sender<ChatEvent>,
-    clear_busy: bool,
-) {
-    let dropped = {
-        let mut queue = queue.lock().await;
-        let dropped = queue.pending.len();
-        queue.pending.clear();
-        if clear_busy {
-            queue.busy = false;
-        }
-        dropped
-    };
-    send_failed_finishes(tx, dropped, "aborted").await;
+async fn abort_queued_turns(queue: &Arc<Mutex<TurnQueue>>) {
+    let mut queue = queue.lock().await;
+    if let Some(prompt) = &mut queue.in_flight {
+        prompt.failure = Some("aborted".to_owned());
+    }
+    for prompt in &mut queue.pending {
+        prompt.failure = Some("aborted".to_owned());
+    }
 }
 
 async fn send_failed_finishes(tx: &Sender<ChatEvent>, count: usize, error: &str) {
     for _ in 0..count {
         if tx
-            .send(ChatEvent::TurnFinished {
-                ok: false,
-                error: Some(error.to_string()),
+            .send(ChatEvent::TurnStarted {
+                origin: TurnOrigin::Submitted,
             })
             .await
             .is_err()
+            || tx
+                .send(ChatEvent::TurnFinished {
+                    ok: false,
+                    error: Some(error.to_string()),
+                })
+                .await
+                .is_err()
         {
             break;
         }
@@ -624,27 +733,30 @@ async fn send_next_queued_turn(
     queue: &Arc<Mutex<TurnQueue>>,
     tx: &Sender<ChatEvent>,
 ) {
-    let next = {
-        let mut queue = queue.lock().await;
-        match queue.pending.pop_front() {
-            Some(line) => Some(line),
-            None => {
-                queue.busy = false;
-                None
-            }
+    loop {
+        let mut state = queue.lock().await;
+        if state.busy || state.in_flight.is_some() {
+            return;
         }
-    };
-    if let Some(line) = next {
+        let Some(mut prompt) = state.pending.pop_front() else {
+            return;
+        };
+        if let Some(error) = prompt.failure {
+            drop(state);
+            send_failed_finishes(tx, 1, &error).await;
+            continue;
+        }
+        let line = prompt.line.clone();
+        prompt.completed_before_dispatch = state.completed_runs;
+        state.in_flight = Some(prompt);
         if write_line_to(stdin, line).await.is_err() {
-            let dropped = {
-                let mut queue = queue.lock().await;
-                let dropped = 1 + queue.pending.len();
-                queue.busy = false;
-                queue.pending.clear();
-                dropped
-            };
+            let dropped = 1 + state.pending.len();
+            state.in_flight = None;
+            state.pending.clear();
+            drop(state);
             send_failed_finishes(tx, dropped, "send failed").await;
         }
+        return;
     }
 }
 
@@ -1241,11 +1353,20 @@ mod tests {
         ChatSessionParams::builder(script.to_str().unwrap(), temp, &sessions).build()
     }
 
-    async fn next_event(rx: &mut Receiver<ChatEvent>) -> ChatEvent {
+    async fn raw_event(rx: &mut Receiver<ChatEvent>) -> ChatEvent {
         tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("timed out waiting for ChatEvent")
             .expect("event channel closed")
+    }
+
+    async fn next_event(rx: &mut Receiver<ChatEvent>) -> ChatEvent {
+        loop {
+            let event = raw_event(rx).await;
+            if !matches!(event, ChatEvent::TurnStarted { .. }) {
+                return event;
+            }
+        }
     }
 
     /// Echo stub: answers every prompt with thinking + text + agent_end, and
@@ -1254,12 +1375,16 @@ mod tests {
     const ECHO_STUB: &str = r#"while IFS= read -r line; do
   case "$line" in
     *'"type":"prompt"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^" ]*\)".*/\1/p')
+      printf '{"type":"response","id":"%s","success":true}\n' "$id"
+      printf '%s\n' '{"type":"agent_start"}' '{"type":"message_start","message":{"role":"user"}}'
       printf '%s\n' '{"type":"message_update","message":{},"assistantMessageEvent":{"type":"thinking_delta","delta":"hmm"}}'
       printf '%s\n' '{"type":"message_update","message":{},"assistantMessageEvent":{"type":"text_delta","delta":"pong"}}'
       printf '%s\n' '{"type":"agent_end"}'
       ;;
     *'"type":"abort"'*)
       printf '%s\n' '{"type":"message_update","message":{},"assistantMessageEvent":{"type":"error","reason":"aborted"}}'
+      printf '%s\n' '{"type":"agent_end"}'
       ;;
   esac
 done"#;
@@ -1310,8 +1435,14 @@ done"#;
         // This stub never answers prompts: the turn stays in flight until abort.
         let stub = r#"while IFS= read -r line; do
   case "$line" in
+    *'"type":"prompt"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^" ]*\)".*/\1/p')
+      printf '{"type":"response","id":"%s","success":true}\n' "$id"
+      printf '%s\n' '{"type":"agent_start"}' '{"type":"message_start","message":{"role":"user"}}'
+      ;;
     *'"type":"abort"'*)
       printf '%s\n' '{"type":"message_update","message":{},"assistantMessageEvent":{"type":"error","reason":"aborted"}}'
+      printf '%s\n' '{"type":"agent_end"}'
       ;;
   esac
 done"#;
@@ -1343,6 +1474,9 @@ done"#;
         let stub = r#"while IFS= read -r line; do
   case "$line" in
     *'"type":"prompt"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^" ]*\)".*/\1/p')
+      printf '{"type":"response","id":"%s","success":true}\n' "$id"
+      printf '%s\n' '{"type":"agent_start"}' '{"type":"message_start","message":{"role":"user"}}'
       printf '%s\n' '{"type":"message_update","message":{},"assistantMessageEvent":{"type":"text_delta","delta":"turn"}}'
       ( sleep 0.1; printf '%s\n' '{"type":"agent_end"}' ) &
       ;;
@@ -1380,11 +1514,15 @@ wait"#;
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn failed_turn_does_not_release_queued_turn() {
+    async fn failed_turn_releases_next_queued_turn_once_at_agent_end() {
         let stub = r#"while IFS= read -r line; do
   case "$line" in
     *'"type":"prompt"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^" ]*\)".*/\1/p')
+      printf '{"type":"response","id":"%s","success":true}\n' "$id"
+      printf '%s\n' '{"type":"agent_start"}' '{"type":"message_start","message":{"role":"user"}}'
       printf '%s\n' '{"type":"message_update","message":{},"assistantMessageEvent":{"type":"error","reason":"boom"}}'
+      printf '%s\n' '{"type":"agent_end"}'
       ;;
   esac
 done"#;
@@ -1408,9 +1546,9 @@ done"#;
         match next_event(&mut rx).await {
             ChatEvent::TurnFinished { ok, error } => {
                 assert!(!ok);
-                assert_eq!(error.as_deref(), Some("aborted"));
+                assert_eq!(error.as_deref(), Some("boom"));
             }
-            other => panic!("expected queued aborted TurnFinished, got {other:?}"),
+            other => panic!("expected queued failed TurnFinished, got {other:?}"),
         }
         assert!(tokio::time::timeout(Duration::from_millis(200), rx.recv())
             .await
@@ -1423,8 +1561,14 @@ done"#;
     async fn abort_reports_queued_turns_as_aborted() {
         let stub = r#"while IFS= read -r line; do
   case "$line" in
+    *'"type":"prompt"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^" ]*\)".*/\1/p')
+      printf '{"type":"response","id":"%s","success":true}\n' "$id"
+      printf '%s\n' '{"type":"agent_start"}' '{"type":"message_start","message":{"role":"user"}}'
+      ;;
     *'"type":"abort"'*)
       printf '%s\n' '{"type":"message_update","message":{},"assistantMessageEvent":{"type":"error","reason":"aborted"}}'
+      printf '%s\n' '{"type":"agent_end"}'
       ;;
   esac
 done"#;
@@ -1456,13 +1600,13 @@ done"#;
     async fn queued_write_failure_reports_dropped_turns_finished() {
         let stdin = Arc::new(Mutex::new(None));
         let queue = Arc::new(Mutex::new(TurnQueue {
-            busy: true,
             pending: VecDeque::from([
-                prompt_command("t2", "second"),
-                prompt_command("t3", "third"),
+                Prompt::new(prompt_command("t2", "second")),
+                Prompt::new(prompt_command("t3", "third")),
             ]),
+            ..TurnQueue::default()
         }));
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
 
         send_next_queued_turn(&stdin, &queue, &tx).await;
 
@@ -1485,12 +1629,10 @@ done"#;
 
     #[tokio::test]
     async fn first_write_failure_resets_busy_state() {
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let queue = Arc::new(Mutex::new(TurnQueue::default()));
         let session = PiChatSession {
             pid: 0,
             next_turn: 0,
-            tx,
             stdin: Arc::new(Mutex::new(None)),
             queue: Arc::clone(&queue),
             closing: Arc::new(AtomicBool::new(true)),
@@ -1504,6 +1646,187 @@ done"#;
         let queue = queue.lock().await;
         assert!(!queue.busy);
         assert!(queue.pending.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn autonomous_busy_race_retries_same_id_and_preserves_identical_fifo_inputs() {
+        // The command reaches Pi before Dar has consumed the autonomous start.
+        // Pi rejects it, then finishes the custom-message run with two error
+        // notifications. Neither errors nor the rejection may consume t1/t2.
+        let stub = r#"n=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"prompt"'*)
+      id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^" ]*\)".*/\1/p')
+      n=$((n + 1))
+      if [ "$n" = 1 ]; then
+        printf '%s\n' '{"type":"agent_start"}' '{"type":"message_start","message":{"role":"custom","customType":"subagent-notify","content":"identical"}}'
+        printf '{"type":"response","id":"%s","command":"prompt","success":false,"error":"Agent is already processing. Specify streamingBehavior"}\n' "$id"
+        printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"autonomous"}}'
+        printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"error","reason":"boom"}}' '{"type":"message_end","message":{"errorMessage":"boom"}}' '{"type":"agent_end"}'
+      else
+        printf '{"type":"response","id":"%s","command":"prompt","success":true}\n' "$id"
+        printf '%s\n' '{"type":"agent_start"}' '{"type":"message_start","message":{"role":"user","content":"identical"}}'
+        printf '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"%s"}}\n' "$id"
+        printf '%s\n' '{"type":"agent_end"}'
+      fi
+      ;;
+  esac
+done"#;
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_stub(temp.path(), stub);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut session = PiChatSession::spawn(&stub_params(temp.path(), &script), tx)
+            .await
+            .unwrap();
+        session.send_turn("identical".to_owned()).await.unwrap();
+        session.send_turn("identical".to_owned()).await.unwrap();
+        assert!(matches!(
+            raw_event(&mut rx).await,
+            ChatEvent::TurnStarted {
+                origin: TurnOrigin::Autonomous
+            }
+        ));
+        assert!(
+            matches!(raw_event(&mut rx).await, ChatEvent::Delta { text, .. } if text == "autonomous")
+        );
+        assert!(
+            matches!(raw_event(&mut rx).await, ChatEvent::TurnFinished { ok: false, error: Some(error) } if error == "boom")
+        );
+        for expected in ["t1", "t2"] {
+            assert!(matches!(
+                raw_event(&mut rx).await,
+                ChatEvent::TurnStarted {
+                    origin: TurnOrigin::Submitted
+                }
+            ));
+            assert!(
+                matches!(raw_event(&mut rx).await, ChatEvent::Delta { text, .. } if text == expected)
+            );
+            assert!(matches!(
+                raw_event(&mut rx).await,
+                ChatEvent::TurnFinished { ok: true, .. }
+            ));
+        }
+        assert!(tokio::time::timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .is_err());
+        ChatSession::close(Box::new(session)).await.unwrap();
+    }
+
+    #[test]
+    fn busy_rejection_without_observed_run_does_not_retry_forever() {
+        let mut queue = TurnQueue {
+            in_flight: Some(Prompt::new(prompt_command("t1", "first"))),
+            ..TurnQueue::default()
+        };
+        let line = r#"{"type":"response","id":"t1","success":false,"error":"Agent is already processing."}"#;
+        assert!(queue
+            .observe(
+                &serde_json::from_str(line).unwrap(),
+                map_stdout_line(line, None)
+            )
+            .is_empty());
+        assert!(queue.pending.front().unwrap().failure.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn close_escalates_when_stdout_pump_holds_writer_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_stub(temp.path(), "sleep 300\n");
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let session = PiChatSession::spawn(&stub_params(temp.path(), &script), tx)
+            .await
+            .unwrap();
+        let stdin = Arc::clone(&session.stdin);
+        let _held_writer = stdin.lock().await;
+        tokio::time::timeout(
+            CLOSE_WAIT + Duration::from_secs(1),
+            ChatSession::close(Box::new(session)),
+        )
+        .await
+        .expect("close must not wait forever for the writer lock")
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn admission_failure_terminates_only_matching_prompt() {
+        let stub = r#"while IFS= read -r line; do
+  case "$line" in
+    *'"id":"t1"'*)
+      printf '%s\n' '{"type":"response","id":"unrelated","success":false,"error":"ignore me"}' '{"type":"response","id":"t1","success":false,"error":"invalid model"}'
+      ;;
+    *'"id":"t2"'*)
+      printf '%s\n' '{"type":"response","id":"t2","success":true}' '{"type":"agent_start"}' '{"type":"message_start","message":{"role":"user"}}' '{"type":"agent_end"}'
+      ;;
+  esac
+done"#;
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_stub(temp.path(), stub);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut session = PiChatSession::spawn(&stub_params(temp.path(), &script), tx)
+            .await
+            .unwrap();
+        session.send_turn("first".to_owned()).await.unwrap();
+        session.send_turn("second".to_owned()).await.unwrap();
+        assert!(matches!(
+            raw_event(&mut rx).await,
+            ChatEvent::TurnStarted {
+                origin: TurnOrigin::Submitted
+            }
+        ));
+        assert!(
+            matches!(raw_event(&mut rx).await, ChatEvent::TurnFinished { ok: false, error: Some(error) } if error == "invalid model")
+        );
+        assert!(matches!(
+            raw_event(&mut rx).await,
+            ChatEvent::TurnStarted {
+                origin: TurnOrigin::Submitted
+            }
+        ));
+        assert!(matches!(
+            raw_event(&mut rx).await,
+            ChatEvent::TurnFinished { ok: true, .. }
+        ));
+        ChatSession::close(Box::new(session)).await.unwrap();
+    }
+
+    #[test]
+    fn pending_admission_does_not_claim_custom_continuation() {
+        let mut queue = TurnQueue {
+            in_flight: Some(Prompt::new(prompt_command("t1", "identical"))),
+            ..TurnQueue::default()
+        };
+        let mut observe = |line: &str| {
+            queue.observe(
+                &serde_json::from_str(line).unwrap(),
+                map_stdout_line(line, None),
+            )
+        };
+        assert!(observe(r#"{"type":"agent_start"}"#).is_empty());
+        assert!(matches!(
+            observe(
+                r#"{"type":"message_start","message":{"role":"custom","content":"identical"}}"#
+            )
+            .as_slice(),
+            [ChatEvent::TurnStarted {
+                origin: TurnOrigin::Autonomous
+            }]
+        ));
+        assert!(observe(r#"{"type":"response","id":"t1","success":true}"#).is_empty());
+        assert!(matches!(
+            observe(r#"{"type":"agent_end"}"#).as_slice(),
+            [ChatEvent::TurnFinished { ok: true, .. }]
+        ));
+        assert!(observe(r#"{"type":"agent_start"}"#).is_empty());
+        assert!(matches!(
+            observe(r#"{"type":"message_start","message":{"role":"user","content":"identical"}}"#)
+                .as_slice(),
+            [ChatEvent::TurnStarted {
+                origin: TurnOrigin::Submitted
+            }]
+        ));
+        assert!(queue.in_flight.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]

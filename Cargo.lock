@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "dar-cap-chat"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "dar-artifacts",
@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "dar-extension-sdk"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "dar-artifacts",

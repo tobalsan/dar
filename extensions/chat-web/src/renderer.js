@@ -23,6 +23,7 @@
     let next = blocks, text = event.text || '';
     switch (event.type) {
       case 'user': next.push({ kind: 'user', text, attachments: event.attachments || [] }); return next.length - 1;
+      case 'started': return -1;
       case 'reset': next.splice(0, next.length, { kind: 'notice', text: 'Context cleared, started a new session.' }); return null;
       case 'delta': case 'thinking': {
         let kind = event.type === 'thinking' ? 'thinking' : 'assistant', last = next.at(-1);
@@ -195,6 +196,7 @@
 
   const render = (app, event) => {
     if (event.type === 'context_usage') { let m = $('chat-token-meter'); if (m) m.textContent = usageText(event); return; }
+    if (event.type === 'started' && event.origin === 'autonomous') { app.turns++; refreshBusy(app); return; }
     if (event.type === 'user') { app.turns++; app.workingWord = WORKING_WORDS[Math.floor(Math.random() * WORKING_WORDS.length)]; }
     if (event.type === 'finished' || event.type === 'aborted' || event.type === 'closed') app.turns = Math.max(0, app.turns - 1);
     app.blocks = reduce(app.blocks, event);
