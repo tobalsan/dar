@@ -15,13 +15,19 @@ id: my-agent
 name: "My Agent"
 
 runner:
-  use: pi                     # pi | codex | cli | fake
+  use: pi                     # pi | codex | opencode | cli | fake | builtin
   command: pi                 # executable; defaults to runner kind's canonical command
   # model: gpt-5             # passed to runners that accept --model
   # provider: anthropic       # passed to runners that accept a provider flag
   # thinking: high            # reasoning level (alias: effort); see [Thinking / reasoning level](runners.md#thinking--reasoning-level)
   max_run_timeout_ms: 3600000 # 1 h hard cap per attempt (alias: turn_timeout_ms)
   stall_timeout_ms: 300000    # 5 min silence → stall kill
+
+# Provider endpoints for `runner.use: builtin` (and its chat backend).
+# providers:
+#   requesty:
+#     api_url: https://router.requesty.ai/v1
+#     api_key: $env:REQUESTY_API_KEY   # literal or $env:VAR
 
 # Optional identity files for agent prompts. Root AGENTS.md loads first when present.
 system_files:
