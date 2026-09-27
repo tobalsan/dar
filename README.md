@@ -44,6 +44,8 @@ open http://127.0.0.1:7878/
 
 `example-agent` ships the `fake` runner, so it has no host dependency.
 
+Start your own agent with `dar create ./my-agent` (add `--orchestrator` for the issue loop); see [CLI reference](docs/cli.md).
+
 An agent folder is self-contained — move the folder, move the agent:
 
 ```

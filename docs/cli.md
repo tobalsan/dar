@@ -3,6 +3,14 @@
 The `dar` command line covers building, running, and inspecting an agent folder.
 
 ```bash
+# Scaffold a new agent folder (agent.yaml + .gitignore). Interactive wizard
+# on a TTY; otherwise flags + defaults (id/name derived from folder name,
+# runner pi). --orchestrator also enables the issue loop and writes WORKFLOW.md.
+# Refuses to overwrite an existing agent.yaml.
+dar create ./my-agent
+dar create ./my-agent --runner codex --model gpt-5 --orchestrator
+dar create ./my-agent --runner pi --provider anthropic
+
 # Bootstrap the per-agent composition crate (.dar/) — one-time setup.
 dar init-build --dir ./my-agent
 dar init-build --dir ./my-agent --vendor   # vendor deps for offline use
