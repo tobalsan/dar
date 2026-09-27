@@ -9,6 +9,8 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- `dar create` now asks (default yes) whether to add `memory.md` to `system_files`, use the TUI foreground, and enable the scheduler and chat-web extensions. Non-interactive equivalents: `--system-files <path>` (repeatable), `--tui`, `--scheduler`, `--chat-web`. Listed system files are created empty if missing.
+
 - **⚠ BREAKING SDK 0.5.0:** `dar-cap-chat` and `dar-extension-sdk` add attributed turn starts; exhaustive chat-event matches must handle `TurnStarted`. Other workspace crates retain their existing versions.
 - Local agent builds now validate each SDK/contract dependency against that crate's version, allowing SDK releases independent of the CLI version.
 

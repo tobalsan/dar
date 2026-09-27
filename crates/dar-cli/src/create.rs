@@ -32,6 +32,14 @@ struct Settings {
     /// Written only when non-empty (else the runner's own default applies).
     model: Option<String>,
     orchestrator_loop: bool,
+    /// `system_files` entries; each is created empty if missing.
+    system_files: Vec<String>,
+    /// Set `foreground: tui`.
+    tui: bool,
+    /// Enable `extensions.scheduler`.
+    scheduler: bool,
+    /// Enable `extensions.chat-web`.
+    chat_web: bool,
 }
 
 /// Scaffold the agent folder at `root`. Refuses if `agent.yaml` already exists.
@@ -54,6 +62,16 @@ pub fn run(root: &Path, args: &CreateArgs) -> Result<CreateOutcome> {
     fs::write(&agent_yaml, render_agent_yaml(&settings))
         .with_context(|| format!("writing {}", agent_yaml.display()))?;
     composer::ensure_agent_gitignore(root)?;
+    for file in &settings.system_files {
+        let path = root.join(file);
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            fs::write(&path, "").with_context(|| format!("writing {}", path.display()))?;
+        }
+    }
 
     Ok(CreateOutcome {
         loop_enabled: settings.orchestrator_loop,
@@ -89,6 +107,15 @@ fn resolve_settings(args: &CreateArgs, default_id: &str, default_name: &str) -> 
         };
         let model = non_empty(&prompt("model", args.model.as_deref().unwrap_or(""))?);
         let orchestrator_loop = prompt_bool("enable orchestrator loop", args.orchestrator)?;
+        let mut system_files = args.system_files.clone();
+        if !system_files.iter().any(|f| f == MEMORY_FILE)
+            && prompt_bool("add memory.md to system_files", true)?
+        {
+            system_files.push(MEMORY_FILE.to_string());
+        }
+        let tui = args.tui || prompt_bool("enable TUI as foreground", true)?;
+        let scheduler = args.scheduler || prompt_bool("enable scheduler", true)?;
+        let chat_web = args.chat_web || prompt_bool("enable chat-web", true)?;
         return Ok(Settings {
             id,
             name,
@@ -96,6 +123,10 @@ fn resolve_settings(args: &CreateArgs, default_id: &str, default_name: &str) -> 
             provider,
             model,
             orchestrator_loop,
+            system_files,
+            tui,
+            scheduler,
+            chat_web,
         });
     }
 
@@ -112,6 +143,10 @@ fn resolve_settings(args: &CreateArgs, default_id: &str, default_name: &str) -> 
         provider,
         model: args.model.as_deref().and_then(non_empty),
         orchestrator_loop: args.orchestrator,
+        system_files: args.system_files.clone(),
+        tui: args.tui,
+        scheduler: args.scheduler,
+        chat_web: args.chat_web,
     })
 }
 
@@ -139,12 +174,33 @@ fn render_agent_yaml(s: &Settings) -> String {
         out.push_str("\ntracker:\n");
         out.push_str(&format!("  use: {}\n", yaml_scalar(DEFAULT_TRACKER_USE)));
     }
+    if !s.system_files.is_empty() {
+        out.push_str("\nsystem_files:\n");
+        for file in &s.system_files {
+            out.push_str(&format!("  - {}\n", yaml_scalar(file)));
+        }
+    }
+    if s.tui {
+        out.push_str("\nforeground: tui\n");
+    }
+    if s.scheduler || s.chat_web {
+        out.push_str("\nextensions:\n");
+        if s.scheduler {
+            out.push_str("  scheduler:\n    enabled: true\n");
+        }
+        if s.chat_web {
+            out.push_str("  chat-web:\n    enabled: true\n");
+        }
+    }
     out
 }
 
 /// Tracker crate the composer links when `--orchestrator` scaffolds a loop.
 /// Matches the default (bare) `init-workflow` scaffold, which is Linear.
 const DEFAULT_TRACKER_USE: &str = "linear";
+
+/// Default agent memory file offered by the wizard.
+const MEMORY_FILE: &str = "memory.md";
 
 /// Render a string as a single-line YAML scalar, quoting/escaping via `serde_yaml`
 /// so free-text (interactive) values can't produce a broken or misparsed file.
@@ -282,7 +338,31 @@ mod tests {
             provider: provider.map(str::to_string),
             model: model.map(str::to_string),
             orchestrator_loop: loop_,
+            system_files: Vec::new(),
+            tui: false,
+            scheduler: false,
+            chat_web: false,
         }
+    }
+
+    #[test]
+    fn render_includes_memory_tui_scheduler_chat_web() {
+        let mut s = settings("pi", None, None, false);
+        s.system_files = vec!["memory.md".to_string()];
+        s.tui = true;
+        s.scheduler = true;
+        s.chat_web = true;
+        let yaml = render_agent_yaml(&s);
+        assert!(yaml.contains("system_files:\n  - memory.md\n"));
+        assert!(yaml.contains("foreground: tui\n"));
+        assert!(yaml.contains(
+            "extensions:\n  scheduler:\n    enabled: true\n  chat-web:\n    enabled: true\n"
+        ));
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("agent.yaml"), &yaml).unwrap();
+        let cfg = orchestrator::config::load(temp.path()).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.foreground, "tui");
     }
 
     #[test]
@@ -375,6 +455,10 @@ mod tests {
             provider: None,
             model: None,
             orchestrator: false,
+            system_files: Vec::new(),
+            tui: false,
+            scheduler: false,
+            chat_web: false,
         };
 
         let outcome = run(&root, &args).unwrap();
@@ -398,6 +482,10 @@ mod tests {
             provider: None,
             model: None,
             orchestrator: true,
+            system_files: Vec::new(),
+            tui: false,
+            scheduler: false,
+            chat_web: false,
         };
 
         let outcome = run(&root, &args).unwrap();
@@ -414,6 +502,33 @@ mod tests {
     }
 
     #[test]
+    fn run_applies_flags_and_creates_system_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("my-agent");
+        let args = CreateArgs {
+            path: Some(root.clone()),
+            runner: None,
+            provider: None,
+            model: None,
+            orchestrator: false,
+            system_files: vec!["memory.md".to_string()],
+            tui: true,
+            scheduler: true,
+            chat_web: true,
+        };
+
+        run(&root, &args).unwrap();
+
+        assert!(root.join("memory.md").is_file());
+        let yaml = std::fs::read_to_string(root.join("agent.yaml")).unwrap();
+        assert!(yaml.contains("system_files:\n  - memory.md\n"));
+        assert!(yaml.contains("foreground: tui\n"));
+        assert!(yaml.contains("  scheduler:\n    enabled: true\n"));
+        assert!(yaml.contains("  chat-web:\n    enabled: true\n"));
+        orchestrator::config::load(&root).unwrap().validate().unwrap();
+    }
+
+    #[test]
     fn run_refuses_to_overwrite_existing_agent_yaml() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -424,6 +539,10 @@ mod tests {
             provider: None,
             model: None,
             orchestrator: false,
+            system_files: Vec::new(),
+            tui: false,
+            scheduler: false,
+            chat_web: false,
         };
 
         let err = run(root, &args).unwrap_err().to_string();

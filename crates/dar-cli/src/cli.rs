@@ -127,6 +127,18 @@ pub struct CreateArgs {
     /// trio + WORKFLOW.md).
     #[arg(long)]
     pub orchestrator: bool,
+    /// Add a `system_files` entry (repeatable); missing files are created empty.
+    #[arg(long = "system-files", value_name = "PATH")]
+    pub system_files: Vec<String>,
+    /// Use the TUI as the foreground (`foreground: tui`).
+    #[arg(long)]
+    pub tui: bool,
+    /// Enable the scheduler extension.
+    #[arg(long)]
+    pub scheduler: bool,
+    /// Enable the chat-web extension.
+    #[arg(long = "chat-web")]
+    pub chat_web: bool,
 }
 
 #[derive(Debug, Args)]
