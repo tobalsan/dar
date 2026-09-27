@@ -315,10 +315,8 @@
     document.addEventListener('click', e => {
       let history = e.target.closest('#chat-history');
       if (history) { showHistoryList(app); return; }
-      let live = e.target.closest('#chat-live');
-      if (live) { returnToLive(app); return; }
       let session = e.target.closest('[data-history-session]');
-      if (session) { openHistorySession(app, session.dataset.historySession); return; }
+      if (session) { session.dataset.liveSession === 'true' ? returnToLive(app) : openHistorySession(app, session.dataset.historySession); return; }
       // A historical transcript is strictly read-only: question controls are
       // rendered for fidelity, but must never answer against the live session.
       if (app.viewingHistory) return;
@@ -349,32 +347,34 @@
     renderChips(app); refreshBusy(app); sizeViewport();
     transcript.scrollTop = transcript.scrollHeight;
     mountHistoryControls();
+    showHistoryList(app);
   };
 
   // History is deliberately view-only. The EventSource remains attached and
   // continues reducing live events into `liveBlocks` while a transcript is open.
   const mountHistoryControls = () => {
-    let root = $('chat-root');
-    if (!root || $('chat-history') || !document.createElement) return;
-    let bar = document.createElement('div'); bar.className = 'chat-history-head';
-    bar.innerHTML = '<button type="button" id="chat-history" class="chat-history-button">History</button><button type="button" id="chat-live" class="chat-history-button" hidden>Back to live</button><div id="chat-history-list" class="chat-history-list" hidden></div>';
-    root.insertBefore(bar, root.firstChild);
+    let list = $('chat-history-list');
+    if (list && !list.innerHTML) list.innerHTML = '<div class="chat-empty">Loading history.</div>';
   };
-  const historyUi = () => ({ list: $('chat-history-list'), live: $('chat-live'), composer: $('chat-composer') });
+  const historyUi = () => ({ list: $('chat-history-list'), composer: $('chat-composer') });
   const showHistoryList = async app => {
     let ui = historyUi(); if (!ui.list) return;
     try {
       let sessions = await request('/chat/sessions').then(r => r.json());
-      ui.list.hidden = false;
-      ui.list.innerHTML = sessions.length ? sessions.map(s => `<button type="button" class="chat-history-entry" data-history-session="${esc(s.id)}"><span>${esc(s.label)}</span><small>${esc(s.start_time || '')}</small></button>`).join('') : '<div class="chat-empty">No previous sessions.</div>';
-    } catch (error) { ui.list.hidden = false; ui.list.textContent = `History unavailable: ${error.message}`; }
+      ui.list.innerHTML = sessions.length ? sessions.map(s => {
+        let active = s.is_live ? !app.viewingHistory : app.historySession === s.id;
+        let live = s.is_live ? '<span class="chat-history-live">live</span>' : '';
+        return `<button type="button" class="chat-history-entry${active ? ' is-active' : ''}" data-history-session="${esc(s.id)}" data-live-session="${s.is_live ? 'true' : 'false'}"><span class="chat-history-entry-head"><span class="chat-history-label">${esc(s.label)}</span>${live}</span><small>${esc(s.start_time || '')}</small></button>`;
+      }).join('') : '<div class="chat-empty">No previous sessions.</div>';
+    } catch (error) { ui.list.textContent = `History unavailable: ${error.message}`; }
   };
   const openHistorySession = async (app, id) => {
     app.historyController?.abort();
     let controller = new AbortController(), ui = historyUi(), load = ++app.historyLoad, transcript = $('chat-transcript');
     app.historyController = controller;
-    app.viewingHistory = true; app.historyBlocks = [];
-    if (ui.list) ui.list.hidden = true; if (ui.live) ui.live.hidden = false; if (ui.composer) ui.composer.hidden = true;
+    app.viewingHistory = true; app.historySession = id; app.historyBlocks = [];
+    if (ui.composer) ui.composer.hidden = true;
+    showHistoryList(app);
     if (transcript) transcript.innerHTML = '';
     try {
       let offset = 0;
@@ -397,11 +397,11 @@
     } catch (error) { if (error.name !== 'AbortError' && load === app.historyLoad && ui.list) ui.list.textContent = `Transcript unavailable: ${error.message}`; }
   };
   const returnToLive = app => {
-    let ui = historyUi(); app.historyController?.abort(); app.historyController = null; app.historyLoad++; app.viewingHistory = false; if (ui.live) ui.live.hidden = true; if (ui.composer) ui.composer.hidden = false; paint(app);
+    let ui = historyUi(); app.historyController?.abort(); app.historyController = null; app.historyLoad++; app.viewingHistory = false; app.historySession = null; if (ui.composer) ui.composer.hidden = false; showHistoryList(app); paint(app);
   };
 
   if (!window.__chatWeb) {
-    let app = { blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false, qsel: {}, qsent: {}, viewingHistory: false, historyLoad: 0, historyController: null, dragDepth: 0 };
+    let app = { blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false, qsel: {}, qsent: {}, viewingHistory: false, historySession: null, historyLoad: 0, historyController: null, dragDepth: 0 };
     window.__chatWeb = app;
     window.renderChatEvent = event => render(app, event);
     app.es = new EventSource(`/chat/${SESSION}/stream`);

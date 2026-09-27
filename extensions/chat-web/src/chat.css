@@ -3,14 +3,22 @@
    status color only as a 15%-alpha tinted pill. */
 .chat-web {
   position: relative;      /* anchors .chat-dropzone */
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(13rem, 17rem) minmax(0, 1fr);
   min-width: 0;
   height: calc(100dvh - var(--chat-top, 9rem));  /* JS overrides --chat-top with the measured section offset */
   min-height: 20rem;
-  gap: .55rem;
+  gap: 1.1rem;
   padding: 0 1.25rem;       /* the shell's #content sits outside <main>, so this fragment gets none for free */
   padding-bottom: .8rem;    /* keep the composer off the window's bottom edge */
+}
+.chat-main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  gap: .55rem;
 }
 /* drag-and-drop overlay, covers transcript + composer; armed by JS only when
    the drag carries files */
@@ -22,13 +30,86 @@
   pointer-events: none;
 }
 .chat-dropzone[hidden] { display: none; }
-.chat-history-head { display:flex; gap:.4rem; align-items:center; width:min(100%,48rem); align-self:center; }
-.chat-history-button, .chat-history-entry { background:var(--panel-2); color:var(--fg); border:1px solid var(--border); border-radius:5px; font:inherit; cursor:pointer; }
-.chat-history-button { padding:.25rem .55rem; }
-.chat-history-list { width:min(100%,48rem); align-self:center; max-height:12rem; overflow:auto; border:1px solid var(--border); border-radius:5px; }
-.chat-history-entry { display:flex; width:100%; justify-content:space-between; gap:.8rem; padding:.45rem .55rem; border:0; border-bottom:1px solid var(--border); text-align:left; }
-.chat-history-entry:last-child { border-bottom:0; }
-.chat-history-entry small { color:var(--muted); white-space:nowrap; }
+.chat-sidebar {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: .65rem;
+  padding: .7rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.chat-sidebar-head { display: flex; align-items: center; gap: .45rem; }
+.chat-sidebar-title {
+  color: var(--muted);
+  font-size: .68rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.chat-history-button {
+  background: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  cursor: pointer;
+  padding: .35rem .55rem;
+}
+.chat-history-button:hover { border-color: var(--accent); }
+.chat-history-button[hidden] { display: none; }
+.chat-history-list {
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: .2rem;
+}
+.chat-history-entry {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: .2rem;
+  padding: .45rem .5rem;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.chat-history-entry:hover,
+.chat-history-entry.is-active { background: var(--panel-2); border-color: var(--border); }
+.chat-history-entry-head {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  min-width: 0;
+}
+.chat-history-entry small {
+  color: var(--muted);
+  font-size: .68rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-history-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-history-live {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: .08rem .38rem;
+  background: rgba(122,162,247,.15);
+  color: var(--info);
+  font-size: .62rem;
+  font-weight: 700;
+}
 
 /* transcript: the one scroll region; the page body never scrolls */
 .chat-transcript {
@@ -260,7 +341,12 @@
 @media (prefers-reduced-motion: reduce) { .chat-loader span { animation: none; opacity: 1; } }
 
 @media (max-width: 760px) {
-  .chat-web { padding: 0 .8rem .8rem; }  /* mirrors the shell's mobile side padding */
+  .chat-web {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    padding: 0 .8rem .8rem;
+  }  /* mirrors the shell's mobile side padding */
+  .chat-sidebar { max-height: 12rem; }
   .chat-bar { flex-wrap: wrap; }
 }
 @media (max-width: 520px) {

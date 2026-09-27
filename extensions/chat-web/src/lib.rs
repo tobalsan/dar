@@ -162,7 +162,7 @@ impl DashboardTab for ChatTab {
     }
     fn render(&self) -> Result<String> {
         Ok(format!(
-            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"><div class="chat-dropzone" id="chat-dropzone" hidden aria-hidden="true">Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite" aria-label="Conversation"></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips" aria-label="Pending attachments"></div><div class="chat-cap-hint" id="chat-cap-hint" aria-live="polite"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files" title="Attach files"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button><input type="file" id="chat-attachments" multiple hidden aria-hidden="true" tabindex="-1"><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message the agent" aria-label="Message" enterkeyhint="send"></textarea><button type="button" id="chat-abort" class="chat-icon chat-icon-stop" aria-label="Stop the running turn" title="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon chat-icon-send" aria-label="Send message" title="Send" disabled><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg></button></div><div class="chat-bar"><span class="chat-spacer"></span><span class="chat-meter" id="chat-token-meter" aria-live="polite"></span></div></form></section><script>{}</script>"#,
+            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"><aside class="chat-sidebar" aria-label="Conversation history"><div class="chat-sidebar-head"><button type="button" id="chat-history" class="chat-history-button">Refresh</button></div><div class="chat-sidebar-title">History</div><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><div class="chat-dropzone" id="chat-dropzone" hidden aria-hidden="true">Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite" aria-label="Conversation"></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips" aria-label="Pending attachments"></div><div class="chat-cap-hint" id="chat-cap-hint" aria-live="polite"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files" title="Attach files"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button><input type="file" id="chat-attachments" multiple hidden aria-hidden="true" tabindex="-1"><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message the agent" aria-label="Message" enterkeyhint="send"></textarea><button type="button" id="chat-abort" class="chat-icon chat-icon-stop" aria-label="Stop the running turn" title="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon chat-icon-send" aria-label="Send message" title="Send" disabled><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg></button></div><div class="chat-bar"><span class="chat-spacer"></span><span class="chat-meter" id="chat-token-meter" aria-live="polite"></span></div></form></div></section><script>{}</script>"#,
             include_str!("chat.css"),
             escape_html_attr(&self.agent_name),
             include_str!("renderer.js"),
@@ -316,20 +316,50 @@ async fn index() -> Html<&'static str> {
 }
 
 #[derive(Deserialize)]
-struct SessionPage { offset: Option<usize>, count: Option<usize> }
+struct SessionPage {
+    offset: Option<usize>,
+    count: Option<usize>,
+}
+
+#[derive(serde::Serialize)]
+struct SessionListEntry {
+    #[serde(flatten)]
+    session: chat::archive::SessionInfo,
+    is_live: bool,
+}
 
 /// Archive routes are deliberately read-only.  They do not resolve or open a
 /// live backend session, so browsing cannot affect streaming chat state.
-async fn session_index(State(state): State<Arc<AppState>>) -> Json<Vec<chat::archive::SessionInfo>> {
-    let live = newest_session(&state.root.join("data/chat/sessions"), &state.config.backend.clone().unwrap_or_else(|| "pi".into())).map(|session| session.id);
+async fn session_index(State(state): State<Arc<AppState>>) -> Json<Vec<SessionListEntry>> {
+    let live = newest_session(
+        &state.root.join("data/chat/sessions"),
+        &state.config.backend.clone().unwrap_or_else(|| "pi".into()),
+    )
+    .map(|session| session.id);
     let sessions = chat::archive::list(&state.root.join("data/chat/sessions"))
-        .into_iter().filter(|session| Some(&session.id) != live.as_ref()).collect();
+        .into_iter()
+        .map(|session| {
+            let is_live = Some(&session.id) == live.as_ref();
+            SessionListEntry { session, is_live }
+        })
+        .collect();
     Json(sessions)
 }
 
-async fn session_transcript(Path(id): Path<String>, Query(page): Query<SessionPage>, State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if id.is_empty() || id.contains('/') || id.contains('\\') { return StatusCode::NOT_FOUND.into_response(); }
-    match chat::archive::read_events(&state.root.join("data/chat/sessions"), &id, page.offset.unwrap_or(0), page.count.unwrap_or(100)) {
+async fn session_transcript(
+    Path(id): Path<String>,
+    Query(page): Query<SessionPage>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if id.is_empty() || id.contains('/') || id.contains('\\') {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match chat::archive::read_events(
+        &state.root.join("data/chat/sessions"),
+        &id,
+        page.offset.unwrap_or(0),
+        page.count.unwrap_or(100),
+    ) {
         Some(page) => Json(page).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
@@ -3194,14 +3224,38 @@ mod tests {
         let dir = root.join("data/chat/sessions");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("2026-01-01_a.jsonl"), "{\"type\":\"session\",\"id\":\"past\"}\n{\"type\":\"message_end\",\"message\":{\"role\":\"user\",\"content\":\"remember this\"}}\n").unwrap();
-        let state = Arc::new(AppState { config: Config::default(), root, start: std::sync::OnceLock::new(), sessions: Mutex::new(HashMap::new()) });
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root,
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::new()),
+        });
         let app = router(state);
-        let index = app.clone().oneshot(axum::http::Request::builder().uri("/sessions").body(Body::empty()).unwrap()).await.unwrap();
+        let index = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(index.status(), StatusCode::OK);
-        let transcript = app.oneshot(axum::http::Request::builder().uri("/sessions/past?count=1").body(Body::empty()).unwrap()).await.unwrap();
+        let transcript = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/sessions/past?count=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(transcript.status(), StatusCode::OK);
         let bytes = transcript.into_body().collect().await.unwrap().to_bytes();
-        assert!(String::from_utf8(bytes.to_vec()).unwrap().contains("remember this"));
+        assert!(String::from_utf8(bytes.to_vec())
+            .unwrap()
+            .contains("remember this"));
     }
 
     #[test]
