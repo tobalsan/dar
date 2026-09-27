@@ -9,6 +9,8 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Fixed web chat getting stuck as "running" (Stop does nothing) with newer Pi versions that inject a system preamble message before the user prompt.
+
 - `dar create` now asks (default yes) whether to add `memory.md` to `system_files`, use the TUI foreground, and enable the scheduler and chat-web extensions. Non-interactive equivalents: `--system-files <path>` (repeatable), `--tui`, `--scheduler`, `--chat-web`. Listed system files are created empty if missing.
 
 - **⚠ BREAKING SDK 0.5.0:** `dar-cap-chat` and `dar-extension-sdk` add attributed turn starts; exhaustive chat-event matches must handle `TurnStarted`. Other workspace crates retain their existing versions.

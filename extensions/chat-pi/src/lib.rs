@@ -172,8 +172,15 @@ impl TurnQueue {
             _ => {}
         }
         let mut events = Vec::new();
-        if self.busy && self.origin.is_none() && kind == Some("message_start") {
-            events.push(self.start(value["message"]["role"].as_str()));
+        // Pi may inject a system preamble before the user message; it does not
+        // identify the turn's origin.
+        let role = value["message"]["role"].as_str();
+        if self.busy
+            && self.origin.is_none()
+            && kind == Some("message_start")
+            && role != Some("system")
+        {
+            events.push(self.start(role));
         }
         match mapped {
             Mapped::Emit(ChatEvent::TurnFinished { ok, error }) => {
@@ -1789,6 +1796,33 @@ done"#;
             ChatEvent::TurnFinished { ok: true, .. }
         ));
         ChatSession::close(Box::new(session)).await.unwrap();
+    }
+
+    #[test]
+    fn system_preamble_does_not_make_submitted_turn_autonomous() {
+        let mut queue = TurnQueue {
+            in_flight: Some(Prompt::new(prompt_command("t1", "test"))),
+            ..TurnQueue::default()
+        };
+        let mut observe = |line: &str| {
+            queue.observe(
+                &serde_json::from_str(line).unwrap(),
+                map_stdout_line(line, None),
+            )
+        };
+        assert!(observe(r#"{"type":"response","id":"t1","success":true}"#).is_empty());
+        assert!(observe(r#"{"type":"agent_start"}"#).is_empty());
+        assert!(
+            observe(r#"{"type":"message_start","message":{"role":"system","content":""}}"#)
+                .is_empty()
+        );
+        assert!(matches!(
+            observe(r#"{"type":"message_start","message":{"role":"user","content":"test"}}"#)
+                .as_slice(),
+            [ChatEvent::TurnStarted {
+                origin: TurnOrigin::Submitted
+            }]
+        ));
     }
 
     #[test]
