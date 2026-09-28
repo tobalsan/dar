@@ -31,10 +31,18 @@ pub(crate) struct DashboardState {
     root: PathBuf,
     config: Arc<Config>,
     pending: Arc<Mutex<HashMap<String, Pending>>>,
+    /// Per-server login generation, bumped by Disconnect. Only touched while
+    /// holding `pending`, so a start that began before a Disconnect cannot
+    /// insert afterwards.
+    generations: Arc<Mutex<HashMap<String, u64>>>,
+    /// Serializes code exchange against Disconnect so a completing Connect
+    /// popup can never re-create credentials that Disconnect just cleared.
+    ops: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct Pending {
     created: Instant,
+    generation: u64,
     server: String,
     manager: AuthorizationManager,
     store: FileCredentialStore,
@@ -46,6 +54,8 @@ impl DashboardState {
             root,
             config: Arc::new(config),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            generations: Arc::new(Mutex::new(HashMap::new())),
+            ops: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -61,6 +71,21 @@ impl DashboardState {
             Some(_) => anyhow::bail!("server does not support OAuth login"),
             None => anyhow::bail!("unknown MCP server"),
         }
+    }
+
+    fn generation(&self, server: &str) -> u64 {
+        let _pending = self.pending.lock().expect("MCP pending state poisoned");
+        self.generation_locked(server)
+    }
+
+    /// Caller must hold the `pending` lock.
+    fn generation_locked(&self, server: &str) -> u64 {
+        *self
+            .generations
+            .lock()
+            .expect("MCP generation state poisoned")
+            .get(server)
+            .unwrap_or(&0)
     }
 
     fn prune(&self) {
@@ -207,6 +232,15 @@ async fn start_inner(state: &DashboardState, name: &str, headers: &HeaderMap) ->
     state.prune();
     let url = state.oauth_server(name)?.to_owned();
     let host = loopback_host(headers)?;
+    // Only the dashboard itself may start a login (blocks cross-site slot
+    // exhaustion). Browsers send Sec-Fetch-Site on every navigation.
+    if !matches!(
+        headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()),
+        Some("same-origin")
+    ) {
+        anyhow::bail!("start MCP login from the dashboard MCP tab");
+    }
+    let generation = state.generation(name);
     if state
         .pending
         .lock()
@@ -229,10 +263,14 @@ async fn start_inner(state: &DashboardState, name: &str, headers: &HeaderMap) ->
     if pending.len() >= MAX_PENDING {
         anyhow::bail!("too many pending MCP authorizations; retry in a few minutes");
     }
+    if state.generation_locked(name) != generation {
+        anyhow::bail!("server was disconnected while starting login; try again");
+    }
     pending.insert(
         oauth_state,
         Pending {
             created: Instant::now(),
+            generation,
             server: name.to_owned(),
             manager,
             store,
@@ -246,11 +284,13 @@ async fn callback(
     Query(query): Query<CallbackQuery>,
 ) -> Response {
     state.prune();
-    let pending = state
-        .pending
-        .lock()
-        .expect("MCP pending state poisoned")
-        .remove(&query.state);
+    let _ops = state.ops.lock().await;
+    let pending = {
+        let mut pending = state.pending.lock().expect("MCP pending state poisoned");
+        pending
+            .remove(&query.state)
+            .filter(|p| p.generation == state.generation_locked(&p.server))
+    };
     let Some(mut pending) = pending else {
         return (
             StatusCode::BAD_REQUEST,
@@ -276,12 +316,18 @@ async fn disconnect(
             anyhow::bail!("cross-site request rejected");
         }
         state.oauth_server(&query.server)?;
-        // Drop in-flight Connect popups so they cannot re-create the login.
-        state
-            .pending
-            .lock()
-            .expect("MCP pending state poisoned")
-            .retain(|_, pending| pending.server != query.server);
+        let _ops = state.ops.lock().await;
+        // Invalidate in-flight Connect popups and starts still in discovery.
+        {
+            let mut pending = state.pending.lock().expect("MCP pending state poisoned");
+            pending.retain(|_, p| p.server != query.server);
+            *state
+                .generations
+                .lock()
+                .expect("MCP generation state poisoned")
+                .entry(query.server.clone())
+                .or_default() += 1;
+        }
         let store = FileCredentialStore::new(&state.root, &query.server)?;
         // Serialize with token refresh/exchange so a concurrent save can't undo this.
         let _guard = store
@@ -455,10 +501,69 @@ mod tests {
         for i in 0..MAX_PENDING {
             insert_pending(&state, &i.to_string(), "remote", Instant::now()).await;
         }
-        let error = start_inner(&state, "remote", &headers(&[("host", "127.0.0.1:7878")]))
-            .await
-            .unwrap_err();
+        let same_site = headers(&[
+            ("host", "127.0.0.1:7878"),
+            ("sec-fetch-site", "same-origin"),
+        ]);
+        let error = start_inner(&state, "remote", &same_site).await.unwrap_err();
         assert!(error.to_string().contains("too many pending"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn cross_site_start_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let config: Config =
+            serde_json::from_value(serde_json::json!({"mcpServers":{"remote":{"url":"http://x"}}}))
+                .unwrap();
+        let state = DashboardState::new(root.path().to_path_buf(), config);
+        for site in [None, Some("cross-site"), Some("same-site")] {
+            let mut h = headers(&[("host", "127.0.0.1:7878")]);
+            if let Some(site) = site {
+                h.insert("sec-fetch-site", site.parse().unwrap());
+            }
+            let error = start_inner(&state, "remote", &h).await.unwrap_err();
+            assert!(error.to_string().contains("dashboard MCP tab"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_after_disconnect_cannot_resurrect_login() {
+        let root = tempfile::tempdir().unwrap();
+        let config: Config =
+            serde_json::from_value(serde_json::json!({"mcpServers":{"remote":{"url":"http://x"}}}))
+                .unwrap();
+        let state = DashboardState::new(root.path().to_path_buf(), config);
+        let stale = state.generation("remote");
+        let ok = headers(&[("host", "127.0.0.1:7878"), ("hx-request", "true")]);
+        let query = Query(ServerQuery {
+            server: "remote".into(),
+        });
+        assert_eq!(
+            disconnect(State(state.clone()), query, ok).await.status(),
+            StatusCode::OK
+        );
+
+        // A popup whose start began before Disconnect is rejected at callback,
+        // before any code exchange is attempted.
+        insert_pending(&state, "late", "remote", Instant::now()).await;
+        state
+            .pending
+            .lock()
+            .unwrap()
+            .get_mut("late")
+            .unwrap()
+            .generation = stale;
+        let response = callback(
+            State(state.clone()),
+            Query(CallbackQuery {
+                code: "c".into(),
+                state: "late".into(),
+                iss: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!credential_path(root.path(), "remote").exists());
     }
 
     #[test]
@@ -487,6 +592,7 @@ mod tests {
     async fn insert_pending(state: &DashboardState, key: &str, server: &str, created: Instant) {
         let pending = Pending {
             created,
+            generation: state.generation(server),
             server: server.into(),
             manager: AuthorizationManager::new("http://127.0.0.1:9/mcp")
                 .await

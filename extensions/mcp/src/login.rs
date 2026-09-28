@@ -14,7 +14,11 @@ pub async fn login(root: &Path, name: &str) -> Result<()> {
 /// Auto-login at `dar run` boot: shorter wait, and give up at once if no
 /// browser could be opened, so an unattended TTY never stalls boot for long.
 pub async fn auto_login(root: &Path, name: &str) -> Result<()> {
-    login_with(root, name, Duration::from_secs(180), true).await
+    // Bound the whole flow (discovery, registration, browser, callback).
+    let limit = Duration::from_secs(180);
+    tokio::time::timeout(limit, login_with(root, name, limit, true))
+        .await
+        .context("MCP login timed out after 3 minutes")?
 }
 
 async fn login_with(root: &Path, name: &str, wait: Duration, need_browser: bool) -> Result<()> {
@@ -37,7 +41,7 @@ async fn login_with(root: &Path, name: &str, wait: Duration, need_browser: bool)
     let redirect = format!("http://{}/callback", listener.local_addr()?);
     let (mut manager, store, auth_url) = begin_authorization(root, name, url, &redirect).await?;
     println!("Open this URL to authorize {name}:\n{auth_url}");
-    if !open_browser(&auth_url) && need_browser {
+    if !open_browser(&auth_url).await && need_browser {
         bail!("could not open a browser; run `dar mcp login {name}` or use the dashboard");
     }
     let minutes = wait.as_secs() / 60;
@@ -175,14 +179,21 @@ pub(crate) async fn begin_authorization(
     Ok((manager, store, auth_url))
 }
 
-fn open_browser(url: &str) -> bool {
+async fn open_browser(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     let command = "open";
     #[cfg(not(target_os = "macos"))]
     let command = "xdg-open";
-    std::process::Command::new(command)
+    let Ok(mut child) = tokio::process::Command::new(command)
         .arg(url)
+        .kill_on_drop(true)
         .spawn()
-        .and_then(|mut child| child.wait())
-        .is_ok_and(|status| status.success())
+    else {
+        return false;
+    };
+    // A hung opener counts as failure (and is killed on drop).
+    matches!(
+        tokio::time::timeout(Duration::from_secs(10), child.wait()).await,
+        Ok(Ok(status)) if status.success()
+    )
 }
