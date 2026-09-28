@@ -9,6 +9,8 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-28
+
 - Agents can stay silent: a reply of exactly `NO_REPLY` delivers nothing in web chat, the TUI, or channel extensions (raw turn kept in history). Chat surfaces receive a new `ChatEvent::Silent` just before `TurnFinished`. See [docs/chat.md](docs/chat.md).
 - Added an agent-to-agent loop guard: `ChatSession::send_turn_from` takes an optional `AgentSender { agent_id, hops }`; new `agent_loop: { max_agent_turns: 8, max_hops: 5 }` in `agent.yaml` caps consecutive agent turns per chat session and hop TTL. Blocked turns skip the model and finish silently. See [docs/configuration.md](docs/configuration.md).
 - All workspace crates now share version 0.6.0 (previously 0.4.x, with the SDK and cap-chat on their own track); external extensions must depend on `dar-extension-sdk`/`dar-host-api` `"0.6"`.
@@ -454,6 +456,7 @@ loop.
   startup; record runs for failed dispatch attempts; honor Linear complexity
   rate limits.
 
+[0.6.0]: https://github.com/tobalsan/dar/compare/v0.4.1...v0.6.0
 [0.4.0]: https://github.com/tobalsan/dar/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/tobalsan/dar/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/tobalsan/dar/compare/v0.2.0...v0.3.0
