@@ -3,9 +3,11 @@
 use std::{collections::BTreeMap, path::Path, process::Stdio, sync::Arc, time::Duration};
 
 pub mod credentials;
+mod dashboard;
 pub mod login;
 
 use anyhow::{bail, Context, Result};
+use cap_dashboard_tab::DashboardTabs;
 use dar_extension_sdk::{
     tools::{
         Redactor, ToolExecutor, ToolOutcome, ToolRegistryHandle, ToolSpec, TOOL_REGISTRY_SERVICE,
@@ -32,6 +34,45 @@ pub enum DoctorStatus {
     Ok(usize),
     NeedsLogin,
     Unreachable(String),
+}
+
+pub async fn servers_needing_login(root: &Path) -> Result<Vec<String>> {
+    let config = load(root)?;
+    let secrets = Arc::new(BridgeSecrets::default());
+    let futures = config
+        .mcp_servers
+        .into_iter()
+        .filter_map(|(name, server)| match &server {
+            Server::Http { headers, .. }
+                if !headers
+                    .keys()
+                    .any(|key| key.eq_ignore_ascii_case("authorization"))
+                    && !root
+                        .join("data/mcp-auth")
+                        .join(format!("{name}.json"))
+                        .exists() =>
+            {
+                let root = root.to_path_buf();
+                let secrets = Arc::clone(&secrets);
+                Some(async move {
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(15),
+                        discover(&root, &name, server, &secrets),
+                    )
+                    .await;
+                    match result {
+                        Ok(Err(error)) if needs_login(&error) => Some(name),
+                        _ => None,
+                    }
+                })
+            }
+            _ => None,
+        });
+    Ok(futures_util::future::join_all(futures)
+        .await
+        .into_iter()
+        .flatten()
+        .collect())
 }
 
 pub async fn doctor_statuses(root: &Path) -> Result<Vec<(String, DoctorStatus)>> {
@@ -62,7 +103,7 @@ pub async fn doctor_statuses(root: &Path) -> Result<Vec<(String, DoctorStatus)>>
     Ok(futures_util::future::join_all(futures).await)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Config {
     #[serde(default)]
@@ -121,12 +162,23 @@ impl Extension for McpExtension {
     fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let config = load(ctx.paths.root())?;
-            if config.mcp_servers.is_empty()
-                || ctx
-                    .services
-                    .get::<McpBridgeMode>(MCP_BRIDGE_MODE_SERVICE)
-                    .is_err()
+            if config.mcp_servers.is_empty() {
+                return Ok(());
+            }
+            if ctx
+                .services
+                .get::<McpBridgeMode>(MCP_BRIDGE_MODE_SERVICE)
+                .is_err()
             {
+                let state = dashboard::DashboardState::new(ctx.paths.root().to_path_buf(), config);
+                DashboardTabs::shared(&mut ctx.services)?
+                    .add(Arc::new(dashboard::McpTab::new(state.clone())))?;
+                ctx.http.mount(host_api::HttpMount {
+                    namespace: "/mcp".into(),
+                    router: dashboard::router(state),
+                    routes: dashboard::routes(),
+                    claim_root: false,
+                })?;
                 return Ok(());
             }
             let registry = ctx
@@ -476,6 +528,46 @@ mod tests {
             anyhow::anyhow!("Transport error: Auth required, when send initialize request");
         assert!(needs_login(&rmcp_401));
         assert!(!needs_login(&anyhow::anyhow!("connection refused")));
+    }
+
+    #[tokio::test]
+    async fn auto_login_probe_selects_only_unauthorized_server() {
+        use axum::{http::StatusCode, routing::any, Router};
+        let unauthorized = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unauthorized_addr = unauthorized.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                unauthorized,
+                Router::new().fallback(any(|| async { StatusCode::UNAUTHORIZED })),
+            )
+            .await
+            .unwrap();
+        });
+        let public = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let public_addr = public.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                public,
+                Router::new().fallback(any(|| async { StatusCode::OK })),
+            )
+            .await
+            .unwrap();
+        });
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("mcp.json"),
+            serde_json::json!({"mcpServers": {
+                "locked": {"url": format!("http://{unauthorized_addr}")},
+                "public": {"url": format!("http://{public_addr}")},
+                "local": {"command":"do-not-spawn"}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            servers_needing_login(root.path()).await.unwrap(),
+            vec!["locked"]
+        );
     }
 
     #[test]

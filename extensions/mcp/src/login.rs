@@ -8,6 +8,16 @@ use crate::{credentials::FileCredentialStore, load, Server};
 
 /// Run interactive OAuth authorization for one configured HTTP server.
 pub async fn login(root: &Path, name: &str) -> Result<()> {
+    login_with(root, name, Duration::from_secs(900), false).await
+}
+
+/// Auto-login at `dar run` boot: shorter wait, and give up at once if no
+/// browser could be opened, so an unattended TTY never stalls boot for long.
+pub async fn auto_login(root: &Path, name: &str) -> Result<()> {
+    login_with(root, name, Duration::from_secs(180), true).await
+}
+
+async fn login_with(root: &Path, name: &str, wait: Duration, need_browser: bool) -> Result<()> {
     let config = load(root)?;
     let server = config
         .mcp_servers
@@ -25,17 +35,14 @@ pub async fn login(root: &Path, name: &str) -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let redirect = format!("http://{}/callback", listener.local_addr()?);
-    let store = FileCredentialStore::new(root, name)?;
-    let mut manager = AuthorizationManager::new(url).await?;
-    manager.set_credential_store(store.clone());
-    let metadata = manager.resolve_metadata().await?;
-    manager.set_metadata(metadata.metadata);
-    manager.register_client("dar", &redirect, &[]).await?;
-    let auth_url = manager.get_authorization_url(&[]).await?;
+    let (mut manager, store, auth_url) = begin_authorization(root, name, url, &redirect).await?;
     println!("Open this URL to authorize {name}:\n{auth_url}");
-    open_browser(&auth_url);
+    if !open_browser(&auth_url) && need_browser {
+        bail!("could not open a browser; run `dar mcp login {name}` or use the dashboard");
+    }
+    let minutes = wait.as_secs() / 60;
 
-    tokio::time::timeout(Duration::from_secs(900), async {
+    tokio::time::timeout(wait, async {
         loop {
             let (mut stream, _) = listener.accept().await?;
             // A stalled connection must not block the real callback.
@@ -78,19 +85,8 @@ pub async fn login(root: &Path, name: &str) -> Result<()> {
                 .get("state")
                 .context("OAuth callback missing state")?;
             let issuer = params.get("iss").map(|value| value.as_ref());
-            let _guard = store
-                .acquire_refresh_guard()
-                .await?
-                .context("credential lock unavailable")?;
-            match manager
-                .exchange_code_for_token_with_issuer(code, state, issuer)
-                .await
-            {
-                Ok(_) => {
-                    store
-                        .load()
-                        .await?
-                        .context("OAuth server returned no stored credentials")?;
+            match exchange_and_save(&mut manager, &store, code, state, issuer).await {
+                Ok(()) => {
                     respond(
                         &mut stream,
                         "200 OK",
@@ -106,14 +102,35 @@ pub async fn login(root: &Path, name: &str) -> Result<()> {
                         "Authorization failed. Return to terminal.",
                     )
                     .await?;
-                    break Err(error.into());
+                    break Err(error);
                 }
             }
         }
     })
     .await
-    .context("OAuth callback timed out after 15 minutes")??;
+    .with_context(|| format!("OAuth callback timed out after {minutes} minutes"))??;
     println!("MCP login succeeded for {name}");
+    Ok(())
+}
+
+pub(crate) async fn exchange_and_save(
+    manager: &mut AuthorizationManager,
+    store: &FileCredentialStore,
+    code: &str,
+    state: &str,
+    issuer: Option<&str>,
+) -> Result<()> {
+    let _guard = store
+        .acquire_refresh_guard()
+        .await?
+        .context("credential lock unavailable")?;
+    manager
+        .exchange_code_for_token_with_issuer(code, state, issuer)
+        .await?;
+    store
+        .load()
+        .await?
+        .context("OAuth server returned no stored credentials")?;
     Ok(())
 }
 
@@ -139,10 +156,33 @@ async fn respond(stream: &mut tokio::net::TcpStream, status: &str, body: &str) -
     Ok(())
 }
 
-fn open_browser(url: &str) {
+/// OAuth discovery + dynamic client registration; returns the manager (holding
+/// the PKCE verifier) and the provider authorization URL. Shared by the CLI and
+/// dashboard flows.
+pub(crate) async fn begin_authorization(
+    root: &Path,
+    name: &str,
+    url: &str,
+    redirect: &str,
+) -> Result<(AuthorizationManager, FileCredentialStore, String)> {
+    let store = FileCredentialStore::new(root, name)?;
+    let mut manager = AuthorizationManager::new(url).await?;
+    manager.set_credential_store(store.clone());
+    let metadata = manager.resolve_metadata().await?;
+    manager.set_metadata(metadata.metadata);
+    manager.register_client("dar", redirect, &[]).await?;
+    let auth_url = manager.get_authorization_url(&[]).await?;
+    Ok((manager, store, auth_url))
+}
+
+fn open_browser(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     let command = "open";
     #[cfg(not(target_os = "macos"))]
     let command = "xdg-open";
-    let _ = std::process::Command::new(command).arg(url).spawn();
+    std::process::Command::new(command)
+        .arg(url)
+        .spawn()
+        .and_then(|mut child| child.wait())
+        .is_ok_and(|status| status.success())
 }

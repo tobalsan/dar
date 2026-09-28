@@ -10,6 +10,7 @@ pub mod self_check;
 pub mod self_update;
 
 use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -55,6 +56,19 @@ async fn run_inner(plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
             // them both in the inherited self-check child and at runtime.
             dotenv::load_agent_env(&root)?;
             self_check::guard_boot(&root)?;
+            if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                match mcp::servers_needing_login(&root).await {
+                    Ok(servers) => {
+                        for server in servers {
+                            println!("MCP server {server} needs login; opening authorization...");
+                            if let Err(error) = mcp::login::auto_login(&root, &server).await {
+                                eprintln!("warning: MCP login failed for {server}: {error:#}");
+                            }
+                        }
+                    }
+                    Err(error) => eprintln!("warning: could not check MCP login status: {error:#}"),
+                }
+            }
             let (_workflow_file, workflow_root, is_default) =
                 cli::resolve_workflow(&root, args.workflow.as_deref())?;
             run_host(root, workflow_root, !is_default, original_args, plugins).await

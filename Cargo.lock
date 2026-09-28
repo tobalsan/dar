@@ -896,6 +896,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.9",
+ "dar-cap-dashboard-tab",
  "dar-extension-sdk",
  "dar-host-api",
  "dar-tool-registry",

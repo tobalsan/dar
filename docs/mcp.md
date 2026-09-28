@@ -26,4 +26,12 @@ dar mcp login <server-name> --dir /path/to/agent
 
 Dar discovers OAuth metadata, dynamically registers public client `dar`, opens PKCE authorization in browser, validates callback state, and stores rotating credentials under `data/mcp-auth/<server>.json`. Directory mode is `0700`; credential and lock files use `0600`. Bridge refreshes stored credentials under cross-process file lock. `dar doctor` reports tool count, login requirement, invalid config, or connectivity warning for each server.
 
+## Automatic login
+
+On an interactive terminal, `dar run` probes configured HTTP servers without static authorization before boot. Servers that reject the unauthenticated probe with an authorization error open the same OAuth login flow, sequentially. Login failures warn but never prevent agent boot. Non-interactive runs skip this check.
+
+## Dashboard
+
+Agents with configured MCP servers expose an **MCP** dashboard tab. It shows transport and local credential status without contacting or spawning servers. OAuth-capable HTTP servers can be connected, reconnected, or disconnected there. OAuth state expires after ten minutes. Running agents' runners use changed credentials on their next MCP bridge start.
+
 Runners reach these tools through the host bridge they already use, so `pi`, `codex`, `opencode`, and `builtin` need no extra setup. The `pi` runner needs `pi-mcp-adapter` installed on the host (it provides `--mcp-config`); without it pi exits with `Unknown option: --mcp-config`. MCP servers a runner already loads from its own config keep working alongside these.
