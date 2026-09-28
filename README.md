@@ -70,6 +70,7 @@ my-agent/
 | [WORKFLOW.md](docs/workflows.md) | Prompt template, issue-loop frontmatter, `--workflow` (one agent, many hats) |
 | [Trackers](docs/trackers.md) | Local issue files, Linear, Plane |
 | [Runners](docs/runners.md) | Runner backends and the thinking/reasoning level |
+| [MCP servers](docs/mcp.md) | External stdio/HTTP tool servers and OAuth login |
 | [Dashboard](docs/dashboard.md) | Panels, controls, and the HTTP API |
 | [Chat surfaces](docs/chat.md) | Terminal UI (`foreground: tui`) and web chat |
 | [Scheduler](docs/scheduler.md) | Cron jobs, gate scripts, delivery, HTTP API |

@@ -23,6 +23,7 @@ tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal"] }
 host-api = { package = "dar-host-api", path = "../crates/host-api", version = "0.4" }
 dar-cli-core = { path = "../crates/dar-cli", version = "0.4" }
 tool-registry-host = { package = "dar-tool-registry-host", path = "../extensions/tool-registry-host", version = "0.4" }
+mcp = { package = "dar-mcp", path = "../extensions/mcp", version = "0.4" }
 orchestrator = { package = "dar-orchestrator", path = "../extensions/orchestrator", version = "0.4" }
 frontend-log = { package = "dar-frontend-log", path = "../extensions/frontend-log", version = "0.4" }
 dashboard = { package = "dar-dashboard", path = "../extensions/dashboard", version = "0.4" }

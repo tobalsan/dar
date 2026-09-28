@@ -2,6 +2,7 @@
 async fn main() {
     dar_cli_core::run(host_api::plugins![
         tool_registry_host::ToolRegistryHostExtension,
+        mcp::McpExtension,
         frontend_log::FrontendLogExtension,
         system_context::SystemContextExtension,
         tracker_files::TrackerFilesExtension,
@@ -51,6 +52,7 @@ mod tests {
             plugins,
             [
                 "tool_registry_host::ToolRegistryHostExtension",
+                "mcp::McpExtension",
                 "frontend_log::FrontendLogExtension",
                 "system_context::SystemContextExtension",
                 "tracker_files::TrackerFilesExtension",

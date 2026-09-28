@@ -36,7 +36,11 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 pub async fn build_registry(
     root: &Path,
     plugins: Vec<Arc<dyn Extension>>,
-) -> Result<(Arc<dyn ToolRegistryHandle>, Redactor)> {
+) -> Result<(
+    Arc<dyn ToolRegistryHandle>,
+    Redactor,
+    Arc<host_api::BridgeSecrets>,
+)> {
     // Load the agent's secrets into this process so executors can use them.
     // Build a redactor from exactly those `.env`-loaded keys so the same
     // secrets `runner-core::scrub_loaded_env` strips from child spawns are also
@@ -44,22 +48,27 @@ pub async fn build_registry(
     // scrub guarantee to the bridge process.
     let report = orchestrator::dotenv::load_agent_env(root)
         .with_context(|| format!("loading .env for {}", root.display()))?;
-    let redactor = Redactor::from_env_keys(report.loaded);
-    let services = crate::plugin_services(root, plugins).await?;
+    let mut redactor = Redactor::from_env_keys(report.loaded);
+    let services = crate::plugin_services_mode(root, plugins, true).await?;
+    let secrets = services
+        .get::<host_api::BridgeSecrets>(host_api::BRIDGE_SECRETS_SERVICE)
+        .context("bridge secrets service not registered")?;
+    redactor.extend_secret_values(secrets.values());
     let registry = services
         .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
         .context("tool registry service not registered (tool-registry-host extension missing?)")?;
-    Ok((registry, redactor))
+    Ok((registry, redactor, secrets))
 }
 
 /// Entry point for the `__mcp-bridge` subcommand: build the registry and serve
 /// MCP over stdin/stdout until EOF.
 pub async fn serve(root: &Path, plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
-    let (registry, redactor) = build_registry(root, plugins).await?;
+    let (registry, redactor, secrets) = build_registry(root, plugins).await?;
     serve_stdio_with_root(
         registry,
         redactor,
         Some(root),
+        Some(secrets),
         tokio::io::stdin(),
         tokio::io::stdout(),
     )
@@ -78,13 +87,14 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    serve_stdio_with_root(registry, redactor, None, input, output).await
+    serve_stdio_with_root(registry, redactor, None, None, input, output).await
 }
 
 async fn serve_stdio_with_root<R, W>(
     registry: Arc<dyn ToolRegistryHandle>,
     mut redactor: Redactor,
     root: Option<&Path>,
+    bridge_secrets: Option<Arc<host_api::BridgeSecrets>>,
     input: R,
     mut output: W,
 ) -> Result<()>
@@ -101,6 +111,9 @@ where
         if let Some(root) = root {
             redactor.extend_secret_values(agent_env::provider(root).secret_values());
         }
+        if let Some(secrets) = &bridge_secrets {
+            redactor.extend_secret_values(secrets.values());
+        }
         let request: Value = match serde_json::from_str(trimmed) {
             Ok(value) => value,
             Err(_) => {
@@ -108,7 +121,9 @@ where
                 continue;
             }
         };
-        if let Some(response) = handle_message(&registry, &redactor, &request).await {
+        if let Some(response) =
+            handle_message(&registry, &redactor, bridge_secrets.as_deref(), &request).await
+        {
             write_message(&mut output, &response).await?;
         }
         if request.pointer("/method").and_then(Value::as_str) == Some("tools/call")
@@ -128,6 +143,7 @@ where
 async fn handle_message(
     registry: &Arc<dyn ToolRegistryHandle>,
     redactor: &Redactor,
+    bridge_secrets: Option<&host_api::BridgeSecrets>,
     request: &Value,
 ) -> Option<Value> {
     let method = request.get("method").and_then(Value::as_str);
@@ -145,10 +161,16 @@ async fn handle_message(
             }),
         ),
         Some("tools/list") => {
-            let tools: Vec<Value> = registry.list().iter().map(|s| s.to_mcp_tool()).collect();
+            let tools: Vec<Value> = registry
+                .list()
+                .iter()
+                .map(|s| redact_metadata(redactor, &s.to_mcp_tool()))
+                .collect();
             result(id, json!({ "tools": tools }))
         }
-        Some("tools/call") => handle_tools_call(registry, redactor, id, request).await,
+        Some("tools/call") => {
+            handle_tools_call(registry, redactor, bridge_secrets, id, request).await
+        }
         Some("ping") => result(id, json!({})),
         _ => error(id, -32601, "method not found"),
     };
@@ -158,6 +180,7 @@ async fn handle_message(
 async fn handle_tools_call(
     registry: &Arc<dyn ToolRegistryHandle>,
     redactor: &Redactor,
+    bridge_secrets: Option<&host_api::BridgeSecrets>,
     id: Value,
     request: &Value,
 ) -> Value {
@@ -175,8 +198,27 @@ async fn handle_tools_call(
     // returns to the agent so the run continues. Dispatch through the observed
     // path so each call emits a redacted+truncated runtime log carrying tool
     // name, status, duration, and read/write metadata — no raw payload dumps.
-    let (outcome, observation) = registry.dispatch_observed(name, args, redactor).await;
-    emit_observation(&observation);
+    let (outcome, mut observation) = registry
+        .dispatch_observed(name, args.clone(), redactor)
+        .await;
+    // An upstream MCP call may have refreshed an OAuth token mid-call. Fold any
+    // secrets registered since the snapshot in, and rebuild the observation from
+    // the raw outcome (the first one was truncated with the stale redactor).
+    if let Some(secrets) = bridge_secrets {
+        let mut redactor = redactor.clone();
+        redactor.extend_secret_values(secrets.values());
+        observation = ToolCallObservation::build(
+            name,
+            observation.access,
+            &outcome,
+            observation.duration,
+            &args,
+            &redactor,
+        );
+        eprintln!("[dar:tool] {}", observation.log_line());
+        return result(id, outcome.redacted(&redactor).to_mcp_result());
+    }
+    eprintln!("[dar:tool] {}", observation.log_line());
     result(id, outcome.redacted(redactor).to_mcp_result())
 }
 
@@ -184,8 +226,12 @@ async fn handle_tools_call(
 /// JSON-RPC channel, so the human-readable line goes to stderr, which the host
 /// captures as the MCP server's log stream. The line is already redacted and
 /// truncated by `dispatch_observed`, so no host secret or raw payload appears.
-fn emit_observation(observation: &ToolCallObservation) {
-    eprintln!("[dar:tool] {}", observation.log_line());
+/// Redact tool metadata including object keys (`redact_value` keeps keys, and an
+/// upstream schema could name a property after a secret) by masking the
+/// serialized form. Falls back to value-only redaction if masking broke JSON.
+fn redact_metadata(redactor: &Redactor, value: &Value) -> Value {
+    serde_json::from_str(&redactor.redact(&value.to_string()))
+        .unwrap_or_else(|_| redactor.redact_value(value))
 }
 
 fn result(id: Value, result: Value) -> Value {
@@ -272,6 +318,51 @@ mod tests {
             .collect()
     }
 
+    /// Simulates an upstream OAuth refresh: a new token is registered as a
+    /// bridge secret *during* the call and echoed back in the result.
+    struct RefreshesMidCall(Arc<host_api::BridgeSecrets>);
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for RefreshesMidCall {
+        async fn execute(&self, _args: Value) -> Result<ToolOutcome> {
+            self.0.extend(["fresh-opaque-token".to_string()]);
+            // Long prefix: the secret lands past the log truncation point.
+            Ok(ToolOutcome::ok(format!(
+                "{}token=fresh-opaque-token",
+                "x".repeat(500)
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn secret_registered_mid_call_is_redacted_from_result() {
+        let secrets = Arc::new(host_api::BridgeSecrets::default());
+        let reg = ToolRegistry::new();
+        reg.register_tool(
+            ToolSpec::new("refresh", "refreshes", json!({ "type": "object" })),
+            Arc::new(RefreshesMidCall(secrets.clone())),
+        )
+        .unwrap();
+        let input = format!(
+            "{}\n",
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "refresh" } })
+        );
+        let mut output: Vec<u8> = Vec::new();
+        serve_stdio_with_root(
+            Arc::new(reg),
+            Redactor::default(),
+            None,
+            Some(secrets),
+            input.as_bytes(),
+            &mut output,
+        )
+        .await
+        .unwrap();
+        let out = String::from_utf8(output).unwrap();
+        assert!(!out.contains("fresh-opaque"), "{out}");
+        assert!(out.contains("[REDACTED]"), "{out}");
+    }
+
     #[tokio::test]
     async fn initialize_advertises_tools_capability() {
         let out = roundtrip(&[json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" })]).await;
@@ -289,6 +380,31 @@ mod tests {
             tools[0]["inputSchema"]["properties"]["text"]["type"],
             "string"
         );
+    }
+
+    #[tokio::test]
+    async fn tools_list_redacts_secret_metadata() {
+        let secret = "configured-header-secret";
+        let reg = ToolRegistry::new();
+        reg.register_tool(
+            ToolSpec::new(
+                "safe",
+                format!("description {secret}"),
+                json!({"type":"object","description":secret,"properties":{secret:{"type":"string"}}}),
+            ),
+            Arc::new(EchoUpper),
+        )
+        .unwrap();
+        let out = roundtrip_with(
+            Arc::new(reg),
+            Redactor::from_secret_values([secret]),
+            &[json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})],
+        )
+        .await;
+        let encoded = out[0].to_string();
+        assert!(!encoded.contains(secret));
+        assert!(out[0]["result"]["tools"][0]["name"] == "safe");
+        assert!(encoded.contains("[REDACTED]"));
     }
 
     #[tokio::test]
@@ -426,6 +542,7 @@ mod tests {
             Arc::new(registry),
             Redactor::from_secret_values([old]),
             Some(root.path()),
+            None,
             input.as_bytes(),
             &mut output,
         )

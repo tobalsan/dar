@@ -26,7 +26,7 @@ use orchestrator::workflow_config::EffectiveLoopConfig;
 /// <path>` dir otherwise). Returns the process exit code. Path derivation
 /// mirrors the orchestrator's `start()` so doctor validates exactly what a
 /// subsequent `dar run --workflow …` would run.
-pub fn run(
+pub async fn run(
     root: &Path,
     workflow_root: &Path,
     dotenv: &LoadReport,
@@ -40,6 +40,28 @@ pub fn run(
         AgentPaths::with_workflow(root.to_path_buf(), workflow_root.to_path_buf(), state_dir)
     };
     let mut ok = true;
+
+    match mcp::doctor_statuses(root).await {
+        Ok(statuses) => {
+            for (name, status) in statuses {
+                match status {
+                    mcp::DoctorStatus::Ok(count) => {
+                        pass(&format!("MCP {name}: ok ({count} tools)"))
+                    }
+                    mcp::DoctorStatus::NeedsLogin => eprintln!(
+                        "doctor: warning: MCP {name}: needs login (run: dar mcp login {name})"
+                    ),
+                    mcp::DoctorStatus::Unreachable(error) => {
+                        eprintln!("doctor: warning: MCP {name}: unreachable: {error}")
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            fail(&format!("MCP invalid config: {error:#}"));
+            ok = false;
+        }
+    }
 
     if dotenv.found {
         pass(&format!(

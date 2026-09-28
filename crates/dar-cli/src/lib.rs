@@ -67,6 +67,12 @@ async fn run_inner(plugins: Vec<Arc<dyn Extension>>) -> Result<()> {
             ))
             .await
         }
+        Command::Mcp(args) => match args.command {
+            cli::McpCommand::Login { name, dir } => {
+                let root = cli::resolve_root(dir.as_deref())?;
+                mcp::login::login(&root, &name).await
+            }
+        },
         Command::McpBridge(args) => {
             let root = args.resolve_root()?;
             let workflow = args
@@ -209,6 +215,7 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
     match command {
         Command::Run(_) => unreachable!("run is handled by run_host()"),
         Command::Dash(_) => unreachable!("dash is handled in run_inner()"),
+        Command::Mcp(_) => unreachable!("mcp is handled in run_inner()"),
         Command::McpBridge(_) => unreachable!("mcp bridge is handled in run_inner()"),
         Command::Doctor(args) => {
             let root = args.resolve_root()?;
@@ -229,7 +236,7 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
             }
             let dotenv_report = dotenv::load_agent_env(&root)?;
             let services = plugin_services(&root, plugins).await?;
-            let code = doctor::run(&root, &workflow_root, &dotenv_report, services)?;
+            let code = doctor::run(&root, &workflow_root, &dotenv_report, services).await?;
             std::process::exit(code);
         }
         Command::Create(args) => {
@@ -358,6 +365,14 @@ pub(crate) async fn plugin_services(
     root: &std::path::Path,
     plugins: Vec<Arc<dyn Extension>>,
 ) -> Result<ServiceRegistry> {
+    plugin_services_mode(root, plugins, false).await
+}
+
+pub(crate) async fn plugin_services_mode(
+    root: &std::path::Path,
+    plugins: Vec<Arc<dyn Extension>>,
+    bridge_mode: bool,
+) -> Result<ServiceRegistry> {
     let config = ConfigStore::from_values(config::load(root)?.extension_configs()?);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut services = ServiceRegistry::default();
@@ -365,6 +380,16 @@ pub(crate) async fn plugin_services(
         host_api::AGENT_ENV_SERVICE,
         agent_env::provider(root),
     )?;
+    if bridge_mode {
+        services.service(
+            host_api::MCP_BRIDGE_MODE_SERVICE,
+            Arc::new(host_api::McpBridgeMode),
+        )?;
+        services.service(
+            host_api::BRIDGE_SECRETS_SERVICE,
+            Arc::new(host_api::BridgeSecrets::default()),
+        )?;
+    }
     let mut ctx = RegisterCtx {
         bus: EventBus::new(),
         http: HttpRegistry::disabled(),

@@ -41,6 +41,8 @@ pub enum Command {
     InitWorkflow(InitWorkflowArgs),
     /// Export the configured tracker project and issues under the data dir.
     Export(ExportArgs),
+    /// Manage configured MCP servers.
+    Mcp(McpArgs),
     /// Host-owned MCP bridge over stdio (spawned by runners; not for direct use).
     #[command(name = "__mcp-bridge", hide = true)]
     McpBridge(McpBridgeArgs),
@@ -159,6 +161,22 @@ pub struct DirArgs {
     /// Agent folder (defaults to the current directory).
     #[arg(long)]
     pub dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct McpArgs {
+    #[command(subcommand)]
+    pub command: McpCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    /// Authorize one HTTP MCP server using browser OAuth.
+    Login {
+        name: String,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -324,7 +342,7 @@ impl ExportArgs {
     }
 }
 
-fn resolve_root(dir: Option<&std::path::Path>) -> Result<PathBuf> {
+pub(crate) fn resolve_root(dir: Option<&std::path::Path>) -> Result<PathBuf> {
     let raw = match dir {
         Some(p) => p.to_path_buf(),
         None => std::env::current_dir().context("resolving current directory")?,

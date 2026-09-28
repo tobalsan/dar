@@ -26,6 +26,7 @@ members = [
     "extensions/dashboard",
     "extensions/example",
     "extensions/frontend-log",
+    "extensions/mcp",
     "extensions/orchestrator",
     "extensions/runner-cli",
     "extensions/runner-codex",

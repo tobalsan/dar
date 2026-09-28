@@ -9,6 +9,10 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Added MCP server support: drop an `mcp.json` (standard `mcpServers` shape) in an agent folder and its stdio or streamable-HTTP servers' tools reach every runner as `<server>__<tool>` through the host MCP bridge. See [docs/mcp.md](docs/mcp.md).
+- Added `dar mcp login <server>`: zero-config OAuth (discovery, dynamic client registration, PKCE) for remote MCP servers such as `https://mcp.linear.app/mcp`; tokens are stored in `data/mcp-auth/` and refreshed automatically.
+- `dar doctor` now reports each MCP server as ok (with tool count), needs login, unreachable, or invalid config.
+
 ## [0.4.1] — 2026-09-27
 
 - Fixed web chat getting stuck as "running" (Stop does nothing) with newer Pi versions that inject a system preamble message before the user prompt.

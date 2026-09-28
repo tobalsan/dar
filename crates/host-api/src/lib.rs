@@ -60,6 +60,25 @@ use tokio::sync::{broadcast, watch};
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub const AGENT_ENV_SERVICE: &str = "host.agent-env";
+/// Typed marker installed only while building the hidden MCP bridge registry.
+pub const MCP_BRIDGE_MODE_SERVICE: &str = "host.mcp-bridge-mode";
+#[derive(Debug, Default)]
+pub struct McpBridgeMode;
+/// Secrets resolved by bridge-only extensions and folded into bridge redaction.
+pub const BRIDGE_SECRETS_SERVICE: &str = "host.bridge-secrets";
+#[derive(Debug, Default)]
+pub struct BridgeSecrets(Mutex<Vec<String>>);
+impl BridgeSecrets {
+    pub fn extend(&self, values: impl IntoIterator<Item = String>) {
+        self.0
+            .lock()
+            .expect("bridge secrets poisoned")
+            .extend(values);
+    }
+    pub fn values(&self) -> Vec<String> {
+        self.0.lock().expect("bridge secrets poisoned").clone()
+    }
+}
 /// Root-scoped environment view. Implementations preserve process-env
 /// precedence while refreshing agent `.env` values on demand.
 pub trait AgentEnv: Send + Sync {

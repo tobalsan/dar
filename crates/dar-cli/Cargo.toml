@@ -34,6 +34,7 @@ tool-registry = { package = "dar-tool-registry", path = "../tool-registry", vers
 orchestrator = { package = "dar-orchestrator", path = "../../extensions/orchestrator", version = "0.4" }
 system-context = { package = "dar-system-context", path = "../../extensions/system-context", version = "0.4" }
 scheduler = { package = "dar-scheduler", path = "../../extensions/scheduler", version = "0.4" }
+mcp = { package = "dar-mcp", path = "../../extensions/mcp", version = "0.4" }
 
 [dev-dependencies]
 tempfile = "3"

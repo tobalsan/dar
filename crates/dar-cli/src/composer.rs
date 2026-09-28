@@ -83,6 +83,10 @@ const STOCK_EXTENSIONS: &[StockExtension] = &[
         factory: "tool_registry_host::ToolRegistryHostExtension",
     },
     StockExtension {
+        package: "mcp",
+        factory: "mcp::McpExtension",
+    },
+    StockExtension {
         package: "frontend-log",
         factory: "frontend_log::FrontendLogExtension",
     },
@@ -257,6 +261,7 @@ fn selected_stock_extensions(
     let selected_runner = runner_package(&selection.runner.use_)?;
     let mut packages = vec![
         "tool-registry-host",
+        "mcp",
         "frontend-log",
         "system-context",
         "orchestrator",

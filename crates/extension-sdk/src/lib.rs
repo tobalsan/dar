@@ -14,9 +14,10 @@ use std::sync::{Mutex, OnceLock};
 pub use dar_artifacts as artifacts;
 
 pub use host_api::{
-    AgentEnv, BoxFuture, ConfigStore, EnvReloadConsumer, EnvReloadConsumers, EventBus, Extension,
-    HostPaths, RegisterCtx, ServiceRegistry, ShutdownToken, StartCtx, AGENT_ENV_SERVICE,
-    ENV_RELOAD_CONSUMERS_SERVICE,
+    AgentEnv, BoxFuture, BridgeSecrets, ConfigStore, EnvReloadConsumer, EnvReloadConsumers,
+    EventBus, Extension, HostPaths, McpBridgeMode, RegisterCtx, ServiceRegistry, ShutdownToken,
+    StartCtx, AGENT_ENV_SERVICE, BRIDGE_SECRETS_SERVICE, ENV_RELOAD_CONSUMERS_SERVICE,
+    MCP_BRIDGE_MODE_SERVICE,
 };
 
 /// Runtime result delivery for communication extensions.
@@ -237,7 +238,7 @@ pub mod tools {
     use super::{Path, ServiceRegistry};
     use cap_chat::HostToolBridge;
     pub use tool_registry::{
-        ToolExecutor, ToolOutcome, ToolRegistryHandle, ToolSpec, TOOL_REGISTRY_SERVICE,
+        Redactor, ToolExecutor, ToolOutcome, ToolRegistryHandle, ToolSpec, TOOL_REGISTRY_SERVICE,
     };
 
     /// Resolve the hidden host MCP bridge command for a chat or runner spawn.
