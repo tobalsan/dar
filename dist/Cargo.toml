@@ -20,28 +20,28 @@ path = "src/bin/cargo-dar.rs"
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "signal"] }
-host-api = { package = "dar-host-api", path = "../crates/host-api", version = "0.4" }
-dar-cli-core = { path = "../crates/dar-cli", version = "0.4" }
-tool-registry-host = { package = "dar-tool-registry-host", path = "../extensions/tool-registry-host", version = "0.4" }
-mcp = { package = "dar-mcp", path = "../extensions/mcp", version = "0.4" }
-orchestrator = { package = "dar-orchestrator", path = "../extensions/orchestrator", version = "0.4" }
-frontend-log = { package = "dar-frontend-log", path = "../extensions/frontend-log", version = "0.4" }
-dashboard = { package = "dar-dashboard", path = "../extensions/dashboard", version = "0.4" }
-tracker-files = { package = "dar-tracker-files", path = "../extensions/tracker-files", version = "0.4" }
-tracker-linear = { package = "dar-tracker-linear", path = "../extensions/tracker-linear", version = "0.4" }
-tracker-plane = { package = "dar-tracker-plane", path = "../extensions/tracker-plane", version = "0.4" }
-runner-pi = { package = "dar-runner-pi", path = "../extensions/runner-pi", version = "0.4" }
-runner-codex = { package = "dar-runner-codex", path = "../extensions/runner-codex", version = "0.4" }
-runner-cli = { package = "dar-runner-cli", path = "../extensions/runner-cli", version = "0.4" }
-runner-fake = { package = "dar-runner-fake", path = "../extensions/runner-fake", version = "0.4" }
-runner-opencode = { package = "dar-runner-opencode", path = "../extensions/runner-opencode", version = "0.4" }
-scheduler = { package = "dar-scheduler", path = "../extensions/scheduler", version = "0.4" }
-system-context = { package = "dar-system-context", path = "../extensions/system-context", version = "0.4" }
-chat-opencode = { package = "dar-chat-opencode", path = "../extensions/chat-opencode", version = "0.4" }
-chat-pi = { package = "dar-chat-pi", path = "../extensions/chat-pi", version = "0.4" }
-chat-codex = { package = "dar-chat-codex", path = "../extensions/chat-codex", version = "0.4" }
-chat-web = { package = "dar-chat-web", path = "../extensions/chat-web", version = "0.4" }
-tui = { package = "dar-tui", path = "../extensions/tui", version = "0.4" }
+host-api = { package = "dar-host-api", path = "../crates/host-api", version = "0.6" }
+dar-cli-core = { path = "../crates/dar-cli", version = "0.6" }
+tool-registry-host = { package = "dar-tool-registry-host", path = "../extensions/tool-registry-host", version = "0.6" }
+mcp = { package = "dar-mcp", path = "../extensions/mcp", version = "0.6" }
+orchestrator = { package = "dar-orchestrator", path = "../extensions/orchestrator", version = "0.6" }
+frontend-log = { package = "dar-frontend-log", path = "../extensions/frontend-log", version = "0.6" }
+dashboard = { package = "dar-dashboard", path = "../extensions/dashboard", version = "0.6" }
+tracker-files = { package = "dar-tracker-files", path = "../extensions/tracker-files", version = "0.6" }
+tracker-linear = { package = "dar-tracker-linear", path = "../extensions/tracker-linear", version = "0.6" }
+tracker-plane = { package = "dar-tracker-plane", path = "../extensions/tracker-plane", version = "0.6" }
+runner-pi = { package = "dar-runner-pi", path = "../extensions/runner-pi", version = "0.6" }
+runner-codex = { package = "dar-runner-codex", path = "../extensions/runner-codex", version = "0.6" }
+runner-cli = { package = "dar-runner-cli", path = "../extensions/runner-cli", version = "0.6" }
+runner-fake = { package = "dar-runner-fake", path = "../extensions/runner-fake", version = "0.6" }
+runner-opencode = { package = "dar-runner-opencode", path = "../extensions/runner-opencode", version = "0.6" }
+scheduler = { package = "dar-scheduler", path = "../extensions/scheduler", version = "0.6" }
+system-context = { package = "dar-system-context", path = "../extensions/system-context", version = "0.6" }
+chat-opencode = { package = "dar-chat-opencode", path = "../extensions/chat-opencode", version = "0.6" }
+chat-pi = { package = "dar-chat-pi", path = "../extensions/chat-pi", version = "0.6" }
+chat-codex = { package = "dar-chat-codex", path = "../extensions/chat-codex", version = "0.6" }
+chat-web = { package = "dar-chat-web", path = "../extensions/chat-web", version = "0.6" }
+tui = { package = "dar-tui", path = "../extensions/tui", version = "0.6" }
 
 [dev-dependencies]
 tempfile = "3"
