@@ -11,6 +11,12 @@ pub use dar_artifacts::ArtifactId;
 use dar_artifacts::{ArtifactMetadata, ArtifactStore};
 use tokio::sync::mpsc::Sender;
 
+mod silence;
+pub use silence::{
+    is_no_reply, open_guarded, AgentLoopConfig, AgentSender, LoopGuard, NoReplyFilter,
+    SilentReason, NO_REPLY_INSTRUCTION, NO_REPLY_TOKEN,
+};
+
 /// Named service used by chat surfaces that join the agent-wide live session.
 pub const CHAT_COORDINATOR_SERVICE: &str = "chat-coordinator";
 
@@ -290,6 +296,15 @@ pub enum ChatEvent {
         answers: Vec<Vec<String>>,
         rejected: bool,
     },
+    /// The run intentionally delivers nothing; emitted just before its
+    /// `TurnFinished`. `reason: None` = the agent replied `NO_REPLY` (`text`
+    /// holds the raw suppressed reply, for debug views); `Some` = the loop
+    /// guard blocked the turn and the model was never called. Channel
+    /// surfaces must post nothing for such a turn.
+    Silent {
+        reason: Option<SilentReason>,
+        text: String,
+    },
     /// Backend-side error line (stderr, protocol error).
     Error(String),
     /// Best-effort context-usage report for the status line. `tokens_used`
@@ -337,6 +352,8 @@ pub struct ChatSessionParams {
     pub resume_session_id: Option<String>,
     /// Optional side-channel for exact `artifact_publish` resource links.
     pub artifact_ready: Option<Sender<ArtifactReady>>,
+    /// Agent-to-agent loop-guard limits (`agent_loop:` in `agent.yaml`).
+    pub agent_loop: AgentLoopConfig,
 }
 
 impl ChatSessionParams {
@@ -355,6 +372,7 @@ impl ChatSessionParams {
             host_tool_bridge: None,
             resume_session_id: None,
             artifact_ready: None,
+            agent_loop: AgentLoopConfig::default(),
         }
     }
 }
@@ -369,6 +387,7 @@ pub struct ChatSessionParamsBuilder {
     host_tool_bridge: Option<HostToolBridge>,
     resume_session_id: Option<String>,
     artifact_ready: Option<Sender<ArtifactReady>>,
+    agent_loop: AgentLoopConfig,
 }
 
 impl ChatSessionParamsBuilder {
@@ -410,6 +429,11 @@ impl ChatSessionParamsBuilder {
         self
     }
 
+    pub fn agent_loop(mut self, value: AgentLoopConfig) -> Self {
+        self.agent_loop = value;
+        self
+    }
+
     pub fn build(self) -> ChatSessionParams {
         ChatSessionParams {
             command: self.command,
@@ -421,6 +445,7 @@ impl ChatSessionParamsBuilder {
             host_tool_bridge: self.host_tool_bridge,
             resume_session_id: self.resume_session_id,
             artifact_ready: self.artifact_ready,
+            agent_loop: self.agent_loop,
         }
     }
 }
@@ -444,6 +469,17 @@ pub trait ChatSession: Send {
     /// cancels backend-held queued messages, those accepted messages finish
     /// as aborted.
     fn send_turn(&mut self, prompt: String) -> BoxFuture<'_, anyhow::Result<()>>;
+    /// [`send_turn`](Self::send_turn) with an author: `None` = human turn,
+    /// `Some` = another agent. Sessions from stock backends apply the loop
+    /// guard here (a blocked turn emits only `Silent` + `TurnFinished`).
+    fn send_turn_from(
+        &mut self,
+        prompt: String,
+        sender: Option<AgentSender>,
+    ) -> BoxFuture<'_, anyhow::Result<()>> {
+        let _ = sender;
+        self.send_turn(prompt)
+    }
     /// Graceful cancel of the in-flight turn. Session stays usable; queued
     /// accepted messages that cannot survive the abort finish as aborted.
     fn abort(&mut self) -> BoxFuture<'_, anyhow::Result<()>>;

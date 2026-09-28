@@ -13,7 +13,7 @@ name = "runner_builtin"
 
 [dependencies]
 anyhow = "1"
-cap-chat = { package = "dar-cap-chat", path = "../../crates/cap-chat", version = "0.5" }
+cap-chat = { package = "dar-cap-chat", path = "../../crates/cap-chat", version = "0.6" }
 cap-runner = { package = "dar-cap-runner", path = "../../crates/cap-runner", version = "0.4" }
 host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.4" }
 runner-core = { package = "dar-runner-core", path = "../../crates/runner-core", version = "0.4" }

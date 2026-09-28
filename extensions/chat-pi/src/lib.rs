@@ -62,10 +62,14 @@ impl ChatBackend for PiChatBackend {
         params: ChatSessionParams,
         tx: Sender<ChatEvent>,
     ) -> cap_chat::BoxFuture<'a, Result<Box<dyn ChatSession>>> {
-        Box::pin(async move {
-            let session = PiChatSession::spawn(&params, tx).await?;
-            Ok(Box::new(session) as Box<dyn ChatSession>)
-        })
+        Box::pin(cap_chat::open_guarded(
+            params.agent_loop,
+            tx,
+            move |tx| async move {
+                let session = PiChatSession::spawn(&params, tx).await?;
+                Ok(Box::new(session) as Box<dyn ChatSession>)
+            },
+        ))
     }
 }
 
@@ -979,7 +983,14 @@ mod tests {
             .iter()
             .position(|a| a == "--system-prompt")
             .expect("non-TUI surface must pass --system-prompt via the shared SDK helper");
-        assert_eq!(args[idx + 1], OsString::from(context.text));
+        assert_eq!(
+            args[idx + 1],
+            OsString::from(format!(
+                "{}\n\n{}",
+                context.text,
+                cap_chat::NO_REPLY_INSTRUCTION
+            ))
+        );
     }
 
     /// Graceful degrade, matching the TUI: an absent `system.context` topic

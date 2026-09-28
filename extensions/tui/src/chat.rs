@@ -483,6 +483,8 @@ impl ChatState {
                 }
             }
             ChatEvent::Error(message) => self.blocks.push(ChatBlock::Error(message)),
+            // Silent turn (NO_REPLY / loop guard): render nothing.
+            ChatEvent::Silent { .. } => {}
             ChatEvent::ContextUsage {
                 tokens_used,
                 context_window,

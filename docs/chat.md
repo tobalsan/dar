@@ -2,6 +2,15 @@
 
 dar has two operator chat surfaces — a terminal UI and a web chat — that share one live session.
 
+## Silent replies (`NO_REPLY`)
+
+An agent whose entire final reply is `NO_REPLY` (whitespace, `*`/`**`,
+backticks and a trailing `.` tolerated) delivers nothing on any surface: web
+chat, TUI, and channel extensions. The instruction is appended to the agent's
+system prompt when it has identity files (`AGENTS.md` / `system_files`). Text
+sent before a tool call in the same turn is still delivered. The backend's own
+session history and the web transcript keep the raw `NO_REPLY` turn.
+
 ## Terminal UI (`foreground: tui`)
 
 Set `foreground: tui` in `agent.yaml` to replace the plain log stream with an

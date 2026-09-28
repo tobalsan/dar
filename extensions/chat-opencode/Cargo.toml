@@ -13,7 +13,7 @@ name = "chat_opencode"
 
 [dependencies]
 anyhow = "1"
-cap-chat = { package = "dar-cap-chat", path = "../../crates/cap-chat", version = "0.5" }
+cap-chat = { package = "dar-cap-chat", path = "../../crates/cap-chat", version = "0.6" }
 host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.4" }
 opencode-client = { package = "dar-opencode-client", path = "../../crates/opencode-client", version = "0.4" }
 runner-core = { package = "dar-runner-core", path = "../../crates/runner-core", version = "0.4" }

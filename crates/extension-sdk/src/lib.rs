@@ -34,6 +34,10 @@ pub mod chat {
     use serde::Deserialize;
 
     pub use cap_chat::{
+        is_no_reply, AgentLoopConfig, AgentSender, SilentReason, NO_REPLY_INSTRUCTION,
+        NO_REPLY_TOKEN,
+    };
+    pub use cap_chat::{
         ArtifactReady, BoxFuture, ChatBackend, ChatCoordinator, ChatEvent, ChatRole, ChatSession,
         ChatSessionParams, ChatSessionParamsBuilder, HostToolBridge, QuestionInfo, QuestionOption,
         TurnOrigin, CHAT_COORDINATOR_SERVICE, CHAT_FALLBACK_BACKEND,
@@ -101,6 +105,21 @@ pub mod chat {
         serde_yaml::from_str(&yaml).ok()
     }
 
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct AgentLoopYaml {
+        agent_loop: AgentLoopConfig,
+    }
+
+    /// `agent_loop:` from `agent.yaml`; defaults when absent or unreadable.
+    fn agent_loop_config(ctx: &StartCtx) -> AgentLoopConfig {
+        std::fs::read_to_string(ctx.paths.root().join("agent.yaml"))
+            .ok()
+            .and_then(|yaml| serde_yaml::from_str::<AgentLoopYaml>(&yaml).ok())
+            .unwrap_or_default()
+            .agent_loop
+    }
+
     /// Build the [`ChatSessionParams`] every agent-facing chat surface should
     /// open with, so TUI, IRC, Telegram, and any future web/Discord surface all
     /// talk to the same agent identity. Sourced entirely from retained bus
@@ -109,9 +128,9 @@ pub mod chat {
     /// * **model / provider** — from the retained [`RunSnapshot`] when available,
     ///   otherwise directly from `agent.yaml` for passive agents;
     /// * **system_prompt** — the retained [`SystemContext`] assembly
-    ///   ([`SYSTEM_CONTEXT_TOPIC`]); an absent topic or an empty assembly
-    ///   yields `None`, so the session opens exactly as before with no system
-    ///   turn injected (matching the TUI's graceful-degrade behavior);
+    ///   ([`SYSTEM_CONTEXT_TOPIC`]) followed by [`NO_REPLY_INSTRUCTION`]; an
+    ///   absent topic or empty assembly yields `None` (backend default prompt);
+    /// * **agent_loop** — `agent_loop:` from `agent.yaml` (loop-guard limits);
     /// * **host tool bridge** — the hidden `__mcp-bridge` descriptor, or `None`
     ///   when no tool registry is present;
     /// * **cwd** — the agent root;
@@ -124,14 +143,18 @@ pub mod chat {
         let profile = agent_profile(ctx).and_then(|profile| profile.runner);
         let model = profile.as_ref().and_then(|runner| runner.model.clone());
         let provider = profile.and_then(|runner| runner.provider);
-        let system_prompt = ctx
+        let identity = ctx
             .host
             .bus
             .read_retained::<SystemContext>(SYSTEM_CONTEXT_TOPIC)
             .ok()
             .filter(|sc| !sc.is_empty())
             .map(|sc| sc.text);
+        // No identity -> `None`: some backends (pi `--system-prompt`) would
+        // otherwise replace their whole default prompt with this one line.
+        let system_prompt = identity.map(|text| format!("{text}\n\n{NO_REPLY_INSTRUCTION}"));
         ChatSessionParams::builder("", ctx.paths.root(), session_dir)
+            .agent_loop(agent_loop_config(ctx))
             .model(model)
             .provider(provider)
             .system_prompt(system_prompt)

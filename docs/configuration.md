@@ -62,6 +62,20 @@ A successful live self-rebuild restarts the host and reloads the current
 offline `dar self rebuild --dir ...` only swaps the binary, so a running host
 keeps its existing context until manually restarted.
 
+## Agent loop guard (`agent_loop`)
+
+```yaml
+agent_loop:
+  max_agent_turns: 8   # consecutive agent-authored turns per chat session
+  max_hops: 5          # largest accepted AgentSender.hops
+```
+
+Guards agent-to-agent chat (e.g. Discord bots talking to each other). Each chat
+session counts consecutive turns sent by another agent; a human turn resets the
+count. A turn over either limit is dropped without calling the model, logged,
+and finishes silently (see `NO_REPLY` in [chat.md](chat.md)). Both default as
+shown when omitted. Read when a chat session opens.
+
 ## Environment variables exported to children
 
 On startup, `dar run` and `dar doctor` load `<agent-folder>/.env`

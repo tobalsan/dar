@@ -49,10 +49,14 @@ impl ChatBackend for CodexChatBackend {
         params: ChatSessionParams,
         tx: Sender<ChatEvent>,
     ) -> cap_chat::BoxFuture<'a, Result<Box<dyn ChatSession>>> {
-        Box::pin(async move {
-            let session = CodexChatSession::spawn(&params, tx).await?;
-            Ok(Box::new(session) as Box<dyn ChatSession>)
-        })
+        Box::pin(cap_chat::open_guarded(
+            params.agent_loop,
+            tx,
+            move |tx| async move {
+                let session = CodexChatSession::spawn(&params, tx).await?;
+                Ok(Box::new(session) as Box<dyn ChatSession>)
+            },
+        ))
     }
 }
 

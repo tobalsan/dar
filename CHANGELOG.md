@@ -9,6 +9,9 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Agents can stay silent: a reply of exactly `NO_REPLY` delivers nothing in web chat, the TUI, or channel extensions (raw turn kept in history). Chat surfaces receive a new `ChatEvent::Silent` just before `TurnFinished`. See [docs/chat.md](docs/chat.md).
+- Added an agent-to-agent loop guard: `ChatSession::send_turn_from` takes an optional `AgentSender { agent_id, hops }`; new `agent_loop: { max_agent_turns: 8, max_hops: 5 }` in `agent.yaml` caps consecutive agent turns per chat session and hop TTL. Blocked turns skip the model and finish silently. See [docs/configuration.md](docs/configuration.md).
+- **⚠ BREAKING SDK 0.6.0:** `dar-cap-chat` and `dar-extension-sdk` add `ChatEvent::Silent`; exhaustive chat-event matches must handle it.
 - Added MCP server support: drop an `mcp.json` (standard `mcpServers` shape) in an agent folder and its stdio or streamable-HTTP servers' tools reach every runner as `<server>__<tool>` through the host MCP bridge. See [docs/mcp.md](docs/mcp.md).
 - Added `dar mcp login <server>`: zero-config OAuth (discovery, dynamic client registration, PKCE) for remote MCP servers such as `https://mcp.linear.app/mcp`; tokens are stored in `data/mcp-auth/` and refreshed automatically.
 - `dar doctor` now reports each MCP server as ok (with tool count), needs login, unreachable, or invalid config.

@@ -58,13 +58,17 @@ impl ChatBackend for BuiltinChatBackend {
         params: ChatSessionParams,
         tx: tokio::sync::mpsc::Sender<ChatEvent>,
     ) -> cap_chat::BoxFuture<'a, Result<Box<dyn ChatSession>>> {
-        Box::pin(async move {
-            Ok(Box::new(BuiltinChatSession {
-                params: Arc::new(params),
-                tx,
-                messages: Arc::new(Mutex::new(Vec::new())),
-            }) as Box<dyn ChatSession>)
-        })
+        Box::pin(cap_chat::open_guarded(
+            params.agent_loop,
+            tx,
+            move |tx| async move {
+                Ok(Box::new(BuiltinChatSession {
+                    params: Arc::new(params),
+                    tx,
+                    messages: Arc::new(Mutex::new(Vec::new())),
+                }) as Box<dyn ChatSession>)
+            },
+        ))
     }
 }
 

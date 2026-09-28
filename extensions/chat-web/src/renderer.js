@@ -42,6 +42,8 @@
       case 'question_done': { let index = next.length - 1; while (index >= 0 && (next[index].kind !== 'question' || next[index].id !== event.id)) index--; let q = next[index]; if (q) { q.done = true; q.rejected = !!event.is_error; q.answerText = event.text || ''; } return index >= 0 ? index : next.length - 1; }
       case 'error': next.push({ kind: 'error', text: event.error || 'unknown error' }); return next.length - 1;
       case 'context_usage': return -1;
+      // Agent chose silence (NO_REPLY) or the loop guard dropped the turn.
+      case 'silent': return -1;
       case 'aborted': { let dismissed = dismissPendingQuestions(next); next.push({ kind: 'error', text: event.error === 'aborted' ? 'turn aborted' : `turn failed: ${event.error || 'unknown error'}` }); return dismissed ? null : next.length - 1; }
       case 'closed': { let dismissed = dismissPendingQuestions(next); next.push({ kind: 'error', text: `chat session closed${event.error ? `: ${event.error}` : ''}` }); return dismissed ? null : next.length - 1; }
       case 'finished': return dismissPendingQuestions(next) ? null : -1;

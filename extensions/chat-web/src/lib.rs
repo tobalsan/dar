@@ -871,6 +871,21 @@ impl Session {
                 None,
                 None,
             ),
+            // Kept in the transcript (raw text) but rendered as nothing.
+            ChatEvent::Silent { reason, text } => (
+                "silent",
+                Some(text),
+                reason.map(|reason| reason.as_str().to_owned()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
             ChatEvent::Error(error) => (
                 "error",
                 None,
@@ -1741,6 +1756,19 @@ mod tests {
             pause_after_send: std::sync::Mutex::new(None),
             pause_after_subscribe: std::sync::Mutex::new(None),
         })
+    }
+
+    #[test]
+    fn silent_event_is_kept_raw_in_history() {
+        let s = session(Box::new(RejectingSession));
+        assert!(s.publish(ChatEvent::Silent {
+            reason: None,
+            text: "NO_REPLY".into(),
+        }));
+        let history = s.history.lock().unwrap();
+        let event = history.back().unwrap();
+        assert_eq!(event.kind, "silent");
+        assert_eq!(event.text.as_deref(), Some("NO_REPLY"));
     }
 
     struct ClosingSession {

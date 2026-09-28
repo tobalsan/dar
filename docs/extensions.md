@@ -198,6 +198,31 @@ missing `RunSnapshot` leaves model/provider unset. The retained bus contract
 `system-context` extension and re-exported from `dar_extension_sdk::chat`, so a
 surface never needs to depend on a `publish = false` in-tree crate to read it.
 
+#### Silent turns and agent senders
+
+Stock chat backends filter `NO_REPLY` and apply the loop guard before events
+reach you, so a surface only has to honor two contracts:
+
+- **`ChatEvent::Silent { reason, text }`** arrives just before a run's
+  `TurnFinished` when the run must deliver nothing. Post nothing for that turn
+  (no "(no response)" placeholder); still clear typing indicators on
+  `TurnFinished`. `reason: None` = the agent replied `NO_REPLY` (`text` is the
+  raw reply); `Some(SilentReason::MaxAgentTurns | MaxHops)` = the loop guard
+  blocked the turn and the model was never called. Assistant `Delta`s that
+  could still become `NO_REPLY` are held back until they can't, so streaming
+  surfaces never see a partial token.
+- **`ChatSession::send_turn_from(prompt, Some(AgentSender { agent_id, hops }))`**
+  for messages authored by another agent/bot (e.g. `agent_id:
+  "discord:<botUserId>"`). `send_turn` / `None` = human turn, which resets the
+  per-session counter. Limits come from `agent_loop:` in `agent.yaml` via
+  `agent_session_params`. Keep one session per conversation so the counter is
+  per conversation.
+
+`is_no_reply`, `NO_REPLY_TOKEN`, `AgentSender`, `AgentLoopConfig` and
+`SilentReason` are re-exported from `dar_extension_sdk::chat`. Custom
+`ChatBackend`s get the same behavior by opening through
+`cap_chat::open_guarded`.
+
 ### Dashboard tab
 
 Any extension can contribute a tab to the web dashboard via the cap-style

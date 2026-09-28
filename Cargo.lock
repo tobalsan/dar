@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "dar-cap-chat"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "dar-artifacts",
@@ -627,6 +627,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -835,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "dar-extension-sdk"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "dar-artifacts",

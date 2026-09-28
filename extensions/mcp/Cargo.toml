@@ -14,7 +14,7 @@ anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
 cap-dashboard-tab = { package = "dar-cap-dashboard-tab", path = "../../crates/cap-dashboard-tab", version = "0.4" }
-dar-extension-sdk = { path = "../../crates/extension-sdk", version = "0.5" }
+dar-extension-sdk = { path = "../../crates/extension-sdk", version = "0.6" }
 dar-host-api = { path = "../../crates/host-api", version = "0.4" }
 futures-util = "0.3"
 fs2 = "0.4"
