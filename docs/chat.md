@@ -66,25 +66,56 @@ extensions:
     enabled: true      # optional runtime kill switch; linking is by section presence
     backend: pi        # optional; default: follow runner.use, then pi
     command: ""        # optional backend binary override ("" = backend default)
-    idle_minutes: 360  # optional; shut an idle session's child down (default 360)
+    idle_minutes: 360  # deprecated compatibility key; accepted but ignored
 ```
 
 Backend resolution matches the TUI: `backend` if set, else `runner.use` when
 that id has a registered chat backend, else `pi`. The web chat and the TUI
-share one live session: transcripts live under `data/chat/sessions/`, a turn
-started on either surface streams into every open browser tab, and reconnects
-replay missed events (SSE with `Last-Event-ID`). Attachments are uploaded via
+share one live session: each process boot starts fresh while prior backend
+sessions remain available to resume. Web replay lives at
+`data/chat/sessions/main.jsonl`; backend sessions stay under
+`data/chat/sessions/`, with titles/archive state in `data/chat/sessions-meta.json`.
+Turns stream into every open browser tab, and reconnects replay missed events
+(SSE with `Last-Event-ID`). Attachments are uploaded via
 multipart `POST /chat/{session}/upload` (max 8 files, 8 MiB body) and stored
 under `data/chat/uploads/`; the agent turn receives their local paths.
 Assistant turns are labeled with the agent's `name` from `agent.yaml` (falls
 back to `Agent`).
 
-The composer is a row of icon buttons: attach (paperclip) left of the input,
-send (arrow) right of it, and a stop button that appears only while a turn is
-running, plus a token meter fed by backend-reported context usage. Two slash
-commands are recognized in the chat input: `/compact` passes through to the
-backend CLI to compact the session context, and `/new` clears the shared
-session with a "Context cleared, started a new session." notice.
+**New chat.** An empty chat shows a short invite with the composer centered
+below it; the composer glides down to its dock once the first message is
+sent. The header's **New chat** button (or `/new`) starts a fresh chat; the
+previous one stays in the sidebar.
+
+**Composer.** Attach (paperclip), send, and a stop button that appears only
+while a turn is running. Files can also be pasted or dropped anywhere on the
+chat; pending images show as thumbnails. Messages sent while a turn is
+running are queued by the backend. Slash commands: `/stop` aborts the running
+turn, `/compact` compacts the session context, `/new` starts a fresh chat.
+The header shows a token meter fed by backend-reported context usage; above
+70% of the context window a hint suggests `/compact`.
+
+**Transcript.** Assistant replies render as GitHub-flavored Markdown (tables,
+code blocks, lists, blockquotes; raw HTML is escaped and output sanitized,
+links open in a new tab). Tool calls and thinking are collapsible, tool rows
+showing a one-line argument summary. Messages carry timestamps; a stopped turn
+is marked **Interrupted**.
+
+**Sidebar.** Lists saved sessions grouped by recency (Today, Yesterday,
+Earlier this week/month, then by month) with relative times and a search box.
+Clicking a session resumes it live: its history is replayed and the next
+message continues that backend session. Hover a row to rename, archive, or
+delete it (delete is permanent and removes the backend session file).
+Archived sessions move to a collapsible **Archived** section. After the first
+reply, a session is titled automatically (3–6 words) by a one-off call to the
+same backend and model, in the background; it never blocks the chat or
+appears as a session itself. The sidebar collapses to a rail (remembered per
+browser) and becomes a slide-in drawer on narrow screens.
+
+Session routes (all under `/chat`): `GET /sessions` lists sessions,
+`POST /main/resume` `{"id": ...}` resumes one, `PATCH /sessions/{id}`
+`{"title"?, "archived"?}` renames/archives (empty title clears it), and
+`DELETE /sessions/{id}` deletes.
 
 When the agent is passive (no orchestration loop configured), the dashboard
 opens on the Chat tab by default; the composer sends with Enter (Shift+Enter

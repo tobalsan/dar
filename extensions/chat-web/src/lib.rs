@@ -75,11 +75,21 @@ impl Extension for ChatWebExtension {
                 root: ctx.paths.root().to_path_buf(),
                 start: std::sync::OnceLock::new(),
                 sessions: Mutex::new(HashMap::new()),
+                live_id: Mutex::new(None),
+                transition: Mutex::new(()),
+                meta: Mutex::new(load_meta(
+                    &ctx.paths.root().join("data/chat/sessions-meta.json"),
+                )),
             });
             self.state
                 .set(Arc::clone(&state))
                 .map_err(|_| anyhow::anyhow!("chat-web registered twice"))?;
             migrate_tui_sessions(ctx.paths.root())?;
+            let transcript = ctx.paths.root().join("data/chat/sessions/main.jsonl");
+            if let Some(parent) = transcript.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(transcript, "")?;
             state.session("main").await?;
             let coordinator: Arc<dyn chat::ChatCoordinator> = state.clone();
             ctx.services.service::<dyn chat::ChatCoordinator>(
@@ -96,6 +106,7 @@ impl Extension for ChatWebExtension {
                     "/".into(),
                     "/sessions".into(),
                     "/sessions/{id}".into(),
+                    "/{session}/resume".into(),
                     "/{session}/stream".into(),
                     "/{session}/history".into(),
                     "/{session}/send".into(),
@@ -162,9 +173,13 @@ impl DashboardTab for ChatTab {
     }
     fn render(&self) -> Result<String> {
         Ok(format!(
-            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"><aside class="chat-sidebar" aria-label="Conversation history"><div class="chat-sidebar-head"><button type="button" id="chat-history" class="chat-history-button">Refresh</button></div><div class="chat-sidebar-title">History</div><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><div class="chat-dropzone" id="chat-dropzone" hidden aria-hidden="true">Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite" aria-label="Conversation"></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips" aria-label="Pending attachments"></div><div class="chat-cap-hint" id="chat-cap-hint" aria-live="polite"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files" title="Attach files"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button><input type="file" id="chat-attachments" multiple hidden aria-hidden="true" tabindex="-1"><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message the agent" aria-label="Message" enterkeyhint="send"></textarea><button type="button" id="chat-abort" class="chat-icon chat-icon-stop" aria-label="Stop the running turn" title="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon chat-icon-send" aria-label="Send message" title="Send" disabled><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg></button></div><div class="chat-bar"><span class="chat-spacer"></span><span class="chat-meter" id="chat-token-meter" aria-live="polite"></span></div></form></div></section><script>{}</script>"#,
+            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"><aside class="chat-sidebar" aria-label="Conversations"><div class="chat-sidebar-head"><strong>Chats</strong><button type="button" id="chat-sidebar-toggle" data-sidebar-toggle class="chat-icon" aria-label="Toggle sidebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button></div><input id="chat-search" class="chat-search" type="search" placeholder="Search conversations" aria-label="Search conversations"><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><header class="chat-header"><button type="button" data-sidebar-toggle class="chat-icon chat-mobile-sidebar-toggle" aria-label="Open conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button><div><strong>{}</strong><span id="chat-token-meter" class="chat-meter"></span></div><button type="button" class="chat-new" onclick="fetch('/chat/main/new',{{method:'POST'}})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button></header><div class="chat-dropzone" id="chat-dropzone" hidden>Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite"></div><div class="chat-hero" id="chat-hero"></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips"></div><div class="chat-cap-hint" id="chat-cap-hint"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.4 11.1l-9.2 9.1a6 6 0 01-8.4-8.4L13 2.6a4 4 0 015.6 5.6l-9.2 9.2a2 2 0 01-2.8-2.8l8.5-8.5"/></svg></button><input type="file" id="chat-attachments" multiple hidden><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message {}" aria-label="Message"></textarea><button type="button" id="chat-abort" class="chat-icon" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon" aria-label="Send" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div><div id="chat-context-warning" class="chat-context-warning" hidden>Context is filling up — send /compact to summarize.</div></form></div></section><script>{}</script><script>{}</script><script>{}</script>"#,
             include_str!("chat.css"),
             escape_html_attr(&self.agent_name),
+            escape_html_attr(&self.agent_name),
+            escape_html_attr(&self.agent_name),
+            include_str!("vendor/marked.min.js"),
+            include_str!("vendor/purify.min.js"),
             include_str!("renderer.js"),
         ))
     }
@@ -211,6 +226,9 @@ struct AppState {
     root: std::path::PathBuf,
     start: std::sync::OnceLock<StartCtx>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    live_id: Mutex<Option<String>>,
+    meta: Mutex<HashMap<String, SessionMeta>>,
+    transition: Mutex<()>,
 }
 #[cfg(test)]
 struct PublishPause {
@@ -236,6 +254,9 @@ struct Session {
     abort_requested: std::sync::atomic::AtomicBool,
     transcript_failed: std::sync::atomic::AtomicBool,
     suppress_resume: std::sync::atomic::AtomicBool,
+    title_started: std::sync::atomic::AtomicBool,
+    opened_after_ms: std::sync::atomic::AtomicU64,
+    resolved_live_id: std::sync::Mutex<Option<String>>,
     abort_signal: watch::Sender<bool>,
     publish_lock: std::sync::Mutex<()>,
     command_ids: Mutex<HashSet<String>>,
@@ -246,9 +267,12 @@ struct Session {
     #[cfg(test)]
     pause_after_subscribe: std::sync::Mutex<Option<Arc<StreamPause>>>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct WireEvent {
     seq: u64,
+    #[serde(default = "now_ms")]
+    ts: u64,
     #[serde(rename = "type")]
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,6 +299,8 @@ struct WireEvent {
     questions: Option<Vec<QuestionInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     origin: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    historical: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Attachment {
@@ -292,7 +318,13 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/sessions", get(session_index))
-        .route("/sessions/{id}", get(session_transcript))
+        .route(
+            "/sessions/{id}",
+            get(session_transcript)
+                .patch(patch_session)
+                .delete(delete_session),
+        )
+        .route("/{session}/resume", post(resume_session))
         .route("/{session}/stream", get(stream))
         .route("/{session}/send", post(send))
         .route("/{session}/upload", post(upload))
@@ -323,26 +355,115 @@ struct SessionPage {
 
 #[derive(serde::Serialize)]
 struct SessionListEntry {
-    #[serde(flatten)]
-    session: chat::archive::SessionInfo,
+    id: String,
+    label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    start_time: Option<String>,
+    modified_ms: u64,
+    archived: bool,
     is_live: bool,
 }
 
-/// Archive routes are deliberately read-only.  They do not resolve or open a
-/// live backend session, so browsing cannot affect streaming chat state.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct SessionMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archived: Option<bool>,
+}
+
+fn valid_backend_id(id: &str) -> bool {
+    !id.is_empty() && !id.contains('/') && !id.contains('\\') && !id.contains("..")
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn archive_timestamp_ms(value: &serde_json::Value) -> Option<u64> {
+    if let Some(value) = value.as_u64() {
+        return Some(value);
+    }
+    let text = value.as_str()?;
+    let (date, time) = text.split_once('T')?;
+    let mut date = date.split('-').map(|part| part.parse::<i64>().ok());
+    let (year, month, day) = (date.next()??, date.next()??, date.next()??);
+    let time = time.trim_end_matches('Z');
+    let mut parts = time.split(':');
+    let hour = parts.next()?.parse::<i64>().ok()?;
+    let minute = parts.next()?.parse::<i64>().ok()?;
+    let seconds = parts.next()?;
+    let (second, fraction) = seconds.split_once('.').unwrap_or((seconds, ""));
+    let second = second.parse::<i64>().ok()?;
+    let millis = fraction.chars().take(3).collect::<String>();
+    let millis = format!("{millis:0<3}").parse::<i64>().ok()?;
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = if adjusted_year >= 0 {
+        adjusted_year
+    } else {
+        adjusted_year - 399
+    } / 400;
+    let yoe = adjusted_year - era * 400;
+    let shifted_month = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * shifted_month + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    (days >= 0)
+        .then_some(((days * 86400 + hour * 3600 + minute * 60 + second) * 1000 + millis) as u64)
+}
+
+fn load_meta(path: &std::path::Path) -> HashMap<String, SessionMeta> {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn write_meta(path: &std::path::Path, meta: &HashMap<String, SessionMeta>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(meta)?)?;
+    fs::rename(tmp, path)?;
+    Ok(())
+}
+
 async fn session_index(State(state): State<Arc<AppState>>) -> Json<Vec<SessionListEntry>> {
-    let live = newest_session(
-        &state.root.join("data/chat/sessions"),
-        &state.config.backend.clone().unwrap_or_else(|| "pi".into()),
-    )
-    .map(|session| session.id);
-    let sessions = chat::archive::list(&state.root.join("data/chat/sessions"))
+    let dir = state.root.join("data/chat/sessions");
+    if let Ok(session) = state.session("main").await { state.resolve_live_id(&session).await; }
+    let live = state.live_id.lock().await.clone();
+    let meta = state.meta.lock().await.clone();
+    let mut sessions: Vec<_> = chat::archive::list(&dir)
         .into_iter()
-        .map(|session| {
-            let is_live = Some(&session.id) == live.as_ref();
-            SessionListEntry { session, is_live }
+        .filter_map(|session| {
+            let path = chat::archive::session_file_by_id(&dir, &session.id)?;
+            let modified_ms = path
+                .metadata()
+                .ok()?
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_millis() as u64;
+            let item_meta = meta.get(&session.id).cloned().unwrap_or_default();
+            let title = item_meta.title.filter(|title| !title.trim().is_empty());
+            Some(SessionListEntry {
+                is_live: live.as_deref() == Some(&session.id),
+                label: title.clone().unwrap_or(session.label),
+                id: session.id,
+                title,
+                start_time: session.start_time,
+                modified_ms,
+                archived: item_meta.archived.unwrap_or(false),
+            })
         })
         .collect();
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.modified_ms));
     Json(sessions)
 }
 
@@ -363,6 +484,136 @@ async fn session_transcript(
         Some(page) => Json(page).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+#[derive(Deserialize)]
+struct SessionPatch {
+    title: Option<String>,
+    archived: Option<bool>,
+}
+
+async fn patch_session(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SessionPatch>,
+) -> impl IntoResponse {
+    let dir = state.root.join("data/chat/sessions");
+    if !valid_backend_id(&id) || chat::archive::session_file_by_id(&dir, &id).is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let mut meta = state.meta.lock().await;
+    let entry = meta.entry(id).or_default();
+    if let Some(title) = body.title {
+        let title = title.trim().to_owned();
+        entry.title = (!title.is_empty()).then_some(title);
+    }
+    if let Some(archived) = body.archived {
+        entry.archived = Some(archived);
+    }
+    match write_meta(&state.root.join("data/chat/sessions-meta.json"), &meta) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
+}
+
+async fn delete_session(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let dir = state.root.join("data/chat/sessions");
+    let Some(path) = valid_backend_id(&id)
+        .then(|| chat::archive::session_file_by_id(&dir, &id))
+        .flatten()
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let _transition = state.transition.lock().await;
+    if let Ok(session) = state.session("main").await { state.resolve_live_id(&session).await; }
+    if state.live_id.lock().await.as_deref() == Some(&id) {
+        if let Err(error) = state.reset_session_unlocked("main").await {
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+    }
+    if let Err(error) = fs::remove_file(path) {
+        return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+    }
+    let mut meta = state.meta.lock().await;
+    meta.remove(&id);
+    if let Err(error) = write_meta(&state.root.join("data/chat/sessions-meta.json"), &meta) {
+        return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct ResumeRequest {
+    id: String,
+}
+
+async fn resume_session(
+    Path(session_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ResumeRequest>,
+) -> impl IntoResponse {
+    let dir = state.root.join("data/chat/sessions");
+    if !valid_backend_id(&body.id) || chat::archive::session_file_by_id(&dir, &body.id).is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let _transition = state.transition.lock().await;
+    if let Err(error) = state.reset_session_unlocked(&session_id).await {
+        return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+    }
+    let session = match state.session(&session_id).await {
+        Ok(session) => session,
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
+    let mut offset = 0;
+    loop {
+        let Some(page) =
+            chat::archive::read_events(&dir, &body.id, offset, chat::archive::READ_MAX)
+        else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        for value in page.events {
+            let timestamp = value
+                .get("timestamp")
+                .and_then(archive_timestamp_ms)
+                .unwrap_or_else(now_ms);
+            let mut event: WireEvent = match serde_json::from_value(value) {
+                Ok(event) => event,
+                Err(_) => continue,
+            };
+            event.ts = timestamp;
+            event.historical = true;
+            let _publish = session
+                .publish_lock
+                .lock()
+                .expect("chat-web publish mutex poisoned");
+            event.seq = session
+                .next_seq
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if let Err(error) = append_transcript(&session.transcript, &event) {
+                return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+            }
+            session
+                .history
+                .lock()
+                .expect("chat-web history mutex poisoned")
+                .push_back(event.clone());
+            let _ = session.tx.send(event);
+        }
+        match page.next_offset {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    *session.resolved_live_id.lock().expect("chat-web identity mutex poisoned") = Some(body.id.clone());
+    *state.live_id.lock().await = Some(body.id);
+    session
+        .suppress_resume
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    StatusCode::ACCEPTED.into_response()
 }
 
 // Tells the fleet proxy (`dar dash`) this response's URLs are already
@@ -401,6 +652,9 @@ impl AppState {
             abort_requested: std::sync::atomic::AtomicBool::new(false),
             transcript_failed: std::sync::atomic::AtomicBool::new(false),
             suppress_resume: std::sync::atomic::AtomicBool::new(false),
+            title_started: std::sync::atomic::AtomicBool::new(false),
+            opened_after_ms: std::sync::atomic::AtomicU64::new(0),
+            resolved_live_id: std::sync::Mutex::new(None),
             abort_signal,
             publish_lock: std::sync::Mutex::new(()),
             command_ids: Mutex::new(HashSet::new()),
@@ -431,13 +685,18 @@ impl AppState {
             .with_context(|| format!("chat backend {backend_id:?} is not registered"))?;
         let session_dir = self.root.join("data/chat/sessions");
         std::fs::create_dir_all(&session_dir)?;
-        let resume_session_id = (!session
+        self.resolve_live_id(&session).await;
+        let resume_session_id = if session
             .suppress_resume
-            .swap(false, std::sync::atomic::Ordering::SeqCst))
-        .then(|| newest_session(&session_dir, &backend_id))
-        .flatten()
-        .filter(|session| !self.session_is_idle(session))
-        .map(|session| session.id);
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            None
+        } else {
+            self.live_id.lock().await.clone()
+        };
+        session
+            .opened_after_ms
+            .store(now_ms(), std::sync::atomic::Ordering::SeqCst);
         let params = chat::agent_session_params(start, &session_dir)
             .command(self.config.command.as_deref().unwrap_or(""))
             .resume_session_id(resume_session_id)
@@ -448,25 +707,199 @@ impl AppState {
             + 1;
         let (event_tx, mut event_rx) = mpsc::channel::<ChatEvent>(128);
         let sink = Arc::clone(&session);
+        let identity_sink = Arc::clone(&session);
+        let identity_dir = session_dir.clone();
+        let identity_backend = backend_id.clone();
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
+                let terminal = matches!(event, ChatEvent::TurnFinished { .. } | ChatEvent::SessionClosed { .. });
                 let _acceptance = sink.acceptance_lock.lock().await;
                 if sink.publish_if_current(generation, event.clone()) {
                     let _ = sink.events.send(event);
+                    if terminal {
+                        let opened_after = identity_sink.opened_after_ms.load(std::sync::atomic::Ordering::SeqCst);
+                        if let Some(found) = newest_session_since(&identity_dir, &identity_backend, opened_after) {
+                            // Reset bumps the generation before clearing the identity, so
+                            // rechecking under the identity lock drops a stale terminal event.
+                            let mut resolved = identity_sink.resolved_live_id.lock().expect("chat-web identity mutex poisoned");
+                            if identity_sink.generation.load(std::sync::atomic::Ordering::SeqCst) == generation {
+                                *resolved = Some(found.id);
+                            }
+                        }
+                    }
                 }
             }
         });
         backend.open(params, event_tx).await
     }
 
-    fn session_is_idle(&self, session: &PersistedSession) -> bool {
-        let idle_minutes = self.config.idle_minutes.unwrap_or(360);
-        session.modified.elapsed().is_ok_and(|idle| {
-            idle > std::time::Duration::from_secs(idle_minutes.saturating_mul(60))
-        })
+    /// Holds `live_id` throughout; reset clears the resolved identity and
+    /// open time before `live_id`, so a concurrent reset can't be undone here.
+    async fn resolve_live_id(&self, session: &Session) {
+        let mut live = self.live_id.lock().await;
+        if live.is_some() { return; }
+        let resolved = session.resolved_live_id.lock().expect("chat-web identity mutex poisoned").clone();
+        if let Some(id) = resolved {
+            *live = Some(id);
+            return;
+        }
+        let Some(start) = self.start.get() else { return; };
+        let opened_after = session.opened_after_ms.load(std::sync::atomic::Ordering::SeqCst);
+        if opened_after == 0 { return; }
+        let backend_id = chat::resolve_agent_backend(start, self.config.backend.as_deref());
+        if let Some(found) = newest_session_since(&self.root.join("data/chat/sessions"), &backend_id, opened_after) {
+            *session.resolved_live_id.lock().expect("chat-web identity mutex poisoned") = Some(found.id.clone());
+            *live = Some(found.id);
+        }
+    }
+
+    async fn finish_turn(
+        &self,
+        web_session: Arc<Session>,
+        generation: u64,
+        first_user: String,
+        assistant: String,
+    ) {
+        if web_session
+            .generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != generation
+        {
+            return;
+        }
+        let Some(start) = self.start.get() else {
+            return;
+        };
+        let backend_id = chat::resolve_agent_backend(start, self.config.backend.as_deref());
+        let dir = self.root.join("data/chat/sessions");
+        self.resolve_live_id(&web_session).await;
+        let current_id = self.live_id.lock().await.clone();
+        let id = match current_id {
+            Some(id) => id,
+            None => {
+                let opened_after = web_session
+                    .opened_after_ms
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                let Some(session) = newest_session_since(&dir, &backend_id, opened_after) else {
+                    return;
+                };
+                if web_session
+                    .generation
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    != generation
+                {
+                    return;
+                }
+                *self.live_id.lock().await = Some(session.id.clone());
+                session.id
+            }
+        };
+        if self
+            .meta
+            .lock()
+            .await
+            .get(&id)
+            .and_then(|meta| meta.title.as_ref())
+            .is_some()
+        {
+            return;
+        }
+        let Ok(backend) = start
+            .host
+            .services
+            .get_named::<dyn ChatBackend>(&backend_id)
+        else {
+            return;
+        };
+        let temp = self.root.join("data/chat/.titler").join(format!(
+            "{}-{}",
+            now_ms(),
+            std::process::id()
+        ));
+        if fs::create_dir_all(&temp).is_err() {
+            return;
+        }
+        let params = chat::agent_session_params(start, &temp)
+            .command(self.config.command.as_deref().unwrap_or(""))
+            .system_prompt(None)
+            .host_tool_bridge(None)
+            .resume_session_id(None)
+            .build();
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut title_session = match backend.open(params, tx).await {
+            Ok(session) => session,
+            Err(error) => {
+                tracing::warn!("chat title session failed to open: {error:#}");
+                let _ = fs::remove_dir_all(&temp);
+                return;
+            }
+        };
+        let prompt = format!("Return a concise 3-6 word title summarizing this chat in the conversation's language. No quotes. No punctuation at the end.\n\nUser: {}\n\nAssistant: {}", truncate_chars(&first_user, 2000), truncate_chars(&assistant, 2000));
+        let collect = async {
+            title_session.send_turn(prompt).await?;
+            let mut title = String::new();
+            loop {
+                match rx.recv().await {
+                    Some(ChatEvent::Delta {
+                        role: ChatRole::Assistant,
+                        text,
+                    }) => title.push_str(&text),
+                    Some(ChatEvent::TurnFinished { ok: true, .. }) => break,
+                    Some(ChatEvent::TurnFinished { .. }) | Some(ChatEvent::Error(_)) => {
+                        anyhow::bail!("title generation failed")
+                    }
+                    Some(_) => {}
+                    None => anyhow::bail!("title session ended before successful finish"),
+                }
+            }
+            Result::<String>::Ok(normalize_title(&title))
+        };
+        let result = tokio::time::timeout(title_timeout(), collect).await;
+        if let Err(error) = title_session.close().await {
+            tracing::warn!("chat title session close failed: {error:#}");
+        }
+        if let Err(error) = fs::remove_dir_all(&temp) {
+            tracing::warn!("chat title temp cleanup failed: {error:#}");
+        }
+        let title = match result {
+            Ok(Ok(title)) if !title.is_empty() => title,
+            Ok(Ok(_)) => return,
+            Ok(Err(error)) => {
+                tracing::warn!("chat title generation failed: {error:#}");
+                return;
+            }
+            Err(_) => {
+                tracing::warn!("chat title generation timed out");
+                return;
+            }
+        };
+        if web_session
+            .generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != generation
+        {
+            return;
+        };
+        let mut meta = self.meta.lock().await;
+        if meta
+            .get(&id)
+            .and_then(|entry| entry.title.as_ref())
+            .is_none()
+        {
+            meta.entry(id.clone()).or_default().title = Some(title);
+            if let Err(error) = write_meta(&self.root.join("data/chat/sessions-meta.json"), &meta) {
+                tracing::warn!("chat title metadata write failed: {error:#}");
+                meta.entry(id).or_default().title = None;
+            }
+        }
     }
 
     async fn reset_session(&self, id: &str) -> Result<()> {
+        let _transition = self.transition.lock().await;
+        self.reset_session_unlocked(id).await
+    }
+
+    async fn reset_session_unlocked(&self, id: &str) -> Result<()> {
         let session = self.session(id).await?;
         let backend = session.inner.lock().await.take();
         session
@@ -484,6 +917,9 @@ impl AppState {
         session
             .suppress_resume
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        *session.resolved_live_id.lock().expect("chat-web identity mutex poisoned") = None;
+        session.opened_after_ms.store(0, std::sync::atomic::Ordering::SeqCst);
+        *self.live_id.lock().await = None;
         let _ = session.abort_signal.send(false);
         {
             let _publish = session
@@ -505,6 +941,7 @@ impl AppState {
                 + 1;
             let event = WireEvent {
                 seq,
+                ts: now_ms(),
                 kind: "reset".into(),
                 text: None,
                 id: None,
@@ -518,6 +955,7 @@ impl AppState {
                 attachments: vec![],
                 questions: None,
                 origin: None,
+                historical: false,
             };
             append_transcript(&session.transcript, &event)?;
             session
@@ -528,13 +966,46 @@ impl AppState {
             let _ = session.tx.send(event);
         }
         let _ = session.events.send(ChatEvent::SessionReset);
+        session
+            .title_started
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(backend) = backend {
-            tokio::spawn(async move {
-                let _ = backend.close().await;
-            });
+            backend.close().await?;
         }
         Ok(())
     }
+}
+
+fn title_timeout() -> std::time::Duration {
+    #[cfg(test)]
+    {
+        return std::time::Duration::from_millis(50);
+    }
+    #[cfg(not(test))]
+    {
+        std::time::Duration::from_secs(30)
+    }
+}
+
+fn truncate_chars(value: &str, max: usize) -> String {
+    value.chars().take(max).collect()
+}
+
+fn normalize_title(value: &str) -> String {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed
+        .trim_matches(|c: char| matches!(c, '\'' | '"' | '`'))
+        .trim_end_matches(|c: char| c.is_ascii_punctuation())
+        .trim();
+    if trimmed.chars().count() <= 60 {
+        return trimmed.to_owned();
+    }
+    let prefix: String = trimmed.chars().take(60).collect();
+    prefix
+        .rsplit_once(char::is_whitespace)
+        .map(|(head, _)| head)
+        .unwrap_or(&prefix)
+        .to_owned()
 }
 
 fn migrate_tui_sessions(root: &std::path::Path) -> Result<()> {
@@ -562,7 +1033,16 @@ struct PersistedSession {
     modified: std::time::SystemTime,
 }
 
+#[cfg(test)]
 fn newest_session(dir: &std::path::Path, backend_id: &str) -> Option<PersistedSession> {
+    newest_session_since(dir, backend_id, 0)
+}
+
+fn newest_session_since(
+    dir: &std::path::Path,
+    backend_id: &str,
+    modified_after_ms: u64,
+) -> Option<PersistedSession> {
     fs::read_dir(dir)
         .ok()?
         .filter_map(Result::ok)
@@ -584,10 +1064,12 @@ fn newest_session(dir: &std::path::Path, backend_id: &str) -> Option<PersistedSe
                     == backend_id)
                     .then_some(())?;
                 let id = header.get("id")?.as_str()?.to_owned();
-                Some(PersistedSession {
-                    id,
-                    modified: entry.metadata().ok()?.modified().ok()?,
-                })
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                let modified_ms = modified
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_millis() as u64;
+                (modified_ms >= modified_after_ms).then_some(PersistedSession { id, modified })
             })?
         })
         .max_by_key(|session| session.modified)
@@ -600,6 +1082,7 @@ impl chat::ChatCoordinator for AppState {
         display: String,
     ) -> dar_extension_sdk::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            let _transition = self.transition.lock().await;
             let session = self.session("main").await?;
             let mut inner = session.inner.lock().await;
             if inner.is_none() {
@@ -693,6 +1176,7 @@ impl Session {
             + 1;
         let event = WireEvent {
             seq,
+            ts: now_ms(),
             kind: "user".into(),
             text: Some(text),
             id: None,
@@ -706,6 +1190,7 @@ impl Session {
             attachments,
             questions: None,
             origin: None,
+            historical: false,
         };
         append_transcript(&self.transcript, &event)?;
         self.history
@@ -949,6 +1434,7 @@ impl Session {
             + 1;
         let event = WireEvent {
             seq,
+            ts: now_ms(),
             kind: kind.to_owned(),
             text,
             id,
@@ -962,6 +1448,7 @@ impl Session {
             attachments: vec![],
             questions,
             origin,
+            historical: false,
         };
         let mut history = self
             .history
@@ -1042,6 +1529,7 @@ impl Session {
             + 1;
         let event = WireEvent {
             seq,
+            ts: now_ms(),
             kind: kind.to_owned(),
             text: None,
             id: None,
@@ -1055,6 +1543,7 @@ impl Session {
             attachments: vec![],
             questions: None,
             origin: None,
+            historical: false,
         };
         history.push_back(event.clone());
         let _ = self.tx.send(event);
@@ -1237,6 +1726,7 @@ async fn submit(
         )
             .into_response();
     }
+    let _transition = state.transition.lock().await;
     match state.session(&id).await {
         Ok(s) => {
             if reserve_command && !s.command_ids.lock().await.insert(command_id.clone()) {
@@ -1263,21 +1753,59 @@ async fn submit(
             let prompt = attachment_prompt(&message, &attachments, &state.root);
             let display = display_message(&message, &attachments);
             let mut aborted = s.abort_signal.subscribe();
+            let mut completion = s.events.subscribe();
             let accepted = tokio::select! {
                 result = s.accept_turn(
                     guard.as_mut().expect("session open").as_mut(),
                     prompt,
-                    display,
+                    display.clone(),
                     attachments,
                 ) => result,
                 _ = aborted.changed() => Err(anyhow::anyhow!("turn aborted before acceptance")),
             };
             match accepted {
-                Ok(()) => (
-                    StatusCode::ACCEPTED,
-                    Json(serde_json::json!({"accepted":true,"command_id":command_id})),
-                )
-                    .into_response(),
+                Ok(()) => {
+                    if !s
+                        .title_started
+                        .swap(true, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        let watcher = Arc::clone(&state);
+                        let watched_session = Arc::clone(&s);
+                        let generation = s.generation.load(std::sync::atomic::Ordering::SeqCst);
+                        let first_user = display.clone();
+                        tokio::spawn(async move {
+                            let mut assistant = String::new();
+                            while let Ok(event) = completion.recv().await {
+                                if watched_session
+                                    .generation
+                                    .load(std::sync::atomic::Ordering::SeqCst)
+                                    != generation
+                                {
+                                    return;
+                                }
+                                match event {
+                                    ChatEvent::Delta {
+                                        role: ChatRole::Assistant,
+                                        text,
+                                    } => assistant.push_str(&text),
+                                    ChatEvent::TurnFinished { ok: true, .. } => break,
+                                    ChatEvent::TurnFinished { .. }
+                                    | ChatEvent::SessionReset
+                                    | ChatEvent::SessionClosed { .. } => return,
+                                    _ => {}
+                                }
+                            }
+                            watcher
+                                .finish_turn(watched_session, generation, first_user, assistant)
+                                .await;
+                        });
+                    }
+                    (
+                        StatusCode::ACCEPTED,
+                        Json(serde_json::json!({"accepted":true,"command_id":command_id})),
+                    )
+                        .into_response()
+                }
                 Err(e) => {
                     s.command_ids.lock().await.remove(&command_id);
                     (
@@ -1747,6 +2275,9 @@ mod tests {
             abort_requested: std::sync::atomic::AtomicBool::new(false),
             transcript_failed: std::sync::atomic::AtomicBool::new(false),
             suppress_resume: std::sync::atomic::AtomicBool::new(false),
+            title_started: std::sync::atomic::AtomicBool::new(false),
+            opened_after_ms: std::sync::atomic::AtomicU64::new(0),
+            resolved_live_id: std::sync::Mutex::new(None),
             abort_signal: watch::channel(false).0,
             publish_lock: std::sync::Mutex::new(()),
             command_ids: Mutex::new(HashSet::new()),
@@ -1803,6 +2334,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(sessions),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let extension = ChatWebExtension::default();
         extension
@@ -1817,6 +2351,76 @@ mod tests {
 
     struct FakeBackend {
         opens: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum TitlerMode {
+        Success,
+        Failure,
+        Timeout,
+    }
+    struct TitlerBackend {
+        mode: TitlerMode,
+        closed: Arc<AtomicBool>,
+    }
+    struct TitlerSession {
+        mode: TitlerMode,
+        events: mpsc::Sender<ChatEvent>,
+        closed: Arc<AtomicBool>,
+    }
+    impl ChatSession for TitlerSession {
+        fn send_turn(&mut self, _prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
+            let mode = self.mode;
+            let events = self.events.clone();
+            Box::pin(async move {
+                match mode {
+                    TitlerMode::Success => {
+                        events
+                            .send(ChatEvent::Delta {
+                                role: ChatRole::Assistant,
+                                text: "Useful title.".into(),
+                            })
+                            .await?;
+                        events
+                            .send(ChatEvent::TurnFinished {
+                                ok: true,
+                                error: None,
+                            })
+                            .await?;
+                    }
+                    TitlerMode::Failure => anyhow::bail!("mock title failure"),
+                    TitlerMode::Timeout => std::future::pending::<()>().await,
+                }
+                Ok(())
+            })
+        }
+        fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn close(self: Box<Self>) -> cap_chat::BoxFuture<'static, Result<()>> {
+            let closed = self.closed;
+            Box::pin(async move {
+                closed.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+    impl ChatBackend for TitlerBackend {
+        fn open<'a>(
+            &'a self,
+            _params: cap_chat::ChatSessionParams,
+            events: mpsc::Sender<ChatEvent>,
+        ) -> cap_chat::BoxFuture<'a, Result<Box<dyn ChatSession>>> {
+            let mode = self.mode;
+            let closed = Arc::clone(&self.closed);
+            Box::pin(async move {
+                Ok(Box::new(TitlerSession {
+                    mode,
+                    events,
+                    closed,
+                }) as Box<dyn ChatSession>)
+            })
+        }
     }
 
     struct StreamingSession {
@@ -1929,18 +2533,8 @@ mod tests {
         let opencode_pick = newest_session(&sessions, "opencode").unwrap();
         assert_eq!(opencode_pick.id, "resume-oc");
 
-        let mut persisted = pi_pick;
-        persisted.modified = std::time::SystemTime::UNIX_EPOCH;
-        let state = AppState {
-            config: Config {
-                idle_minutes: Some(0),
-                ..Config::default()
-            },
-            root,
-            start: std::sync::OnceLock::new(),
-            sessions: Mutex::new(HashMap::new()),
-        };
-        assert!(state.session_is_idle(&persisted));
+        // idle_minutes remains accepted for config compatibility, but no
+        // longer influences fresh-by-default startup.
     }
 
     fn register_ctx(root: PathBuf, config_value: serde_json::Value) -> host_api::RegisterCtx {
@@ -2009,6 +2603,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::from(start_ctx(services)),
             sessions: Mutex::new(HashMap::new()),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
 
         let response = stream(
@@ -2069,6 +2666,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::from(start),
             sessions: Mutex::new(HashMap::new()),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
 
         let response = stream(
@@ -2103,6 +2703,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let mut events = s.events.subscribe();
 
@@ -2189,6 +2792,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coordinator_send_waits_for_resume_transition() {
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let session = session(Box::new(FakeSession {
+            sends: Arc::clone(&sends),
+            aborted: Arc::new(AtomicBool::new(false)),
+            abort_fails: false,
+        }));
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: test_root(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::from([("main".into(), session)])),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
+        });
+        let transition = state.transition.lock().await;
+        let sending = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                chat::ChatCoordinator::send_turn(state.as_ref(), "prompt".into(), "display".into()).await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(sends.load(Ordering::SeqCst), 0, "coordinator must not cross resume transition");
+        drop(transition);
+        sending.await.unwrap().unwrap();
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn coordinator_publishes_user_before_eager_backend_output() {
         let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut services = dar_extension_sdk::ServiceRegistry::default();
@@ -2208,6 +2842,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::from(start_ctx(services)),
             sessions: Mutex::new(HashMap::new()),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         };
         let session = state.session("main").await.unwrap();
         let mut events = session.events.subscribe();
@@ -2236,6 +2873,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("main".into(), Arc::clone(&s))])),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         };
         let mut events = s.events.subscribe();
 
@@ -2262,6 +2902,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
 
         assert_eq!(
@@ -2309,6 +2952,9 @@ mod tests {
             root: root.clone(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let body = "--x\r\nContent-Disposition: form-data; name=\"command_id\"\r\n\r\nupload-1\r\n--x\r\nContent-Disposition: form-data; name=\"message\"\r\n\r\ninspect this\r\n--x\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"note.txt\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--x--\r\n";
         let request = || {
@@ -2343,6 +2989,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let invalid = "--x\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"bad.exe\"\r\nContent-Type: application/octet-stream\r\n\r\nbad\r\n--x--\r\n";
         let request = |body: Vec<u8>| {
@@ -2536,6 +3185,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let mut events = s.tx.subscribe();
         s.active_turns.store(1, Ordering::SeqCst);
@@ -2582,6 +3234,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let mut events = s.tx.subscribe();
         s.active_turns.store(1, Ordering::SeqCst);
@@ -2613,6 +3268,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let mut events = s.tx.subscribe();
         s.active_turns.store(2, Ordering::SeqCst);
@@ -2638,6 +3296,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let mut events = s.tx.subscribe();
         s.active_turns.store(1, Ordering::SeqCst);
@@ -2680,6 +3341,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::from(start_ctx(services)),
             sessions: Mutex::new(HashMap::new()),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let app = router(Arc::clone(&state));
         let stream_a = app
@@ -2826,6 +3490,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let session = state.session("test").await.unwrap();
         let (sent_tx, sent_rx) = std::sync::mpsc::channel();
@@ -2895,6 +3562,9 @@ mod tests {
             root: root.clone(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let session = state.session("resume").await.unwrap();
         session.publish_user("first".into(), vec![]).unwrap();
@@ -2907,6 +3577,9 @@ mod tests {
             root,
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let mut headers = HeaderMap::new();
         headers.insert("last-event-id", "0".parse().unwrap());
@@ -2936,6 +3609,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         state
             .session("history")
@@ -2962,6 +3638,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let get = |uri: &str| {
             axum::http::Request::builder()
@@ -2985,6 +3664,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let session = state.session("lag").await.unwrap();
         let response = stream(
@@ -3036,7 +3718,7 @@ mod tests {
         assert!(html.contains("id=\"chat-cap-hint\""));
         assert!(html.contains(".chat-dropzone") && html.contains(".chat-dropzone[hidden]"));
         assert!(html.contains(".chat-cap-hint"));
-        assert!(html.contains("position: relative;      /* anchors .chat-dropzone */"));
+        assert!(html.contains(".chat-web {\n  position: relative"));
         assert!(html.contains("id=\"chat-send\""));
         // Guards against the renderer losing the fleet-proxy prefix read.
         assert!(html.contains("window.__dashPrefix"));
@@ -3045,10 +3727,11 @@ mod tests {
         assert!(html[abort_pos..abort_tag_end].contains("hidden"));
         assert!(!html.contains("chat-compact"));
         assert!(!html.contains(">Compact<"));
-        assert!(html.contains("@media (max-width: 520px)"));
+        assert!(html.contains("@media (max-width: 760px)"));
         assert!(html.contains("overflow-wrap: anywhere"));
+        // the pending-reply loader needs its dots animation styled
+        assert!(html.contains("animation: chat-pulse"));
         assert!(!html.contains("\\\"chat-composer\\\""));
-        assert!(html.contains("Context cleared, started a new session."));
         // The self-refreshing tab owns its own EventSource + JS lifecycle.
         assert!(tab.self_refreshing());
         assert!(tab.passive_default());
@@ -3080,6 +3763,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
 
         assert_eq!(
@@ -3157,6 +3843,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let request = || {
             axum::http::Request::builder()
@@ -3195,6 +3884,9 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
 
         let response = router(state)
@@ -3257,6 +3949,9 @@ mod tests {
             root,
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
         });
         let app = router(state);
         let index = app
@@ -3286,6 +3981,108 @@ mod tests {
             .contains("remember this"));
     }
 
+    #[tokio::test]
+    async fn fresh_turn_title_resolution_does_not_deadlock_live_id() {
+        let root = test_root();
+        let dir = root.join("data/chat/sessions");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("backend.jsonl"),
+            "{\"type\":\"session\",\"id\":\"backend\",\"backend\":\"fake\"}\n",
+        )
+        .unwrap();
+        let mut services = dar_extension_sdk::ServiceRegistry::default();
+        services
+            .register::<dyn ChatBackend>(
+                "fake",
+                Arc::new(TitlerBackend {
+                    mode: TitlerMode::Success,
+                    closed: Arc::new(AtomicBool::new(false)),
+                }),
+            )
+            .unwrap();
+        let web = session(Box::new(RejectingSession));
+        let state = Arc::new(AppState {
+            config: Config {
+                backend: Some("fake".into()),
+                ..Config::default()
+            },
+            root,
+            start: std::sync::OnceLock::from(start_ctx(services)),
+            sessions: Mutex::new(HashMap::new()),
+            live_id: Mutex::new(None),
+            meta: Mutex::new(HashMap::new()),
+            transition: Mutex::new(()),
+        });
+        web.opened_after_ms.store(0, Ordering::SeqCst);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            state.finish_turn(web, 0, "hello".into(), "reply".into()),
+        )
+        .await
+        .expect("title resolution must not deadlock");
+        assert_eq!(state.live_id.lock().await.as_deref(), Some("backend"));
+    }
+
+    #[tokio::test]
+    async fn titler_success_timeout_and_failure_are_isolated_and_cleaned() {
+        for mode in [
+            TitlerMode::Success,
+            TitlerMode::Timeout,
+            TitlerMode::Failure,
+        ] {
+            let root = test_root();
+            let closed = Arc::new(AtomicBool::new(false));
+            let mut services = dar_extension_sdk::ServiceRegistry::default();
+            services
+                .register::<dyn ChatBackend>(
+                    "fake",
+                    Arc::new(TitlerBackend {
+                        mode,
+                        closed: Arc::clone(&closed),
+                    }),
+                )
+                .unwrap();
+            let web = session(Box::new(RejectingSession));
+            let state = AppState {
+                config: Config {
+                    backend: Some("fake".into()),
+                    ..Config::default()
+                },
+                root: root.clone(),
+                start: std::sync::OnceLock::from(start_ctx(services)),
+                sessions: Mutex::new(HashMap::new()),
+                live_id: Mutex::new(Some("live".into())),
+                meta: Mutex::new(HashMap::new()),
+                transition: Mutex::new(()),
+            };
+            state
+                .finish_turn(web, 0, "hello".into(), "reply".into())
+                .await;
+            assert!(closed.load(Ordering::SeqCst), "titler session must close");
+            assert!(
+                !root
+                    .join("data/chat/.titler")
+                    .read_dir()
+                    .is_ok_and(|mut entries| entries.next().is_some()),
+                "titler temp directory must be empty"
+            );
+            assert!(
+                chat::archive::list(&root.join("data/chat/sessions")).is_empty(),
+                "titler must not create archive entries"
+            );
+            assert_eq!(
+                state
+                    .meta
+                    .lock()
+                    .await
+                    .get("live")
+                    .and_then(|m| m.title.as_deref()),
+                matches!(mode, TitlerMode::Success).then_some("Useful title")
+            );
+        }
+    }
+
     #[test]
     fn renderer_source_is_re_execution_safe_under_node() {
         // The fragment is re-spliced whenever the Chat tab is (re)activated, so
@@ -3312,11 +4109,34 @@ mod tests {
     }
 
     #[test]
+    fn browser_resume_replay_does_not_set_busy_state() {
+        let renderer = format!("{}/src/renderer.js", env!("CARGO_MANIFEST_DIR"));
+        let script = r#"const handlers={},el=id=>({id,dataset:{},style:{setProperty(){}},value:'',disabled:false,hidden:false,innerHTML:'',scrollHeight:1,scrollTop:0,clientHeight:1,getBoundingClientRect:()=>({top:0}),querySelectorAll:()=>[]});const es=Object.fromEntries(['chat-root','chat-transcript','chat-input','chat-chips','chat-send','chat-abort','chat-token-meter','chat-context-warning'].map(id=>[id,el(id)]));global.document={hidden:false,getElementById:id=>es[id]||null,addEventListener:(t,f)=>handlers[t]=f};global.window={innerHeight:1000,addEventListener(){}};global.EventSource=function(){};global.crypto={randomUUID:()=> 'x'};require(process.argv[1]);window.renderChatEvent({type:'user',text:'old',historical:true});window.renderChatEvent({type:'delta',text:'answer',historical:true});setTimeout(()=>{if(window.__chatWeb.turns!==0||!es['chat-abort'].disabled)process.exit(1)},0);"#;
+        assert!(std::process::Command::new("node")
+            .args(["-e", script, &renderer])
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    #[test]
     fn browser_renderer_handles_the_representative_event_sequence() {
         let renderer = format!("{}/src/renderer.js", env!("CARGO_MANIFEST_DIR"));
-        let script = r#"const r=require(process.argv[1]);let b=[];for(const e of [{type:'thinking',text:'plan '},{type:'thinking',text:'it'},{type:'delta',text:'* **answer**\n```txt\n**code**\n```'},{type:'tool_call',id:'x',name:'shell',args:'{}'},{type:'tool_output',id:'x',text:'partial'},{type:'tool_output',id:'x',text:'failed',is_error:true,done:true},{type:'error',error:'warning'},{type:'aborted',error:'aborted'},{type:'user',text:'run `x --y` now'}])b=r.reduce(b,e);let h=r.html(b);if(b.length!==6||b[0].text!=='plan it'||(h.match(/data-tool-id=/g)||[]).length!==1||!h.includes('failed')||!h.includes('is-error is-done')||!h.includes('<ul><li><strong>answer</strong></li></ul>')||!h.includes('<pre><code data-language="txt">**code**\n</code></pre>')||!h.includes('warning')||!h.includes('turn aborted')||!h.includes('<code>x --y</code>')||r.usageText({tokens_used:12,context_window:100})!=='12 / 100 tokens'||r.usageText({tokens_used:12})!=='12 tokens')process.exit(1);"#;
+        let script = r#"const r=require(process.argv[1]);let b=[];for(const e of [{type:'thinking',text:'plan '},{type:'thinking',text:'it'},{type:'delta',text:'* **answer**\n```txt\n**code**\n```'},{type:'tool_call',id:'x',name:'shell',args:'{}'},{type:'tool_output',id:'x',text:'partial'},{type:'tool_output',id:'x',text:'failed',is_error:true,done:true},{type:'error',error:'warning'},{type:'aborted',error:'aborted'},{type:'user',text:'run `x --y` now'}])b=r.reduce(b,e);let h=r.html(b);if(b.length!==6||b[0].text!=='plan it'||(h.match(/data-tool-id=/g)||[]).length!==1||!h.includes('failed')||!h.includes('is-error is-done')||!h.includes('<ul><li><strong>answer</strong></li></ul>')||!h.includes('<pre><code data-language="txt">**code**\n</code></pre>')||!h.includes('warning')||!h.includes('Interrupted')||!h.includes('<code>x --y</code>')||r.usageText({tokens_used:12,context_window:100})!=='12 / 100 tokens'||r.usageText({tokens_used:12})!=='12 tokens')process.exit(1);"#;
         let status = std::process::Command::new("node")
             .args(["-e", script, &renderer])
+            .status()
+            .expect("node is available for browser renderer tests");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn browser_renderer_uses_gfm_tables_and_sanitizes() {
+        let renderer = format!("{}/src/renderer.js", env!("CARGO_MANIFEST_DIR"));
+        let marked = format!("{}/src/vendor/marked.min.js", env!("CARGO_MANIFEST_DIR"));
+        let script = r#"global.marked=require(process.argv[2]);global.DOMPurify={sanitize:s=>s};const r=require(process.argv[1]);let h=r.markdown('| A | B |\n|---|---|\n| 1 | 2 |');if(!h.includes('<table>')||!h.includes('<td>1</td>'))process.exit(1);h=r.markdown('[<b>text</b> and **bold**](https://example.com)');if(h.includes('<b>text</b>')||!h.includes('&lt;b&gt;text&lt;/b&gt;')||!h.includes('<strong>bold</strong>'))process.exit(1);"#;
+        let status = std::process::Command::new("node")
+            .args(["-e", script, &renderer, &marked])
             .status()
             .expect("node is available for browser renderer tests");
         assert!(status.success());
@@ -3392,6 +4212,7 @@ if(elements['chat-cap-hint'].textContent.includes('skipped'))process.exit(1);
                 path,
                 &WireEvent {
                     seq,
+                    ts: now_ms(),
                     kind: "delta".into(),
                     text: Some(seq.to_string()),
                     id: None,
@@ -3405,6 +4226,7 @@ if(elements['chat-cap-hint'].textContent.includes('skipped'))process.exit(1);
                     attachments: vec![],
                     questions: None,
                     origin: None,
+                    historical: false,
                 },
             )
             .unwrap();

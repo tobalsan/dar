@@ -106,13 +106,19 @@ fn read_session_info(path: &Path) -> Option<SessionInfo> {
         .to_string();
     let start_time = file_stem.split_once('_').map(|(ts, _)| ts.to_string());
     let (has_message, first_user) = first_user_message(path);
-    if !has_message { return None; }
-    let label = first_user.as_deref().or_else(|| header
-        .get("label")
-        .or_else(|| header.get("title"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty()))
+    if !has_message {
+        return None;
+    }
+    let label = first_user
+        .as_deref()
+        .or_else(|| {
+            header
+                .get("label")
+                .or_else(|| header.get("title"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or(&file_stem)
         .chars()
         .take(LABEL_MAX)
@@ -128,14 +134,22 @@ fn read_session_info(path: &Path) -> Option<SessionInfo> {
 /// obtain its first user label. It retains no message bodies and tolerates
 /// malformed trailing data.
 fn first_user_message(path: &Path) -> (bool, Option<String>) {
-    let Ok(file) = fs::File::open(path) else { return (false, None) };
+    let Ok(file) = fs::File::open(path) else {
+        return (false, None);
+    };
     let mut has_message = false;
     for line in BufReader::new(file).lines() {
         let Ok(line) = line else { continue };
-        let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
-        let Some((role, text)) = message_role_text(&value) else { continue };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some((role, text)) = message_role_text(&value) else {
+            continue;
+        };
         has_message = true;
-        if role == "user" { return (true, Some(text)); }
+        if role == "user" {
+            return (true, Some(text));
+        }
     }
     (has_message, None)
 }
@@ -232,35 +246,109 @@ pub fn read(sessions_dir: &Path, session_id: &str, start: usize, count: usize) -
 /// Read normalized chat-web events without retaining a whole transcript. This
 /// is the web projection of the archive; TUI recall continues to project the
 /// same file through [`read`] into its role/text DTO.
-pub fn read_events(sessions_dir: &Path, session_id: &str, start: usize, count: usize) -> Option<EventPage> {
+pub fn read_events(
+    sessions_dir: &Path,
+    session_id: &str,
+    start: usize,
+    count: usize,
+) -> Option<EventPage> {
     let path = session_file_by_id(sessions_dir, session_id)?;
     let count = count.min(READ_MAX);
-    if count == 0 { return Some(EventPage { events: Vec::new(), offset: start, next_offset: None }); }
+    if count == 0 {
+        return Some(EventPage {
+            events: Vec::new(),
+            offset: start,
+            next_offset: None,
+        });
+    }
     let file = fs::File::open(path).ok()?;
     let mut events = Vec::with_capacity(count);
     let mut index = 0;
     let mut more = false;
     for line in BufReader::new(file).lines() {
         let Ok(line) = line else { continue };
-        let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let normalized = normalize_events(value);
         for event in normalized {
-            if index >= start && events.len() < count { events.push(event); }
-            else if index >= start { more = true; break; }
+            if index >= start && events.len() < count {
+                events.push(event);
+            } else if index >= start {
+                more = true;
+                break;
+            }
             index += 1;
         }
-        if more { break; }
+        if more {
+            break;
+        }
     }
-    Some(EventPage { next_offset: more.then_some(start + events.len()), events, offset: start })
+    Some(EventPage {
+        next_offset: more.then_some(start + events.len()),
+        events,
+        offset: start,
+    })
 }
 
 fn normalize_events(value: Value) -> Vec<Value> {
-    if value.get("type").and_then(Value::as_str).is_some_and(|kind| matches!(kind, "user" | "delta" | "thinking" | "tool_call" | "tool_output" | "question" | "question_done" | "error" | "notice" | "finished" | "aborted" | "closed" | "context_usage" | "reset")) { return vec![value]; }
+    if value
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| {
+            matches!(
+                kind,
+                "user"
+                    | "delta"
+                    | "thinking"
+                    | "tool_call"
+                    | "tool_output"
+                    | "question"
+                    | "question_done"
+                    | "error"
+                    | "notice"
+                    | "finished"
+                    | "aborted"
+                    | "closed"
+                    | "context_usage"
+                    | "reset"
+            )
+        })
+    {
+        return vec![value];
+    }
+    let timestamp = value.get("timestamp").cloned().or_else(|| {
+        value
+            .get("message")
+            .and_then(|message| message.get("timestamp"))
+            .cloned()
+    });
     let message = value.get("message").unwrap_or(&value);
-    let Some(role) = message.get("role").and_then(Value::as_str) else { return vec![] };
-    let Some(content) = message.get("content") else { return vec![] };
-    if let Some(text) = content.as_str() { return match role { "user" => vec![serde_json::json!({"type":"user","text":text})], "assistant" => vec![serde_json::json!({"type":"delta","text":text})], _ => vec![] }; }
-    let Some(parts) = content.as_array() else { return vec![] };
+    let Some(role) = message.get("role").and_then(Value::as_str) else {
+        return vec![];
+    };
+    let Some(content) = message.get("content") else {
+        return vec![];
+    };
+    if let Some(text) = content.as_str() {
+        let mut events = match role {
+            "user" => vec![serde_json::json!({"type":"user","text":text})],
+            "assistant" => vec![serde_json::json!({"type":"delta","text":text})],
+            _ => vec![],
+        };
+        if let Some(timestamp) = timestamp {
+            for event in &mut events {
+                event
+                    .as_object_mut()
+                    .expect("normalized event is an object")
+                    .insert("timestamp".into(), timestamp.clone());
+            }
+        }
+        return events;
+    }
+    let Some(parts) = content.as_array() else {
+        return vec![];
+    };
     let mut events = Vec::new();
     for part in parts {
         let kind = part.get("type").and_then(Value::as_str).unwrap_or("text");
@@ -273,6 +361,13 @@ fn normalize_events(value: Value) -> Vec<Value> {
                 if !url.is_empty() { events.push(serde_json::json!({"type":"user","text":"","attachments":[{"name":part.get("name").and_then(Value::as_str).unwrap_or("image"),"url":url,"image":true}]})); }
             }
             _ => { let text = part.as_str().or_else(|| part.get("text").and_then(Value::as_str)).unwrap_or_default(); if !text.is_empty() { events.push(serde_json::json!({"type":if role == "user" { "user" } else { "delta" },"text":text})); } }
+        }
+    }
+    if let Some(timestamp) = timestamp {
+        for event in &mut events {
+            if let Some(object) = event.as_object_mut() {
+                object.insert("timestamp".into(), timestamp.clone());
+            }
         }
     }
     events
@@ -336,8 +431,12 @@ fn read_recent_messages(path: &Path) -> (Vec<Message>, bool) {
 /// Find the session file whose header `id` equals `session_id`. Scans the dir's
 /// `.jsonl` files reading only each header line. `None` when the dir is
 /// unreadable or no file carries that id.
-fn session_file_by_id(sessions_dir: &Path, session_id: &str) -> Option<std::path::PathBuf> {
-    if session_id.is_empty() {
+pub fn session_file_by_id(sessions_dir: &Path, session_id: &str) -> Option<std::path::PathBuf> {
+    if session_id.is_empty()
+        || session_id.contains('/')
+        || session_id.contains('\\')
+        || session_id.contains("..")
+    {
         return None;
     }
     let entries = fs::read_dir(sessions_dir).ok()?;
@@ -1120,6 +1219,18 @@ mod tests {
         assert_eq!(slice[1].role, "assistant");
         assert_eq!(slice[1].text, "second");
         assert_eq!(slice[1].index, 1);
+    }
+
+    #[test]
+    fn read_events_preserves_timestamp_for_string_content() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "2024-06-15T12:30:00Z_a.jsonl",
+            "{\"type\":\"session\",\"id\":\"sess-a\"}\n{\"timestamp\":\"2024-06-15T12:31:00Z\",\"role\":\"user\",\"content\":\"first\"}\n",
+        );
+        let page = read_events(temp.path(), "sess-a", 0, READ_MAX).unwrap();
+        assert_eq!(page.events[0]["timestamp"], "2024-06-15T12:31:00Z");
     }
 
     #[test]

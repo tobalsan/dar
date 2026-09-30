@@ -9,11 +9,18 @@
     return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
   }));
 
-  const markdown = s => {
+  const fallbackMarkdown = s => {
     let code = [];
-    let html = esc(s).replace(/```([^\n]*)\n([\s\S]*?)```/g, (_, lang, text) => `\0${code.push(`<pre><code${lang ? ` data-language="${esc(lang)}"` : ''}>${text}</code></pre>`) - 1}\0`).replace(/`([^`\n]+)`/g, (_, text) => `\0${code.push(`<code>${text}</code>`) - 1}\0`);
-    html = html.replace(/^[-*] (.+)$/gm, '<li>$1</li>').replace(/(?:<li>[\s\S]*?<\/li>\n?)+/g, m => `<ul>${m}</ul>`).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\*(.+?)\*/g, '<em>$1</em>').replace(/\n/g, '<br>').replace(/<\/li><br><\/ul>/g, '</li></ul>');
-    return html.replace(/\0(\d+)\0/g, (_, i) => code[i]);
+    let out = esc(s).replace(/```([^\n]*)\n([\s\S]*?)```/g, (_, lang, text) => `\0${code.push(`<pre><code${lang ? ` data-language="${esc(lang)}"` : ''}>${text}</code></pre>`) - 1}\0`).replace(/`([^`\n]+)`/g, (_, text) => `\0${code.push(`<code>${text}</code>`) - 1}\0`);
+    out = out.replace(/^[-*] (.+)$/gm, '<li>$1</li>').replace(/(?:<li>[\s\S]*?<\/li>\n?)+/g, m => `<ul>${m}</ul>`).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\*(.+?)\*/g, '<em>$1</em>').replace(/\n/g, '<br>').replace(/<\/li><br><\/ul>/g, '</li></ul>');
+    return out.replace(/\0(\d+)\0/g, (_, i) => code[i]);
+  };
+  const markdown = s => {
+    if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') return fallbackMarkdown(s);
+    const renderer = new marked.Renderer();
+    renderer.html = token => esc(typeof token === 'string' ? token : token.text || token.raw || '');
+    renderer.link = function (token) { return `<a href="${esc(token.href || '')}" target="_blank" rel="noopener noreferrer"${token.title ? ` title="${esc(token.title)}"` : ''}>${this.parser.parseInline(token.tokens || [])}</a>`; };
+    return DOMPurify.sanitize(marked.parse(s, { gfm: true, breaks: true, renderer }), { ADD_ATTR: ['target'] });
   };
 
   // Mutate a private transcript buffer and report the changed block. Live
@@ -22,15 +29,17 @@
   const reduceInto = (blocks, event) => {
     let next = blocks, text = event.text || '';
     switch (event.type) {
-      case 'user': next.push({ kind: 'user', text, attachments: event.attachments || [] }); return next.length - 1;
+      case 'user': next.push({ kind: 'user', text, attachments: event.attachments || [], ts: event.ts || event.timestamp }); return next.length - 1;
       case 'started': return -1;
-      case 'reset': next.splice(0, next.length, { kind: 'notice', text: 'Context cleared, started a new session.' }); return null;
+      // A reset (new chat or resume) starts from an empty transcript: the hero
+      // shows for a new chat, and a resume replays history right after.
+      case 'reset': next.splice(0, next.length); return null;
       case 'delta': case 'thinking': {
         let kind = event.type === 'thinking' ? 'thinking' : 'assistant', last = next.at(-1);
         if (last && last.kind === kind) { last.text += text; return next.length - 1; }
-        next.push({ kind, text }); return next.length - 1;
+        next.push({ kind, text, ts: event.ts || event.timestamp }); return next.length - 1;
       }
-      case 'tool_call': next.push({ kind: 'tool', id: event.id, name: event.name || event.id, args: event.args || '', text: '', is_error: false, done: false }); return next.length - 1;
+      case 'tool_call': next.push({ kind: 'tool', id: event.id, name: event.name || event.id, args: event.args || '', ts: event.ts || event.timestamp, text: '', is_error: false, done: false }); return next.length - 1;
       case 'tool_output': {
         let index = next.length - 1;
         while (index >= 0 && (next[index].kind !== 'tool' || next[index].id !== event.id)) index--;
@@ -44,7 +53,7 @@
       case 'context_usage': return -1;
       // Agent chose silence (NO_REPLY) or the loop guard dropped the turn.
       case 'silent': return -1;
-      case 'aborted': { let dismissed = dismissPendingQuestions(next); next.push({ kind: 'error', text: event.error === 'aborted' ? 'turn aborted' : `turn failed: ${event.error || 'unknown error'}` }); return dismissed ? null : next.length - 1; }
+      case 'aborted': { let dismissed = dismissPendingQuestions(next); next.push(event.error === 'aborted' ? { kind: 'interrupted', text: 'Interrupted', ts: event.ts } : { kind: 'error', text: `turn failed: ${event.error || 'unknown error'}`, ts: event.ts }); return dismissed ? null : next.length - 1; }
       case 'closed': { let dismissed = dismissPendingQuestions(next); next.push({ kind: 'error', text: `chat session closed${event.error ? `: ${event.error}` : ''}` }); return dismissed ? null : next.length - 1; }
       case 'finished': return dismissPendingQuestions(next) ? null : -1;
     }
@@ -69,11 +78,15 @@
 
   const agentName = () => (typeof document !== 'undefined' && document.getElementById('chat-root') && document.getElementById('chat-root').dataset.agentName) || 'Agent';
 
+  const timeLabel = ts => { if (!ts) return ''; let d = new Date(typeof ts === 'number' ? ts : Date.parse(ts)); return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); };
+  const argSummary = args => { try { let value = typeof args === 'string' ? JSON.parse(args) : args; for (let key of ['path','command','query','url']) if (value && value[key]) return String(value[key]).replace(/\s+/g, ' ').slice(0, 90); } catch (_) {} return String(args || '').replace(/\s+/g, ' ').slice(0, 90); };
+  const stamp = block => block.ts ? `<time class="chat-time" datetime="${esc(new Date(block.ts).toISOString())}">${esc(timeLabel(block.ts))}</time>` : '';
+
   const html = (blocks, qsel = {}, readOnly = false) => blocks.map((block, i) => {
     if (block.kind === 'tool') {
       let state = block.is_error ? 'bad' : block.done ? 'done' : 'live';
       let label = block.is_error ? 'error' : block.done ? 'done' : 'running';
-      return `<details class="chat-tool" data-tool-id="${esc(block.id)}" data-bi="${i}"><summary><span class="chat-pill chat-pill-${state}">${label}</span><span class="chat-tool-name">${esc(block.name)}</span></summary><pre class="chat-tool-args">${esc(block.args)}</pre><pre class="chat-tool-output${block.is_error ? ' is-error' : ''}${block.done ? ' is-done' : ''}">${esc(block.text)}</pre></details>`;
+      return `<details class="chat-tool" data-tool-id="${esc(block.id)}" data-bi="${i}"><summary><span class="chat-pill chat-pill-${state}">${label}</span><span class="chat-tool-name">${esc(block.name)}</span><span class="chat-tool-summary">${esc(argSummary(block.args))}</span></summary><pre class="chat-tool-args">${esc(block.args)}</pre><pre class="chat-tool-output${block.is_error ? ' is-error' : ''}${block.done ? ' is-done' : ''}">${esc(block.text)}</pre></details>`;
     }
     if (block.kind === 'question') {
       let state = block.done ? (block.rejected ? 'bad' : 'done') : 'live';
@@ -103,6 +116,7 @@
     if (block.kind === 'thinking') {
       return `<details class="chat-think" data-bi="${i}"><summary>Thinking</summary><pre>${esc(block.text)}</pre></details>`;
     }
+    if (block.kind === 'interrupted') return `<div class="chat-interrupted">Interrupted${stamp(block)}</div>`;
     if (block.kind === 'error') {
       return `<div class="chat-turn chat-error"><span class="chat-pill chat-pill-bad">error</span><div class="chat-error-body">${markdown(block.text)}</div></div>`;
     }
@@ -113,7 +127,7 @@
     let attachments = (block.attachments || []).map(a => a.image
       ? `<img class="chat-attachment-image" src="${esc(PREFIX + a.url)}" alt="${esc(a.name)}">`
       : `<a class="chat-attachment" href="${esc(PREFIX + a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.name)}</a>`).join('');
-    return `<div class="chat-turn chat-${block.kind}"><div class="chat-role">${roleLabel}</div><div class="chat-body">${markdown(block.text)}${attachments ? `<div class="chat-attach-row">${attachments}</div>` : ''}</div></div>`;
+    return `<div class="chat-turn chat-${block.kind}"><div class="chat-role"><span>${roleLabel}</span>${stamp(block)}</div><div class="chat-body">${markdown(block.text)}${attachments ? `<div class="chat-attach-row">${attachments}</div>` : ''}</div></div>`;
   }).join('');
 
   const usageText = event => event.context_window ? `${event.tokens_used} / ${event.context_window} tokens` : `${event.tokens_used} tokens`;
@@ -126,7 +140,7 @@
     throw new Error(detail || `request failed (${response.status})`);
   };
 
-  if (typeof module !== 'undefined') module.exports = { reduce, html, usageText, request };
+  if (typeof module !== 'undefined') module.exports = { reduce, html, markdown, usageText, request };
   if (typeof document === 'undefined') return;
 
   const SESSION = 'main', MAX_ATTACHMENTS = 8;
@@ -137,11 +151,10 @@
 
   const autogrow = el => { if (!el) return; el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, Math.round(0.4 * window.innerHeight)) + 'px'; };
 
-  const sizeViewport = () => { let root = $('chat-root'); if (root) root.style.setProperty('--chat-top', Math.round(root.getBoundingClientRect().top) + 'px'); };
 
   const renderChips = app => {
     let host = $('chat-chips'); if (!host) return;
-    host.innerHTML = app.pending.map((file, i) => `<span class="chat-chip"><span class="chat-chip-name">${esc(file.name)}</span><button type="button" class="chat-chip-x" data-chip="${i}" aria-label="Remove attachment">×</button></span>`).join('');
+    host.innerHTML = app.pending.map((file, i) => `<span class="chat-chip">${file.type && file.type.startsWith('image/') ? `<img src="${file._preview || (file._preview = URL.createObjectURL(file))}" alt="">` : ''}<span class="chat-chip-name">${esc(file.name)}</span><button type="button" class="chat-chip-x" data-chip="${i}" aria-label="Remove attachment">×</button></span>`).join('');
   };
 
   const capHint = (app, dropped) => {
@@ -177,13 +190,16 @@
   const pendingHtml = word => `<div class="chat-turn chat-assistant chat-pending"><div class="chat-role">${esc(agentName())}</div><div class="chat-body"><span class="chat-loader" role="status" aria-label="Working"><em class="chat-loader-word">${esc(word)}</em><span></span><span></span><span></span></span></div></div>`;
 
   const paint = app => {
-    if (app.viewingHistory) return;
     let transcript = $('chat-transcript'); if (!transcript) return;
     let stick = app.stick;
+    let empty = !app.blocks.some(b => b.kind === 'user' || b.kind === 'assistant');
+    let root = $('chat-root');
+    if (empty && root?.classList && !root.classList.contains('is-empty')) pickHeroLine();
+    root?.classList?.toggle('is-empty', empty);
     let last = app.blocks[app.blocks.length - 1];
     let pending = app.turns > 0 && last && last.kind === 'user';
     let open = new Set(Array.from(transcript.querySelectorAll('details[open]'), d => d.dataset.bi));
-    transcript.innerHTML = (app.blocks.length ? html(app.blocks, app.qsel) : '<div class="chat-empty">No messages yet. Ask the agent anything.</div>') + (pending ? pendingHtml(app.workingWord || 'Working') : '');
+    transcript.innerHTML = html(app.blocks, app.qsel) + (pending ? pendingHtml(app.workingWord || 'Working') : '');
     for (const d of transcript.querySelectorAll('details')) if (open.has(d.dataset.bi)) d.open = true;
     if (stick) transcript.scrollTop = transcript.scrollHeight;
   };
@@ -197,10 +213,11 @@
   };
 
   const render = (app, event) => {
-    if (event.type === 'context_usage') { let m = $('chat-token-meter'); if (m) m.textContent = usageText(event); return; }
-    if (event.type === 'started' && event.origin === 'autonomous') { app.turns++; refreshBusy(app); return; }
-    if (event.type === 'user') { app.turns++; app.workingWord = WORKING_WORDS[Math.floor(Math.random() * WORKING_WORDS.length)]; }
-    if (event.type === 'finished' || event.type === 'aborted' || event.type === 'closed') app.turns = Math.max(0, app.turns - 1);
+    if (event.type === 'context_usage') { let m = $('chat-token-meter'), w=$('chat-context-warning'); if (m) m.textContent = usageText(event); if(w) w.hidden=!(event.context_window && event.tokens_used/event.context_window>=.7); return; }
+    if (event.type === 'reset') { app.turns=0; app.qsel={}; app.qsent={}; let m=$('chat-token-meter'),w=$('chat-context-warning'); if(m)m.textContent=''; if(w)w.hidden=true; }
+    if (!event.historical && event.type === 'started' && event.origin === 'autonomous') { app.turns++; refreshBusy(app); return; }
+    if (!event.historical && event.type === 'user') { app.turns++; app.workingWord = WORKING_WORDS[Math.floor(Math.random() * WORKING_WORDS.length)]; }
+    if (!event.historical && (event.type === 'finished' || event.type === 'aborted' || event.type === 'closed')) app.turns = Math.max(0, app.turns - 1);
     app.blocks = reduce(app.blocks, event);
     schedulePaint(app);
   };
@@ -216,6 +233,7 @@
     if (!input || !sendEnabled(app)) return;
     let message = input.value, files = app.pending.slice(), command_id = uuid();
     let command = message.trim();
+    if (!files.length && command === '/stop') { fetch(`/chat/${SESSION}/abort`, { method: 'POST' }); app.draft=''; input.value=''; autogrow(input); refreshBusy(app); return; }
     if (!files.length && command === '/new') {
       app.draft = ''; input.value = ''; app.pending = []; renderChips(app); autogrow(input); refreshBusy(app);
       try {
@@ -278,7 +296,11 @@
 
   const bindDocument = app => {
     document.addEventListener('submit', e => { if (e.target.id === 'chat-composer') { e.preventDefault(); sendFlow(app); } });
-    document.addEventListener('keydown', e => { if (e.target.id === 'chat-input' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendFlow(app); } });
+    document.addEventListener('keydown', e => {
+      if (e.target.id === 'chat-input' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendFlow(app); return; }
+      // Session rows are role=button: Enter/Space resumes, like a click.
+      if (e.target.classList?.contains('chat-session') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); resumeSession(app, e.target.dataset.sessionId); }
+    });
     document.addEventListener('input', e => { if (e.target.id === 'chat-input') { app.draft = e.target.value; autogrow(e.target); refreshBusy(app); } });
     document.addEventListener('change', e => {
       if (e.target.id !== 'chat-attachments') return;
@@ -286,7 +308,7 @@
       e.target.value = '';
     });
     document.addEventListener('paste', e => {
-      if (e.target.id !== 'chat-input' || app.viewingHistory) return;
+      if (e.target.id !== 'chat-input') return;
       let files = e.clipboardData && e.clipboardData.files;
       if (!files || !files.length) return;
       e.preventDefault();
@@ -297,14 +319,14 @@
     // outside #chat-root navigates the whole page to the file.
     document.addEventListener('dragover', e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault(); });
     document.addEventListener('dragenter', e => {
-      if (app.viewingHistory || !e.dataTransfer.types.includes('Files') || !e.target.closest('#chat-root')) return;
+      if (!e.dataTransfer.types.includes('Files') || !e.target.closest('#chat-root')) return;
       e.preventDefault();
       app.dragDepth++; toggleDropzone(app, true);
     });
     // Enter/leave depth counter (not bare dragleave) so moving over child
     // elements inside the zone doesn't flicker the overlay.
     document.addEventListener('dragleave', e => {
-      if (app.viewingHistory || !e.dataTransfer.types.includes('Files') || !e.target.closest('#chat-root')) return;
+      if (!e.dataTransfer.types.includes('Files') || !e.target.closest('#chat-root')) return;
       app.dragDepth = Math.max(0, app.dragDepth - 1);
       if (!app.dragDepth) toggleDropzone(app, false);
     });
@@ -312,18 +334,16 @@
       if (!e.dataTransfer.types.includes('Files')) return;
       e.preventDefault();
       app.dragDepth = 0; toggleDropzone(app, false);
-      if (!app.viewingHistory && e.target.closest('#chat-root')) addFiles(app, e.dataTransfer.files);
+      if (e.target.closest('#chat-root')) addFiles(app, e.dataTransfer.files);
     });
     document.addEventListener('click', e => {
-      let history = e.target.closest('#chat-history');
-      if (history) { showHistoryList(app); return; }
-      let session = e.target.closest('[data-history-session]');
-      if (session) { session.dataset.liveSession === 'true' ? returnToLive(app) : openHistorySession(app, session.dataset.historySession); return; }
-      // A historical transcript is strictly read-only: question controls are
-      // rendered for fidelity, but must never answer against the live session.
-      if (app.viewingHistory) return;
+      if (e.target.closest('[data-sidebar-toggle]')) { toggleSidebar(); return; }
+      let action = e.target.closest('[data-session-action]');
+      if (action) { sessionAction(app, action.dataset.sessionAction, action.dataset.sessionId); return; }
+      let session = e.target.closest('[data-session-id]');
+      if (session && !e.target.closest('input,button,[data-session-action]')) { resumeSession(app, session.dataset.sessionId); return; }
       let chip = e.target.closest('.chat-chip-x');
-      if (chip) { app.pending.splice(Number(chip.dataset.chip), 1); renderChips(app); refreshBusy(app); return; }
+      if (chip) { let removed = app.pending.splice(Number(chip.dataset.chip), 1)[0]; if (removed && removed._preview) URL.revokeObjectURL(removed._preview); renderChips(app); refreshBusy(app); return; }
       if (e.target.closest('#chat-attach')) { let f = $('chat-attachments'); if (f) f.click(); return; }
       let abort = e.target.closest('#chat-abort');
       if (abort && !abort.disabled) { fetch(`/chat/${SESSION}/abort`, { method: 'POST' }); return; }
@@ -338,6 +358,9 @@
         return;
       }
     });
+    // Keep the Archived section's open state across periodic list refreshes.
+    document.addEventListener('toggle', e => { if (e.target.classList?.contains('chat-archived')) app.archivedOpen = e.target.open; }, true);
+    document.addEventListener('mouseover', e => { let row = e.target.closest?.('.chat-session'); if (row && !row.contains(e.relatedTarget)) revealTitle(row); });
     document.addEventListener('scroll', e => { if (e.target.id === 'chat-transcript') { let t = e.target; app.stick = (t.scrollHeight - t.scrollTop - t.clientHeight) < 64; } }, true);
   };
 
@@ -346,70 +369,65 @@
     if (!transcript || !input) return;
     paint(app);
     input.value = app.draft; autogrow(input);
-    renderChips(app); refreshBusy(app); sizeViewport();
+    renderChips(app); refreshBusy(app);
     transcript.scrollTop = transcript.scrollHeight;
-    mountHistoryControls();
+    pickHeroLine();
+    $('chat-root').classList?.toggle('sidebar-collapsed', typeof localStorage !== 'undefined' && localStorage.getItem('dar-chat-sidebar') === 'collapsed');
     showHistoryList(app);
   };
 
-  // History is deliberately view-only. The EventSource remains attached and
-  // continues reducing live events into `liveBlocks` while a transcript is open.
-  const mountHistoryControls = () => {
-    let list = $('chat-history-list');
-    if (list && !list.innerHTML) list.innerHTML = '<div class="chat-empty">Loading history.</div>';
+  // Empty-chat invite; a fresh line is drawn each time the chat becomes empty.
+  const HERO_LINES = [
+    "What are we building today?", "Where do you want to start?", "What's on your mind?", "Ready when you are.",
+    "What can I help you ship?", "Got something to untangle?", "Let's make something good.", "What's the mission?",
+    "First thought, best thought.", "What are you curious about?", "Drop the big question.", "What needs doing?",
+    "Say the word.", "New session, fresh ideas.", "What's brewing?", "Pick a thread to pull.",
+    "What should we tackle first?", "Blank slate, endless options.", "What's the puzzle today?", "Ask me anything.",
+    "Let's get to work.", "What's on the docket?", "Bring me your hardest problem.", "What are we exploring?",
+    "Start anywhere. I'll keep up.", "What's the goal today?", "Give me the gist.", "What's next on the list?",
+    "Fire away.", "What's the plan, boss?",
+  ];
+  const pickHeroLine = () => {
+    let hero = $('chat-hero');
+    if (hero) hero.textContent = HERO_LINES[Math.floor(Math.random() * HERO_LINES.length)];
   };
-  const historyUi = () => ({ list: $('chat-history-list'), composer: $('chat-composer') });
-  const showHistoryList = async app => {
-    let ui = historyUi(); if (!ui.list) return;
-    try {
-      let sessions = await request('/chat/sessions').then(r => r.json());
-      ui.list.innerHTML = sessions.length ? sessions.map(s => {
-        let active = s.is_live ? !app.viewingHistory : app.historySession === s.id;
-        let live = s.is_live ? '<span class="chat-history-live">live</span>' : '';
-        return `<button type="button" class="chat-history-entry${active ? ' is-active' : ''}" data-history-session="${esc(s.id)}" data-live-session="${s.is_live ? 'true' : 'false'}"><span class="chat-history-entry-head"><span class="chat-history-label">${esc(s.label)}</span>${live}</span><small>${esc(s.start_time || '')}</small></button>`;
-      }).join('') : '<div class="chat-empty">No previous sessions.</div>';
-    } catch (error) { ui.list.textContent = `History unavailable: ${error.message}`; }
+
+  // Slide an overflowing title left on hover so its tail clears the action icons.
+  const revealTitle = row => {
+    let box = row.querySelector('.chat-session-label'), text = box?.firstElementChild;
+    if (!text) return;
+    let reserve = row.querySelector('.chat-session-actions')?.offsetWidth || 0;
+    let shift = text.scrollWidth + reserve - box.clientWidth;
+    row.style.setProperty('--title-shift', `${Math.max(0, shift)}px`);
+    row.style.setProperty('--title-ms', `${Math.max(1200, shift * 16) / 0.3}ms`);
   };
-  const openHistorySession = async (app, id) => {
-    app.historyController?.abort();
-    let controller = new AbortController(), ui = historyUi(), load = ++app.historyLoad, transcript = $('chat-transcript');
-    app.historyController = controller;
-    app.viewingHistory = true; app.historySession = id; app.historyBlocks = [];
-    if (ui.composer) ui.composer.hidden = true;
-    showHistoryList(app);
-    if (transcript) transcript.innerHTML = '';
-    try {
-      let offset = 0;
-      do {
-        let page = await request(`/chat/sessions/${encodeURIComponent(id)}?offset=${offset}&count=20`, { signal: controller.signal }).then(r => r.json());
-        if (load !== app.historyLoad || !app.viewingHistory) return;
-        for (let event of page.events) {
-          let changed = reduceInto(app.historyBlocks, event);
-          if (!transcript || changed < 0) continue;
-          if (changed === null) transcript.innerHTML = html(app.historyBlocks, {}, true);
-          else if (changed < transcript.children.length) transcript.children[changed].outerHTML = html([app.historyBlocks[changed]], {}, true);
-          else transcript.insertAdjacentHTML('beforeend', html([app.historyBlocks[changed]], {}, true));
-        }
-        offset = page.next_offset;
-        // Let the browser paint between bounded archive pages instead of
-        // blocking on a months-old transcript.
-        if (offset != null) await new Promise(resolve => raf(resolve));
-      } while (offset != null);
-      if (load === app.historyLoad && transcript && !app.historyBlocks.length) transcript.innerHTML = '<div class="chat-empty">No messages.</div>';
-    } catch (error) { if (error.name !== 'AbortError' && load === app.historyLoad && ui.list) ui.list.textContent = `Transcript unavailable: ${error.message}`; }
+
+  const ICONS = {
+    rename: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z"/>',
+    archive: '<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 001 1h12a1 1 0 001-1V8M10 12h4"/>',
+    unarchive: '<rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 001 1h12a1 1 0 001-1V8M12 18v-6M9.5 14.5L12 12l2.5 2.5"/>',
+    delete: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/>',
   };
-  const returnToLive = app => {
-    let ui = historyUi(); app.historyController?.abort(); app.historyController = null; app.historyLoad++; app.viewingHistory = false; app.historySession = null; if (ui.composer) ui.composer.hidden = false; showHistoryList(app); paint(app);
-  };
+  const actionButton = (action, id, label) => `<button type="button" data-session-action="${action}" data-session-id="${esc(id)}" aria-label="${label}" title="${label}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[action]}</svg></button>`;
+
+  const relativeTime = ms => { let n=Math.max(0,Date.now()-ms), m=Math.floor(n/60000); if(m<1)return 'now'; if(m<60)return `${m}m`; let h=Math.floor(m/60); if(h<24)return `${h}h`; return `${Math.floor(h/24)}d`; };
+  const groupName = ms => { let d=new Date(ms), now=new Date(), day=86400000, today=new Date(now.getFullYear(),now.getMonth(),now.getDate()).getTime(), t=new Date(d.getFullYear(),d.getMonth(),d.getDate()).getTime(); if(t===today)return 'Today'; if(t===today-day)return 'Yesterday'; let age=(today-t)/day; if(age<7)return 'Earlier this week'; if(d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear())return 'Earlier this month'; return d.toLocaleDateString([], {month:'long',year:'numeric'}); };
+  const sessionRow = s => `<div class="chat-session${s.is_live ? ' is-live' : ''}" data-session-id="${esc(s.id)}" role="button" tabindex="0" title="${esc(s.label)}">`
+    + `<div class="chat-session-copy"><span class="chat-session-label"><span>${esc(s.label)}</span></span><small>${s.is_live ? '<span class="chat-live-dot"></span>Live · ' : ''}${relativeTime(s.modified_ms)}</small></div>`
+    + `<div class="chat-session-actions">${actionButton('rename', s.id, 'Rename')}${s.archived ? actionButton('unarchive', s.id, 'Unarchive') : actionButton('archive', s.id, 'Archive')}${actionButton('delete', s.id, 'Delete')}</div></div>`;
+  const showHistoryList = async app => { let host=$('chat-history-list'); if(!host||app.editingSession)return; let sequence=++app.sidebarSequence; try { let all=await request('/chat/sessions').then(r=>r.json()); if(app.editingSession||sequence!==app.sidebarSequence)return; let q=($('chat-search')?.value||'').toLowerCase(), active=all.filter(s=>!s.archived&&s.label.toLowerCase().includes(q)), archived=all.filter(s=>s.archived&&s.label.toLowerCase().includes(q)), groups=[]; for(let s of active){let name=groupName(s.modified_ms), g=groups.at(-1);if(!g||g.name!==name)groups.push(g={name,items:[]});g.items.push(s)} host.innerHTML=groups.map(g=>`<div class="chat-session-group"><h3>${g.name}</h3>${g.items.map(sessionRow).join('')}</div>`).join('')+(archived.length?`<details class="chat-archived"${app.archivedOpen?' open':''}><summary>Archived (${archived.length})</summary>${archived.map(sessionRow).join('')}</details>`:'')||'<div class="chat-empty">No conversations</div>'; } catch(error){if(sequence===app.sidebarSequence&&!app.editingSession)host.textContent=`Sessions unavailable: ${error.message}`;} };
+  const resumeSession = async (app,id) => { try { await request(`/chat/${SESSION}/resume`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id})}); showHistoryList(app); } catch(error){render(app,{type:'error',error:`Session not resumed: ${error.message}`});} };
+  const sessionAction = async (app,action,id) => { try { if(action==='delete'){if(!confirm('Delete this conversation permanently?'))return;await request(`/chat/sessions/${encodeURIComponent(id)}`,{method:'DELETE'});} else if(action==='rename'){let row=document.querySelector(`[data-session-id="${CSS.escape(id)}"]`), label=row?.querySelector('.chat-session-label');if(!label)return;let input=document.createElement('input');input.className='chat-session-edit';input.value=label.textContent;label.replaceWith(input);input.focus();input.select();app.editingSession=id;let settled=false;let done=async save=>{if(settled)return;settled=true;app.editingSession=null;if(save)await request(`/chat/sessions/${encodeURIComponent(id)}`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({title:input.value.trim()})});showHistoryList(app)};input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();done(true)}if(e.key==='Escape'){e.preventDefault();done(false)}});input.addEventListener('blur',()=>done(true),{once:true});return;} else await request(`/chat/sessions/${encodeURIComponent(id)}`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({archived:action==='archive'})}); showHistoryList(app); } catch(error){render(app,{type:'error',error:`Session action failed: ${error.message}`});} };
+  const toggleSidebar = () => { let root=$('chat-root'); if(matchMedia('(max-width: 760px)').matches){root.classList.toggle('sidebar-open');return;} let collapsed=!root.classList.contains('sidebar-collapsed');root.classList.toggle('sidebar-collapsed',collapsed);localStorage.setItem('dar-chat-sidebar',collapsed?'collapsed':'open'); };
 
   if (!window.__chatWeb) {
-    let app = { blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false, qsel: {}, qsent: {}, viewingHistory: false, historySession: null, historyLoad: 0, historyController: null, dragDepth: 0 };
+    let app = { blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false, qsel: {}, qsent: {}, editingSession: null, sidebarSequence: 0, dragDepth: 0 };
     window.__chatWeb = app;
     window.renderChatEvent = event => render(app, event);
     app.es = new EventSource(`/chat/${SESSION}/stream`);
     app.es.onmessage = e => render(app, JSON.parse(e.data));
     bindDocument(app);
-    window.addEventListener('resize', sizeViewport);
+    window.addEventListener('focus',()=>showHistoryList(app)); document.addEventListener('visibilitychange',()=>{if(!document.hidden)showHistoryList(app)}); if (typeof module === 'undefined') setInterval(()=>{if(!document.hidden)showHistoryList(app)},5000); document.addEventListener('input',e=>{if(e.target.id==='chat-search')showHistoryList(app)});
   }
   mount(window.__chatWeb);
 })();
