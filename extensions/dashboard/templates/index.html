@@ -38,6 +38,13 @@
       --bg: #111317; --panel: #1b1f26; --panel-2: #202630; --border: #303844;
       --fg: #eceff3; --muted: #9ba6b5; --accent: #62b3b0; --ok: #57c785;
       --warn: #f2b84b; --bad: #f26d6d; --info: #7aa2f7;
+      --chrome: #15181d; --row: #171b21; --shadow: rgba(0,0,0,.45);
+    }
+    [data-theme="light"] {
+      --bg: #f7f8fa; --panel: #ffffff; --panel-2: #eef1f5; --border: #d8dde5;
+      --fg: #18202a; --muted: #667184; --accent: #287f7c; --ok: #278653;
+      --warn: #a66a08; --bad: #c13f3f; --info: #3f68bd;
+      --chrome: #ffffff; --row: #f7f8fa; --shadow: rgba(24,32,42,.12);
     }
     * { box-sizing: border-box; }
     body {
@@ -50,7 +57,7 @@
     }
     button:hover { border-color: var(--accent); }
     button.danger:hover { border-color: var(--bad); color: var(--bad); }
-    header { padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); background: #15181d; }
+    header { padding: 1rem 1.25rem; border-bottom: 1px solid var(--border); background: var(--chrome); }
     .top { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }
     h1 { font-size: 1.05rem; margin: 0 .4rem 0 0; }
     .stat { color: var(--muted); padding: .2rem .45rem; border: 1px solid var(--border); border-radius: 6px; }
@@ -70,7 +77,7 @@
     .run-list { display: grid; gap: .45rem; }
     .run-row {
       width: 100%; text-align: left; display: grid; grid-template-columns: 1fr auto; gap: .35rem .75rem;
-      padding: .6rem; background: #171b21; border: 1px solid var(--border); border-radius: 6px;
+      padding: .6rem; background: var(--row); border: 1px solid var(--border); border-radius: 6px;
     }
     .run-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .meta { color: var(--muted); font-size: .78rem; overflow-wrap: anywhere; }
@@ -91,7 +98,7 @@
     .drawer {
       position: fixed; top: 0; right: 0; bottom: 0; width: min(34rem, 100%);
       background: var(--panel); border-left: 1px solid var(--border);
-      box-shadow: -8px 0 24px rgba(0,0,0,.45); padding: 1rem 1.1rem;
+      box-shadow: -8px 0 24px var(--shadow); padding: 1rem 1.1rem;
       display: flex; flex-direction: column; gap: .8rem; overflow: hidden; z-index: 50;
     }
     .drawer-head { display: flex; align-items: center; gap: .6rem; }
@@ -105,7 +112,7 @@
     .drawer-events { flex: 1; overflow-y: auto; overflow-x: hidden; display: grid; grid-template-columns: minmax(0, 1fr); gap: .3rem; align-content: start; padding-right: .25rem; }
     .ev-row {
       display: grid; grid-template-columns: auto 1fr; gap: .5rem; align-items: baseline;
-      padding: .35rem .5rem; background: #171b21; border: 1px solid var(--border); border-radius: 5px;
+      padding: .35rem .5rem; background: var(--row); border: 1px solid var(--border); border-radius: 5px;
     }
     .ev-meta { display: flex; flex-direction: column; gap: .1rem; }
     .ev-ts { color: var(--muted); font-size: .68rem; white-space: nowrap; }
@@ -118,8 +125,9 @@
     ::-webkit-scrollbar-track { background: transparent; }
     .dash-tabs {
       display: flex; gap: .35rem; padding: .55rem 1.25rem 0;
-      border-bottom: 1px solid var(--border); background: #15181d;
+      border-bottom: 1px solid var(--border); background: var(--panel);
     }
+    .theme-toggle { margin-left: auto; align-self: center; border-radius: 999px; }
     .dash-tab {
       border: 1px solid var(--border); border-bottom: none; background: var(--panel-2);
       color: var(--muted); border-radius: 6px 6px 0 0; padding: .4rem .8rem;
@@ -144,6 +152,7 @@
     <button class="dash-tab{% if active_tab == t.id %} active{% endif %}" data-tab-url="/tabs/{{ t.id }}" data-self-refreshing="{{ t.self_refreshing }}"
             onclick="activateDashTab(this,'/tabs/{{ t.id }}')">{{ t.title }}</button>
     {% endfor %}
+    <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle light and dark theme" title="Toggle theme">◐</button>
   </nav>
   {% endif %}
   <div id="content">
@@ -155,6 +164,17 @@
   <div id="run-detail"></div>
   <script>
     window.__dashPage = window.__dashPage || 1;
+    (function () {
+      var stored = localStorage.getItem('dar-theme');
+      var theme = stored || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+      document.documentElement.dataset.theme = theme;
+      var button = document.getElementById('theme-toggle');
+      if (button) button.addEventListener('click', function () {
+        theme = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+        document.documentElement.dataset.theme = theme;
+        localStorage.setItem('dar-theme', theme);
+      });
+    })();
     // Active tab URL/liveness the #content poller reads. Initialized from the
     // server-rendered active tab button so a page load lands on whatever tab
     // was chosen (Runs, or a passive-default tab); falls back to the run view

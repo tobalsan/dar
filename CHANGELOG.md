@@ -9,6 +9,8 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Dashboard now supports persisted light and dark themes, defaulting to the system color scheme.
+
 ## [0.6.0] — 2026-09-28
 
 - Agents can stay silent: a reply of exactly `NO_REPLY` delivers nothing in web chat, the TUI, or channel extensions (raw turn kept in history). Chat surfaces receive a new `ChatEvent::Silent` just before `TurnFinished`. See [docs/chat.md](docs/chat.md).

@@ -8,6 +8,9 @@ No auth.
 **Panels:** agent identity, active runs with elapsed time and last event,
 queue, retry queue, run history (persisted in SQLite across restarts).
 
+**Theme:** light or dark via the header toggle (◐), remembered per browser;
+defaults to the system color scheme.
+
 **Controls** (mutate run state only, never issue state):
 
 - **Stop** — kill all active children (SIGTERM → 5s grace → SIGKILL). Issue
