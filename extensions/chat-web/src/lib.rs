@@ -99,6 +99,7 @@ impl Extension for ChatWebExtension {
             DashboardTabs::shared(&mut ctx.services)?.add(Arc::new(ChatTab {
                 agent_name: agent_display_name(ctx.paths.root()),
                 agent_description: agent_description(ctx.paths.root()),
+                agent_avatar: agent_avatar(ctx.paths.root()),
             }))?;
             ctx.http.mount(host_api::HttpMount {
                 namespace: "/chat".into(),
@@ -107,6 +108,7 @@ impl Extension for ChatWebExtension {
                     "/".into(),
                     "/sessions".into(),
                     "/sessions/{id}".into(),
+                    "/avatar".into(),
                     "/{session}/resume".into(),
                     "/{session}/stream".into(),
                     "/{session}/history".into(),
@@ -159,6 +161,7 @@ impl Extension for ChatWebExtension {
 struct ChatTab {
     agent_name: String,
     agent_description: Option<String>,
+    agent_avatar: Option<Avatar>,
 }
 impl DashboardTab for ChatTab {
     fn id(&self) -> &str {
@@ -175,14 +178,16 @@ impl DashboardTab for ChatTab {
     }
     fn render(&self) -> Result<String> {
         Ok(format!(
-            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"><aside class="chat-sidebar" aria-label="Conversations"><div class="chat-sidebar-head"><strong>Chats</strong><button type="button" id="chat-sidebar-toggle" data-sidebar-toggle class="chat-icon" aria-label="Toggle sidebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button></div><input id="chat-search" class="chat-search" type="search" placeholder="Search conversations" aria-label="Search conversations"><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><header class="chat-header"><button type="button" data-sidebar-toggle class="chat-icon chat-mobile-sidebar-toggle" aria-label="Open conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button><div><span class="chat-title"><strong>{}</strong>{}</span><span id="chat-token-meter" class="chat-meter"></span></div><button type="button" class="chat-new" onclick="fetch('/chat/main/new',{{method:'POST'}})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button></header><div class="chat-dropzone" id="chat-dropzone" hidden>Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite"></div><div class="chat-hero" id="chat-hero"></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips"></div><div class="chat-cap-hint" id="chat-cap-hint"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.4 11.1l-9.2 9.1a6 6 0 01-8.4-8.4L13 2.6a4 4 0 015.6 5.6l-9.2 9.2a2 2 0 01-2.8-2.8l8.5-8.5"/></svg></button><input type="file" id="chat-attachments" multiple hidden><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message {}" aria-label="Message"></textarea><button type="button" id="chat-abort" class="chat-icon" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon" aria-label="Send" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div><div id="chat-context-warning" class="chat-context-warning" hidden>Context is filling up — send /compact to summarize.</div></form></div></section><script>{}</script><script>{}</script><script>{}</script>"#,
+            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"><aside class="chat-sidebar" aria-label="Conversations"><div class="chat-sidebar-head"><strong>Chats</strong><button type="button" id="chat-sidebar-toggle" data-sidebar-toggle class="chat-icon" aria-label="Toggle sidebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button></div><input id="chat-search" class="chat-search" type="search" placeholder="Search conversations" aria-label="Search conversations"><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><header class="chat-header"><button type="button" data-sidebar-toggle class="chat-icon chat-mobile-sidebar-toggle" aria-label="Open conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button><div>{}<span class="chat-title"><strong>{}</strong>{}</span><span id="chat-token-meter" class="chat-meter"></span></div><button type="button" class="chat-new" onclick="fetch('/chat/main/new',{{method:'POST'}})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button></header><div class="chat-dropzone" id="chat-dropzone" hidden>Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite"></div><div class="chat-hero" id="chat-hero">{}<div class="chat-hero-line" id="chat-hero-line"></div></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips"></div><div class="chat-cap-hint" id="chat-cap-hint"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.4 11.1l-9.2 9.1a6 6 0 01-8.4-8.4L13 2.6a4 4 0 015.6 5.6l-9.2 9.2a2 2 0 01-2.8-2.8l8.5-8.5"/></svg></button><input type="file" id="chat-attachments" multiple hidden><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message {}" aria-label="Message"></textarea><button type="button" id="chat-abort" class="chat-icon" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon" aria-label="Send" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div><div id="chat-context-warning" class="chat-context-warning" hidden>Context is filling up — send /compact to summarize.</div></form></div></section><script>{}</script><script>{}</script><script>{}</script>"#,
             include_str!("chat.css"),
             escape_html_attr(&self.agent_name),
+            avatar_html(self.agent_avatar.as_ref(), "chat-avatar", &self.agent_name),
             escape_html_attr(&self.agent_name),
             self.agent_description
                 .as_deref()
                 .map(|d| format!("<small class=\"chat-desc\">{}</small>", escape_html_attr(d)))
                 .unwrap_or_default(),
+            avatar_html(self.agent_avatar.as_ref(), "chat-hero-avatar", &self.agent_name),
             escape_html_attr(&self.agent_name),
             include_str!("vendor/marked.min.js"),
             include_str!("vendor/purify.min.js"),
@@ -232,6 +237,97 @@ fn agent_description(root: &std::path::Path) -> Option<String> {
         .and_then(|parsed| parsed.description)
         .map(|d| d.trim().to_owned())
         .filter(|d| !d.is_empty())
+}
+
+/// `agent.yaml`'s optional top-level `avatar` (same shape as yoplai): an
+/// emoji/short text, an `http(s)` image URL, or an image path relative to the
+/// agent folder (served by `GET /chat/avatar`).
+#[derive(Debug, PartialEq)]
+enum Avatar {
+    Text(String),
+    Url(String),
+    File(std::path::PathBuf),
+}
+
+fn agent_avatar(root: &std::path::Path) -> Option<Avatar> {
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct AgentYaml {
+        avatar: Option<String>,
+    }
+    let value = fs::read_to_string(root.join("agent.yaml"))
+        .ok()
+        .and_then(|contents| serde_yaml::from_str::<AgentYaml>(&contents).ok())?
+        .avatar?
+        .trim()
+        .to_owned();
+    if value.is_empty() {
+        return None;
+    }
+    if value.starts_with("https://") || value.starts_with("http://") {
+        return Some(Avatar::Url(value));
+    }
+    // Image paths must resolve to a file inside the agent folder.
+    let file = root.join(&value).canonicalize().ok().filter(|file| {
+        file.is_file() && root.canonicalize().is_ok_and(|root| file.starts_with(root))
+    });
+    if let Some(file) = file {
+        return Some(Avatar::File(file));
+    }
+    if value.chars().count() <= 8 && !value.contains(['.', '/', '\\']) {
+        return Some(Avatar::Text(value));
+    }
+    tracing::warn!(avatar = %value, "agent.yaml avatar is not an emoji, URL, or image inside the agent folder; ignoring");
+    None
+}
+
+/// Avatar markup; image `src` is set by the renderer so the fleet `__dashPrefix` applies.
+fn avatar_html(avatar: Option<&Avatar>, class: &str, name: &str) -> String {
+    match avatar {
+        None => String::new(),
+        Some(Avatar::Text(text)) => format!(
+            r#"<span class="{class}" aria-hidden="true">{}</span>"#,
+            escape_html_attr(text)
+        ),
+        Some(Avatar::Url(url)) => format!(
+            r#"<span class="{class}"><img data-avatar-src="{}" alt="{}"></span>"#,
+            escape_html_attr(url),
+            escape_html_attr(name)
+        ),
+        Some(Avatar::File(_)) => format!(
+            r#"<span class="{class}"><img data-avatar-src="/chat/avatar" alt="{}"></span>"#,
+            escape_html_attr(name)
+        ),
+    }
+}
+
+async fn avatar(State(state): State<Arc<AppState>>) -> axum::response::Response {
+    let Some(Avatar::File(file)) = agent_avatar(&state.root) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let name = file.to_string_lossy().to_string();
+    let content_type = match attachment_content_type(&name) {
+        "application/octet-stream" if name.to_ascii_lowercase().ends_with(".svg") => {
+            "image/svg+xml"
+        }
+        other => other,
+    };
+    match fs::read(&file) {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, content_type),
+                (header::CACHE_CONTROL, "no-cache"),
+                // SVG avatars may carry scripts; never let them run on the dashboard origin.
+                (
+                    header::CONTENT_SECURITY_POLICY,
+                    "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 fn escape_html_attr(value: &str) -> String {
@@ -339,6 +435,7 @@ fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/sessions", get(session_index))
+        .route("/avatar", get(avatar))
         .route(
             "/sessions/{id}",
             get(session_transcript)
@@ -3722,8 +3819,11 @@ mod tests {
         let tab = ChatTab {
             agent_name: "Test Agent".into(),
             agent_description: Some("Does <things>".into()),
+            agent_avatar: None,
         };
         let html = tab.render().unwrap();
+        assert!(!html.contains("class=\"chat-avatar\""));
+        assert!(html.contains("id=\"chat-hero-line\""));
         assert!(html.contains("id=\"chat-composer\""));
         assert!(html.contains("<small class=\"chat-desc\">Does &lt;things&gt;</small>"));
         // Belt-and-braces: even if the JS singleton fails to attach, the inline
@@ -3943,6 +4043,80 @@ mod tests {
             prompt.contains("/agent/data/chat/uploads/main/upload-1/0-logo.png"),
             "{prompt}"
         );
+    }
+
+    #[test]
+    fn agent_avatar_accepts_emoji_url_and_contained_image() {
+        let root = test_root();
+        fs::create_dir_all(root.join("assets")).unwrap();
+        fs::write(root.join("assets/me.png"), b"png").unwrap();
+        let avatar_for = |value: &str| {
+            fs::write(root.join("agent.yaml"), format!("avatar: \"{value}\"\n")).unwrap();
+            agent_avatar(&root)
+        };
+        assert_eq!(avatar_for("🦉"), Some(Avatar::Text("🦉".into())));
+        assert_eq!(
+            avatar_for("https://x.test/a.png"),
+            Some(Avatar::Url("https://x.test/a.png".into()))
+        );
+        assert_eq!(
+            avatar_for("assets/me.png"),
+            Some(Avatar::File(root.join("assets/me.png").canonicalize().unwrap()))
+        );
+        assert_eq!(avatar_for("assets/missing.png"), None);
+        assert_eq!(avatar_for("../../etc/hosts"), None);
+        assert_eq!(avatar_for(""), None);
+        fs::remove_file(root.join("agent.yaml")).unwrap();
+        assert_eq!(agent_avatar(&root), None);
+
+        let tab = |avatar| ChatTab {
+            agent_name: "Owl".into(),
+            agent_description: None,
+            agent_avatar: Some(avatar),
+        };
+        let html = tab(Avatar::Text("🦉".into())).render().unwrap();
+        assert!(html.contains(r#"<span class="chat-avatar" aria-hidden="true">🦉</span>"#));
+        assert!(html.contains(r#"<span class="chat-hero-avatar" aria-hidden="true">🦉</span>"#));
+        let html = tab(Avatar::File(root.join("assets/me.png"))).render().unwrap();
+        assert!(html.contains(r#"<img data-avatar-src="/chat/avatar" alt="Owl">"#));
+    }
+
+    #[tokio::test]
+    async fn avatar_route_serves_only_the_configured_image() {
+        let root = test_root();
+        fs::create_dir_all(&root).unwrap();
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root: root.clone(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::new()),
+            live_id: Mutex::new(None),
+            transition: Mutex::new(()),
+            meta: Mutex::new(HashMap::new()),
+        });
+        let get = || async {
+            router(Arc::clone(&state))
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/avatar")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        };
+        fs::write(root.join("agent.yaml"), "avatar: \"🦉\"\n").unwrap();
+        assert_eq!(get().await.status(), StatusCode::NOT_FOUND);
+
+        fs::write(root.join("me.svg"), "<svg/>").unwrap();
+        fs::write(root.join("agent.yaml"), "avatar: me.svg\n").unwrap();
+        let response = get().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/svg+xml");
+        assert!(response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("sandbox"));
     }
 
     #[test]

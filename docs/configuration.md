@@ -3,7 +3,7 @@
 This covers `agent.yaml` identity/host config, system files, exported child environment variables, and the HITL notifier.
 
 `agent.yaml` is agent **identity and host config only**: `id`, `name`,
-`runner`, `hitl`, `dashboard`, `foreground`, `providers`, `extensions`,
+`description`, `avatar`, `runner`, `hitl`, `dashboard`, `foreground`, `providers`, `extensions`,
 `system_files`. The issue-loop config — tracker, polling, workspace — lives
 entirely in `WORKFLOW.md` frontmatter (see [WORKFLOW.md](workflows.md) below);
 `agent.yaml` has no tracker/orchestrator/workspace keys of its own. Old
@@ -13,6 +13,8 @@ fields now, silently ignored.
 ```yaml
 id: my-agent
 name: "My Agent"
+# description: "Triages support tickets"  # shown under the name in web chat
+# avatar: assets/avatar.png  # web chat avatar: emoji ("🦉"), https URL, or image path in the agent folder
 
 runner:
   use: pi                     # pi | codex | opencode | cli | fake | builtin

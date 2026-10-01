@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Web chat shows an agent avatar in the header and new-chat hero when `agent.yaml` sets `avatar:` (emoji, image URL, or image file in the agent folder). See [docs/chat.md](docs/chat.md).
 - `agent.yaml` accepts an optional root `description`. `dar dash` lists agents by `name` (not `id`) with the description underneath, and the web chat header shows it below the agent name.
 - Web chat redesign: modern look, centered composer with an invite line on empty chats, **New chat** button, Markdown tables and rich formatting, message timestamps, tool-call summaries, an **Interrupted** marker, `/stop`, and a high-context-usage hint. See [docs/chat.md](docs/chat.md).
 - Web chat sessions: dar starts a fresh chat on boot; any saved session can be resumed from a searchable sidebar, renamed, archived, or deleted, and new sessions are titled automatically after the first reply.

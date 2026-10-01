@@ -80,7 +80,11 @@ Turns stream into every open browser tab, and reconnects replay missed events
 multipart `POST /chat/{session}/upload` (max 8 files, 8 MiB body) and stored
 under `data/chat/uploads/`; the agent turn receives their local paths.
 Assistant turns are labeled with the agent's `name` from `agent.yaml` (falls
-back to `Agent`).
+back to `Agent`). An optional top-level `avatar` in `agent.yaml` shows next to
+the name in the chat header and above the new-chat invite: an emoji
+(`avatar: "🦉"`), an `http(s)` image URL, or an image path relative to the
+agent folder (`avatar: assets/avatar.png`; png/jpg/gif/webp/svg), served at
+`GET /chat/avatar`. Paths outside the agent folder are ignored.
 
 **New chat.** An empty chat shows a short invite with the composer centered
 below it; the composer glides down to its dock once the first message is

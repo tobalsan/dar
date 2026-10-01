@@ -372,6 +372,8 @@
     renderChips(app); refreshBusy(app);
     transcript.scrollTop = transcript.scrollHeight;
     pickHeroLine();
+    // Avatar images get their src here so the fleet dashboard prefix applies to local paths.
+    for (const img of document.querySelectorAll?.('img[data-avatar-src]') || []) img.src = /^https?:/.test(img.dataset.avatarSrc) ? img.dataset.avatarSrc : PREFIX + img.dataset.avatarSrc;
     $('chat-root').classList?.toggle('sidebar-collapsed', typeof localStorage !== 'undefined' && localStorage.getItem('dar-chat-sidebar') === 'collapsed');
     showHistoryList(app);
   };
@@ -388,7 +390,7 @@
     "Fire away.", "What's the plan, boss?",
   ];
   const pickHeroLine = () => {
-    let hero = $('chat-hero');
+    let hero = $('chat-hero-line');
     if (hero) hero.textContent = HERO_LINES[Math.floor(Math.random() * HERO_LINES.length)];
   };
 
