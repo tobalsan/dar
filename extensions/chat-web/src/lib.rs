@@ -98,6 +98,7 @@ impl Extension for ChatWebExtension {
             )?;
             DashboardTabs::shared(&mut ctx.services)?.add(Arc::new(ChatTab {
                 agent_name: agent_display_name(ctx.paths.root()),
+                agent_description: agent_description(ctx.paths.root()),
             }))?;
             ctx.http.mount(host_api::HttpMount {
                 namespace: "/chat".into(),
@@ -157,6 +158,7 @@ impl Extension for ChatWebExtension {
 
 struct ChatTab {
     agent_name: String,
+    agent_description: Option<String>,
 }
 impl DashboardTab for ChatTab {
     fn id(&self) -> &str {
@@ -173,10 +175,14 @@ impl DashboardTab for ChatTab {
     }
     fn render(&self) -> Result<String> {
         Ok(format!(
-            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"><aside class="chat-sidebar" aria-label="Conversations"><div class="chat-sidebar-head"><strong>Chats</strong><button type="button" id="chat-sidebar-toggle" data-sidebar-toggle class="chat-icon" aria-label="Toggle sidebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button></div><input id="chat-search" class="chat-search" type="search" placeholder="Search conversations" aria-label="Search conversations"><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><header class="chat-header"><button type="button" data-sidebar-toggle class="chat-icon chat-mobile-sidebar-toggle" aria-label="Open conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button><div><strong>{}</strong><span id="chat-token-meter" class="chat-meter"></span></div><button type="button" class="chat-new" onclick="fetch('/chat/main/new',{{method:'POST'}})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button></header><div class="chat-dropzone" id="chat-dropzone" hidden>Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite"></div><div class="chat-hero" id="chat-hero"></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips"></div><div class="chat-cap-hint" id="chat-cap-hint"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.4 11.1l-9.2 9.1a6 6 0 01-8.4-8.4L13 2.6a4 4 0 015.6 5.6l-9.2 9.2a2 2 0 01-2.8-2.8l8.5-8.5"/></svg></button><input type="file" id="chat-attachments" multiple hidden><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message {}" aria-label="Message"></textarea><button type="button" id="chat-abort" class="chat-icon" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon" aria-label="Send" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div><div id="chat-context-warning" class="chat-context-warning" hidden>Context is filling up — send /compact to summarize.</div></form></div></section><script>{}</script><script>{}</script><script>{}</script>"#,
+            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"><aside class="chat-sidebar" aria-label="Conversations"><div class="chat-sidebar-head"><strong>Chats</strong><button type="button" id="chat-sidebar-toggle" data-sidebar-toggle class="chat-icon" aria-label="Toggle sidebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button></div><input id="chat-search" class="chat-search" type="search" placeholder="Search conversations" aria-label="Search conversations"><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><header class="chat-header"><button type="button" data-sidebar-toggle class="chat-icon chat-mobile-sidebar-toggle" aria-label="Open conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button><div><span class="chat-title"><strong>{}</strong>{}</span><span id="chat-token-meter" class="chat-meter"></span></div><button type="button" class="chat-new" onclick="fetch('/chat/main/new',{{method:'POST'}})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button></header><div class="chat-dropzone" id="chat-dropzone" hidden>Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite"></div><div class="chat-hero" id="chat-hero"></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips"></div><div class="chat-cap-hint" id="chat-cap-hint"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.4 11.1l-9.2 9.1a6 6 0 01-8.4-8.4L13 2.6a4 4 0 015.6 5.6l-9.2 9.2a2 2 0 01-2.8-2.8l8.5-8.5"/></svg></button><input type="file" id="chat-attachments" multiple hidden><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message {}" aria-label="Message"></textarea><button type="button" id="chat-abort" class="chat-icon" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon" aria-label="Send" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div><div id="chat-context-warning" class="chat-context-warning" hidden>Context is filling up — send /compact to summarize.</div></form></div></section><script>{}</script><script>{}</script><script>{}</script>"#,
             include_str!("chat.css"),
             escape_html_attr(&self.agent_name),
             escape_html_attr(&self.agent_name),
+            self.agent_description
+                .as_deref()
+                .map(|d| format!("<small class=\"chat-desc\">{}</small>", escape_html_attr(d)))
+                .unwrap_or_default(),
             escape_html_attr(&self.agent_name),
             include_str!("vendor/marked.min.js"),
             include_str!("vendor/purify.min.js"),
@@ -211,6 +217,21 @@ fn agent_display_name(root: &std::path::Path) -> String {
                 })
         })
         .unwrap_or_else(|| "Agent".to_owned())
+}
+
+/// `agent.yaml`'s optional `description`, shown under the name in the header.
+fn agent_description(root: &std::path::Path) -> Option<String> {
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct AgentYaml {
+        description: Option<String>,
+    }
+    fs::read_to_string(root.join("agent.yaml"))
+        .ok()
+        .and_then(|contents| serde_yaml::from_str::<AgentYaml>(&contents).ok())
+        .and_then(|parsed| parsed.description)
+        .map(|d| d.trim().to_owned())
+        .filter(|d| !d.is_empty())
 }
 
 fn escape_html_attr(value: &str) -> String {
@@ -979,7 +1000,7 @@ impl AppState {
 fn title_timeout() -> std::time::Duration {
     #[cfg(test)]
     {
-        return std::time::Duration::from_millis(50);
+        std::time::Duration::from_millis(50)
     }
     #[cfg(not(test))]
     {
@@ -3700,9 +3721,11 @@ mod tests {
     fn tab_fragment_has_a_usable_composer() {
         let tab = ChatTab {
             agent_name: "Test Agent".into(),
+            agent_description: Some("Does <things>".into()),
         };
         let html = tab.render().unwrap();
         assert!(html.contains("id=\"chat-composer\""));
+        assert!(html.contains("<small class=\"chat-desc\">Does &lt;things&gt;</small>"));
         // Belt-and-braces: even if the JS singleton fails to attach, the inline
         // handler blocks a native submit / full-page reload.
         assert!(html.contains("onsubmit=\"event.preventDefault()\""));

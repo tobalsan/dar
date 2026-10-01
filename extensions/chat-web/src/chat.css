@@ -208,6 +208,19 @@ body:has(.chat-web) #content {
   margin-right: auto;
   min-width: 0;
 }
+.chat-title {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.2;
+}
+.chat-desc {
+  color: var(--muted);
+  font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .chat-header strong {
   font-size: 0.95rem;
   font-weight: 650;

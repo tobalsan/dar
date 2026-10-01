@@ -118,6 +118,7 @@ async fn api_agents(State(state): State<DashState>) -> Response {
             serde_json::json!({
                 "id": entry.id,
                 "label": agent_label(entry),
+                "description": agent_meta(entry).1,
                 "folder": entry.folder,
                 "workflow": entry.workflow,
                 "addr": entry.addr,
@@ -150,8 +151,9 @@ fn agent_url(entry: &PresenceEntry) -> Option<String> {
 /// `id · <workflow-dir basename>-<path hash>`, or plain `id` when the
 /// workflow's directory is the agent folder (the default workflow).
 fn agent_label(entry: &PresenceEntry) -> String {
+    let name = agent_meta(entry).0.unwrap_or_else(|| entry.id.clone());
     let Some(workflow) = entry.workflow.as_deref() else {
-        return entry.id.clone();
+        return name;
     };
     let folder = Path::new(&entry.folder);
     let wf_dir = Path::new(workflow).parent();
@@ -162,7 +164,7 @@ fn agent_label(entry: &PresenceEntry) -> String {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             if base.is_empty() {
-                entry.id.clone()
+                name
             } else {
                 let file_name = entry.file_name();
                 let hash = file_name
@@ -170,11 +172,27 @@ fn agent_label(entry: &PresenceEntry) -> String {
                     .and_then(|name| name.rsplit_once('-'))
                     .map(|(_, hash)| hash)
                     .unwrap_or("workflow");
-                format!("{} \u{b7} {}-{hash}", entry.id, base)
+                format!("{} \u{b7} {}-{hash}", name, base)
             }
         }
-        _ => entry.id.clone(),
+        _ => name,
     }
+}
+
+/// `(name, description)` from the agent folder's `agent.yaml`; blanks → None.
+fn agent_meta(entry: &PresenceEntry) -> (Option<String>, Option<String>) {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default)]
+    struct Meta {
+        name: Option<String>,
+        description: Option<String>,
+    }
+    let meta = std::fs::read_to_string(Path::new(&entry.folder).join("agent.yaml"))
+        .ok()
+        .and_then(|s| serde_yaml::from_str::<Meta>(&s).ok())
+        .unwrap_or_default();
+    let clean = |v: Option<String>| v.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    (clean(meta.name), clean(meta.description))
 }
 
 fn render_shell(agents: &[PresenceEntry]) -> Result<String> {
@@ -191,14 +209,16 @@ fn render_shell(agents: &[PresenceEntry]) -> Result<String> {
         if first_url.is_empty() {
             first_url = url.clone();
         }
-        let folder = a.folder.rsplit('/').next().unwrap_or(&a.folder);
+        let folder = agent_meta(a)
+            .1
+            .unwrap_or_else(|| a.folder.rsplit('/').next().unwrap_or(&a.folder).to_string());
         items.push_str(&format!(
             "<li><button class=\"agent\" data-src=\"{url}\" onclick=\"pick(this)\">\
              <span class=\"aid\">{id}</span>\
              <span class=\"afolder\">{folder}</span></button></li>",
             url = he(&url),
             id = he(&agent_label(a)),
-            folder = he(folder),
+            folder = he(&folder),
         ));
     }
     let initial = if first_url.is_empty() {
@@ -318,7 +338,7 @@ fn render_shell(agents: &[PresenceEntry]) -> Result<String> {
         b.className = 'agent';
         b.dataset.src = url;
         b.onclick = function () {{ pick(b); }};
-        var folder = (a.folder || '').split('/').pop();
+        var folder = a.description || (a.folder || '').split('/').pop();
         b.innerHTML = '<span class="aid"></span><span class="afolder"></span>';
         b.querySelector('.aid').textContent = a.label;
         b.querySelector('.afolder').textContent = folder;
@@ -389,6 +409,20 @@ mod tests {
     use super::test_support::{entry, entry_wf, state};
     use super::*;
     use axum::http::StatusCode;
+
+    #[test]
+    fn sidebar_uses_yaml_name_and_description() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("agent.yaml"),
+            "id: kal\nname: Kalel\ndescription: Ships PRs\n",
+        )
+        .unwrap();
+        let e = entry("kal", dir.path().to_str().unwrap(), "0.0.0.0:1", 1);
+        assert_eq!(agent_label(&e), "Kalel");
+        let html = render_shell(&[e]).unwrap();
+        assert!(html.contains("<span class=\"afolder\">Ships PRs</span>"));
+    }
 
     #[test]
     fn agent_url_uses_proxy_path() {
