@@ -9,6 +9,8 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Builtin runner/chat now send `x-opencode-session` (and `x-opencode-client: dar`) to providers named `opencode` / `opencode-go`, fixing OpenCode Go `MissingSessionID` 400s.
+
 - Web chat shows an agent avatar in the header and new-chat hero when `agent.yaml` sets `avatar:` (emoji, image URL, or image file in the agent folder). See [docs/chat.md](docs/chat.md).
 - `agent.yaml` accepts an optional root `description`. `dar dash` lists agents by `name` (not `id`) with the description underneath, and the web chat header shows it below the agent name.
 - Web chat redesign: modern look, centered composer with an invite line on empty chats, **New chat** button, Markdown tables and rich formatting, message timestamps, tool-call summaries, an **Interrupted** marker, `/stop`, and a high-context-usage hint. See [docs/chat.md](docs/chat.md).

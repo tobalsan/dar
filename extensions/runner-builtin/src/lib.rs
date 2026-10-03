@@ -66,6 +66,11 @@ impl ChatBackend for BuiltinChatBackend {
                     params: Arc::new(params),
                     tx,
                     messages: Arc::new(Mutex::new(Vec::new())),
+                    session_id: format!(
+                        "dar-{}-{}",
+                        std::process::id(),
+                        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+                    ),
                 }) as Box<dyn ChatSession>)
             },
         ))
@@ -76,6 +81,7 @@ struct BuiltinChatSession {
     params: Arc<ChatSessionParams>,
     tx: tokio::sync::mpsc::Sender<ChatEvent>,
     messages: Arc<Mutex<Vec<serde_json::Value>>>,
+    session_id: String,
 }
 
 impl ChatSession for BuiltinChatSession {
@@ -83,9 +89,11 @@ impl ChatSession for BuiltinChatSession {
         let params = Arc::clone(&self.params);
         let tx = self.tx.clone();
         let messages = Arc::clone(&self.messages);
+        let session_id = self.session_id.clone();
         Box::pin(async move {
             tokio::spawn(async move {
-                if let Err(err) = run_builtin_chat_turn(params, tx.clone(), messages, prompt).await
+                if let Err(err) =
+                    run_builtin_chat_turn(params, tx.clone(), messages, prompt, session_id).await
                 {
                     let message = format!("{err:#}");
                     let _ = tx.send(ChatEvent::Error(message.clone())).await;
@@ -115,6 +123,7 @@ async fn run_builtin_chat_turn(
     tx: tokio::sync::mpsc::Sender<ChatEvent>,
     messages: Arc<Mutex<Vec<serde_json::Value>>>,
     prompt: String,
+    session_id: String,
 ) -> Result<()> {
     let provider = params
         .provider
@@ -146,6 +155,7 @@ async fn run_builtin_chat_turn(
             &client,
             &base_url,
             &api_key,
+            opencode_session(provider, &session_id),
             model,
             &request_messages,
             &tools,
@@ -325,6 +335,7 @@ async fn run_openai_compatible(
             client: &client,
             base_url: &base_url,
             api_key: &api_key,
+            opencode_session: opencode_session(provider, &run_id),
             model,
             messages: &messages,
             tools: &tools,
@@ -471,6 +482,24 @@ fn provider_endpoint(agent_root: &Path, provider: &str) -> Result<(String, Strin
     Ok((base, key))
 }
 
+/// OpenCode Go rejects requests without `x-opencode-session`; only send it to
+/// providers named `opencode` / `opencode-go`.
+fn opencode_session<'a>(provider: &str, session_id: &'a str) -> Option<&'a str> {
+    matches!(provider, "opencode" | "opencode-go").then_some(session_id)
+}
+
+fn with_opencode_headers(
+    builder: reqwest::RequestBuilder,
+    session: Option<&str>,
+) -> reqwest::RequestBuilder {
+    match session {
+        Some(id) => builder
+            .header("x-opencode-session", id)
+            .header("x-opencode-client", "dar"),
+        None => builder,
+    }
+}
+
 fn resolve_config_value(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
     if value.is_empty() {
@@ -531,6 +560,7 @@ struct ProviderRequest<'a> {
     client: &'a reqwest::Client,
     base_url: &'a str,
     api_key: &'a str,
+    opencode_session: Option<&'a str>,
     model: &'a str,
     messages: &'a [serde_json::Value],
     tools: &'a [serde_json::Value],
@@ -589,14 +619,14 @@ async fn stream_chat_completion(
     if !request.tools.is_empty() {
         body["tools"] = serde_json::Value::Array(request.tools.to_vec());
     }
-    let response = request
-        .client
-        .post(&url)
-        .bearer_auth(request.api_key)
-        .json(&body)
-        .send()
-        .await
-        .with_context(|| format!("posting builtin runner request to {url}"))?;
+    let response = with_opencode_headers(
+        request.client.post(&url).bearer_auth(request.api_key),
+        request.opencode_session,
+    )
+    .json(&body)
+    .send()
+    .await
+    .with_context(|| format!("posting builtin runner request to {url}"))?;
     let status = response.status();
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
@@ -650,6 +680,7 @@ async fn stream_chat_completion_to_chat(
     client: &reqwest::Client,
     base_url: &str,
     api_key: &str,
+    opencode_session: Option<&str>,
     model: &str,
     messages: &[serde_json::Value],
     tools: &[serde_json::Value],
@@ -660,9 +691,7 @@ async fn stream_chat_completion_to_chat(
     if !tools.is_empty() {
         body["tools"] = serde_json::Value::Array(tools.to_vec());
     }
-    let response = client
-        .post(&url)
-        .bearer_auth(api_key)
+    let response = with_opencode_headers(client.post(&url).bearer_auth(api_key), opencode_session)
         .json(&body)
         .send()
         .await
@@ -1047,5 +1076,12 @@ mod tests {
         assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].name, "echo_upper");
         assert_eq!(calls[0].arguments, r#"{"text":"hi"}"#);
+    }
+
+    #[test]
+    fn opencode_session_header_only_for_opencode_providers() {
+        assert_eq!(opencode_session("opencode", "s1"), Some("s1"));
+        assert_eq!(opencode_session("opencode-go", "s1"), Some("s1"));
+        assert_eq!(opencode_session("requesty", "s1"), None);
     }
 }
