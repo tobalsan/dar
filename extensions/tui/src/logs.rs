@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 
-use host_api::{EventBus, LogEvent, LOG_EVENTS_TOPIC, STARTUP_BANNER_TOPIC};
+use host_api::{EventBus, LogEvent, STARTUP_BANNER_TOPIC};
 use tokio::sync::{broadcast, watch};
 
 /// Max retained log rows; the oldest row is dropped when the ring is full.
@@ -108,7 +108,7 @@ impl LogFeed {
     /// unavailable (frontend-log not linked); an already-retained banner is
     /// pushed into the buffer immediately so it leads the log output.
     pub fn subscribe(bus: &EventBus, logs: &mut LogsState) -> Self {
-        let events = match bus.subscribe::<LogEvent>(LOG_EVENTS_TOPIC) {
+        let events = match host_api::subscribe_log_events(bus) {
             Ok(events) => Some(events),
             Err(_) => {
                 logs.unavailable = true;
@@ -203,6 +203,7 @@ impl LogFeed {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use host_api::LOG_EVENTS_TOPIC;
 
     fn event(level: &str, target: &str, message: &str) -> LogEvent {
         LogEvent {

@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use host_api::{
-    ExclusiveTerminal, Extension, Foreground, LogEvent, RegisterCtx, StartCtx, APP_DONE_TOPIC,
-    LOG_EVENTS_TOPIC, STARTUP_BANNER_TOPIC,
+    ExclusiveTerminal, Extension, Foreground, LogEvent, LogStartupReceiver, RegisterCtx, StartCtx,
+    APP_DONE_TOPIC, LOG_EVENTS_TOPIC, LOG_STARTUP_RECEIVER_TOPIC, STARTUP_BANNER_TOPIC,
 };
 
 pub struct FrontendLogExtension;
@@ -17,6 +17,14 @@ impl Extension for FrontendLogExtension {
         Box::pin(async move {
             ctx.bus
                 .register_broadcast::<LogEvent>(LOG_EVENTS_TOPIC, 1024)?;
+            // Open a receiver now so startup lines buffer until a foreground runs.
+            let startup: LogStartupReceiver = Arc::new(std::sync::Mutex::new(Some(
+                ctx.bus.subscribe::<LogEvent>(LOG_EVENTS_TOPIC)?,
+            )));
+            ctx.bus.register_retained::<Option<LogStartupReceiver>>(
+                LOG_STARTUP_RECEIVER_TOPIC,
+                Some(startup),
+            )?;
             ctx.bus.register_retained::<bool>(APP_DONE_TOPIC, false)?;
             ctx.bus
                 .register_retained::<Option<LogEvent>>(STARTUP_BANNER_TOPIC, None)?;
@@ -49,7 +57,7 @@ impl Foreground for FrontendLogForeground {
         Box::pin(async move {
             let mut shutdown = ctx.shutdown.clone();
             let mut app_done = ctx.host.bus.subscribe_retained::<bool>(APP_DONE_TOPIC)?;
-            let mut events = ctx.host.bus.subscribe::<LogEvent>(LOG_EVENTS_TOPIC)?;
+            let mut events = host_api::subscribe_log_events(&ctx.host.bus)?;
             // The banner topic is retained, so a banner published before this
             // foreground started running (e.g. during another extension's
             // start) is observed here instead of being dropped.
@@ -154,6 +162,25 @@ mod tests {
             .is_none());
         assert!(ctx.foreground.select(Some("logs")).unwrap().is_some());
         assert!(ctx.foreground.select(Some("missing")).is_err());
+    }
+
+    /// Log lines published during extension `start` (before any foreground
+    /// subscribes) must still reach the first foreground's subscription.
+    #[tokio::test]
+    async fn log_events_published_before_subscribe_are_buffered() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = host_api::HostPaths::new(temp.path()).unwrap();
+        let mut ctx = register_ctx(paths);
+        FrontendLogExtension.register(&mut ctx).await.unwrap();
+        let event = LogEvent {
+            time: "t".into(),
+            level: "INFO".into(),
+            target: "whatsapp".into(),
+            message: "listening".into(),
+        };
+        ctx.bus.publish(LOG_EVENTS_TOPIC, event.clone()).unwrap();
+        let mut rx = host_api::subscribe_log_events(&ctx.bus).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), event);
     }
 
     /// Boot-ordering regression test: a banner published BEFORE the foreground

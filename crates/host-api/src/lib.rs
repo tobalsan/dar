@@ -123,6 +123,24 @@ pub const LOG_EVENTS_TOPIC: &str = "host.log-events";
 /// `start` — broadcast topics do not replay values published before
 /// subscription.
 pub const STARTUP_BANNER_TOPIC: &str = "host.startup-banner";
+/// Retained slot holding a `host.log-events` receiver opened at register time,
+/// so log lines emitted during extension `start` are buffered until a
+/// foreground takes it. See [`subscribe_log_events`].
+pub const LOG_STARTUP_RECEIVER_TOPIC: &str = "host.log-startup-receiver";
+
+pub type LogStartupReceiver =
+    std::sync::Arc<std::sync::Mutex<Option<tokio::sync::broadcast::Receiver<LogEvent>>>>;
+
+/// Subscribe to `host.log-events`, taking the register-time receiver (with any
+/// buffered startup lines) when still available, else a fresh subscription.
+pub fn subscribe_log_events(bus: &EventBus) -> Result<tokio::sync::broadcast::Receiver<LogEvent>> {
+    if let Ok(slot) = bus.read_retained::<Option<LogStartupReceiver>>(LOG_STARTUP_RECEIVER_TOPIC) {
+        if let Some(rx) = slot.and_then(|slot| slot.lock().ok()?.take()) {
+            return Ok(rx);
+        }
+    }
+    bus.subscribe::<LogEvent>(LOG_EVENTS_TOPIC)
+}
 
 pub trait Extension: Send + Sync {
     fn id(&self) -> &'static str;

@@ -16,8 +16,7 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use host_api::{
-    ExclusiveTerminal, Foreground, LogEvent, StartCtx, APP_DONE_TOPIC, LOG_EVENTS_TOPIC,
-    STARTUP_BANNER_TOPIC,
+    ExclusiveTerminal, Foreground, LogEvent, StartCtx, APP_DONE_TOPIC, STARTUP_BANNER_TOPIC,
 };
 use orchestrator_api::{RunSnapshot, RUN_SNAPSHOT_TOPIC};
 use ratatui::backend::CrosstermBackend;
@@ -125,7 +124,7 @@ fn write_event(terminal: &mut ExclusiveTerminal, event: &LogEvent) -> std::io::R
 async fn run_non_interactive(ctx: StartCtx, mut terminal: ExclusiveTerminal) -> Result<()> {
     let mut shutdown = ctx.shutdown.clone();
     let mut app_done = ctx.host.bus.subscribe_retained::<bool>(APP_DONE_TOPIC)?;
-    let mut events = ctx.host.bus.subscribe::<LogEvent>(LOG_EVENTS_TOPIC)?;
+    let mut events = host_api::subscribe_log_events(&ctx.host.bus)?;
     let mut banner = ctx
         .host
         .bus
@@ -535,6 +534,7 @@ mod tests {
 
     use super::*;
     use crate::{DEFAULT_TURN_TIMEOUT, MAX_TURN_TIMEOUT_SECS};
+    use host_api::LOG_EVENTS_TOPIC;
 
     #[test]
     fn default_turn_timeout_is_sixty_minutes() {
