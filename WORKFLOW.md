@@ -6,7 +6,7 @@ tracker:
     - repo:dar
     - repo:dar-extensions
   active_states: [Todo, In Progress]
-  terminal_states: [In Review, Done, Cancelled]
+  terminal_states: [In Review, Ready to Merge, Done, Cancelled]
   needs_human: "Needs Human"
 
 polling:
@@ -42,7 +42,7 @@ Do this FIRST, before any task work — it is mandatory and unconditional. The c
 4. Add one concise tracker comment saying you are working on it (the claim comment).
 5. Continue only after those tracker updates succeed.
 
-Keep that same tracker comment updated with progress, validation results, blockers, and the final handoff. Do not create a noisy comment stream.
+Keep that same tracker comment updated with progress, validation results, blockers, and the final handoff, **but only while it is still the newest comment on the issue**. Before every update, re-read the issue's comments. If anyone (a human, Pom, a reviewer or another agent) has commented after yours, do NOT edit your earlier comment: post a new comment instead, and keep updating that new one under the same rule. Editing an older comment makes your update appear above the comments it answers, so readers lose the chronology. Otherwise, do not create a noisy comment stream.
 
 ## Dependencies
 
