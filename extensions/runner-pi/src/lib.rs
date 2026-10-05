@@ -152,12 +152,11 @@ async fn spawn_pi(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     );
 
     // Wire the host MCP bridge so the pi agent sees the same registry tools as
-    // codex: a per-session `--mcp-config` pointing at `<host> __mcp-bridge`,
-    // with an eager server lifecycle that defeats the cold-cache init race (see
-    // `mcp_config_args`).
+    // codex: `<host> __mcp-bridge` merged into the workspace's `.pi/mcp.json`
+    // (pi 1.0 native MCP) + `--approve` so pi trusts it.
     let mut bridge_env: Vec<(OsString, OsString)> = Vec::new();
     if let Some(bridge) = &p.host_tool_bridge {
-        let (bridge_args, env) = runner_core::pi_mcp_config_args(&session_dir, bridge)?;
+        let (bridge_args, env) = runner_core::pi_mcp_config_args(p.workspace, bridge)?;
         args.extend(bridge_args);
         bridge_env = env;
     }
@@ -1028,34 +1027,20 @@ mod tests {
     }
 
     #[test]
-    fn mcp_config_args_writes_config_and_returns_flag_and_env() {
+    fn mcp_config_args_writes_workspace_config_and_approves() {
         // The pi runner reuses the shared `pi_mcp_config_args` writer; assert it
-        // produces the per-session `--mcp-config` flag + `MCP_DIRECT_TOOLS` env
-        // the spawn path applies. (Config-document shape is covered in
-        // runner-core's bridge tests.)
+        // writes `<workspace>/.pi/mcp.json` and returns `--approve`. (Merge
+        // semantics are covered in runner-core's bridge tests.)
         let dir = tempfile::tempdir().unwrap();
-        let session_dir = dir.path().join("pi-sessions/ISSUE-1");
-        std::fs::create_dir_all(&session_dir).unwrap();
-
-        let (args, env) = runner_core::pi_mcp_config_args(&session_dir, &bridge()).unwrap();
-
-        // `--mcp-config <session_dir>/mcp-config.json`
-        assert_eq!(args[0], OsString::from("--mcp-config"));
-        let config_path = PathBuf::from(&args[1]);
-        assert_eq!(config_path, session_dir.join("mcp-config.json"));
-        assert!(config_path.exists(), "config file must be written");
-        let written: Value =
-            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let (args, env) = runner_core::pi_mcp_config_args(dir.path(), &bridge()).unwrap();
+        assert_eq!(args, vec![OsString::from("--approve")]);
+        assert!(env.is_empty());
+        let written: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join(".pi/mcp.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(written["mcpServers"]["dar"]["command"], "/opt/dar");
-
-        // Direct-tool promotion scoped to our server. We must NOT override
-        // PI_CODING_AGENT_DIR (that would drop the adapter that registers
-        // `--mcp-config`).
-        assert!(env.contains(&(OsString::from("MCP_DIRECT_TOOLS"), OsString::from("dar"))));
-        assert!(
-            !env.iter().any(|(k, _)| k == "PI_CODING_AGENT_DIR"),
-            "must not repoint PI_CODING_AGENT_DIR; the mcp adapter lives there"
-        );
+        assert_eq!(written["mcpServers"]["dar"]["exposure"], "direct");
     }
 
     #[test]

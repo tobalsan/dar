@@ -222,11 +222,11 @@ impl PiChatSession {
         cmd.args(pi_args(params));
         scrub_loaded_env(&mut cmd);
         // Wire the host MCP bridge so the chat pi agent sees the same registry
-        // tools an issue worker does: a per-session `--mcp-config` pointing at
-        // `<host> __mcp-bridge`, plus `MCP_DIRECT_TOOLS`. Reuses the runner's
-        // config writer so chat and worker spawns stay identical.
+        // tools an issue worker does: `<host> __mcp-bridge` merged into the
+        // agent root's `.pi/mcp.json` (pi 1.0 native MCP) + `--approve`. Reuses
+        // the runner's config writer so chat and worker spawns stay identical.
         if let Some(bridge) = &params.host_tool_bridge {
-            let (bridge_args, env) = runner_core::pi_mcp_config_args(&params.session_dir, bridge)?;
+            let (bridge_args, env) = runner_core::pi_mcp_config_args(&params.agent_root, bridge)?;
             cmd.args(bridge_args);
             cmd.envs(env);
         }

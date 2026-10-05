@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- pi runner/chat now target pi ≥ 1.0 native MCP: host tools are wired via `<cwd>/.pi/mcp.json` (merged, user servers kept) + `--approve`, fixing `Unknown option: --mcp-config` crashes. pi-mcp-adapter no longer needed.
 - Builtin runner/chat now send `x-opencode-session` (and `x-opencode-client: dar`) to providers named `opencode` / `opencode-go`, fixing OpenCode Go `MissingSessionID` 400s.
 
 - Web chat shows an agent avatar in the header and new-chat hero when `agent.yaml` sets `avatar:` (emoji, image URL, or image file in the agent folder). See [docs/chat.md](docs/chat.md).

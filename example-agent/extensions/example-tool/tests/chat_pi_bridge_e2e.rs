@@ -15,8 +15,7 @@
 //! bridge threaded extension config into the tool's register() pass, so a green
 //! run guards config parity on the chat path too.
 //!
-//! Gated: skips (passes) unless `pi` is installed (with the MCP adapter that
-//! registers `--mcp-config`) and `DAR_PI_E2E=1` is set, so CI without a pi
+//! Gated: skips (passes) unless `pi` is installed (pi >= 1.0, native MCP) and `DAR_PI_E2E=1` is set, so CI without a pi
 //! login is unaffected.
 //!
 //! Run it explicitly with:
@@ -55,8 +54,8 @@ async fn chat_pi_calls_echo_upper_through_host_bridge() {
     let expected = format!("HELLO FROM SPIKE{SUFFIX}");
 
     // The same `HostToolBridge` descriptor the TUI foreground builds for chat:
-    // `<bridge> --suffix <suffix>`. chat-pi's spawn writes the `--mcp-config`
-    // document and `MCP_DIRECT_TOOLS` env via the shared runner-core writer.
+    // `<bridge> --suffix <suffix>`. chat-pi's spawn merges the bridge into
+    // `<agent_root>/.pi/mcp.json` via the shared runner-core writer.
     let bridge = HostToolBridge {
         command: bridge_bin.to_string(),
         args: vec!["--suffix".to_string(), SUFFIX.to_string()],

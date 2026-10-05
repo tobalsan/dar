@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use tool_registry::{ToolRegistryHandle, TOOL_REGISTRY_SERVICE};
 
 /// Name of the host MCP bridge as advertised to every backend. Stable so pi's
-/// per-session metadata cache, `MCP_DIRECT_TOOLS`, codex `mcp_servers.<name>`,
+/// `.pi/mcp.json` entry, codex `mcp_servers.<name>`,
 /// and opencode `mcp.<name>` all refer to the same server.
 pub const BRIDGE_SERVER_NAME: &str = "dar";
 
@@ -80,57 +80,46 @@ fn bridge_dial_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
 }
 
 // ---------------------------------------------------------------------------
-// pi (--mcp-config)
+// pi (<cwd>/.pi/mcp.json, native MCP since pi 1.0)
 // ---------------------------------------------------------------------------
 
-/// Per-session pi settings sub-tree that makes the host bridge's tools reliable
-/// on the first turn:
-/// - `directTools: true` promotes the bridge's tools to first-class pi tools.
-/// - `disableProxyTool: false` keeps the always-present proxy `mcp` tool as the
-///   cold-start floor (registered synchronously at load, lazy-connects on call),
-///   so the host tool is reachable on the very first turn even before the async
-///   server bootstrap finishes.
-fn pi_bridge_settings() -> Value {
-    json!({
-        "toolPrefix": "none",
-        "directTools": true,
-        "disableProxyTool": false,
-    })
-}
-
-/// The pi `--mcp-config` document advertising the host bridge as a stdio MCP
-/// server. Matches pi-mcp-adapter's schema: `{ "mcpServers": { <name>: { command,
-/// args } }, "settings": { ... } }`. The server is marked `lifecycle: "eager"`
-/// so pi connects (and warms the per-session metadata cache) during
-/// `session_start` rather than waiting for the first call.
-fn pi_bridge_mcp_config(bridge: &HostToolBridge) -> Value {
-    json!({
-        "mcpServers": {
-            BRIDGE_SERVER_NAME: {
-                "command": bridge.command,
-                "args": bridge.args,
-                "lifecycle": "eager",
-            }
-        },
-        "settings": pi_bridge_settings(),
-    })
-}
-
-/// Materialize the per-session pi MCP config for the host bridge, returning the
-/// extra `pi` CLI args (`--mcp-config <file>`) and process env (`MCP_DIRECT_TOOLS`)
-/// to apply. Writes `<session_dir>/mcp-config.json`.
-pub fn pi_mcp_config_args(session_dir: &Path, bridge: &HostToolBridge) -> Result<BridgeInvocation> {
-    let config_path = session_dir.join("mcp-config.json");
-    let config = pi_bridge_mcp_config(bridge);
+/// Advertise the host bridge to pi's native MCP support. Pi 1.0 reads servers
+/// only from `~/.pi/agent/mcp.json` and, for trusted projects, from
+/// `<cwd>/.pi/mcp.json` — there is no per-run config flag. So merge the bridge
+/// entry (`exposure: "direct"` → first-class pi tools) into the spawn cwd's
+/// project file, keeping any user-defined servers, and return `--approve` so pi
+/// trusts that project file for this run.
+pub fn pi_mcp_config_args(cwd: &Path, bridge: &HostToolBridge) -> Result<BridgeInvocation> {
+    let config_path = cwd.join(".pi").join("mcp.json");
+    let mut config: Value = match std::fs::read_to_string(&config_path) {
+        Ok(text) => serde_json::from_str(&text)
+            .with_context(|| format!("parsing pi mcp config {}", config_path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(e) => {
+            return Err(e).with_context(|| format!("reading {}", config_path.display()));
+        }
+    };
+    let root = config
+        .as_object_mut()
+        .with_context(|| format!("{}: expected a JSON object", config_path.display()))?;
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .with_context(|| format!("{}: \"mcpServers\" must be an object", config_path.display()))?;
+    servers.insert(
+        BRIDGE_SERVER_NAME.to_string(),
+        json!({
+            "command": bridge.command,
+            "args": bridge.args,
+            "exposure": "direct",
+        }),
+    );
+    std::fs::create_dir_all(config_path.parent().expect("has parent"))
+        .with_context(|| format!("creating {}", cwd.join(".pi").display()))?;
     std::fs::write(&config_path, format!("{config:#}\n"))
         .with_context(|| format!("writing pi mcp config {}", config_path.display()))?;
-
-    let args = vec![OsString::from("--mcp-config"), config_path.into_os_string()];
-    let env = vec![(
-        OsString::from("MCP_DIRECT_TOOLS"),
-        OsString::from(BRIDGE_SERVER_NAME),
-    )];
-    Ok((args, env))
+    Ok((vec![OsString::from("--approve")], Vec::new()))
 }
 
 // ---------------------------------------------------------------------------
@@ -334,28 +323,34 @@ mod tests {
     }
 
     #[test]
-    fn pi_mcp_config_args_writes_config_and_returns_flag_and_env() {
+    fn pi_mcp_config_args_merges_project_config_and_approves() {
         let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(".pi/mcp.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            r#"{"mcpServers":{"user":{"command":"u"}},"other":1}"#,
+        )
+        .unwrap();
+
         let (args, env) = pi_mcp_config_args(dir.path(), &bridge()).unwrap();
-        assert_eq!(args[0], OsString::from("--mcp-config"));
-        let config_path = dir.path().join("mcp-config.json");
-        assert_eq!(args[1], config_path.as_os_str());
+        assert_eq!(args, vec![OsString::from("--approve")]);
+        assert!(env.is_empty());
+
         let written: Value =
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-        assert_eq!(
-            written["mcpServers"][BRIDGE_SERVER_NAME]["command"],
-            "/opt/dar"
-        );
-        assert_eq!(
-            written["mcpServers"][BRIDGE_SERVER_NAME]["args"],
-            json!(["__mcp-bridge", "--dir", "/tmp/agent"])
-        );
-        assert_eq!(
-            written["mcpServers"][BRIDGE_SERVER_NAME]["lifecycle"],
-            "eager"
-        );
-        assert_eq!(env[0].0, OsString::from("MCP_DIRECT_TOOLS"));
-        assert_eq!(env[0].1, OsString::from(BRIDGE_SERVER_NAME));
+        let server = &written["mcpServers"][BRIDGE_SERVER_NAME];
+        assert_eq!(server["command"], "/opt/dar");
+        assert_eq!(server["args"], json!(["__mcp-bridge", "--dir", "/tmp/agent"]));
+        assert_eq!(server["exposure"], "direct");
+        assert_eq!(written["mcpServers"]["user"]["command"], "u");
+        assert_eq!(written["other"], 1);
+
+        // Idempotent and creates the file when missing.
+        let fresh = tempfile::tempdir().unwrap();
+        pi_mcp_config_args(fresh.path(), &bridge()).unwrap();
+        pi_mcp_config_args(fresh.path(), &bridge()).unwrap();
+        assert!(fresh.path().join(".pi/mcp.json").exists());
     }
 
     #[test]
