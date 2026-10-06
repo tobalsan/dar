@@ -95,6 +95,7 @@ pub mod chat {
     #[serde(default)]
     struct MaxToolCallsRunner {
         max_tool_calls: Option<u32>,
+        context_window: Option<u64>,
     }
 
     /// `runner.max_tool_calls` from `agent.yaml`; `None` when absent or unreadable.
@@ -103,6 +104,14 @@ pub mod chat {
             .ok()
             .and_then(|yaml| serde_yaml::from_str::<MaxToolCallsYaml>(&yaml).ok())
             .and_then(|cfg| cfg.runner.max_tool_calls)
+    }
+
+    /// `runner.context_window` from `agent.yaml`; `None` when absent or unreadable.
+    fn context_window(ctx: &StartCtx) -> Option<u64> {
+        std::fs::read_to_string(ctx.paths.root().join("agent.yaml"))
+            .ok()
+            .and_then(|yaml| serde_yaml::from_str::<MaxToolCallsYaml>(&yaml).ok())
+            .and_then(|cfg| cfg.runner.context_window)
     }
 
     fn agent_profile(ctx: &StartCtx) -> Option<AgentProfile> {
@@ -151,6 +160,7 @@ pub mod chat {
     ///   ([`SYSTEM_CONTEXT_TOPIC`]) followed by [`NO_REPLY_INSTRUCTION`]; an
     ///   absent topic or empty assembly yields `None` (backend default prompt);
     /// * **max_tool_calls** — `runner.max_tool_calls` from `agent.yaml`;
+    /// * **context_window** — `runner.context_window` from `agent.yaml`;
     /// * **agent_loop** — `agent_loop:` from `agent.yaml` (loop-guard limits);
     /// * **host tool bridge** — the hidden `__mcp-bridge` descriptor, or `None`
     ///   when no tool registry is present;
@@ -177,6 +187,7 @@ pub mod chat {
         ChatSessionParams::builder("", ctx.paths.root(), session_dir)
             .agent_loop(agent_loop_config(ctx))
             .max_tool_calls(max_tool_calls(ctx))
+            .context_window(context_window(ctx))
             .model(model)
             .provider(provider)
             .system_prompt(system_prompt)

@@ -25,6 +25,7 @@ runner:
   max_run_timeout_ms: 3600000 # 1 h hard cap per attempt (alias: turn_timeout_ms)
   stall_timeout_ms: 300000    # 5 min silence → stall kill
   # max_tool_calls: 100      # builtin runner/chat only: max tool calls per turn (default 100, must be > 0)
+  # context_window: 128000  # builtin chat only: model context window in tokens, shown with context usage (must be > 0)
 
 # Provider endpoints for `runner.use: builtin` (and its chat backend).
 # providers:

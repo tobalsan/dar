@@ -102,6 +102,10 @@ pub struct RunnerConfig {
     /// builtin default (100); other runners ignore it.
     #[serde(default)]
     pub max_tool_calls: Option<u32>,
+    /// Model context window in tokens, reported with the builtin chat's
+    /// context-usage events. Unset leaves the window unknown.
+    #[serde(default)]
+    pub context_window: Option<u64>,
 }
 
 fn default_turn_timeout_ms() -> u64 {
@@ -312,6 +316,9 @@ impl AgentConfig {
         if self.runner.max_tool_calls == Some(0) {
             bail!("runner.max_tool_calls must be > 0");
         }
+        if self.runner.context_window == Some(0) {
+            bail!("runner.context_window must be > 0");
+        }
         Ok(())
     }
 }
@@ -422,6 +429,26 @@ mod tests {
         let error = cfg.validate().unwrap_err().to_string();
 
         assert!(error.contains("runner.max_tool_calls"), "{error}");
+    }
+
+    #[test]
+    fn zero_context_window_is_rejected() {
+        let raw = BASE.replace("use: fake", "use: fake\n  context_window: 0");
+        let cfg: AgentConfig = serde_yaml::from_str(&raw).unwrap();
+
+        let error = cfg.validate().unwrap_err().to_string();
+
+        assert!(error.contains("runner.context_window"), "{error}");
+    }
+
+    #[test]
+    fn context_window_parses_when_set() {
+        let cfg: AgentConfig = serde_yaml::from_str(BASE).unwrap();
+        assert_eq!(cfg.runner.context_window, None);
+        let raw = BASE.replace("use: fake", "use: fake\n  context_window: 128000");
+        let cfg: AgentConfig = serde_yaml::from_str(&raw).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.runner.context_window, Some(128000));
     }
 
     #[test]

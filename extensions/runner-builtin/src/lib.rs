@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod tools;
+mod transcript;
 
 use anyhow::{anyhow, Context, Result};
 use cap_chat::{ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams};
@@ -18,7 +19,8 @@ use futures_util::StreamExt;
 use host_api::{Extension, RegisterCtx};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::oneshot;
+use transcript::{summary_message, Transcript};
 
 const EVENT_KIND: &str = "runner.builtin";
 
@@ -62,38 +64,190 @@ impl ChatBackend for BuiltinChatBackend {
             params.agent_loop,
             tx,
             move |tx| async move {
-                Ok(Box::new(BuiltinChatSession {
-                    params: Arc::new(params),
-                    tx,
-                    messages: Arc::new(Mutex::new(Vec::new())),
-                    session_id: format!(
+                let resumed = params.resume_session_id.as_deref().and_then(|id| {
+                    let resumed = Transcript::resume(&params.session_dir, id);
+                    if resumed.is_none() {
+                        tracing::warn!(
+                            session = id,
+                            "builtin chat session to resume not found; opening fresh"
+                        );
+                    }
+                    resumed
+                });
+                let (transcript, history) = resumed.unwrap_or_else(|| {
+                    let id = format!(
                         "dar-{}-{}",
                         std::process::id(),
                         chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-                    ),
+                    );
+                    (Transcript::fresh(&params.session_dir, id), Vec::new())
+                });
+                Ok(Box::new(BuiltinChatSession {
+                    params: Arc::new(params),
+                    tx,
+                    session_id: transcript.id().to_string(),
+                    state: Arc::new(std::sync::Mutex::new(ChatState {
+                        history,
+                        transcript,
+                    })),
+                    turns: Vec::new(),
+                    turn_tail: None,
                 }) as Box<dyn ChatSession>)
             },
         ))
     }
 }
 
+/// Conversation history (OpenAI chat messages, without the system prompt) and
+/// its transcript. Every history change goes through [`ChatState::push`] /
+/// [`ChatState::compact`] so the transcript never diverges. Locked only for
+/// short synchronous sections, never across an `await`.
+struct ChatState {
+    history: Vec<serde_json::Value>,
+    transcript: Transcript,
+}
+
+impl ChatState {
+    fn push(&mut self, message: serde_json::Value) {
+        self.transcript.append_message(&message);
+        self.history.push(message);
+    }
+
+    fn compact(&mut self, summary: &str) {
+        self.transcript.append_compaction(summary);
+        self.history = vec![summary_message(summary)];
+    }
+
+    /// Answers every tool call of the trailing assistant tool-call batch that has
+    /// no tool response yet, so the next request is valid for the provider.
+    fn answer_unfinished_tool_calls(&mut self, reason: &str) {
+        for message in self.unanswered_tool_responses(reason) {
+            self.push(message);
+        }
+    }
+
+    /// The tool responses [`Self::answer_unfinished_tool_calls`] would add,
+    /// without touching history or the transcript.
+    fn unanswered_tool_responses(&self, reason: &str) -> Vec<serde_json::Value> {
+        let Some(start) = self
+            .history
+            .iter()
+            .rposition(|message| message.get("tool_calls").is_some())
+        else {
+            return Vec::new();
+        };
+        let answered: Vec<String> = self.history[start + 1..]
+            .iter()
+            .filter_map(|message| message["tool_call_id"].as_str().map(str::to_string))
+            .collect();
+        let missing: Vec<String> = self.history[start]["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|call| call["id"].as_str())
+            .filter(|id| !answered.iter().any(|answered| answered == id))
+            .map(str::to_string)
+            .collect();
+        missing
+            .into_iter()
+            .map(|id| {
+                serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": id,
+                    "content": format!("not executed: {reason}"),
+                })
+            })
+            .collect()
+    }
+}
+
+type SharedChatState = Arc<std::sync::Mutex<ChatState>>;
+
+fn lock_state(state: &SharedChatState) -> std::sync::MutexGuard<'_, ChatState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 struct BuiltinChatSession {
     params: Arc<ChatSessionParams>,
     tx: tokio::sync::mpsc::Sender<ChatEvent>,
-    messages: Arc<Mutex<Vec<serde_json::Value>>>,
+    state: SharedChatState,
     session_id: String,
+    /// Accepted turns not yet reaped: at most one running, the rest waiting
+    /// on their predecessor via `turn_tail`.
+    turns: Vec<tokio::task::JoinHandle<()>>,
+    /// Completes (sender dropped) when the most recently accepted turn ends;
+    /// the next `send_turn` captures it synchronously, so turns run in
+    /// submission order.
+    turn_tail: Option<oneshot::Receiver<()>>,
+}
+
+/// Cancels the in-flight turn and every queued one and repairs the history
+/// for the next request. Returns how many turns were cancelled.
+async fn cancel_turns(turns: Vec<tokio::task::JoinHandle<()>>, state: &SharedChatState) -> usize {
+    let turns: Vec<_> = turns
+        .into_iter()
+        .filter(|turn| !turn.is_finished())
+        .collect();
+    for turn in &turns {
+        turn.abort();
+    }
+    let mut aborted = 0;
+    for turn in turns {
+        if turn.await.is_err() {
+            aborted += 1; // otherwise finished on its own before the abort landed
+        }
+    }
+    if aborted > 0 {
+        lock_state(state).answer_unfinished_tool_calls("aborted");
+    }
+    aborted
+}
+
+/// Reports `count` cancelled turns as aborted from a background task, so
+/// `abort`/`close` never wait on channel capacity while their caller is the
+/// one draining events. The receiver completes once every report is sent.
+fn report_aborted(
+    tx: tokio::sync::mpsc::Sender<ChatEvent>,
+    count: usize,
+) -> Option<oneshot::Receiver<()>> {
+    if count == 0 {
+        return None;
+    }
+    let (done_tx, done_rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _done = done_tx;
+        for _ in 0..count {
+            let _ = tx
+                .send(ChatEvent::TurnFinished {
+                    ok: false,
+                    error: Some("aborted".to_string()),
+                })
+                .await;
+        }
+    });
+    Some(done_rx)
 }
 
 impl ChatSession for BuiltinChatSession {
     fn send_turn(&mut self, prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
         let params = Arc::clone(&self.params);
         let tx = self.tx.clone();
-        let messages = Arc::clone(&self.messages);
+        let state = Arc::clone(&self.state);
         let session_id = self.session_id.clone();
         Box::pin(async move {
-            tokio::spawn(async move {
+            self.turns.retain(|turn| !turn.is_finished());
+            let previous = self.turn_tail.take();
+            let (done_tx, done_rx) = oneshot::channel::<()>();
+            self.turn_tail = Some(done_rx);
+            self.turns.push(tokio::spawn(async move {
+                if let Some(previous) = previous {
+                    let _ = previous.await; // resolves when the predecessor ends or is aborted
+                }
+                let _done = done_tx;
                 if let Err(err) =
-                    run_builtin_chat_turn(params, tx.clone(), messages, prompt, session_id).await
+                    run_builtin_chat_turn(params, tx.clone(), state, prompt, session_id).await
                 {
                     let message = format!("{err:#}");
                     let _ = tx.send(ChatEvent::Error(message.clone())).await;
@@ -104,24 +258,68 @@ impl ChatSession for BuiltinChatSession {
                         })
                         .await;
                 }
-            });
+            }));
             Ok(())
         })
     }
 
     fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
-        Box::pin(async { Ok(()) })
+        Box::pin(async move {
+            let aborted = cancel_turns(std::mem::take(&mut self.turns), &self.state).await;
+            if let Some(reported) = report_aborted(self.tx.clone(), aborted) {
+                // The next turn waits for these reports, keeping event order.
+                self.turn_tail = Some(reported);
+            }
+            Ok(())
+        })
     }
 
-    fn close(self: Box<Self>) -> cap_chat::BoxFuture<'static, Result<()>> {
-        Box::pin(async { Ok(()) })
+    fn close(mut self: Box<Self>) -> cap_chat::BoxFuture<'static, Result<()>> {
+        Box::pin(async move {
+            let aborted = cancel_turns(std::mem::take(&mut self.turns), &self.state).await;
+            let _ = report_aborted(self.tx.clone(), aborted);
+            Ok(())
+        })
+    }
+}
+
+const COMPACT_COMMAND: &str = "/compact";
+
+const COMPACT_PROMPT: &str = "Summarize the conversation so far so it can replace the full history. Be concise but keep the facts, decisions, open tasks, user preferences, and names needed to continue. Reply with the summary only.";
+
+/// The request messages: system prompt (not part of the persisted history)
+/// followed by the history.
+fn chat_request_messages(
+    params: &ChatSessionParams,
+    state: &SharedChatState,
+) -> Vec<serde_json::Value> {
+    let mut messages = Vec::new();
+    if let Some(system) = params.system_prompt.as_deref().filter(|s| !s.is_empty()) {
+        messages.push(serde_json::json!({"role": "system", "content": system}));
+    }
+    messages.extend(lock_state(state).history.iter().cloned());
+    messages
+}
+
+async fn send_context_usage(
+    tx: &tokio::sync::mpsc::Sender<ChatEvent>,
+    tokens_used: Option<u64>,
+    context_window: Option<u64>,
+) {
+    if let Some(tokens_used) = tokens_used {
+        let _ = tx
+            .send(ChatEvent::ContextUsage {
+                tokens_used,
+                context_window,
+            })
+            .await;
     }
 }
 
 async fn run_builtin_chat_turn(
     params: Arc<ChatSessionParams>,
     tx: tokio::sync::mpsc::Sender<ChatEvent>,
-    messages: Arc<Mutex<Vec<serde_json::Value>>>,
+    state: SharedChatState,
     prompt: String,
     session_id: String,
 ) -> Result<()> {
@@ -130,17 +328,31 @@ async fn run_builtin_chat_turn(
         .as_deref()
         .context("builtin chat requires runner.provider")?;
     let (base_url, api_key) = provider_endpoint(&params.agent_root, provider)?;
-    let mut request_messages = {
-        let mut guard = messages.lock().await;
-        if guard.is_empty() {
-            if let Some(system) = params.system_prompt.as_deref().filter(|s| !s.is_empty()) {
-                guard.push(serde_json::json!({"role": "system", "content": system}));
-            }
-        }
-        guard.push(serde_json::json!({"role": "user", "content": prompt}));
-        guard.clone()
-    };
     let client = reqwest::Client::new();
+    let model = params.model.as_deref().unwrap_or("openai/gpt-4o-mini");
+    let opencode_session = opencode_session(provider, &session_id);
+    if prompt.trim() == COMPACT_COMMAND {
+        return compact_chat_history(
+            &params,
+            &tx,
+            &state,
+            &ProviderRequest {
+                client: &client,
+                base_url: &base_url,
+                api_key: &api_key,
+                opencode_session,
+                model,
+                messages: &[],
+                tools: &[],
+            },
+        )
+        .await;
+    }
+    {
+        let mut guard = lock_state(&state);
+        guard.answer_unfinished_tool_calls("interrupted");
+        guard.push(serde_json::json!({"role": "user", "content": prompt}));
+    }
     let mut bridge = match params.host_tool_bridge.clone() {
         Some(bridge) => Some(McpBridgeClient::spawn(bridge).await?),
         None => None,
@@ -149,23 +361,27 @@ async fn run_builtin_chat_turn(
         Some(bridge) => bridge.openai_tools().await?,
         None => Vec::new(),
     };
-    let model = params.model.as_deref().unwrap_or("openai/gpt-4o-mini");
     let mut budget = ToolCallBudget::new(params.max_tool_calls);
     loop {
+        let request_messages = chat_request_messages(&params, &state);
         let request = ProviderRequest {
             client: &client,
             base_url: &base_url,
             api_key: &api_key,
-            opencode_session: opencode_session(provider, &session_id),
+            opencode_session,
             model,
             messages: &request_messages,
             tools: &tools,
         };
-        let outcome = stream_chat_completion_to_chat(&request, &tx).await?;
+        let outcome = stream_chat_completion_to_chat(&request, Some(&tx)).await?;
+        send_context_usage(
+            &tx,
+            outcome.usage.as_ref().map(|usage| usage.total),
+            params.context_window,
+        )
+        .await;
         if outcome.tool_calls.is_empty() {
-            messages
-                .lock()
-                .await
+            lock_state(&state)
                 .push(serde_json::json!({"role": "assistant", "content": outcome.content}));
             let _ = tx
                 .send(ChatEvent::TurnFinished {
@@ -181,8 +397,7 @@ async fn run_builtin_chat_turn(
         if !outcome.content.is_empty() {
             assistant["content"] = serde_json::Value::String(outcome.content);
         }
-        request_messages.push(assistant.clone());
-        messages.lock().await.push(assistant);
+        lock_state(&state).push(assistant);
         let bridge = bridge
             .as_mut()
             .context("model requested a tool but no host tool bridge is available")?;
@@ -215,15 +430,68 @@ async fn run_builtin_chat_turn(
                     done: true,
                 })
                 .await;
-            let tool_message = serde_json::json!({
+            lock_state(&state).push(serde_json::json!({
                 "role": "tool",
                 "tool_call_id": id,
                 "content": result_content,
-            });
-            request_messages.push(tool_message.clone());
-            messages.lock().await.push(tool_message);
+            }));
         }
     }
+}
+
+/// `/compact`: replaces the history with one model-written summary message.
+/// Any failure leaves the history untouched. The usage reported afterwards is
+/// the summary's completion size, an estimate of the new context (the summary
+/// call's own prompt size describes the history that was just dropped).
+async fn compact_chat_history(
+    params: &ChatSessionParams,
+    tx: &tokio::sync::mpsc::Sender<ChatEvent>,
+    state: &SharedChatState,
+    base: &ProviderRequest<'_>,
+) -> Result<()> {
+    if lock_state(state).history.is_empty() {
+        let _ = tx
+            .send(ChatEvent::TurnFinished {
+                ok: true,
+                error: None,
+            })
+            .await;
+        return Ok(());
+    }
+    let mut messages = chat_request_messages(params, state);
+    messages.extend(lock_state(state).unanswered_tool_responses("interrupted"));
+    messages.push(serde_json::json!({"role": "user", "content": COMPACT_PROMPT}));
+    let request = ProviderRequest {
+        messages: &messages,
+        ..*base
+    };
+    let outcome = stream_chat_completion_to_chat(&request, None).await?;
+    let summary = outcome.content.trim();
+    if summary.is_empty() {
+        return Err(anyhow!("compaction produced an empty summary"));
+    }
+    lock_state(state).compact(summary);
+    let _ = tx
+        .send(ChatEvent::Delta {
+            role: ChatRole::Assistant,
+            text: "Context compacted.".to_string(),
+        })
+        .await;
+    send_context_usage(
+        tx,
+        outcome
+            .usage
+            .map(|usage| usage.completion.unwrap_or(usage.total)),
+        params.context_window,
+    )
+    .await;
+    let _ = tx
+        .send(ChatEvent::TurnFinished {
+            ok: true,
+            error: None,
+        })
+        .await;
+    Ok(())
 }
 
 impl Runner for BuiltinRunner {
@@ -551,6 +819,26 @@ struct ChatOutcome {
     content: String,
     tool_calls: Vec<serde_json::Value>,
     finish_reason: Option<String>,
+    usage: Option<TokenUsage>,
+}
+
+/// Provider-reported token usage of one model response.
+struct TokenUsage {
+    /// `prompt_tokens + completion_tokens`, else `total_tokens`.
+    total: u64,
+    completion: Option<u64>,
+}
+
+impl TokenUsage {
+    fn from_chunk(usage: &serde_json::Value) -> Option<Self> {
+        let prompt = usage["prompt_tokens"].as_u64();
+        let completion = usage["completion_tokens"].as_u64();
+        let total = match (prompt, completion) {
+            (Some(prompt), Some(completion)) => prompt + completion,
+            _ => usage["total_tokens"].as_u64()?,
+        };
+        Some(Self { total, completion })
+    }
 }
 
 #[derive(Default, Clone)]
@@ -591,6 +879,7 @@ fn is_transient_provider_error(err: &anyhow::Error) -> bool {
     )
 }
 
+#[derive(Clone, Copy)]
 struct ProviderRequest<'a> {
     client: &'a reqwest::Client,
     base_url: &'a str,
@@ -713,7 +1002,7 @@ async fn stream_chat_completion(
 
 async fn stream_chat_completion_to_chat(
     request: &ProviderRequest<'_>,
-    tx: &tokio::sync::mpsc::Sender<ChatEvent>,
+    tx: Option<&tokio::sync::mpsc::Sender<ChatEvent>>,
 ) -> Result<ChatOutcome> {
     let ProviderRequest {
         client,
@@ -725,7 +1014,12 @@ async fn stream_chat_completion_to_chat(
         tools,
     } = *request;
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let mut body = serde_json::json!({"model": model, "stream": true, "messages": messages});
+    let mut body = serde_json::json!({
+        "model": model,
+        "stream": true,
+        "stream_options": {"include_usage": true},
+        "messages": messages,
+    });
     if !tools.is_empty() {
         body["tools"] = serde_json::Value::Array(tools.to_vec());
     }
@@ -769,7 +1063,7 @@ async fn stream_chat_completion_to_chat(
 
 async fn handle_chat_sse_line(
     line: &str,
-    tx: &tokio::sync::mpsc::Sender<ChatEvent>,
+    tx: Option<&tokio::sync::mpsc::Sender<ChatEvent>>,
     outcome: &mut ChatOutcome,
     tool_deltas: &mut Vec<ToolCallDelta>,
 ) -> Result<()> {
@@ -784,26 +1078,36 @@ async fn handle_chat_sse_line(
     if let Some(reason) = value["choices"][0]["finish_reason"].as_str() {
         outcome.finish_reason = Some(reason.to_string());
     }
+    if !value["error"].is_null() {
+        return Err(anyhow!("builtin provider stream error: {}", value["error"]));
+    }
+    if let Some(usage) = TokenUsage::from_chunk(&value["usage"]) {
+        outcome.usage = Some(usage);
+    }
     let delta = &value["choices"][0]["delta"];
     if let Some(text) = delta["content"].as_str() {
         if !text.is_empty() {
             outcome.content.push_str(text);
-            let _ = tx
-                .send(ChatEvent::Delta {
-                    role: ChatRole::Assistant,
-                    text: text.to_string(),
-                })
-                .await;
+            if let Some(tx) = tx {
+                let _ = tx
+                    .send(ChatEvent::Delta {
+                        role: ChatRole::Assistant,
+                        text: text.to_string(),
+                    })
+                    .await;
+            }
         }
     }
     if let Some(text) = delta["reasoning_content"].as_str() {
         if !text.is_empty() {
-            let _ = tx
-                .send(ChatEvent::Delta {
-                    role: ChatRole::Thinking,
-                    text: text.to_string(),
-                })
-                .await;
+            if let Some(tx) = tx {
+                let _ = tx
+                    .send(ChatEvent::Delta {
+                        role: ChatRole::Thinking,
+                        text: text.to_string(),
+                    })
+                    .await;
+            }
         }
     }
     if let Some(calls) = delta["tool_calls"].as_array() {
@@ -906,6 +1210,7 @@ impl McpBridgeClient {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("spawning builtin host tool bridge {}", bridge.command))?;
         let stdin = child
@@ -993,6 +1298,9 @@ fn persist_event(
         chrono::Utc::now(),
     );
 }
+
+#[cfg(test)]
+mod chat_tests;
 
 #[cfg(test)]
 mod tests {

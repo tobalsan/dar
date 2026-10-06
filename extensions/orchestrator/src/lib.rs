@@ -3104,6 +3104,7 @@ mod tests {
                 stall_timeout_ms: 1000,
                 max_turns: 20,
                 max_tool_calls: None,
+                context_window: None,
             },
             hitl: HitlConfig::default(),
             dashboard: DashboardConfig::default(),
@@ -3140,6 +3141,7 @@ mod tests {
                 stall_timeout_ms: 1000,
                 max_turns: 20,
                 max_tool_calls: None,
+                context_window: None,
             },
             hitl: HitlConfig::default(),
             dashboard: DashboardConfig::default(),
@@ -3511,6 +3513,7 @@ mod tests {
                 stall_timeout_ms: 300_000,
                 max_turns: 20,
                 max_tool_calls: None,
+                context_window: None,
             },
             hitl: HitlConfig::default(),
             dashboard: DashboardConfig {
@@ -4789,6 +4792,7 @@ dashboard:
                 stall_timeout_ms: 300_000,
                 max_turns: 20,
                 max_tool_calls: None,
+                context_window: None,
             },
             hitl: HitlConfig::default(),
             dashboard: DashboardConfig {

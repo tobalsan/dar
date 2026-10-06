@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- The builtin chat backend now persists sessions as transcripts in the chat session dir (`backend: builtin`) and resumes them (channels and chat-web reopen the newest session with history). `abort` now cancels the in-flight turn, usage is reported as context usage, and a bare `/compact` summarizes and replaces the history instead of being sent to the model. New optional `runner.context_window` (tokens, must be > 0) sets the window shown with context usage. See [docs/configuration.md](docs/configuration.md).
 - Added `runner.max_tool_calls` (default 100) for the builtin runner and chat: the maximum number of tool calls per turn, replacing the hard-coded 8-round limit. Other runners ignore it. See [docs/configuration.md](docs/configuration.md).
 - New `dar sandbox [PATH]` and `dar create --sandbox`: scaffold a Docker sandbox (Dockerfile, hardened docker-compose.yml with granular mounts and no docker socket, .env.example, SANDBOX.md) for `builtin`/`pi` agents and set `sandboxed: true` in `agent.yaml`. `dar build` on a sandboxed agent also builds a static musl `bin/dar-sandbox` inside Docker. `chat-web` agents get a fixed `dashboard.port` published on host loopback. See [docs/sandbox.md](docs/sandbox.md).
 

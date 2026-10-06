@@ -357,6 +357,9 @@ pub struct ChatSessionParams {
     /// `runner.max_tool_calls` from `agent.yaml`; only the builtin chat backend
     /// honors it (`None` = its default).
     pub max_tool_calls: Option<u32>,
+    /// `runner.context_window` from `agent.yaml`; only the builtin chat backend
+    /// uses it, as the window reported with `ChatEvent::ContextUsage`.
+    pub context_window: Option<u64>,
 }
 
 impl ChatSessionParams {
@@ -377,6 +380,7 @@ impl ChatSessionParams {
             artifact_ready: None,
             agent_loop: AgentLoopConfig::default(),
             max_tool_calls: None,
+            context_window: None,
         }
     }
 }
@@ -393,6 +397,7 @@ pub struct ChatSessionParamsBuilder {
     artifact_ready: Option<Sender<ArtifactReady>>,
     agent_loop: AgentLoopConfig,
     max_tool_calls: Option<u32>,
+    context_window: Option<u64>,
 }
 
 impl ChatSessionParamsBuilder {
@@ -444,6 +449,11 @@ impl ChatSessionParamsBuilder {
         self
     }
 
+    pub fn context_window(mut self, value: Option<u64>) -> Self {
+        self.context_window = value;
+        self
+    }
+
     pub fn build(self) -> ChatSessionParams {
         ChatSessionParams {
             command: self.command,
@@ -457,6 +467,7 @@ impl ChatSessionParamsBuilder {
             artifact_ready: self.artifact_ready,
             agent_loop: self.agent_loop,
             max_tool_calls: self.max_tool_calls,
+            context_window: self.context_window,
         }
     }
 }

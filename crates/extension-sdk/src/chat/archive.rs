@@ -317,6 +317,9 @@ fn normalize_events(value: Value) -> Vec<Value> {
     {
         return vec![value];
     }
+    if value.get("type").and_then(Value::as_str) == Some("compaction") {
+        return vec![serde_json::json!({"type":"notice","text":"Context compacted."})];
+    }
     let timestamp = value.get("timestamp").cloned().or_else(|| {
         value
             .get("message")
@@ -327,6 +330,9 @@ fn normalize_events(value: Value) -> Vec<Value> {
     let Some(role) = message.get("role").and_then(Value::as_str) else {
         return vec![];
     };
+    if role == "tool" || message.get("tool_calls").is_some() {
+        return openai_tool_events(message, role, timestamp);
+    }
     let Some(content) = message.get("content") else {
         return vec![];
     };
@@ -361,6 +367,49 @@ fn normalize_events(value: Value) -> Vec<Value> {
                 if !url.is_empty() { events.push(serde_json::json!({"type":"user","text":"","attachments":[{"name":part.get("name").and_then(Value::as_str).unwrap_or("image"),"url":url,"image":true}]})); }
             }
             _ => { let text = part.as_str().or_else(|| part.get("text").and_then(Value::as_str)).unwrap_or_default(); if !text.is_empty() { events.push(serde_json::json!({"type":if role == "user" { "user" } else { "delta" },"text":text})); } }
+        }
+    }
+    if let Some(timestamp) = timestamp {
+        for event in &mut events {
+            if let Some(object) = event.as_object_mut() {
+                object.insert("timestamp".into(), timestamp.clone());
+            }
+        }
+    }
+    events
+}
+
+/// Events for an OpenAI chat-completions `tool` message (a tool result) or an
+/// assistant message carrying `tool_calls` (the builtin backend's transcript
+/// shape): assistant text as a delta, each call as a `tool_call`, each result
+/// as a `tool_output`.
+fn openai_tool_events(message: &Value, role: &str, timestamp: Option<Value>) -> Vec<Value> {
+    let mut events = Vec::new();
+    if role == "tool" {
+        events.push(serde_json::json!({
+            "type": "tool_output",
+            "id": message.get("tool_call_id").and_then(Value::as_str).unwrap_or_default(),
+            "text": content_text(message.get("content").unwrap_or(&Value::Null)),
+            "is_error": false,
+            "done": true,
+        }));
+    } else {
+        let text = content_text(message.get("content").unwrap_or(&Value::Null));
+        if !text.is_empty() {
+            events.push(serde_json::json!({"type":"delta","text":text}));
+        }
+        for call in message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            events.push(serde_json::json!({
+                "type": "tool_call",
+                "id": call.get("id").and_then(Value::as_str).unwrap_or_default(),
+                "name": call.pointer("/function/name").and_then(Value::as_str).unwrap_or_default(),
+                "args": call.pointer("/function/arguments").and_then(Value::as_str).unwrap_or_default(),
+            }));
         }
     }
     if let Some(timestamp) = timestamp {
@@ -1373,6 +1422,74 @@ mod tests {
         assert_eq!(page.events[1]["args"], "{\"q\":\"x\"}");
         assert_eq!(page.events[2]["type"], "tool_output");
         assert_eq!(page.events[2]["text"], "result");
+    }
+
+    const BUILTIN_TRANSCRIPT: &str = concat!(
+        "{\"type\":\"session\",\"version\":3,\"id\":\"b1\",\"backend\":\"builtin\"}\n",
+        "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+        "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":\"checking\",\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":1}\"}}]}}\n",
+        "{\"type\":\"message\",\"message\":{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"found\"}}\n",
+        "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":\"done\"}}\n",
+        "{\"type\":\"compaction\",\"summary\":\"sum\"}\n",
+        "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"later\"}}\n"
+    );
+
+    #[test]
+    fn read_events_renders_builtin_tool_calls_results_and_compaction() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "2024-06-15T12:30:00Z_b1.jsonl",
+            BUILTIN_TRANSCRIPT,
+        );
+        let page = read_events(temp.path(), "b1", 0, READ_MAX).unwrap();
+        let kinds: Vec<&str> = page
+            .events
+            .iter()
+            .map(|e| e["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "user",
+                "delta",
+                "tool_call",
+                "tool_output",
+                "delta",
+                "notice",
+                "user"
+            ]
+        );
+        assert_eq!(page.events[2]["id"], "c1");
+        assert_eq!(page.events[2]["name"], "lookup");
+        assert_eq!(page.events[2]["args"], "{\"q\":1}");
+        assert_eq!(page.events[3]["id"], "c1");
+        assert_eq!(page.events[3]["text"], "found");
+    }
+
+    #[test]
+    fn builtin_transcript_lists_searches_and_reads_text_only() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "2024-06-15T12:30:00Z_b1.jsonl",
+            BUILTIN_TRANSCRIPT,
+        );
+        let sessions = list(temp.path());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "b1");
+        assert_eq!(sessions[0].label, "hello");
+        assert_eq!(
+            newest_session_id(temp.path(), "builtin").as_deref(),
+            Some("b1")
+        );
+        assert_eq!(newest_session_id(temp.path(), "pi"), None);
+        let texts: Vec<String> = read(temp.path(), "b1", 0, READ_MAX)
+            .into_iter()
+            .map(|m| m.text)
+            .collect();
+        assert_eq!(texts, ["hello", "checking", "done", "later"]);
+        assert!(search(temp.path(), "found").is_empty());
     }
 
     #[test]
