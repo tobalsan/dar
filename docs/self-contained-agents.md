@@ -146,6 +146,13 @@ To bump dependencies deliberately (then commit the updated lock):
 dar lock-refresh --dir ./my-agent
 ```
 
+## Docker sandbox
+
+`dar sandbox` (or `dar create --sandbox`) scaffolds a Docker setup and sets
+`sandboxed: true` in `agent.yaml`; `dar build` then also produces a static
+musl `bin/dar-sandbox` (built inside Docker, so it works from macOS) that the
+container bind-mounts read-only. See [cli.md](cli.md).
+
 ## Portability
 
 `dar build` runs `cargo build --release` against the host's native

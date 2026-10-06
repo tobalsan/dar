@@ -11,6 +11,17 @@ dar create ./my-agent
 dar create ./my-agent --runner codex --model gpt-5 --orchestrator
 dar create ./my-agent --runner pi --provider anthropic
 
+# Docker sandbox mode. `dar create --sandbox` scaffolds it at create time;
+# `dar sandbox [PATH]` converts an existing folder (idempotent: writes only
+# missing files, prints written/skipped lists, appends `sandboxed: true` to
+# agent.yaml without touching comments). Writes Dockerfile, docker-compose.yml,
+# .env.example, .env (chmod 600), SANDBOX.md, memory/, skills/ and (pi) pi-agent/.
+# Supported runners: builtin, pi. With `sandboxed: true`, `dar build` also builds a
+# static musl binary inside Docker (needs Docker) → <folder>/bin/dar-sandbox.
+# See the generated SANDBOX.md for the security model and run/update steps.
+dar sandbox ./my-agent
+dar create ./my-agent --runner builtin --sandbox
+
 # Bootstrap the per-agent composition crate (.dar/) — one-time setup.
 dar init-build --dir ./my-agent
 dar init-build --dir ./my-agent --vendor   # vendor deps for offline use

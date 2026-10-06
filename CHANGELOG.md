@@ -10,6 +10,8 @@ Breaking changes are marked **⚠ BREAKING**.
 ## [Unreleased]
 
 - Added `runner.max_tool_calls` (default 100) for the builtin runner and chat: the maximum number of tool calls per turn, replacing the hard-coded 8-round limit. Other runners ignore it. See [docs/configuration.md](docs/configuration.md).
+- New `dar sandbox [PATH]` and `dar create --sandbox`: scaffold a Docker sandbox (Dockerfile, hardened docker-compose.yml with granular mounts and no docker socket, .env.example, SANDBOX.md) for `builtin`/`pi` agents and set `sandboxed: true` in `agent.yaml`. `dar build` on a sandboxed agent also builds a static musl `bin/dar-sandbox` inside Docker. See [docs/cli.md](docs/cli.md).
+
 - pi runner/chat now target pi ≥ 1.0 native MCP: host tools are wired via `<cwd>/.pi/mcp.json` (merged, user servers kept) + `--approve`, fixing `Unknown option: --mcp-config` crashes. pi-mcp-adapter no longer needed.
 - Builtin runner/chat now send `x-opencode-session` (and `x-opencode-client: dar`) to providers named `opencode` / `opencode-go`, fixing OpenCode Go `MissingSessionID` 400s.
 
