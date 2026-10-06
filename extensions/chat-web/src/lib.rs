@@ -187,7 +187,11 @@ impl DashboardTab for ChatTab {
                 .as_deref()
                 .map(|d| format!("<small class=\"chat-desc\">{}</small>", escape_html_attr(d)))
                 .unwrap_or_default(),
-            avatar_html(self.agent_avatar.as_ref(), "chat-hero-avatar", &self.agent_name),
+            avatar_html(
+                self.agent_avatar.as_ref(),
+                "chat-hero-avatar",
+                &self.agent_name
+            ),
             escape_html_attr(&self.agent_name),
             include_str!("vendor/marked.min.js"),
             include_str!("vendor/purify.min.js"),
@@ -553,7 +557,9 @@ fn write_meta(path: &std::path::Path, meta: &HashMap<String, SessionMeta>) -> Re
 
 async fn session_index(State(state): State<Arc<AppState>>) -> Json<Vec<SessionListEntry>> {
     let dir = state.root.join("data/chat/sessions");
-    if let Ok(session) = state.session("main").await { state.resolve_live_id(&session).await; }
+    if let Ok(session) = state.session("main").await {
+        state.resolve_live_id(&session).await;
+    }
     let live = state.live_id.lock().await.clone();
     let meta = state.meta.lock().await.clone();
     let mut sessions: Vec<_> = chat::archive::list(&dir)
@@ -646,7 +652,9 @@ async fn delete_session(
         return StatusCode::NOT_FOUND.into_response();
     };
     let _transition = state.transition.lock().await;
-    if let Ok(session) = state.session("main").await { state.resolve_live_id(&session).await; }
+    if let Ok(session) = state.session("main").await {
+        state.resolve_live_id(&session).await;
+    }
     if state.live_id.lock().await.as_deref() == Some(&id) {
         if let Err(error) = state.reset_session_unlocked("main").await {
             return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
@@ -726,7 +734,10 @@ async fn resume_session(
             None => break,
         }
     }
-    *session.resolved_live_id.lock().expect("chat-web identity mutex poisoned") = Some(body.id.clone());
+    *session
+        .resolved_live_id
+        .lock()
+        .expect("chat-web identity mutex poisoned") = Some(body.id.clone());
     *state.live_id.lock().await = Some(body.id);
     session
         .suppress_resume
@@ -830,17 +841,31 @@ impl AppState {
         let identity_backend = backend_id.clone();
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                let terminal = matches!(event, ChatEvent::TurnFinished { .. } | ChatEvent::SessionClosed { .. });
+                let terminal = matches!(
+                    event,
+                    ChatEvent::TurnFinished { .. } | ChatEvent::SessionClosed { .. }
+                );
                 let _acceptance = sink.acceptance_lock.lock().await;
                 if sink.publish_if_current(generation, event.clone()) {
                     let _ = sink.events.send(event);
                     if terminal {
-                        let opened_after = identity_sink.opened_after_ms.load(std::sync::atomic::Ordering::SeqCst);
-                        if let Some(found) = newest_session_since(&identity_dir, &identity_backend, opened_after) {
+                        let opened_after = identity_sink
+                            .opened_after_ms
+                            .load(std::sync::atomic::Ordering::SeqCst);
+                        if let Some(found) =
+                            newest_session_since(&identity_dir, &identity_backend, opened_after)
+                        {
                             // Reset bumps the generation before clearing the identity, so
                             // rechecking under the identity lock drops a stale terminal event.
-                            let mut resolved = identity_sink.resolved_live_id.lock().expect("chat-web identity mutex poisoned");
-                            if identity_sink.generation.load(std::sync::atomic::Ordering::SeqCst) == generation {
+                            let mut resolved = identity_sink
+                                .resolved_live_id
+                                .lock()
+                                .expect("chat-web identity mutex poisoned");
+                            if identity_sink
+                                .generation
+                                .load(std::sync::atomic::Ordering::SeqCst)
+                                == generation
+                            {
                                 *resolved = Some(found.id);
                             }
                         }
@@ -855,18 +880,37 @@ impl AppState {
     /// open time before `live_id`, so a concurrent reset can't be undone here.
     async fn resolve_live_id(&self, session: &Session) {
         let mut live = self.live_id.lock().await;
-        if live.is_some() { return; }
-        let resolved = session.resolved_live_id.lock().expect("chat-web identity mutex poisoned").clone();
+        if live.is_some() {
+            return;
+        }
+        let resolved = session
+            .resolved_live_id
+            .lock()
+            .expect("chat-web identity mutex poisoned")
+            .clone();
         if let Some(id) = resolved {
             *live = Some(id);
             return;
         }
-        let Some(start) = self.start.get() else { return; };
-        let opened_after = session.opened_after_ms.load(std::sync::atomic::Ordering::SeqCst);
-        if opened_after == 0 { return; }
+        let Some(start) = self.start.get() else {
+            return;
+        };
+        let opened_after = session
+            .opened_after_ms
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if opened_after == 0 {
+            return;
+        }
         let backend_id = chat::resolve_agent_backend(start, self.config.backend.as_deref());
-        if let Some(found) = newest_session_since(&self.root.join("data/chat/sessions"), &backend_id, opened_after) {
-            *session.resolved_live_id.lock().expect("chat-web identity mutex poisoned") = Some(found.id.clone());
+        if let Some(found) = newest_session_since(
+            &self.root.join("data/chat/sessions"),
+            &backend_id,
+            opened_after,
+        ) {
+            *session
+                .resolved_live_id
+                .lock()
+                .expect("chat-web identity mutex poisoned") = Some(found.id.clone());
             *live = Some(found.id);
         }
     }
@@ -1035,8 +1079,13 @@ impl AppState {
         session
             .suppress_resume
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        *session.resolved_live_id.lock().expect("chat-web identity mutex poisoned") = None;
-        session.opened_after_ms.store(0, std::sync::atomic::Ordering::SeqCst);
+        *session
+            .resolved_live_id
+            .lock()
+            .expect("chat-web identity mutex poisoned") = None;
+        session
+            .opened_after_ms
+            .store(0, std::sync::atomic::Ordering::SeqCst);
         *self.live_id.lock().await = None;
         let _ = session.abort_signal.send(false);
         {
@@ -2930,11 +2979,16 @@ mod tests {
         let sending = {
             let state = Arc::clone(&state);
             tokio::spawn(async move {
-                chat::ChatCoordinator::send_turn(state.as_ref(), "prompt".into(), "display".into()).await
+                chat::ChatCoordinator::send_turn(state.as_ref(), "prompt".into(), "display".into())
+                    .await
             })
         };
         tokio::task::yield_now().await;
-        assert_eq!(sends.load(Ordering::SeqCst), 0, "coordinator must not cross resume transition");
+        assert_eq!(
+            sends.load(Ordering::SeqCst),
+            0,
+            "coordinator must not cross resume transition"
+        );
         drop(transition);
         sending.await.unwrap().unwrap();
         assert_eq!(sends.load(Ordering::SeqCst), 1);
@@ -4061,7 +4115,9 @@ mod tests {
         );
         assert_eq!(
             avatar_for("assets/me.png"),
-            Some(Avatar::File(root.join("assets/me.png").canonicalize().unwrap()))
+            Some(Avatar::File(
+                root.join("assets/me.png").canonicalize().unwrap()
+            ))
         );
         assert_eq!(avatar_for("assets/missing.png"), None);
         assert_eq!(avatar_for("../../etc/hosts"), None);
@@ -4077,7 +4133,9 @@ mod tests {
         let html = tab(Avatar::Text("🦉".into())).render().unwrap();
         assert!(html.contains(r#"<span class="chat-avatar" aria-hidden="true">🦉</span>"#));
         assert!(html.contains(r#"<span class="chat-hero-avatar" aria-hidden="true">🦉</span>"#));
-        let html = tab(Avatar::File(root.join("assets/me.png"))).render().unwrap();
+        let html = tab(Avatar::File(root.join("assets/me.png")))
+            .render()
+            .unwrap();
         assert!(html.contains(r#"<img data-avatar-src="/chat/avatar" alt="Owl">"#));
     }
 

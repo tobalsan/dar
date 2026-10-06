@@ -151,17 +151,16 @@ async fn run_builtin_chat_turn(
     };
     let model = params.model.as_deref().unwrap_or("openai/gpt-4o-mini");
     for _ in 0..8 {
-        let outcome = stream_chat_completion_to_chat(
-            &client,
-            &base_url,
-            &api_key,
-            opencode_session(provider, &session_id),
+        let request = ProviderRequest {
+            client: &client,
+            base_url: &base_url,
+            api_key: &api_key,
+            opencode_session: opencode_session(provider, &session_id),
             model,
-            &request_messages,
-            &tools,
-            &tx,
-        )
-        .await?;
+            messages: &request_messages,
+            tools: &tools,
+        };
+        let outcome = stream_chat_completion_to_chat(&request, &tx).await?;
         if outcome.tool_calls.is_empty() {
             messages
                 .lock()
@@ -677,15 +676,18 @@ async fn stream_chat_completion(
 }
 
 async fn stream_chat_completion_to_chat(
-    client: &reqwest::Client,
-    base_url: &str,
-    api_key: &str,
-    opencode_session: Option<&str>,
-    model: &str,
-    messages: &[serde_json::Value],
-    tools: &[serde_json::Value],
+    request: &ProviderRequest<'_>,
     tx: &tokio::sync::mpsc::Sender<ChatEvent>,
 ) -> Result<ChatOutcome> {
+    let ProviderRequest {
+        client,
+        base_url,
+        api_key,
+        opencode_session,
+        model,
+        messages,
+        tools,
+    } = *request;
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
     let mut body = serde_json::json!({"model": model, "stream": true, "messages": messages});
     if !tools.is_empty() {

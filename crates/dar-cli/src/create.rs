@@ -525,7 +525,10 @@ mod tests {
         assert!(yaml.contains("foreground: tui\n"));
         assert!(yaml.contains("  scheduler:\n    enabled: true\n"));
         assert!(yaml.contains("  chat-web:\n    enabled: true\n"));
-        orchestrator::config::load(&root).unwrap().validate().unwrap();
+        orchestrator::config::load(&root)
+            .unwrap()
+            .validate()
+            .unwrap();
     }
 
     #[test]

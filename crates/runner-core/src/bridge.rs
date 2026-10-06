@@ -106,7 +106,12 @@ pub fn pi_mcp_config_args(cwd: &Path, bridge: &HostToolBridge) -> Result<BridgeI
         .entry("mcpServers")
         .or_insert_with(|| json!({}))
         .as_object_mut()
-        .with_context(|| format!("{}: \"mcpServers\" must be an object", config_path.display()))?;
+        .with_context(|| {
+            format!(
+                "{}: \"mcpServers\" must be an object",
+                config_path.display()
+            )
+        })?;
     servers.insert(
         BRIDGE_SERVER_NAME.to_string(),
         json!({
@@ -341,7 +346,10 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         let server = &written["mcpServers"][BRIDGE_SERVER_NAME];
         assert_eq!(server["command"], "/opt/dar");
-        assert_eq!(server["args"], json!(["__mcp-bridge", "--dir", "/tmp/agent"]));
+        assert_eq!(
+            server["args"],
+            json!(["__mcp-bridge", "--dir", "/tmp/agent"])
+        );
         assert_eq!(server["exposure"], "direct");
         assert_eq!(written["mcpServers"]["user"]["command"], "u");
         assert_eq!(written["other"], 1);
