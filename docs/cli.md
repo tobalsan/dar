@@ -18,7 +18,8 @@ dar create ./my-agent --runner pi --provider anthropic
 # .env.example, .env (chmod 600), SANDBOX.md, memory/, skills/ and (pi) pi-agent/.
 # Supported runners: builtin, pi. With `sandboxed: true`, `dar build` also builds a
 # static musl binary inside Docker (needs Docker) → <folder>/bin/dar-sandbox.
-# See the generated SANDBOX.md for the security model and run/update steps.
+# chat-web agents get a fixed dashboard.port published on host loopback.
+# Full guide: docs/sandbox.md (also the generated SANDBOX.md).
 dar sandbox ./my-agent
 dar create ./my-agent --runner builtin --sandbox
 

@@ -151,7 +151,7 @@ dar lock-refresh --dir ./my-agent
 `dar sandbox` (or `dar create --sandbox`) scaffolds a Docker setup and sets
 `sandboxed: true` in `agent.yaml`; `dar build` then also produces a static
 musl `bin/dar-sandbox` (built inside Docker, so it works from macOS) that the
-container bind-mounts read-only. See [cli.md](cli.md).
+container bind-mounts read-only. See [sandbox.md](sandbox.md).
 
 ## Portability
 

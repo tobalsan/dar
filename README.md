@@ -44,7 +44,7 @@ open http://127.0.0.1:7878/
 
 `example-agent` ships the `fake` runner, so it has no host dependency.
 
-Start your own agent with `dar create ./my-agent` (add `--orchestrator` for the issue loop); see [CLI reference](docs/cli.md).
+Start your own agent with `dar create ./my-agent` (add `--orchestrator` for the issue loop); see [CLI reference](docs/cli.md). Add `--sandbox` (or run `dar sandbox` on an existing folder) to run it in a hardened Docker container; see [Docker sandbox](docs/sandbox.md).
 
 An agent folder is self-contained — move the folder, move the agent:
 
@@ -75,4 +75,5 @@ my-agent/
 | [Chat surfaces](docs/chat.md) | Terminal UI (`foreground: tui`) and web chat |
 | [Scheduler](docs/scheduler.md) | Cron jobs, gate scripts, delivery, HTTP API |
 | [Self-contained agents](docs/self-contained-agents.md) | Per-agent binary (build B), local extensions, self-update |
+| [Docker sandbox](docs/sandbox.md) | `dar sandbox`, hardened container, static binary, chat-web port |
 | [Extensions](docs/extensions.md) | Enabling/configuring extensions, and the authoring guide |

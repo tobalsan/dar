@@ -4,7 +4,7 @@ This covers `agent.yaml` identity/host config, system files, exported child envi
 
 `agent.yaml` is agent **identity and host config only**: `id`, `name`,
 `description`, `avatar`, `runner`, `hitl`, `dashboard`, `foreground`, `providers`, `extensions`,
-`system_files`. The issue-loop config — tracker, polling, workspace — lives
+`system_files`, `sandboxed`. The issue-loop config — tracker, polling, workspace — lives
 entirely in `WORKFLOW.md` frontmatter (see [WORKFLOW.md](workflows.md) below);
 `agent.yaml` has no tracker/orchestrator/workspace keys of its own. Old
 `agent.yaml` files that still carry those keys keep parsing: they're unknown
@@ -133,3 +133,9 @@ Burst-dedup: notifications are batched per `window_secs`; duplicate events
 within the window are collapsed. Max `max_items` unique items per batch.
 </content>
 </invoke>
+
+## Sandbox
+
+`sandboxed: true` (written by `dar sandbox` / `dar create --sandbox`) makes
+`dar build` also produce the static Linux binary `bin/dar-sandbox` for the
+Docker container. Default `false`. See [sandbox.md](sandbox.md).
