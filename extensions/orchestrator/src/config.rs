@@ -95,6 +95,10 @@ pub struct RunnerConfig {
     /// turn-capable runner to continue (turn-loop backstop). Default 20.
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
+    /// Max tool calls the builtin runner executes in one turn. Unset uses the
+    /// builtin default (100); other runners ignore it.
+    #[serde(default)]
+    pub max_tool_calls: Option<u32>,
 }
 
 fn default_turn_timeout_ms() -> u64 {
@@ -302,6 +306,9 @@ impl AgentConfig {
         if self.runner.max_turns == 0 {
             bail!("runner.max_turns must be > 0");
         }
+        if self.runner.max_tool_calls == Some(0) {
+            bail!("runner.max_tool_calls must be > 0");
+        }
         Ok(())
     }
 }
@@ -402,6 +409,26 @@ mod tests {
         let error = cfg.validate().unwrap_err().to_string();
 
         assert!(error.contains("runner.max_turns"), "{error}");
+    }
+
+    #[test]
+    fn zero_max_tool_calls_is_rejected() {
+        let raw = BASE.replace("use: fake", "use: fake\n  max_tool_calls: 0");
+        let cfg: AgentConfig = serde_yaml::from_str(&raw).unwrap();
+
+        let error = cfg.validate().unwrap_err().to_string();
+
+        assert!(error.contains("runner.max_tool_calls"), "{error}");
+    }
+
+    #[test]
+    fn max_tool_calls_defaults_to_unset_and_parses_when_set() {
+        let cfg: AgentConfig = serde_yaml::from_str(BASE).unwrap();
+        assert_eq!(cfg.runner.max_tool_calls, None);
+        let raw = BASE.replace("use: fake", "use: fake\n  max_tool_calls: 250");
+        let cfg: AgentConfig = serde_yaml::from_str(&raw).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.runner.max_tool_calls, Some(250));
     }
 
     #[test]

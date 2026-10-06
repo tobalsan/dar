@@ -655,6 +655,7 @@ mod tests {
                 max_run_timeout_ms: 1_800_000,
                 stall_timeout_ms: 300_000,
                 max_turns: 20,
+                max_tool_calls: None,
             },
             hitl: HitlConfig::default(),
             dashboard: DashboardConfig {
@@ -1167,6 +1168,7 @@ body"#;
             max_run_timeout_ms: 3_600_000,
             stall_timeout_ms: 300_000,
             max_turns: 20,
+            max_tool_calls: None,
         };
         // sdk field in agent.yaml should map to runner kind via the `use_` alias
         let wf = WorkflowFrontmatter::default();

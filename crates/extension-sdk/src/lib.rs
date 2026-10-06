@@ -85,6 +85,26 @@ pub mod chat {
         provider: Option<String>,
     }
 
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct MaxToolCallsYaml {
+        runner: MaxToolCallsRunner,
+    }
+
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct MaxToolCallsRunner {
+        max_tool_calls: Option<u32>,
+    }
+
+    /// `runner.max_tool_calls` from `agent.yaml`; `None` when absent or unreadable.
+    fn max_tool_calls(ctx: &StartCtx) -> Option<u32> {
+        std::fs::read_to_string(ctx.paths.root().join("agent.yaml"))
+            .ok()
+            .and_then(|yaml| serde_yaml::from_str::<MaxToolCallsYaml>(&yaml).ok())
+            .and_then(|cfg| cfg.runner.max_tool_calls)
+    }
+
     fn agent_profile(ctx: &StartCtx) -> Option<AgentProfile> {
         if let Some(snapshot) = ctx
             .host
@@ -130,6 +150,7 @@ pub mod chat {
     /// * **system_prompt** — the retained [`SystemContext`] assembly
     ///   ([`SYSTEM_CONTEXT_TOPIC`]) followed by [`NO_REPLY_INSTRUCTION`]; an
     ///   absent topic or empty assembly yields `None` (backend default prompt);
+    /// * **max_tool_calls** — `runner.max_tool_calls` from `agent.yaml`;
     /// * **agent_loop** — `agent_loop:` from `agent.yaml` (loop-guard limits);
     /// * **host tool bridge** — the hidden `__mcp-bridge` descriptor, or `None`
     ///   when no tool registry is present;
@@ -155,6 +176,7 @@ pub mod chat {
         let system_prompt = identity.map(|text| format!("{text}\n\n{NO_REPLY_INSTRUCTION}"));
         ChatSessionParams::builder("", ctx.paths.root(), session_dir)
             .agent_loop(agent_loop_config(ctx))
+            .max_tool_calls(max_tool_calls(ctx))
             .model(model)
             .provider(provider)
             .system_prompt(system_prompt)

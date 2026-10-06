@@ -1952,6 +1952,7 @@ impl Orchestrator {
         .model(self.effective_cfg.model.clone())
         .provider(self.effective_cfg.provider.clone())
         .thinking(self.effective_cfg.thinking.clone())
+        .max_tool_calls(self.agent_cfg.runner.max_tool_calls)
         .host_tool_bridge(self.host_tool_bridge())
         .build();
 
@@ -3102,6 +3103,7 @@ mod tests {
                 max_run_timeout_ms: 1000,
                 stall_timeout_ms: 1000,
                 max_turns: 20,
+                max_tool_calls: None,
             },
             hitl: HitlConfig::default(),
             dashboard: DashboardConfig::default(),
@@ -3136,6 +3138,7 @@ mod tests {
                 max_run_timeout_ms: 1000,
                 stall_timeout_ms: 1000,
                 max_turns: 20,
+                max_tool_calls: None,
             },
             hitl: HitlConfig::default(),
             dashboard: DashboardConfig::default(),
@@ -3505,6 +3508,7 @@ mod tests {
                 max_run_timeout_ms: 1000,
                 stall_timeout_ms: 300_000,
                 max_turns: 20,
+                max_tool_calls: None,
             },
             hitl: HitlConfig::default(),
             dashboard: DashboardConfig {
@@ -4781,6 +4785,7 @@ dashboard:
                 max_run_timeout_ms: 30_000,
                 stall_timeout_ms: 300_000,
                 max_turns: 20,
+                max_tool_calls: None,
             },
             hitl: HitlConfig::default(),
             dashboard: DashboardConfig {

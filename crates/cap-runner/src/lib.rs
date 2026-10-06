@@ -94,6 +94,9 @@ pub struct SpawnParams<'a> {
     /// Agent identity/system prompt for runners that support a separate system
     /// prompt channel. Empty/absent preserves legacy prompt-only behavior.
     pub system_prompt: Option<String>,
+    /// `runner.max_tool_calls` from `agent.yaml`; only the builtin runner
+    /// honors it (`None` = its default).
+    pub max_tool_calls: Option<u32>,
     pub workspace: &'a Path,
     pub workspace_root: &'a Path,
     pub agent_root: &'a Path,
@@ -129,6 +132,7 @@ pub struct SpawnParamsBuilder<'a> {
     provider: Option<String>,
     thinking: Option<String>,
     system_prompt: Option<String>,
+    max_tool_calls: Option<u32>,
     host_tool_bridge: Option<HostToolBridge>,
 }
 
@@ -173,6 +177,7 @@ impl<'a> SpawnParams<'a> {
             provider: None,
             thinking: None,
             system_prompt: None,
+            max_tool_calls: None,
             host_tool_bridge: None,
         }
     }
@@ -199,6 +204,11 @@ impl<'a> SpawnParamsBuilder<'a> {
         self
     }
 
+    pub fn max_tool_calls(mut self, value: Option<u32>) -> Self {
+        self.max_tool_calls = value;
+        self
+    }
+
     pub fn host_tool_bridge(mut self, value: Option<HostToolBridge>) -> Self {
         self.host_tool_bridge = value;
         self
@@ -212,6 +222,7 @@ impl<'a> SpawnParamsBuilder<'a> {
             provider: self.provider,
             thinking: self.thinking,
             system_prompt: self.system_prompt,
+            max_tool_calls: self.max_tool_calls,
             workspace: self.workspace,
             workspace_root: self.workspace_root,
             agent_root: self.agent_root,

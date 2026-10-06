@@ -150,7 +150,8 @@ async fn run_builtin_chat_turn(
         None => Vec::new(),
     };
     let model = params.model.as_deref().unwrap_or("openai/gpt-4o-mini");
-    for _ in 0..8 {
+    let mut budget = ToolCallBudget::new(params.max_tool_calls);
+    loop {
         let request = ProviderRequest {
             client: &client,
             base_url: &base_url,
@@ -174,6 +175,7 @@ async fn run_builtin_chat_turn(
                 .await;
             return Ok(());
         }
+        budget.reserve(outcome.tool_calls.len())?;
         let mut assistant =
             serde_json::json!({"role": "assistant", "tool_calls": outcome.tool_calls});
         if !outcome.content.is_empty() {
@@ -222,7 +224,6 @@ async fn run_builtin_chat_turn(
             messages.lock().await.push(tool_message);
         }
     }
-    Err(anyhow!("builtin chat exceeded tool-call iteration limit"))
 }
 
 impl Runner for BuiltinRunner {
@@ -263,6 +264,7 @@ async fn spawn_builtin(p: SpawnParams<'_>) -> Result<RunnerHandle> {
         prompt: p.prompt.clone(),
         model: p.model.clone(),
         provider: p.provider.clone(),
+        max_tool_calls: p.max_tool_calls,
         agent_root: p.agent_root.to_path_buf(),
         host_tool_bridge: p.host_tool_bridge.clone(),
     };
@@ -301,6 +303,7 @@ struct BuiltinRun {
     prompt: String,
     model: Option<String>,
     provider: Option<String>,
+    max_tool_calls: Option<u32>,
     agent_root: std::path::PathBuf,
     host_tool_bridge: Option<cap_runner::HostToolBridge>,
 }
@@ -329,7 +332,8 @@ async fn run_openai_compatible(
         None => Vec::new(),
     };
 
-    for _ in 0..8 {
+    let mut budget = ToolCallBudget::new(p.max_tool_calls);
+    loop {
         let request = ProviderRequest {
             client: &client,
             base_url: &base_url,
@@ -359,6 +363,7 @@ async fn run_openai_compatible(
             );
             return Ok(());
         }
+        budget.reserve(outcome.tool_calls.len())?;
         let mut assistant =
             serde_json::json!({"role": "assistant", "tool_calls": outcome.tool_calls});
         if !outcome.content.is_empty() {
@@ -409,7 +414,38 @@ async fn run_openai_compatible(
             }));
         }
     }
-    Err(anyhow!("builtin runner exceeded tool-call iteration limit"))
+}
+
+/// Default for `runner.max_tool_calls`.
+const DEFAULT_MAX_TOOL_CALLS: u32 = 100;
+
+/// Counts tool calls executed within one turn against `runner.max_tool_calls`.
+struct ToolCallBudget {
+    used: u32,
+    max: u32,
+}
+
+impl ToolCallBudget {
+    fn new(configured: Option<u32>) -> Self {
+        Self {
+            used: 0,
+            max: configured.unwrap_or(DEFAULT_MAX_TOOL_CALLS),
+        }
+    }
+
+    /// Reserves a whole batch before it enters history, so a rejected batch
+    /// never leaves tool calls without matching tool responses.
+    fn reserve(&mut self, calls: usize) -> Result<()> {
+        let calls = u32::try_from(calls).unwrap_or(u32::MAX);
+        if self.used.saturating_add(calls) > self.max {
+            return Err(anyhow!(
+                "builtin runner exceeded runner.max_tool_calls ({})",
+                self.max
+            ));
+        }
+        self.used += calls;
+        Ok(())
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1078,6 +1114,26 @@ mod tests {
         assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].name, "echo_upper");
         assert_eq!(calls[0].arguments, r#"{"text":"hi"}"#);
+    }
+
+    #[test]
+    fn tool_call_budget_defaults_to_100() {
+        let mut budget = ToolCallBudget::new(None);
+        assert_eq!(budget.max, 100);
+        budget.reserve(100).unwrap();
+        let err = budget.reserve(1).unwrap_err().to_string();
+        assert_eq!(err, "builtin runner exceeded runner.max_tool_calls (100)");
+    }
+
+    #[test]
+    fn tool_call_budget_honors_configured_limit() {
+        let mut budget = ToolCallBudget::new(Some(3));
+        budget.reserve(2).unwrap();
+        let err = budget.reserve(2).unwrap_err().to_string();
+        assert_eq!(err, "builtin runner exceeded runner.max_tool_calls (3)");
+        // A rejected batch consumes nothing; one that fits exactly still runs.
+        budget.reserve(1).unwrap();
+        assert!(budget.reserve(1).is_err());
     }
 
     #[test]

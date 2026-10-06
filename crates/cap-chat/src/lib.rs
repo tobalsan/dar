@@ -354,6 +354,9 @@ pub struct ChatSessionParams {
     pub artifact_ready: Option<Sender<ArtifactReady>>,
     /// Agent-to-agent loop-guard limits (`agent_loop:` in `agent.yaml`).
     pub agent_loop: AgentLoopConfig,
+    /// `runner.max_tool_calls` from `agent.yaml`; only the builtin chat backend
+    /// honors it (`None` = its default).
+    pub max_tool_calls: Option<u32>,
 }
 
 impl ChatSessionParams {
@@ -373,6 +376,7 @@ impl ChatSessionParams {
             resume_session_id: None,
             artifact_ready: None,
             agent_loop: AgentLoopConfig::default(),
+            max_tool_calls: None,
         }
     }
 }
@@ -388,6 +392,7 @@ pub struct ChatSessionParamsBuilder {
     resume_session_id: Option<String>,
     artifact_ready: Option<Sender<ArtifactReady>>,
     agent_loop: AgentLoopConfig,
+    max_tool_calls: Option<u32>,
 }
 
 impl ChatSessionParamsBuilder {
@@ -434,6 +439,11 @@ impl ChatSessionParamsBuilder {
         self
     }
 
+    pub fn max_tool_calls(mut self, value: Option<u32>) -> Self {
+        self.max_tool_calls = value;
+        self
+    }
+
     pub fn build(self) -> ChatSessionParams {
         ChatSessionParams {
             command: self.command,
@@ -446,6 +456,7 @@ impl ChatSessionParamsBuilder {
             resume_session_id: self.resume_session_id,
             artifact_ready: self.artifact_ready,
             agent_loop: self.agent_loop,
+            max_tool_calls: self.max_tool_calls,
         }
     }
 }
