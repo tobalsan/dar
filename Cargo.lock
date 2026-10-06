@@ -787,6 +787,7 @@ dependencies = [
  "dar-system-context",
  "dar-tool-registry",
  "fs2",
+ "libc",
  "regex",
  "reqwest",
  "semver",

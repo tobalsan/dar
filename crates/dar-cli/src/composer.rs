@@ -403,6 +403,9 @@ pub fn build_with_options(agent: &Path, options: BuildOptions) -> Result<()> {
         .canonicalize()
         .with_context(|| format!("resolving agent folder {}", agent.display()))?;
     if options.universal {
+        if crate::sandbox::is_sandboxed(&agent) {
+            bail!("--universal is not supported for sandboxed agents (sandbox needs the static Linux binary); build without --universal");
+        }
         return build_universal(&crate_dir, &agent, options.offline);
     }
     if crate::sandbox::is_sandboxed(&agent) {

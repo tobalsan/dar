@@ -17,7 +17,7 @@ use serde::Deserialize;
 use crate::composer;
 
 /// Pinned image for the in-Docker musl build.
-const RUST_IMAGE: &str = "rust:1.88-bookworm";
+const RUST_IMAGE: &str = "rust:1.96-bookworm";
 const MEMORY_FILE: &str = "memory.md";
 const PI_PACKAGE: &str = "@earendil-works/pi-coding-agent";
 
@@ -112,17 +112,67 @@ fn check_runner(kind: &str) -> Result<()> {
 }
 
 /// Append `sandboxed: true` as a top-level line without re-serializing, so
-/// comments survive. `None` when a top-level `sandboxed:` key already exists.
-fn with_sandboxed_line(text: &str) -> Option<String> {
-    if text.lines().any(|l| l.starts_with("sandboxed:")) {
-        return None;
+/// comments survive. `Ok(None)` when the parsed mapping already has the key.
+/// Errors when the file cannot be safely appended to.
+fn with_sandboxed_line(text: &str) -> Result<Option<String>> {
+    const MANUAL: &str = "add `sandboxed: true` to agent.yaml manually";
+    let value: serde_yaml::Value = serde_yaml::from_str(text).context("parsing agent.yaml")?;
+    let Some(map) = value.as_mapping() else {
+        bail!("agent.yaml is not a mapping; {MANUAL}");
+    };
+    if map.contains_key("sandboxed") {
+        return Ok(None);
+    }
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'));
+    let last = text.lines().map(str::trim).rfind(|l| !l.is_empty());
+    if first.is_some_and(|l| l.starts_with('{')) || last == Some("...") {
+        bail!(
+            "agent.yaml is not a plain block mapping (flow style or `...` document end); {MANUAL}"
+        );
     }
     let mut out = text.to_string();
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
     out.push_str("sandboxed: true\n");
-    Some(out)
+    Ok(Some(out))
+}
+
+/// Host paths the container may write. Each must stay inside the agent folder.
+const WRITABLE_DIRS: [&str; 5] = ["memory", "data", "logs", "workspaces", "cron"];
+
+/// Bail when a writable mount resolves (via symlink) outside `root`.
+fn check_writable_contained(root: &Path, pi: bool) -> Result<()> {
+    let base = root
+        .canonicalize()
+        .with_context(|| format!("resolving {}", root.display()))?;
+    let mut names: Vec<&str> = WRITABLE_DIRS.to_vec();
+    names.push(MEMORY_FILE);
+    if pi {
+        names.push("pi-agent");
+    }
+    for name in names {
+        let resolved = root
+            .join(name)
+            .canonicalize()
+            .with_context(|| format!("resolving writable mount {name}"))?;
+        if !resolved.starts_with(&base) {
+            bail!(
+                "writable mount {name} resolves outside the agent folder ({}); refusing",
+                resolved.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Invoking host user, so bind-mounted dirs are writable by the container.
+fn host_ids() -> (u32, u32) {
+    // SAFETY: getuid/getgid take no arguments and cannot fail.
+    unsafe { (libc::getuid(), libc::getgid()) }
 }
 
 /// Env var names referenced as `$env:NAME` in `providers.*.api_key`, sorted.
@@ -185,10 +235,14 @@ fn render_compose(root: &Path, cfg: &SandboxConfig) -> String {
     out.push_str(
         "    tmpfs:\n      - /tmp\n      - /home/agent:uid=${UID:-1000},gid=${GID:-1000}\n",
     );
+    if pi {
+        // pi chat writes /agent/.pi/mcp.json; root fs is read-only.
+        out.push_str("      - /agent/.pi:uid=${UID:-1000},gid=${GID:-1000}\n");
+    }
     out.push_str("    volumes:\n");
     out.push_str("      - ./bin/dar-sandbox:/agent/bin/dar:ro\n");
     out.push_str("      - ./agent.yaml:/agent/agent.yaml:ro\n");
-    let mut ro: Vec<String> = vec!["AGENTS.md".into(), "TOOLS.md".into()];
+    let mut ro: Vec<String> = vec!["AGENTS.md".into(), "TOOLS.md".into(), "WORKFLOW.md".into()];
     for f in &cfg.system_files {
         let path = f.path().trim_start_matches("./").to_string();
         if !escapes_agent(&path) && path != MEMORY_FILE && !ro.contains(&path) {
@@ -208,16 +262,18 @@ fn render_compose(root: &Path, cfg: &SandboxConfig) -> String {
         out.push_str("      - ./skills:/home/agent/.pi/agent/skills:ro\n");
     }
     out.push_str("      - ./data:/agent/data\n      - ./logs:/agent/logs\n");
+    out.push_str("      - ./workspaces:/agent/workspaces\n      - ./cron:/agent/cron\n");
     out.push_str("      # - ${WORKSPACE_SRC}:/code\n");
     out
 }
 
-fn render_env_example(names: &[String]) -> String {
+fn render_env_example(names: &[String], uid: u32, gid: u32) -> String {
     let mut out = String::from(
         "# Copy to .env (git-ignored, mode 600). Never commit secrets.\n\
          # Host user the container runs as (bind-mounted dirs must be writable by it).\n\
-         UID=1000\nGID=1000\n\n",
+         # Written by `dar sandbox` from the invoking user.\n",
     );
+    out.push_str(&format!("UID={uid}\nGID={gid}\n\n"));
     for name in names {
         out.push_str(&format!("{name}=\n"));
     }
@@ -236,13 +292,17 @@ fn render_readme(runner: &str) -> String {
 Runs this agent in Docker so a misbehaving agent can only touch what is mounted.\n\n\
 ## Security model\n\n\
 - The static `dar` binary (`bin/dar-sandbox`) is bind-mounted read-only; it is not in the image.\n\
-- Granular mounts: `agent.yaml`, `AGENTS.md`, `TOOLS.md`, other system files and `skills/` are read-only. Only `memory.md`, `memory/`, `data/`, `logs/` (and `pi-agent/` for pi) are writable.\n\
+- Granular mounts: `agent.yaml`, `AGENTS.md`, `TOOLS.md`, other system files and `skills/` are read-only. `WORKFLOW.md` is read-only. Only `memory.md`, `memory/`, `data/`, `logs/`, `workspaces/`, `cron/` (and `pi-agent/` for pi) are writable.\n\
 - The agent cannot edit `Dockerfile`, `docker-compose.yml` or `.env`, so it cannot plant code the host later runs.\n\
 - All capabilities dropped, `no-new-privileges`, read-only root fs, CPU/memory/pids limits.\n\
 - The Docker socket is never mounted.\n\n\
 ## Build / run / update\n\n\
 ```bash\ndar build                 # also builds bin/dar-sandbox (static musl, inside Docker)\ndocker compose up -d      # start\ndocker compose restart    # pick up a rebuilt binary\ndocker compose logs -f\n```\n\
 {auth}\n\
+## Host user
+
+`.env` holds `UID`/`GID` of the user who ran `dar sandbox`; the container runs as them. Edit `.env` if you run Docker as someone else.
+
 ## Workspace mounts\n\n\
 Uncomment `- ${{WORKSPACE_SRC}}:/code` in `docker-compose.yml`, set `WORKSPACE_SRC` in `.env`, and add more lines the same way.\n\n\
 ## Gotcha\n\n\
@@ -315,14 +375,7 @@ pub fn scaffold(root: &Path) -> Result<ScaffoldReport> {
     let mut report = ScaffoldReport::default();
     let raw = fs::read_to_string(&yaml_path)
         .with_context(|| format!("reading {}", yaml_path.display()))?;
-    match with_sandboxed_line(&raw) {
-        Some(updated) => {
-            fs::write(&yaml_path, updated)
-                .with_context(|| format!("writing {}", yaml_path.display()))?;
-            report.note("agent.yaml (sandboxed: true)", true);
-        }
-        None => report.note("agent.yaml (sandboxed: true)", false),
-    }
+    let updated_yaml = with_sandboxed_line(&raw)?;
 
     let pi = cfg.runner_kind() == "pi";
     write_if_missing(root, MEMORY_FILE, "", &mut report)?;
@@ -332,6 +385,17 @@ pub fn scaffold(root: &Path) -> Result<ScaffoldReport> {
     ensure_dir(root, "logs", &mut report)?;
     if pi {
         ensure_dir(root, "pi-agent", &mut report)?;
+    }
+    ensure_dir(root, "workspaces", &mut report)?;
+    ensure_dir(root, "cron", &mut report)?;
+    check_writable_contained(root, pi)?;
+    match updated_yaml {
+        Some(updated) => {
+            fs::write(&yaml_path, updated)
+                .with_context(|| format!("writing {}", yaml_path.display()))?;
+            report.note("agent.yaml (sandboxed: true)", true);
+        }
+        None => report.note("agent.yaml (sandboxed: true)", false),
     }
     write_if_missing(
         root,
@@ -345,7 +409,10 @@ pub fn scaffold(root: &Path) -> Result<ScaffoldReport> {
         &render_compose(root, &cfg),
         &mut report,
     )?;
-    let env_example = render_env_example(&env_placeholders(&cfg));
+    let env_example = {
+        let (uid, gid) = host_ids();
+        render_env_example(&env_placeholders(&cfg), uid, gid)
+    };
     write_if_missing(root, ".env.example", &env_example, &mut report)?;
     let env_missing = !root.join(".env").exists();
     write_if_missing(root, ".env", &env_example, &mut report)?;
@@ -455,11 +522,76 @@ mod tests {
     #[test]
     fn sandboxed_line_appended_once() {
         assert_eq!(
-            with_sandboxed_line("id: a").as_deref(),
+            with_sandboxed_line("id: a").unwrap().as_deref(),
             Some("id: a\nsandboxed: true\n")
         );
-        assert_eq!(with_sandboxed_line("id: a\nsandboxed: true\n"), None);
-        assert_eq!(with_sandboxed_line("sandboxed: false\n"), None);
+        assert_eq!(
+            with_sandboxed_line("id: a\nsandboxed: true\n").unwrap(),
+            None
+        );
+        assert_eq!(with_sandboxed_line("sandboxed: false\n").unwrap(), None);
+        // quoted key / not a line prefix match
+        assert_eq!(with_sandboxed_line("\"sandboxed\": true\n").unwrap(), None);
+        assert!(with_sandboxed_line("id: a\nx:\n  sandboxed: true\n")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn sandboxed_line_rejects_unsafe_yaml() {
+        for bad in ["- a\n- b\n", "{id: a}\n", "id: a\n...\n"] {
+            let err = with_sandboxed_line(bad).unwrap_err().to_string();
+            assert!(err.contains("manually"), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn compose_mounts_loop_dirs_and_pi_tmpfs() {
+        let temp = agent(&BUILTIN.replace("builtin", "pi"));
+        fs::write(temp.path().join("WORKFLOW.md"), "x").unwrap();
+        scaffold(temp.path()).unwrap();
+        let c = fs::read_to_string(temp.path().join("docker-compose.yml")).unwrap();
+        assert!(c.contains("- /agent/.pi:uid="));
+        assert!(c.contains("./WORKFLOW.md:/agent/WORKFLOW.md:ro"));
+        assert!(c.contains("./workspaces:/agent/workspaces\n"));
+        assert!(c.contains("./cron:/agent/cron\n"));
+        assert!(temp.path().join("workspaces").is_dir());
+        let b = agent(BUILTIN);
+        scaffold(b.path()).unwrap();
+        let c = fs::read_to_string(b.path().join("docker-compose.yml")).unwrap();
+        assert!(!c.contains("/agent/.pi"));
+        assert!(!c.contains("WORKFLOW.md"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_uses_invoking_user_ids() {
+        let temp = agent(BUILTIN);
+        scaffold(temp.path()).unwrap();
+        let env = fs::read_to_string(temp.path().join(".env")).unwrap();
+        let (uid, gid) = host_ids();
+        assert!(env.contains(&format!("UID={uid}\nGID={gid}\n")), "{env}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_writable_mounts_rejected() {
+        let outside = tempfile::tempdir().unwrap();
+        // dir symlink
+        let t = agent(BUILTIN);
+        std::os::unix::fs::symlink(outside.path(), t.path().join("data")).unwrap();
+        let err = scaffold(t.path()).unwrap_err().to_string();
+        assert!(err.contains("outside the agent folder"), "{err}");
+        assert!(!fs::read_to_string(t.path().join("agent.yaml"))
+            .unwrap()
+            .contains("sandboxed: true"));
+        // file symlink
+        let t = agent(BUILTIN);
+        let target = outside.path().join("m.md");
+        fs::write(&target, "").unwrap();
+        std::os::unix::fs::symlink(&target, t.path().join("memory.md")).unwrap();
+        let err = scaffold(t.path()).unwrap_err().to_string();
+        assert!(err.contains("memory.md"), "{err}");
     }
 
     #[test]
