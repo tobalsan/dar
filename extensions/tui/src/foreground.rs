@@ -222,7 +222,12 @@ async fn run_interactive(
         // Launch hydration replays pi-format archive Messages only:
         // backend-tagged marker files (e.g. opencode's) carry no messages, so
         // they must never be picked for hydration.
-        if let Some(id) = crate::archive::newest_session_id(&session_dir, "pi") {
+        let backend_id = hydration_backend_id(&backend::resolve(
+            config.backend.as_deref(),
+            &ctx.host.services,
+            &ctx.host.bus,
+        ));
+        if let Some(id) = crate::archive::newest_session_id(&session_dir, backend_id) {
             let (messages, truncated) = crate::archive::read_recent(&session_dir, &id);
             app.chat.hydrate(&messages, truncated);
         }
@@ -510,6 +515,15 @@ async fn open_session(
     backend.open(params, tx).await
 }
 
+/// Backend whose archive the launch hydration replays: the builtin backend
+/// resumes its own transcripts, everything else hydrates from pi's.
+fn hydration_backend_id(resolution: &Resolution) -> &'static str {
+    match resolution {
+        Resolution::Backend { id, .. } if id == "builtin" => "builtin",
+        _ => "pi",
+    }
+}
+
 /// Resolve the sessions dir from the chat config via the shared resolver, so
 /// the foreground and the `session_list` tool read the same corpus.
 fn sessions_dir(config: &ChatConfig, ctx: &StartCtx) -> Result<std::path::PathBuf> {
@@ -523,6 +537,17 @@ fn sessions_dir(config: &ChatConfig, ctx: &StartCtx) -> Result<std::path::PathBu
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hydration_follows_builtin_backend_else_pi() {
+        let backend = |id: &str| Resolution::Backend {
+            id: id.to_string(),
+            notice: None,
+        };
+        assert_eq!(super::hydration_backend_id(&backend("builtin")), "builtin");
+        assert_eq!(super::hydration_backend_id(&backend("opencode")), "pi");
+        assert_eq!(super::hydration_backend_id(&Resolution::Disabled), "pi");
+    }
+
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
