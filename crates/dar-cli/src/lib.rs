@@ -6,6 +6,7 @@ pub mod composer;
 mod create;
 pub mod dash;
 mod doctor;
+mod sandbox;
 pub mod self_check;
 pub mod self_update;
 
@@ -256,6 +257,9 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
         Command::Create(args) => {
             let root = args.resolve_root()?;
             let outcome = create::run(&root, &args)?;
+            if args.sandbox {
+                sandbox::run(&root)?;
+            }
             if outcome.loop_enabled {
                 dotenv::load_agent_env(&root)?;
                 let services = plugin_services(&root, plugins).await?;
@@ -271,6 +275,7 @@ async fn run_non_run_command(command: Command, plugins: Vec<Arc<dyn Extension>>)
             }
             Ok(())
         }
+        Command::Sandbox(args) => sandbox::run(&args.resolve_root()?),
         Command::InitBuild(args) => composer::init_build_with_options(
             &args.resolve_root()?,
             composer::BuildOptions {

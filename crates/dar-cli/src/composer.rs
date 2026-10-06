@@ -405,6 +405,9 @@ pub fn build_with_options(agent: &Path, options: BuildOptions) -> Result<()> {
     if options.universal {
         return build_universal(&crate_dir, &agent, options.offline);
     }
+    if crate::sandbox::is_sandboxed(&agent) {
+        crate::sandbox::build_binary(&agent, &crate_dir)?;
+    }
     let target = build_target(&options)?;
     if options.static_ {
         crate::doctor::check_static_build_prereqs(

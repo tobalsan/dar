@@ -3111,6 +3111,7 @@ mod tests {
             providers: Default::default(),
             extensions: Default::default(),
             system_files: None,
+            sandboxed: false,
         };
 
         let snapshot = super::passive_snapshot(&cfg, "/tmp/agent".to_string(), None);
@@ -3146,6 +3147,7 @@ mod tests {
             providers: Default::default(),
             extensions: Default::default(),
             system_files: None,
+            sandboxed: false,
         };
 
         let snapshot =
@@ -3520,6 +3522,7 @@ mod tests {
             providers: Default::default(),
             extensions: Default::default(),
             system_files: None,
+            sandboxed: false,
         }
     }
 
@@ -4797,6 +4800,7 @@ dashboard:
             providers: Default::default(),
             extensions: Default::default(),
             system_files: None,
+            sandboxed: false,
         }
     }
 

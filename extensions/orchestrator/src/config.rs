@@ -51,6 +51,9 @@ pub struct AgentConfig {
     /// Absent key ⇒ `AGENTS.md` only.
     #[serde(default)]
     pub system_files: Option<Vec<system_files::SystemFileEntry>>,
+    /// Marks the agent as Docker-sandboxed (`dar sandbox`); read by `dar build`.
+    #[serde(default)]
+    pub sandboxed: bool,
 }
 
 fn default_foreground() -> String {

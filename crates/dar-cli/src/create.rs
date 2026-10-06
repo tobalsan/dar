@@ -459,6 +459,7 @@ mod tests {
             tui: false,
             scheduler: false,
             chat_web: false,
+            sandbox: false,
         };
 
         let outcome = run(&root, &args).unwrap();
@@ -486,6 +487,7 @@ mod tests {
             tui: false,
             scheduler: false,
             chat_web: false,
+            sandbox: false,
         };
 
         let outcome = run(&root, &args).unwrap();
@@ -515,6 +517,7 @@ mod tests {
             tui: true,
             scheduler: true,
             chat_web: true,
+            sandbox: false,
         };
 
         run(&root, &args).unwrap();
@@ -546,6 +549,7 @@ mod tests {
             tui: false,
             scheduler: false,
             chat_web: false,
+            sandbox: false,
         };
 
         let err = run(root, &args).unwrap_err().to_string();

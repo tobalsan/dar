@@ -25,6 +25,8 @@ pub enum Command {
     Create(CreateArgs),
     /// Bootstrap the per-agent composition crate.
     InitBuild(InitBuildArgs),
+    /// Convert an agent folder to Docker sandbox mode (idempotent scaffold).
+    Sandbox(SandboxArgs),
     /// Regenerate and build the per-agent binary.
     Build(BuildArgs),
     /// Refresh the per-agent Cargo.lock.
@@ -141,6 +143,21 @@ pub struct CreateArgs {
     /// Enable the chat-web extension.
     #[arg(long = "chat-web")]
     pub chat_web: bool,
+    /// Also scaffold Docker sandbox files (same as running `dar sandbox`).
+    #[arg(long)]
+    pub sandbox: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SandboxArgs {
+    /// Agent folder containing agent.yaml (defaults to the current directory).
+    pub path: Option<PathBuf>,
+}
+
+impl SandboxArgs {
+    pub fn resolve_root(&self) -> Result<PathBuf> {
+        resolve_root(self.path.as_deref())
+    }
 }
 
 #[derive(Debug, Args)]
