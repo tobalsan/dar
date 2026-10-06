@@ -17,7 +17,7 @@ use serde::Deserialize;
 use crate::composer;
 
 /// Pinned image for the in-Docker musl build.
-const RUST_IMAGE: &str = "rust:1.96-bookworm";
+const RUST_IMAGE: &str = "rust:1.96-alpine";
 const MEMORY_FILE: &str = "memory.md";
 const PI_PACKAGE: &str = "@earendil-works/pi-coding-agent";
 
@@ -446,24 +446,15 @@ pub fn run(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn sandbox_triple() -> Result<&'static str> {
-    match std::env::consts::ARCH {
-        "x86_64" => Ok("x86_64-unknown-linux-musl"),
-        "aarch64" => Ok("aarch64-unknown-linux-musl"),
-        other => bail!("sandbox build supports only x86_64/aarch64 hosts (got {other})"),
-    }
-}
-
 /// Build the static musl binary inside Docker and install it at
 /// `<agent>/bin/dar-sandbox`. `crate_dir` is the already-composed `.dar`.
 pub fn build_binary(agent: &Path, crate_dir: &Path) -> Result<()> {
     check_runner(load_config(agent)?.runner_kind())?;
-    let triple = sandbox_triple()?;
     let src = composer::dar_source_root()?;
     let target_dir = crate_dir.join("target/sandbox");
-    let script = format!(
-        "export RUSTUP_TOOLCHAIN=$RUST_VERSION; apt-get update -qq && apt-get install -y -qq musl-tools cmake && rustup target add {triple} && cargo build --release --target {triple}"
-    );
+    // Alpine's toolchain is musl-native, so a plain `cargo build` yields a
+    // static binary for the Docker host's arch with no cross-compiler setup.
+    let script = "export RUSTUP_TOOLCHAIN=$RUST_VERSION; apk add -q musl-dev cmake make perl gcc g++ && cargo build --release";
     let mount = |p: &Path| format!("{0}:{0}", p.display());
     let mut cmd = Command::new("docker");
     cmd.args(["run", "--rm", "-v", &mount(&src)]);
@@ -475,12 +466,12 @@ pub fn build_binary(agent: &Path, crate_dir: &Path) -> Result<()> {
         .arg("-e")
         .arg(format!("CARGO_TARGET_DIR={}", target_dir.display()))
         .arg(RUST_IMAGE)
-        .args(["bash", "-c", &script]);
+        .args(["sh", "-c", script]);
     let status = cmd.status().context("running docker (is it installed?)")?;
     if !status.success() {
         bail!("docker sandbox build exited with {status}");
     }
-    let built = target_dir.join(triple).join("release/dar");
+    let built = target_dir.join("release/dar");
     let dest = agent.join("bin/dar-sandbox");
     fs::create_dir_all(agent.join("bin")).context("creating bin/")?;
     fs::copy(&built, &dest)
