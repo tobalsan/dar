@@ -667,6 +667,7 @@ mod tests {
             providers: Default::default(),
             extensions: Default::default(),
             system_files: None,
+            sandboxed: false,
         }
     }
 
