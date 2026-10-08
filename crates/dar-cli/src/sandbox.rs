@@ -367,6 +367,42 @@ Host paths must exist before `docker compose up`; Docker creates missing ones as
     )
 }
 
+/// Append `KEY=value` lines for keys not already set in the env file. Returns
+/// the keys added. Existing values are never changed.
+fn ensure_env_keys(path: &Path, keys: &[(&str, String)]) -> Result<Vec<String>> {
+    let mut text =
+        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let has = |text: &str, k: &str| {
+        text.lines().any(|l| {
+            l.trim_start()
+                .strip_prefix(k)
+                .is_some_and(|r| r.starts_with('='))
+        })
+    };
+    let mut added = Vec::new();
+    for (k, v) in keys {
+        if !has(&text, k) {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&format!("{k}={v}\n"));
+            added.push((*k).to_string());
+        }
+    }
+    if !added.is_empty() {
+        fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(added)
+}
+
+/// First host loopback port from `start` that is free right now (`start` if
+/// none of the next 100 are). Only consulted when `CHAT_PORT` is unset.
+fn free_host_port(start: u16) -> u16 {
+    (start..start.saturating_add(100))
+        .find(|p| std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok())
+        .unwrap_or(start)
+}
+
 /// Write `contents` only when `path` is missing. Returns whether it wrote.
 fn write_if_missing(
     root: &Path,
@@ -468,7 +504,7 @@ pub fn scaffold(root: &Path) -> Result<ScaffoldReport> {
     write_if_missing(
         root,
         "docker-compose.yml",
-        &render_compose(root, &cfg, port.map(|(p, _)| p)),
+        &render_compose(root, &cfg, port.as_ref().map(|(p, _)| *p)),
         &mut report,
     )?;
     let env_example = {
@@ -476,10 +512,23 @@ pub fn scaffold(root: &Path) -> Result<ScaffoldReport> {
         render_env_example(&env_placeholders(&cfg), uid, gid)
     };
     write_if_missing(root, ".env.example", &env_example, &mut report)?;
-    let env_missing = !root.join(".env").exists();
     write_if_missing(root, ".env", &env_example, &mut report)?;
+    // An existing .env (converted agent) still needs the sandbox keys.
+    let (uid, gid) = host_ids();
+    let mut keys = vec![("UID", uid.to_string()), ("GID", gid.to_string())];
+    if let Some(&(p, _)) = port.as_ref() {
+        let host = free_host_port(p);
+        if host != p {
+            eprintln!("note: host port {p} is busy; publishing chat-web on 127.0.0.1:{host} (CHAT_PORT in .env)");
+            keys.push(("CHAT_PORT", host.to_string()));
+        }
+    }
+    let added = ensure_env_keys(&root.join(".env"), &keys)?;
+    if !added.is_empty() {
+        report.note(&format!(".env (+{})", added.join(", ")), true);
+    }
     #[cfg(unix)]
-    if env_missing {
+    {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(root.join(".env"), fs::Permissions::from_mode(0o600))
             .context("chmod 600 .env")?;
@@ -756,5 +805,41 @@ mod tests {
         for entry in [".env", "/bin/", "/pi-agent/"] {
             assert!(ignore.lines().any(|l| l.trim() == entry), "{entry}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_env_gets_ids_and_keeps_values() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = agent(BUILTIN);
+        let env = temp.path().join(".env");
+        fs::write(&env, "P_KEY=secret\nGID=42").unwrap();
+        fs::set_permissions(&env, fs::Permissions::from_mode(0o644)).unwrap();
+        scaffold(temp.path()).unwrap();
+        let (uid, _) = host_ids();
+        assert_eq!(
+            fs::read_to_string(&env).unwrap(),
+            format!("P_KEY=secret\nGID=42\nUID={uid}\n")
+        );
+        assert_eq!(
+            fs::metadata(&env).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        scaffold(temp.path()).unwrap(); // idempotent
+        assert_eq!(fs::read_to_string(&env).unwrap().matches("UID=").count(), 1);
+    }
+
+    #[test]
+    fn busy_chat_port_sets_chat_port_in_env() {
+        let busy = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let p = busy.local_addr().unwrap().port();
+        assert_ne!(free_host_port(p), p);
+        let t = agent(&format!(
+            "{BUILTIN}dashboard:\n  port: {p}\nextensions:\n  chat-web: {{}}\n"
+        ));
+        scaffold(t.path()).unwrap();
+        let env = fs::read_to_string(t.path().join(".env")).unwrap();
+        let line = env.lines().find(|l| l.starts_with("CHAT_PORT=")).unwrap();
+        assert_ne!(line, format!("CHAT_PORT={p}"));
     }
 }

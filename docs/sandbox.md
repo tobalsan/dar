@@ -23,7 +23,8 @@ Idempotent: writes only missing files, prints written/skipped lists. Edits
 can't edit safely (flow style, `...` end) and asks you to add the key by hand.
 
 Writes `Dockerfile`, `docker-compose.yml`, `.env.example`, `.env` (mode 600,
-your UID/GID), `SANDBOX.md`, and the `memory/`, `skills/`, `data/`, `logs/`,
+your UID/GID; an existing `.env` keeps its values and only gets missing
+`UID`/`GID` appended), `SANDBOX.md`, and the `memory/`, `skills/`, `data/`, `logs/`,
 `workspaces/`, `cron/` folders (+ `pi-agent/` for pi). `.env`, `bin/`,
 `pi-agent/` are git-ignored.
 
@@ -59,7 +60,8 @@ sandboxed agents.
 chat-web is served by the dashboard server, whose port defaults to `0`
 (ephemeral) and can't be published. With chat-web enabled, the sandbox pins
 `dashboard.port` (7878 unless already set) and publishes it on host loopback:
-`http://127.0.0.1:7878/chat` (override host port with `CHAT_PORT` in `.env`).
+`http://127.0.0.1:7878/chat`. If that host port is busy (e.g. `dar dash`),
+`dar sandbox` picks the next free one and writes it as `CHAT_PORT` in `.env`.
 A loopback `dashboard.bind` or ephemeral port is refused. For remote access
 put a proxy (e.g. `tailscale serve`) in front. Use `foreground: logs`; the
 container has no TTY for the TUI.
@@ -75,3 +77,5 @@ Uncomment `- ${WORKSPACE_SRC}:/code` in `docker-compose.yml` and set
 - Files added later (e.g. `TOOLS.md`) need a compose line to be mounted.
 - `memory.md` is a single-file mount: rename-replacing it fails (EBUSY).
 - Stale `.dar` crates may need `dar lock-refresh` before `dar build`.
+- Sandboxed agents don't appear in `dar dash`: presence is pid-based and
+  the container's pid/folder/addr aren't valid on the host.
