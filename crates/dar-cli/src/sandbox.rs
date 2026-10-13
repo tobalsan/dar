@@ -754,11 +754,18 @@ mod tests {
         assert!(render_dockerfile("builtin").contains("CMD [\"/agent/bin/dar\",\"run\"]"));
         for runner in ["builtin", "pi"] {
             let dockerfile = render_dockerfile(runner);
-            for needle in ["pandoc", "pip install --no-cache-dir weasyprint==", "fonts-dejavu-core"] {
+            for needle in [
+                "pandoc",
+                "pip install --no-cache-dir weasyprint==",
+                "fonts-dejavu-core",
+            ] {
                 assert!(dockerfile.contains(needle), "{runner} image lacks {needle}");
             }
             // Every continued line must end in a backslash up to the final step.
-            assert!(!dockerfile.contains("\\\n\n"), "{runner} dangling continuation");
+            assert!(
+                !dockerfile.contains("\\\n\n"),
+                "{runner} dangling continuation"
+            );
         }
     }
 
