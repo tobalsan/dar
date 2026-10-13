@@ -13,7 +13,7 @@ mod tools;
 mod transcript;
 
 use anyhow::{anyhow, Context, Result};
-use cap_chat::{ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams};
+use cap_chat::{ArtifactReady, ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams};
 use cap_runner::{ExitKind, Runner, RunnerHandle, SpawnParams};
 use futures_util::StreamExt;
 use host_api::{Extension, RegisterCtx};
@@ -421,6 +421,12 @@ async fn run_builtin_chat_turn(
                 })
                 .await;
             let result = bridge.call_tool(&name, args).await?;
+            if let (Some(sink), Some(ready)) = (
+                &params.artifact_ready,
+                artifact_ready_from_result(&name, &result),
+            ) {
+                let _ = sink.send(ready).await;
+            }
             let result_content = openai_tool_message_content(&result);
             let _ = tx
                 .send(ChatEvent::ToolOutput {
@@ -728,6 +734,15 @@ struct AgentProviderConfig {
 struct AgentConfigFile {
     #[serde(default)]
     providers: HashMap<String, AgentProviderConfig>,
+}
+
+/// The exact `artifact_publish` resource link in an MCP tool result, if any.
+fn artifact_ready_from_result(name: &str, result: &serde_json::Value) -> Option<ArtifactReady> {
+    result
+        .get("content")?
+        .as_array()?
+        .iter()
+        .find_map(|part| ArtifactReady::from_publish_resource(name, part))
 }
 
 fn openai_tool_message_content(result: &serde_json::Value) -> serde_json::Value {

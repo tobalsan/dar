@@ -239,6 +239,67 @@ done
     }
 }
 
+fn write_artifact_bridge_script(dir: &Path) -> cap_runner::HostToolBridge {
+    let script = r#"while read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
+    *'"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"artifact_publish","description":"d","inputSchema":{"type":"object"}}]}}\n' "$id" ;;
+    *'"tools/call"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"resource_link","uri":"dar-artifact://550e8400-e29b-41d4-a716-446655440000","name":"report.txt","mimeType":"text/plain","bytes":5,"sha256":"abc","caption":"cap"}]}}\n' "$id" ;;
+  esac
+done
+"#;
+    let path = dir.join("artifact.sh");
+    std::fs::write(&path, script).unwrap();
+    cap_runner::HostToolBridge {
+        command: "sh".to_string(),
+        args: vec![path.display().to_string()],
+    }
+}
+
+#[tokio::test]
+async fn artifact_publish_result_is_sent_to_artifact_sink() {
+    let (url, _) = spawn_stub(vec![
+        tool_reply(&[("c1", "artifact_publish")]),
+        text_reply("done", None),
+    ])
+    .await;
+    let fx = fixture(&url);
+    let bridge = write_artifact_bridge_script(&fx.root);
+    let (artifact_tx, mut artifacts) = mpsc::channel(4);
+    let (mut session, mut rx) = open(
+        params(&fx)
+            .host_tool_bridge(Some(bridge))
+            .artifact_ready(Some(artifact_tx))
+            .build(),
+    )
+    .await;
+    let events = run_turn(&mut session, &mut rx, "publish it").await;
+    assert_eq!(finished(&events), (true, None));
+    let ready = artifacts.try_recv().expect("artifact event");
+    assert_eq!(ready.name, "report.txt");
+    assert_eq!(ready.mime_type.as_deref(), Some("text/plain"));
+    assert_eq!(ready.caption.as_deref(), Some("cap"));
+    assert!(artifacts.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn non_publish_tool_results_emit_no_artifact() {
+    let (url, _) = spawn_stub(vec![tool_reply(&[("c1", "probe")]), text_reply("ok", None)]).await;
+    let fx = fixture(&url);
+    let bridge = write_bridge_script(&fx.root, false);
+    let (artifact_tx, mut artifacts) = mpsc::channel(4);
+    let (mut session, mut rx) = open(
+        params(&fx)
+            .host_tool_bridge(Some(bridge))
+            .artifact_ready(Some(artifact_tx))
+            .build(),
+    )
+    .await;
+    run_turn(&mut session, &mut rx, "go").await;
+    assert!(artifacts.try_recv().is_err());
+}
+
 #[tokio::test]
 async fn writes_transcript_with_builtin_header_and_every_message() {
     let (url, bodies) = spawn_stub(vec![text_reply("hello back", None)]).await;
