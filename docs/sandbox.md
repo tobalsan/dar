@@ -30,6 +30,15 @@ your UID/GID), `SANDBOX.md`, and the `memory/`, `skills/`, `data/`, `logs/`,
 Runners: `builtin` (Debian slim + CA certs; provider keys come from `$env:`
 refs in `.env`) and `pi` (Node + pi CLI; auth in `./pi-agent`). Others error.
 
+Both images include document tools: `pandoc` (markdown → DOCX/HTML) and
+`weasyprint` as a light PDF engine, so an agent can run
+`pandoc in.md -o out.docx` or `pandoc in.md --pdf-engine=weasyprint -o out.pdf`
+instead of hand-writing generators. WeasyPrint is pip-installed (pinned) in
+`/opt/weasyprint` because Debian's package pulls scipy/sympy/gcc (+1.5 GB).
+Cost: about +100 MB compressed / +490 MB on disk vs. the old image; no LaTeX.
+Fonts are DejaVu only (no CJK). Existing sandboxes keep their Dockerfile
+(`dar sandbox` never overwrites it); delete it and rerun to regenerate.
+
 ## Static binary
 
 With `sandboxed: true`, `dar build` also compiles a static musl

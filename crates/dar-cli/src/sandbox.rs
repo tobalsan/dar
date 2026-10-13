@@ -245,23 +245,43 @@ fn escapes_agent(path: &str) -> bool {
             .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
 }
 
+/// Apt packages in every sandbox image. pandoc turns markdown into DOCX/HTML;
+/// weasyprint (pip, below) is the light PDF engine via
+/// `pandoc --pdf-engine=weasyprint`, no LaTeX. Debian's own `weasyprint`
+/// package is avoided: it drags in scipy/sympy/gcc (+1.5 GB).
+const SANDBOX_PACKAGES: &str = "ca-certificates git pandoc python3 python3-venv \
+libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 fonts-dejavu-core";
+const WEASYPRINT_VERSION: &str = "70.0";
+
+/// The `RUN` step shared by every runner image, without trailing newline;
+/// `tail` is appended to the same layer (e.g. ` && npm install ...`).
+fn render_base_run(tail: &str) -> String {
+    format!(
+        "RUN apt-get update -qq \\\n \
+         && apt-get install -y -qq --no-install-recommends {SANDBOX_PACKAGES} \\\n \
+         && python3 -m venv /opt/weasyprint \\\n \
+         && /opt/weasyprint/bin/pip install --no-cache-dir weasyprint=={WEASYPRINT_VERSION} \\\n \
+         && ln -s /opt/weasyprint/bin/weasyprint /usr/local/bin/weasyprint \\\n \
+         && rm -rf /var/lib/apt/lists/*{tail}\n"
+    )
+}
+
 fn render_dockerfile(runner: &str) -> String {
     let mut out = String::from(
         "# Sandbox image for this dar agent. The dar binary is NOT baked in: it is\n\
          # bind-mounted at /agent/bin/dar (see docker-compose.yml). Rebuild it with\n\
-         # `dar build`, then `docker compose restart`.\n",
+         # `dar build`, then `docker compose restart`.\n\
+         # Document tools: pandoc (markdown -> docx/html) and weasyprint\n\
+         # (`pandoc in.md --pdf-engine=weasyprint -o out.pdf`).\n",
     );
     if runner == "pi" {
         out.push_str("FROM node:22-bookworm-slim\n");
-        out.push_str(
-            "RUN apt-get update -qq \\\n && apt-get install -y -qq --no-install-recommends ca-certificates git \\\n && rm -rf /var/lib/apt/lists/* \\\n",
-        );
-        out.push_str(&format!(" && npm install -g {PI_PACKAGE}\n"));
+        out.push_str(&render_base_run(&format!(
+            " \\\n && npm install -g {PI_PACKAGE}"
+        )));
     } else {
         out.push_str("FROM debian:bookworm-slim\n");
-        out.push_str(
-            "RUN apt-get update -qq \\\n && apt-get install -y -qq --no-install-recommends ca-certificates git \\\n && rm -rf /var/lib/apt/lists/*\n",
-        );
+        out.push_str(&render_base_run(""));
     }
     out.push_str("WORKDIR /agent\nCMD [\"/agent/bin/dar\",\"run\"]\n");
     out
@@ -732,6 +752,14 @@ mod tests {
         assert!(render_dockerfile("pi").contains(PI_PACKAGE));
         assert!(render_dockerfile("builtin").contains("debian:bookworm-slim"));
         assert!(render_dockerfile("builtin").contains("CMD [\"/agent/bin/dar\",\"run\"]"));
+        for runner in ["builtin", "pi"] {
+            let dockerfile = render_dockerfile(runner);
+            for needle in ["pandoc", "pip install --no-cache-dir weasyprint==", "fonts-dejavu-core"] {
+                assert!(dockerfile.contains(needle), "{runner} image lacks {needle}");
+            }
+            // Every continued line must end in a backslash up to the final step.
+            assert!(!dockerfile.contains("\\\n\n"), "{runner} dangling continuation");
+        }
     }
 
     #[test]
