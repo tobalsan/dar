@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- The builtin chat backend now reports `artifact_publish` results through `ChatSessionParams::artifact_ready`, like the pi, codex and opencode chat backends, so channel extensions (Slack, WhatsApp Web) can deliver files published by `runner.use: builtin` agents.
 - `dar sandbox` images (builtin and pi) now include `pandoc` and `weasyprint` so agents can produce DOCX and PDF (`pandoc in.md --pdf-engine=weasyprint -o out.pdf`) without hand-written generators. About +100 MB compressed per image. Existing sandboxes keep their Dockerfile; delete it and rerun `dar sandbox` to pick this up. See [docs/sandbox.md](docs/sandbox.md).
 - The builtin chat backend now persists sessions as transcripts in the chat session dir (`backend: builtin`) and resumes them (channels and chat-web reopen the newest session with history). `abort` now cancels the in-flight turn, usage is reported as context usage, and a bare `/compact` summarizes and replaces the history instead of being sent to the model. New optional `runner.context_window` (tokens, must be > 0) sets the window shown with context usage. See [docs/configuration.md](docs/configuration.md).
 - Added `runner.max_tool_calls` (default 100) for the builtin runner and chat: the maximum number of tool calls per turn, replacing the hard-coded 8-round limit. Other runners ignore it. See [docs/configuration.md](docs/configuration.md).
