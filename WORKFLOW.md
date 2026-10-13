@@ -77,9 +77,48 @@ If the repo you work on contains an AGENTS.md file, you **must follow its instru
 
 1. Follow the e2e playbook exactly (launch the real gateway/UI against an isolated home, seed the minimal config, exercise your slice's behavior end-to-end).
 2. Capture the evidence the playbook asks for (screenshots, logs, API/DOM transcripts).
-3. Report the e2e PASS/FAIL — per behavior — in your tracker handoff comment, with the commands run and evidence file names.
+3. Report the e2e PASS/FAIL — per behavior — in your tracker handoff comment, with the commands run and evidence file names, and tick the acceptance criteria that pass (see **Handoff comment format** below).
 
 If a genuine harness limitation blocks a real e2e run (missing deps, cannot bind ports, fake OAuth preventing user creation, etc.), state it **explicitly** as a harness gap in your handoff — never silently skip the e2e or substitute unit tests and call it validated. Do not move the issue out of active states until the e2e is either done or the gap is documented.
+
+## Handoff comment format
+
+Your comments are read by humans in Linear, which renders the body as Markdown. A single dense paragraph is unreadable, so every comment you post or update (claim, progress, blocker, final handoff) must follow these rules:
+
+- **Real line breaks.** Send the body through GraphQL `variables` (e.g. `mutation($id: String!, $body: String!) { commentUpdate(id: $id, input: { body: $body }) { success } }`), never inlined or escaped inside the query string, so newlines arrive as actual newlines, not as literal `\n` or one collapsed line.
+- **One fact per line.** Short `###` headings, bullet lists, blank lines between sections. Never chain several results into one paragraph with semicolons.
+- Commands, paths, branches and file names go in backticks; several commands go in a fenced code block, one per line.
+- Plain ASCII spaces only (no non-breaking or narrow spaces): write `--using 22` and `port 4080`, never `--using22` or `on4080`.
+- After posting or updating, re-read the comment from the tracker and check it shows separate lines with intact spacing. If not, fix it.
+
+**Acceptance criteria checklist.** If the issue body has an `## Acceptance criteria` checklist, your final handoff comment must reproduce it as a Markdown task list: every item copied verbatim, same order, nothing added, merged or reworded. Mark `- [x]` only for items you actually verified pass (e2e, tests or inspection), followed by a short evidence pointer. Leave `- [ ]` for anything that failed, was not verified, or is blocked by a harness gap, and say why. This gives a clear picture of what passes acceptance. Do this in your comment only; leave the checkboxes in the issue description untouched.
+
+Final handoff skeleton:
+
+~~~markdown
+### Summary
+- PR: <url> (branch `<branch>`, commit `<sha>`)
+- Reviewer subagent: clean
+
+### Acceptance criteria
+- [x] <criterion copied verbatim> (evidence: `validation/01-upload.png`)
+- [ ] <criterion copied verbatim> (FAIL: <what you observed>)
+
+### Validation
+- Unit tests: <count> passed across <files>
+- E2E: PASS / FAIL per behavior, one bullet each
+
+### Commands
+```bash
+<one command per line>
+```
+
+### Evidence
+- `<evidence file>`
+
+### Notes
+- <caveats, harness gaps, merge-order notes>
+~~~
 
 ## Review And PR Flow
 
@@ -94,7 +133,7 @@ When code changes are needed:
 5. After a clean review, commit the work in the worktree.
 6. Create or update the GitHub PR using `gh`. Mint the token with the repo owner explicit — `GH_TOKEN=$(gh-app-token --owner <owner>)` (e.g. `--owner tobalsan` for `tobalsan/dar`). Do NOT call the credential helper without a repo path: with no owner it falls back to the default installation (a different account) and `gh pr create` fails with `Resource not accessible by integration`. `git push` works regardless because git supplies the owner automatically.
 7. Link the PR to the current tracker issue when the configured tracker supports it; otherwise include the PR URL in the final tracker comment. If PR can't be linked directly, you must include the issue ID directly in the PR title.
-8. Post your final handoff comment.
+8. Post your final handoff comment, following **Handoff comment format** (acceptance checklist included).
 9. Move the issue to `In Review` **last** (see ordering rule below).
 
 ## Blockers
