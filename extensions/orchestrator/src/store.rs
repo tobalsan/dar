@@ -53,6 +53,8 @@ pub struct NewRun<'a> {
     pub model: Option<&'a str>,
     /// Model provider this run is dispatched with (None = none/single-provider).
     pub provider: Option<&'a str>,
+    /// Thinking level this run is dispatched with (None = unset in config).
+    pub thinking: Option<&'a str>,
 }
 
 /// Fields written when a run finishes (outcome, timing, exit code).
@@ -84,6 +86,7 @@ pub struct RunRow {
     pub runner: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
+    pub thinking: Option<String>,
 }
 
 /// Parameters for inserting one event (child stdout/stderr or lifecycle event).
@@ -175,7 +178,8 @@ impl Store {
                 process_alive   INTEGER NOT NULL DEFAULT 1,
                 runner          TEXT,
                 model           TEXT,
-                provider        TEXT
+                provider        TEXT,
+                thinking        TEXT
             );
             CREATE INDEX IF NOT EXISTS runs_identifier ON runs(issue_identifier);
             CREATE INDEX IF NOT EXISTS runs_started_at ON runs(started_at);
@@ -225,7 +229,7 @@ impl Store {
             )
             .context("adding claims.issue_id")?;
         }
-        // Add per-run runner/model/provider columns on pre-existing DBs so
+        // Add per-run runner/model/provider/thinking columns on pre-existing DBs so
         // historical rows simply carry NULLs (rendered as defaults).
         let run_cols = conn
             .prepare("PRAGMA table_info(runs)")?
@@ -235,6 +239,7 @@ impl Store {
             ("runner", "ALTER TABLE runs ADD COLUMN runner TEXT"),
             ("model", "ALTER TABLE runs ADD COLUMN model TEXT"),
             ("provider", "ALTER TABLE runs ADD COLUMN provider TEXT"),
+            ("thinking", "ALTER TABLE runs ADD COLUMN thinking TEXT"),
         ] {
             if !run_cols.iter().any(|name| name == col) {
                 conn.execute(sql, [])
@@ -260,8 +265,8 @@ impl Store {
              (run_id, issue_id, issue_identifier, workspace,
               profile_json, workflow_path, workflow_sha,
               pid, worker_id, started_at, process_alive,
-              runner, model, provider)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,?11,?12,?13)",
+              runner, model, provider, thinking)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,?11,?12,?13,?14)",
             params![
                 r.run_id,
                 r.issue_id,
@@ -276,6 +281,7 @@ impl Store {
                 r.runner,
                 r.model,
                 r.provider,
+                r.thinking,
             ],
         )
         .context("insert_run")?;
@@ -424,7 +430,7 @@ impl Store {
                     profile_json, workflow_path, workflow_sha,
                     pid, worker_id, started_at, finished_at,
                     outcome, exit_code, process_alive,
-                    runner, model, provider
+                    runner, model, provider, thinking
              FROM runs
              ORDER BY started_at DESC
              LIMIT ?1 OFFSET ?2",
@@ -449,6 +455,7 @@ impl Store {
                 runner: row.get(14)?,
                 model: row.get(15)?,
                 provider: row.get(16)?,
+                thinking: row.get(17)?,
             })
         })?;
 
@@ -470,7 +477,7 @@ impl Store {
                     profile_json, workflow_path, workflow_sha,
                     pid, worker_id, started_at, finished_at,
                     outcome, exit_code, process_alive,
-                    runner, model, provider
+                    runner, model, provider, thinking
              FROM runs
              WHERE run_id = ?1",
         )?;
@@ -493,6 +500,7 @@ impl Store {
                 runner: row.get(14)?,
                 model: row.get(15)?,
                 provider: row.get(16)?,
+                thinking: row.get(17)?,
             })
         })?;
         rows.next().transpose().context("get_run")
@@ -821,12 +829,14 @@ mod tests {
                 runner: Some("opencode"),
                 model: Some("claude-opus-4-8"),
                 provider: Some("anthropic"),
+                thinking: Some("high"),
             })
             .unwrap();
         let row = store.get_run(&run_id).unwrap().expect("run present");
         assert_eq!(row.runner.as_deref(), Some("opencode"));
         assert_eq!(row.model.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(row.provider.as_deref(), Some("anthropic"));
+        assert_eq!(row.thinking.as_deref(), Some("high"));
         // Defaults to NULL when not provided.
         let run_id2 = new_run_id("TEST-RM2", &now);
         store
@@ -844,6 +854,7 @@ mod tests {
                 runner: Some("fake"),
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
         let row2 = store.get_run(&run_id2).unwrap().expect("run present");
@@ -873,6 +884,7 @@ mod tests {
                 runner: None,
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
 
@@ -915,6 +927,7 @@ mod tests {
                     runner: None,
                     model: None,
                     provider: None,
+                    thinking: None,
                 })
                 .unwrap();
             store
@@ -989,6 +1002,7 @@ mod tests {
                 runner: None,
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
 
@@ -1033,6 +1047,7 @@ mod tests {
                     runner: None,
                     model: None,
                     provider: None,
+                    thinking: None,
                 })
                 .unwrap();
             if finish {
@@ -1073,6 +1088,7 @@ mod tests {
                 runner: None,
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
 
@@ -1111,6 +1127,7 @@ mod tests {
                 runner: None,
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
 
@@ -1151,6 +1168,7 @@ mod tests {
                 runner: None,
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
 
@@ -1221,6 +1239,7 @@ mod tests {
                 runner: None,
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
         store
@@ -1260,6 +1279,7 @@ mod tests {
                 runner: None,
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
         for _ in 0..2 {

@@ -69,6 +69,7 @@ fn into_api_run(r: crate::store::RunRow) -> RunRow {
         runner: r.runner,
         model: r.model,
         provider: r.provider,
+        thinking: r.thinking,
     }
 }
 

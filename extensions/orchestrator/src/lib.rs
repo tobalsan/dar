@@ -432,6 +432,7 @@ fn passive_snapshot(
             runner: runner_service_id(&agent_cfg.runner.use_).to_string(),
             model: agent_cfg.runner.model.clone(),
             provider: agent_cfg.runner.provider.clone(),
+            thinking: agent_cfg.runner.thinking.clone(),
             workflow,
         },
         version: 1,
@@ -1897,6 +1898,7 @@ impl Orchestrator {
                 runner: Some(&self.effective_cfg.runner_kind),
                 model: self.effective_cfg.model.as_deref(),
                 provider: self.effective_cfg.provider.as_deref(),
+                thinking: self.effective_cfg.thinking.as_deref(),
             }) {
                 tracing::warn!(issue = %issue.identifier, "insert_run (hook_failed) SQLite write failed: {e:#}");
             }
@@ -1974,6 +1976,7 @@ impl Orchestrator {
                     runner: Some(&self.effective_cfg.runner_kind),
                     model: self.effective_cfg.model.as_deref(),
                     provider: self.effective_cfg.provider.as_deref(),
+                    thinking: self.effective_cfg.thinking.as_deref(),
                 }) {
                     tracing::warn!(issue = %issue.identifier, "insert_run SQLite write failed: {e:#}");
                 }
@@ -2093,6 +2096,7 @@ impl Orchestrator {
             runner: Some(&self.effective_cfg.runner_kind),
             model: self.effective_cfg.model.as_deref(),
             provider: self.effective_cfg.provider.as_deref(),
+            thinking: self.effective_cfg.thinking.as_deref(),
         }) {
             tracing::warn!(issue = %issue.identifier, "insert_run (dispatch_failed) SQLite write failed: {e:#}");
         }
@@ -2427,6 +2431,7 @@ impl Orchestrator {
             runner: Some(&self.effective_cfg.runner_kind),
             model: self.effective_cfg.model.as_deref(),
             provider: self.effective_cfg.provider.as_deref(),
+            thinking: self.effective_cfg.thinking.as_deref(),
         }) {
             tracing::warn!(issue = %issue.identifier, "insert park_barrier run failed: {e:#}");
             return;
@@ -2787,6 +2792,7 @@ impl Orchestrator {
                 runner: self.state.agent.runner.clone(),
                 model: self.effective_cfg.model.clone(),
                 provider: self.effective_cfg.provider.clone(),
+                thinking: self.effective_cfg.thinking.clone(),
                 workflow: self.state.agent.workflow.clone(),
             },
             paused: self.state.paused.load(Ordering::SeqCst),
@@ -2936,6 +2942,7 @@ fn api_run_row(row: store::RunRow) -> orchestrator_api::RunRow {
         runner: row.runner,
         model: row.model,
         provider: row.provider,
+        thinking: row.thinking,
     }
 }
 
@@ -3984,6 +3991,7 @@ dashboard:
                 runner: None,
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
         let claim_id = store
@@ -4076,6 +4084,7 @@ dashboard:
                 runner: None,
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
         orchestrator.slots.push(RunSlot {
@@ -4163,6 +4172,7 @@ dashboard:
                 runner: None,
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
         orchestrator.slots.push(RunSlot {
@@ -4244,6 +4254,7 @@ dashboard:
                 runner: None,
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
         orchestrator.slots.push(RunSlot {
@@ -4332,6 +4343,7 @@ dashboard:
                 runner: None,
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
         let claim_id = store
@@ -4497,6 +4509,7 @@ dashboard:
                 runner: None,
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
         orchestrator.slots.push(RunSlot {
@@ -4560,6 +4573,7 @@ dashboard:
                     runner: None,
                     model: None,
                     provider: None,
+                    thinking: None,
                 })
                 .unwrap();
             store
@@ -4656,6 +4670,7 @@ dashboard:
                 runner: None,
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
         store
@@ -5463,6 +5478,7 @@ dashboard:
                 runner: None,
                 model: None,
                 provider: None,
+                thinking: None,
             })
             .unwrap();
         let (handle, harness) = turn_handle_for_test(42);
@@ -5686,6 +5702,7 @@ dashboard:
                     runner: None,
                     model: None,
                     provider: None,
+                    thinking: None,
                 })
                 .unwrap();
             store

@@ -78,7 +78,7 @@ pub struct PageLink {
 #[template(path = "content.html")]
 pub struct ContentTemplate {
     pub agent: AgentInfo,
-    /// Active model formatted for display (`provider/model`, bare model, or `—`).
+    /// Active model formatted for display (`provider/model[:thinking]`, bare model, or `—`).
     pub agent_model: String,
     pub active_runs: Vec<ActiveRun>,
     pub history: Vec<HistoryRow>,
@@ -134,6 +134,7 @@ impl ContentTemplate {
             &s.agent.runner,
             s.agent.model.as_deref(),
             s.agent.provider.as_deref(),
+            s.agent.thinking.as_deref(),
         );
         Self {
             agent: s.agent,
@@ -156,19 +157,29 @@ impl ContentTemplate {
 
 /// Format the dispatched/active model for display.
 ///
-/// Returns `—` when no model is configured. When a provider is set *and* the
+/// Returns `—` when no model is configured. A set thinking level is appended
+/// as `:thinking` (`model:high`, `—:high`). When a provider is set *and* the
 /// runner is multi-provider (`opencode`/`pi`), the model is prefixed as
 /// `provider/model`. `codex` is OpenAI-only, so it never carries a provider
 /// prefix; the model name is shown alone.
-fn fmt_model_display(runner: &str, model: Option<&str>, provider: Option<&str>) -> String {
-    let model = match model.map(str::trim).filter(|m| !m.is_empty()) {
-        Some(m) => m,
-        None => return "\u{2014}".to_string(),
-    };
+fn fmt_model_display(
+    runner: &str,
+    model: Option<&str>,
+    provider: Option<&str>,
+    thinking: Option<&str>,
+) -> String {
+    let model = model
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or("\u{2014}");
     let multi_provider = matches!(runner, "opencode" | "pi");
-    match provider.map(str::trim).filter(|p| !p.is_empty()) {
-        Some(p) if multi_provider => format!("{p}/{model}"),
+    let base = match provider.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) if multi_provider && model != "\u{2014}" => format!("{p}/{model}"),
         _ => model.to_string(),
+    };
+    match thinking.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => format!("{base}:{t}"),
+        None => base,
     }
 }
 
@@ -291,6 +302,7 @@ impl RunDetailTemplate {
                 run.runner.as_deref().unwrap_or_default(),
                 run.model.as_deref(),
                 run.provider.as_deref(),
+                run.thinking.as_deref(),
             ),
             process_alive: run.process_alive,
             workflow_content,
@@ -461,6 +473,7 @@ mod tests {
             runner: Some("codex".to_string()),
             model: Some("gpt-5".to_string()),
             provider: None,
+            thinking: Some("high".to_string()),
         }
     }
 
@@ -721,8 +734,8 @@ mod tests {
         assert!(html.contains(">codex<"), "dispatched runner shown");
         assert!(html.contains(">Model<"), "model label shown");
         assert!(
-            html.contains(">gpt-5<"),
-            "dispatched model shown without provider prefix"
+            html.contains(">gpt-5:high<"),
+            "dispatched model shown without provider prefix, with thinking"
         );
         // protocol_event unwrapped to log_row + text.
         assert!(html.contains("tool_call"), "log_row tag shown");
@@ -796,9 +809,9 @@ mod tests {
 
     #[test]
     fn model_display_unset_shows_dash() {
-        assert_eq!(fmt_model_display("fake", None, None), "\u{2014}");
+        assert_eq!(fmt_model_display("fake", None, None, None), "\u{2014}");
         assert_eq!(
-            fmt_model_display("pi", Some(""), Some("anthropic")),
+            fmt_model_display("pi", Some(""), Some("anthropic"), None),
             "\u{2014}"
         );
     }
@@ -806,11 +819,11 @@ mod tests {
     #[test]
     fn model_display_multi_provider_prefixes() {
         assert_eq!(
-            fmt_model_display("opencode", Some("claude-opus-4-8"), Some("anthropic")),
+            fmt_model_display("opencode", Some("claude-opus-4-8"), Some("anthropic"), None),
             "anthropic/claude-opus-4-8"
         );
         assert_eq!(
-            fmt_model_display("pi", Some("claude-opus-4-8"), Some("anthropic")),
+            fmt_model_display("pi", Some("claude-opus-4-8"), Some("anthropic"), None),
             "anthropic/claude-opus-4-8"
         );
     }
@@ -819,7 +832,7 @@ mod tests {
     fn model_display_codex_never_prefixes_provider() {
         // codex is OpenAI-only: provider is ignored, model shown alone.
         assert_eq!(
-            fmt_model_display("codex", Some("gpt-5"), Some("openai")),
+            fmt_model_display("codex", Some("gpt-5"), Some("openai"), None),
             "gpt-5"
         );
     }
@@ -827,8 +840,24 @@ mod tests {
     #[test]
     fn model_display_no_provider_shows_bare_model() {
         assert_eq!(
-            fmt_model_display("pi", Some("some-model"), None),
+            fmt_model_display("pi", Some("some-model"), None, None),
             "some-model"
+        );
+    }
+
+    #[test]
+    fn model_display_appends_thinking() {
+        assert_eq!(
+            fmt_model_display("codex", Some("gpt-6.1-sol"), None, Some("high")),
+            "gpt-6.1-sol:high"
+        );
+        assert_eq!(
+            fmt_model_display("fake", None, None, Some("high")),
+            "\u{2014}:high"
+        );
+        assert_eq!(
+            fmt_model_display("codex", Some("gpt-5"), None, Some(" ")),
+            "gpt-5"
         );
     }
 
@@ -838,13 +867,14 @@ mod tests {
         s.agent.runner = "opencode".to_string();
         s.agent.model = Some("claude-opus-4-8".to_string());
         s.agent.provider = Some("anthropic".to_string());
+        s.agent.thinking = Some("high".to_string());
         let html = ContentTemplate::from_snapshot(s)
             .render()
             .expect("content renders");
         assert!(html.contains("opencode"), "active runner shown");
         assert!(
-            html.contains("anthropic/claude-opus-4-8"),
-            "active model shown with provider prefix"
+            html.contains("anthropic/claude-opus-4-8:high"),
+            "active model shown with provider prefix and thinking"
         );
     }
 
