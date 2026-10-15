@@ -709,6 +709,10 @@ async fn abort_does_not_wait_for_a_full_event_channel() {
         .open(params(&fx).host_tool_bridge(Some(bridge)).build(), tx)
         .await
         .unwrap();
+    assert!(matches!(
+        rx.recv().await,
+        Some(ChatEvent::SessionIdentity { .. })
+    ));
     // Four cancelled turns need more slots than the loop-guard forwarder
     // buffers, so reporting them blocks unless it runs in the background.
     for prompt in ["A", "B", "C", "D"] {

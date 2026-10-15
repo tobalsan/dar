@@ -420,6 +420,7 @@ impl ChatState {
         match event {
             ChatEvent::TurnStarted { origin } => self.turn_origin = Some(origin),
             ChatEvent::User { text } => self.blocks.push(ChatBlock::User(text)),
+            ChatEvent::SessionIdentity { .. } => {}
             ChatEvent::SessionReset => {
                 self.clear_transcript();
                 self.in_flight = false;

@@ -82,6 +82,11 @@ impl ChatBackend for BuiltinChatBackend {
                     );
                     (Transcript::fresh(&params.session_dir, id), Vec::new())
                 });
+                let _ = tx
+                    .send(ChatEvent::SessionIdentity {
+                        id: transcript.id().to_string(),
+                    })
+                    .await;
                 Ok(Box::new(BuiltinChatSession {
                     params: Arc::new(params),
                     tx,

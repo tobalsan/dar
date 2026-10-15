@@ -261,6 +261,12 @@ impl PiChatSession {
             params.artifact_ready.clone(),
         );
         spawn_stderr_pump(stderr, tx.clone());
+        // Ask pi which session it writes to; the reply surfaces as SessionIdentity.
+        write_line_to(
+            &stdin,
+            serde_json::json!({ "id": "identity", "type": "get_state" }).to_string() + "\n",
+        )
+        .await?;
 
         let closing = Arc::new(AtomicBool::new(false));
         let wait_handle = {
@@ -461,6 +467,18 @@ fn map_stdout_line(line: &str, context_window: Option<u64>) -> Mapped {
             ok: true,
             error: None,
         }),
+        // Reply to the `get_state` sent at spawn; `sessionId` is the header id
+        // of pi's `<ISO>_<uuid>.jsonl` archive file. Never a turn failure.
+        Some("response") if value.get("command").and_then(Value::as_str) == Some("get_state") => {
+            match value
+                .pointer("/data/sessionId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+            {
+                Some(id) => Mapped::Emit(ChatEvent::SessionIdentity { id: id.to_string() }),
+                None => Mapped::Ignore,
+            }
+        }
         Some("response") => match value.get("success").and_then(Value::as_bool) {
             Some(false) => Mapped::Emit(ChatEvent::TurnFinished {
                 ok: false,
@@ -678,6 +696,12 @@ fn spawn_stdout_pump(
             if let Mapped::AutoRespond { reply, notice } = mapped {
                 let _ = write_line_to(&stdin, reply).await;
                 if tx.send(ChatEvent::Error(notice)).await.is_err() {
+                    return;
+                }
+                continue;
+            }
+            if let Mapped::Emit(identity @ ChatEvent::SessionIdentity { .. }) = mapped {
+                if tx.send(identity).await.is_err() {
                     return;
                 }
                 continue;
@@ -1446,6 +1470,29 @@ done"#;
         // Stub exits on stdin EOF, so close is clean and emits no SessionClosed.
         session.close().await.unwrap();
         assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_state_reply_emits_session_identity() {
+        let stub = r#"while IFS= read -r line; do
+  case "$line" in
+    *'"type":"get_state"'*)
+      printf '%s\n' '{"type":"response","id":"identity","command":"get_state","success":true,"data":{"sessionId":"abc-123","sessionFile":"/x/2026_abc-123.jsonl"}}'
+      ;;
+  esac
+done"#;
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_stub(temp.path(), stub);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+
+        let session = PiChatSession::spawn(&stub_params(temp.path(), &script), tx)
+            .await
+            .unwrap();
+        match raw_event(&mut rx).await {
+            ChatEvent::SessionIdentity { id } => assert_eq!(id, "abc-123"),
+            other => panic!("expected SessionIdentity, got {other:?}"),
+        }
+        ChatSession::close(Box::new(session)).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

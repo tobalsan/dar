@@ -1389,7 +1389,9 @@ impl Session {
             questions,
             origin,
         ) = match event {
-            ChatEvent::User { .. } | ChatEvent::SessionReset => return true,
+            ChatEvent::User { .. }
+            | ChatEvent::SessionReset
+            | ChatEvent::SessionIdentity { .. } => return true,
             ChatEvent::TurnStarted { origin } => {
                 if origin == TurnOrigin::Autonomous {
                     self.active_turns

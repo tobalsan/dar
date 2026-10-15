@@ -258,6 +258,11 @@ pub enum TurnOrigin {
 
 #[derive(Clone, Debug)]
 pub enum ChatEvent {
+    /// Backend reports the persisted session/archive id it is writing to;
+    /// emitted once after open (and again after a resume) when known.
+    /// Backends that persist sessions MUST emit it; otherwise chat-web cannot
+    /// mark the session live, resume it, or generate its title.
+    SessionIdentity { id: String },
     /// Begins an attributed run before its visible output and single completion.
     /// Backends without this event retain submitted-only completion semantics.
     TurnStarted { origin: TurnOrigin },

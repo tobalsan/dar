@@ -88,15 +88,16 @@ impl OpenCodeChatSession {
         )
         .await?;
         let client = server.client();
-        let session_id = match resume_session(&client, params.resume_session_id.as_deref()).await {
-            Some(id) => id,
-            None => match client.create_session("tui-chat").await {
-                Ok(id) => id,
-                Err(e) => {
-                    server.kill_and_wait(CLOSE_GRACE).await;
-                    return Err(e);
-                }
-            },
+        let session_result = match params.resume_session_id.as_deref() {
+            Some(id) => resume_session(&client, id).await,
+            None => client.create_session("tui-chat").await,
+        };
+        let session_id = match session_result {
+            Ok(id) => id,
+            Err(e) => {
+                server.kill_and_wait(CLOSE_GRACE).await;
+                return Err(e);
+            }
         };
         // Marker in the SHARED session dir (params.session_dir, sibling to
         // pi's files) so the generic newest-wins resume resolution finds this
@@ -110,6 +111,11 @@ impl OpenCodeChatSession {
                 return Err(e);
             }
         };
+        let _ = tx
+            .send(ChatEvent::SessionIdentity {
+                id: session_id.clone(),
+            })
+            .await;
         let pump_client = client.clone();
         let pump_session = session_id.clone();
         let artifact_ready = params.artifact_ready.clone();
@@ -166,14 +172,17 @@ impl OpenCodeChatSession {
     }
 }
 
-/// Reuse `resume` when the server still knows it; any miss or error falls
-/// back to fresh (None) — resume is always optional.
-async fn resume_session(
-    client: &opencode_client::OpenCodeClient,
-    resume: Option<&str>,
-) -> Option<String> {
-    let id = resume?;
-    matches!(client.session_exists(id).await, Ok(true)).then(|| id.to_string())
+/// Reuse an explicit resume id. A lookup error or missing session fails
+/// closed: silently starting a fresh session would lose conversation context.
+async fn resume_session(client: &opencode_client::OpenCodeClient, id: &str) -> Result<String> {
+    resume_outcome(id, client.session_exists(id).await)
+}
+
+fn resume_outcome(id: &str, lookup: Result<bool>) -> Result<String> {
+    match lookup.with_context(|| format!("looking up opencode session {id}"))? {
+        true => Ok(id.to_string()),
+        false => anyhow::bail!("opencode session {id} not found; refusing to start a fresh one"),
+    }
 }
 
 /// Find the existing marker whose header id matches, else write a new one:
@@ -1252,6 +1261,7 @@ PY"#;
                     assert!(ok, "{error:?}");
                     finished += 1;
                 }
+                ChatEvent::SessionIdentity { id } => assert_eq!(id, "sess-1"),
                 other => panic!("unexpected event: {other:?}"),
             }
         }
@@ -1351,21 +1361,62 @@ PY"#;
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn resume_unknown_id_falls_back_to_create() {
+    async fn resume_unknown_id_fails_closed_and_cleans_up_server() {
         let temp = tempfile::tempdir().unwrap();
-        let script = write_script(temp.path(), FAKE_SERVER);
+        let script = write_script(
+            temp.path(),
+            &format!(
+                "echo $$ > \"{}/server.pid\"\n{FAKE_SERVER}",
+                temp.path().display()
+            ),
+        );
         let sessions = temp.path().join("data").join("tui").join("sessions");
         let params = ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions)
             .resume_session_id(Some("missing".to_string()))
             .build();
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
-        let mut session = OpenCodeChatSession::spawn(&params, tx).await.unwrap();
+        let err = OpenCodeChatSession::spawn(&params, tx)
+            .await
+            .err()
+            .expect("missing resume id must fail");
+        assert!(err.to_string().contains("not found"), "{err}");
+        let markers = std::fs::read_dir(&sessions)
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(markers, 0, "no marker for a failed resume");
+        let pid: u32 = std::fs::read_to_string(temp.path().join("server.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_process_dead(pid).await;
+    }
 
+    #[test]
+    fn resume_lookup_error_fails_closed() {
+        let err = resume_outcome("sess-1", Err(anyhow::anyhow!("boom"))).unwrap_err();
+        assert!(format!("{err:#}").contains("boom"), "{err:#}");
+        assert_eq!(resume_outcome("sess-1", Ok(true)).unwrap(), "sess-1");
+        assert!(resume_outcome("sess-1", Ok(false)).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_resume_id_creates_fresh_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_script(temp.path(), FAKE_SERVER);
+        let sessions = temp.path().join("data").join("tui").join("sessions");
+        let params =
+            ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions).build();
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut session = OpenCodeChatSession::spawn(&params, tx).await.unwrap();
         session.send_turn("hello".to_string()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         let received = std::fs::read_to_string(temp.path().join("received.log")).unwrap();
         assert!(received.contains("hello"), "{received}");
-
         ChatSession::close(Box::new(session)).await.unwrap();
     }
 
