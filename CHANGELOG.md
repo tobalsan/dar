@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- chat-web: reopening a pi chat session from the sidebar now shows tool calls and results as tool blocks again, instead of dropping the calls and dumping tool output into the assistant's reply text.
 - The orchestrator dashboard now shows the configured thinking level next to the model (`model:thinking`, e.g. `gpt-6.1-sol:high`) in the Runs header and the run details pane. Runs record their thinking level; existing run history shows none.
 - The builtin chat backend now reports `artifact_publish` results through `ChatSessionParams::artifact_ready`, like the pi, codex and opencode chat backends, so channel extensions (Slack, WhatsApp Web) can deliver files published by `runner.use: builtin` agents.
 - `dar sandbox` images (builtin and pi) now include `pandoc` and `weasyprint` so agents can produce DOCX and PDF (`pandoc in.md --pdf-engine=weasyprint -o out.pdf`) without hand-written generators. About +100 MB compressed per image. Existing sandboxes keep their Dockerfile; delete it and rerun `dar sandbox` to pick this up. See [docs/sandbox.md](docs/sandbox.md).

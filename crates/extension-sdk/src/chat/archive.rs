@@ -333,6 +333,20 @@ fn normalize_events(value: Value) -> Vec<Value> {
     if role == "tool" || message.get("tool_calls").is_some() {
         return openai_tool_events(message, role, timestamp);
     }
+    // pi's tool result: its own message role, never assistant text.
+    if role == "toolResult" {
+        let mut event = serde_json::json!({
+            "type": "tool_output",
+            "id": message.get("toolCallId").and_then(Value::as_str).unwrap_or_default(),
+            "text": content_text(message.get("content").unwrap_or(&Value::Null)),
+            "is_error": message.get("isError").and_then(Value::as_bool).unwrap_or(false),
+            "done": true,
+        });
+        if let Some(timestamp) = timestamp {
+            event["timestamp"] = timestamp;
+        }
+        return vec![event];
+    }
     let Some(content) = message.get("content") else {
         return vec![];
     };
@@ -361,6 +375,8 @@ fn normalize_events(value: Value) -> Vec<Value> {
         match kind {
             "thinking" => events.push(serde_json::json!({"type":"thinking","text":part.get("thinking").or_else(|| part.get("text")).and_then(Value::as_str).unwrap_or_default()})),
             "tool_use" => events.push(serde_json::json!({"type":"tool_call","id":part.get("id").and_then(Value::as_str).unwrap_or_default(),"name":part.get("name").and_then(Value::as_str).unwrap_or_default(),"args":part.get("input").map(Value::to_string).unwrap_or_default()})),
+            // pi's tool call part: `arguments` is an object (or a raw string).
+            "toolCall" => events.push(serde_json::json!({"type":"tool_call","id":part.get("id").and_then(Value::as_str).unwrap_or_default(),"name":part.get("name").and_then(Value::as_str).unwrap_or_default(),"args":part.get("arguments").map(|args| args.as_str().map_or_else(|| args.to_string(), str::to_string)).unwrap_or_default()})),
             "tool_result" => events.push(serde_json::json!({"type":"tool_output","id":part.get("tool_use_id").and_then(Value::as_str).unwrap_or_default(),"text":content_text(part.get("content").unwrap_or(&Value::Null)),"is_error":part.get("is_error").and_then(Value::as_bool).unwrap_or(false),"done":true})),
             "image" | "image_url" => {
                 let url = part.get("url").or_else(|| part.get("image_url").and_then(|v| v.get("url"))).and_then(Value::as_str).unwrap_or_default();
@@ -1422,6 +1438,27 @@ mod tests {
         assert_eq!(page.events[1]["args"], "{\"q\":\"x\"}");
         assert_eq!(page.events[2]["type"], "tool_output");
         assert_eq!(page.events[2]["text"], "result");
+    }
+
+    #[test]
+    fn read_events_renders_pi_tool_calls_and_results() {
+        let temp = tempfile::tempdir().unwrap();
+        write(temp.path(), "2024-06-15T12:30:00Z_p.jsonl", concat!(
+            "{\"type\":\"session\",\"id\":\"pi\"}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"plan\"},{\"type\":\"toolCall\",\"id\":\"t1\",\"name\":\"bash\",\"arguments\":{\"command\":\"ls\"}}]}}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"toolResult\",\"toolCallId\":\"t1\",\"toolName\":\"bash\",\"content\":[{\"type\":\"text\",\"text\":\"a.txt\\n\"}],\"isError\":true,\"timestamp\":5}}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}\n"
+        ));
+        let events = read_events(temp.path(), "pi", 0, READ_MAX).unwrap().events;
+        let kinds: Vec<_> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["thinking", "tool_call", "tool_output", "delta"]);
+        assert_eq!(events[1]["id"], "t1");
+        assert_eq!(events[1]["name"], "bash");
+        assert_eq!(events[1]["args"], "{\"command\":\"ls\"}");
+        assert_eq!(events[2]["id"], "t1");
+        assert_eq!(events[2]["text"], "a.txt\n");
+        assert_eq!(events[2]["is_error"], true);
+        assert_eq!(events[2]["timestamp"], 5);
     }
 
     const BUILTIN_TRANSCRIPT: &str = concat!(
