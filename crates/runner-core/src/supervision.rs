@@ -645,23 +645,45 @@ mod tests {
                 .await
                 .expect("pipe drain hung after parent exited");
             assert!(matches!(outcome, ExitKind::Normal));
-            let lines = store.0.lock().unwrap();
-            assert!(lines.iter().any(|line| line.contains("FINAL")));
-            let pid = lines
-                .iter()
-                .find_map(|line| {
-                    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-                    value["text"]
-                        .as_str()?
-                        .strip_prefix("descendant=")?
-                        .parse::<i32>()
-                        .ok()
-                })
-                .expect("descendant pid was captured");
-            assert!(
-                kill(Pid::from_raw(pid), None).is_err(),
-                "descendant {pid} survived pipe cleanup"
-            );
+            let pid = {
+                let lines = store.0.lock().unwrap();
+                assert!(lines.iter().any(|line| line.contains("FINAL")));
+                lines
+                    .iter()
+                    .find_map(|line| {
+                        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+                        value["text"]
+                            .as_str()?
+                            .strip_prefix("descendant=")?
+                            .parse::<i32>()
+                            .ok()
+                    })
+                    .expect("descendant pid was captured")
+            };
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                if kill(Pid::from_raw(pid), None) == Err(nix::errno::Errno::ESRCH) {
+                    break;
+                }
+                let output = std::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", &pid.to_string()])
+                    .output()
+                    .expect("reading descendant process state");
+                let state = String::from_utf8_lossy(&output.stdout);
+                // Linux can retain the killed orphan as a zombie until its
+                // adoptive parent reaps it; kill(pid, 0) still succeeds then.
+                if output.status.success() && state.trim().starts_with('Z') {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "descendant {pid} survived pipe cleanup: stat={:?}, ps_exit={}, ps_stderr={:?}",
+                    state.trim(),
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim(),
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         });
     }
 }
