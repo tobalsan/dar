@@ -60,7 +60,8 @@ async fn boot(root: &std::path::Path, config: HashMap<String, serde_json::Value>
         };
         ext.start(ctx).await.unwrap();
     }
-    router
+    // Keep the shutdown channel open for the lifetime of this test router.
+    router.layer(axum::Extension(_tx))
 }
 
 /// Run registration through the shared host tool-registry extension and return
@@ -296,4 +297,136 @@ async fn scheduler_tools_enter_host_registry_only_when_enabled() {
         names.is_empty(),
         "absent scheduler section registers no tools"
     );
+}
+
+#[tokio::test]
+async fn script_failure_history_and_logs_are_scheduler_owned() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("cron")).unwrap();
+    std::fs::write(
+        temp.path().join("fail.sh"),
+        "echo BEFORE\necho BOOM >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("cron/jobs.json"),
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "jobs": [{ "id": "script-fail", "name": "Script failure", "enabled": true,
+                "schedule": {"cron": "0 0 1 1 *", "tz": "UTC"},
+                "payload": {"script": "fail.sh", "noAgent": true} }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let router = boot(
+        temp.path(),
+        HashMap::from([("scheduler".to_string(), json!({}))]),
+    )
+    .await;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/scheduler/jobs/script-fail/run-now")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let (status, job) = get(&router, "/scheduler/jobs/script-fail/detail").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(job.contains("Run history (1)"), "{job}");
+    assert!(job.contains(">failed</span>"), "{job}");
+    let (status, run) = get(&router, "/scheduler/jobs/script-fail/live").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(run.contains("BEFORE") && run.contains("BOOM"), "{run}");
+    assert!(
+        run.contains(">Exit code</span><span class=\"v\">1</span>"),
+        "{run}"
+    );
+    assert!(
+        run.contains(">Phase</span><span class=\"v\">script</span>"),
+        "{run}"
+    );
+    assert!(!run.contains("run_poll.js"));
+    assert!(
+        !run.contains("setTimeout(poll"),
+        "finished run does not poll"
+    );
+    assert!(temp.path().join("cron/history.db").exists());
+    assert!(!temp.path().join("data/store.db").exists());
+    let (_, runs) = get(&router, "/content").await;
+    assert!(!runs.contains("BEFORE") && !runs.contains("BOOM"));
+}
+
+#[tokio::test]
+async fn background_run_continues_after_response_and_exposes_partial_logs() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join("cron")).unwrap();
+    std::fs::write(
+        temp.path().join("slow.sh"),
+        "echo EARLY\nsleep 1\necho LATE\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("cron/jobs.json"),
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "jobs": [{ "id": "slow", "enabled": true,
+                "schedule": {"cron": "0 0 1 1 *", "tz": "UTC"},
+                "payload": {"script": "slow.sh", "noAgent": true} }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let router = boot(
+        temp.path(),
+        HashMap::from([("scheduler".to_string(), json!({}))]),
+    )
+    .await;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/scheduler/jobs/slow/run-now?background=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    drop(response);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let (_, partial) = get(&router, "/scheduler/jobs/slow/live").await;
+        if partial.contains("EARLY") {
+            assert!(
+                !partial.contains("LATE"),
+                "expected incremental output: {partial}"
+            );
+            assert!(partial.contains("cron-run-status\">running"));
+            let (_, tab) = get(&router, "/tabs/cron").await;
+            assert!(tab.contains("/scheduler/jobs/slow/live"));
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no partial transcript before timeout"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    loop {
+        let (_, final_run) = get(&router, "/scheduler/jobs/slow/live").await;
+        if final_run.contains("cron-run-status\">succeeded") {
+            assert!(final_run.contains("EARLY") && final_run.contains("LATE"));
+            assert!(final_run.contains("Final output:"));
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "run did not finish");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }

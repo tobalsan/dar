@@ -11,6 +11,7 @@
 //! state stays here and is merged into list responses.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use tokio::sync::Notify;
@@ -65,6 +66,9 @@ pub struct JobRuntime {
 /// Shared, mutable scheduler state. Cheap to clone behind an `Arc`.
 pub struct SchedulerState {
     inner: Mutex<Inner>,
+    pub history: Option<crate::history::History>,
+    shutdown: Mutex<Option<host_api::ShutdownToken>>,
+    manual_runs: AtomicUsize,
     /// Notified whenever jobs change so the loop re-arms its timer.
     changed: Notify,
 }
@@ -77,11 +81,49 @@ struct Inner {
 impl SchedulerState {
     pub fn new(jobs: Vec<ScheduleJob>) -> Self {
         Self {
+            history: None,
+            shutdown: Mutex::new(None),
+            manual_runs: AtomicUsize::new(0),
             inner: Mutex::new(Inner {
                 jobs,
                 runtime: HashMap::new(),
             }),
             changed: Notify::new(),
+        }
+    }
+
+    pub fn with_history(jobs: Vec<ScheduleJob>, history: crate::history::History) -> Self {
+        Self {
+            history: Some(history),
+            ..Self::new(jobs)
+        }
+    }
+
+    pub fn set_shutdown(&self, shutdown: host_api::ShutdownToken) {
+        *self
+            .shutdown
+            .lock()
+            .expect("scheduler shutdown mutex poisoned") = Some(shutdown);
+    }
+
+    pub fn shutdown(&self) -> Option<host_api::ShutdownToken> {
+        self.shutdown
+            .lock()
+            .expect("scheduler shutdown mutex poisoned")
+            .clone()
+    }
+
+    pub fn manual_started(&self) {
+        self.manual_runs.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn manual_finished(&self) {
+        self.manual_runs.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    pub async fn wait_manual_runs(&self) {
+        while self.manual_runs.load(Ordering::SeqCst) != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 

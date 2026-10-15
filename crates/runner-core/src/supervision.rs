@@ -273,8 +273,9 @@ pub async fn spawn_backend(spec: BackendSpec, p: SpawnParams<'_>) -> Result<Runn
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
+    let mut pumps = Vec::new();
     if let Some(out) = stdout {
-        spawn_line_pump(
+        pumps.push(spawn_line_pump(
             out,
             p.issue_id.clone(),
             p.run_id.clone(),
@@ -284,10 +285,10 @@ pub async fn spawn_backend(spec: BackendSpec, p: SpawnParams<'_>) -> Result<Runn
             Arc::clone(&p.store),
             Arc::clone(&p.last_event_at),
             log_ev,
-        );
+        ));
     }
     if let Some(err) = stderr {
-        spawn_line_pump(
+        pumps.push(spawn_line_pump(
             err,
             p.issue_id.clone(),
             p.run_id.clone(),
@@ -297,7 +298,7 @@ pub async fn spawn_backend(spec: BackendSpec, p: SpawnParams<'_>) -> Result<Runn
             Arc::clone(&p.store),
             Arc::clone(&p.last_event_at),
             log_ev,
-        );
+        ));
     }
 
     let (kill_tx, kill_rx) = oneshot::channel::<KillReason>();
@@ -305,10 +306,27 @@ pub async fn spawn_backend(spec: BackendSpec, p: SpawnParams<'_>) -> Result<Runn
     let issue_id = p.issue_id.clone();
 
     let done = tokio::spawn(async move {
-        supervise(child, pid, timeout, kill_rx, move |kind, message| {
+        let exit = supervise(child, pid, timeout, kill_rx, move |kind, message| {
             log_ev(&issue_id, kind, &message);
         })
-        .await
+        .await;
+        // A process can exit before its final pipe lines reach the store. The
+        // completion signal includes draining both pumps, bounded for children
+        // that leave descendants holding their output pipes open.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        for mut pump in pumps {
+            if tokio::time::timeout_at(deadline, &mut pump).await.is_err() {
+                let _ = kill(Pid::from_raw(-(pid as i32)), Signal::SIGKILL);
+                if tokio::time::timeout(Duration::from_secs(1), &mut pump)
+                    .await
+                    .is_err()
+                {
+                    pump.abort();
+                    let _ = pump.await;
+                }
+            }
+        }
+        exit
     });
 
     Ok(RunnerHandle::new(pid, kill_tx, done))
@@ -388,7 +406,8 @@ pub fn spawn_line_pump<R, F>(
     store: std::sync::Arc<dyn RunnerEventStore>,
     last_event_at: std::sync::Arc<std::sync::Mutex<chrono::DateTime<Utc>>>,
     mut log: F,
-) where
+) -> tokio::task::JoinHandle<()>
+where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     F: FnMut(&str, &str, &str) + Send + 'static,
 {
@@ -424,7 +443,7 @@ pub fn spawn_line_pump<R, F>(
                 }
             }
         }
-    });
+    })
 }
 
 /// Send SIGTERM to the child's process group, wait `grace`, then SIGKILL.
@@ -528,5 +547,121 @@ mod tests {
         );
         assert_eq!(env_value(&env, "GIT_PAGER"), Some(&OsString::from("cat")));
         assert_eq!(env_value(&env, "PAGER"), Some(&OsString::from("cat")));
+    }
+
+    #[derive(Default)]
+    struct CapturedLines(Mutex<Vec<String>>);
+
+    impl RunnerEventStore for CapturedLines {
+        fn insert_event(
+            &self,
+            _run_id: Option<&str>,
+            _issue: &str,
+            _kind: &'static str,
+            payload: &str,
+            _ts: DateTime<Utc>,
+        ) {
+            self.0.lock().unwrap().push(payload.to_string());
+        }
+    }
+
+    #[test]
+    fn fast_cli_and_fake_persist_final_lines_before_completion() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            for kind in ["cli", "fake"] {
+                for run in 0..12 {
+                    let store = Arc::new(CapturedLines::default());
+                    let prompt = format!("FINAL-{kind}-{run}");
+                    let params = SpawnParams::builder(
+                        "sh", kind, root.path(), root.path(), root.path(), prompt.clone(),
+                        "job".into(), format!("run-{run}"), 5000, Arc::new(NullSink), store.clone(), Arc::new(Mutex::new(Utc::now())),
+                    ).build();
+                    let spec = BackendSpec {
+                        command: "sh".into(),
+                        args: vec!["-c".into(), if kind == "fake" {
+                            "printf '%s\\n' \"$AGENT_PROMPT\"".into()
+                        } else {
+                            "i=0; while [ $i -lt 128 ]; do echo line-$i; i=$((i+1)); done; printf '%s\\n' \"$AGENT_PROMPT\"; echo FINAL-STDERR >&2".into()
+                        }],
+                        stdin_payload: None,
+                        event_kind: if kind == "fake" { "runner.fake" } else { "runner.cli" },
+                        session_dir: None,
+                        env: common_env(&params),
+                    };
+                    let handle = spawn_backend(spec, params).await.unwrap();
+                    assert!(matches!(handle.wait().await, ExitKind::Normal));
+                    let lines = store.0.lock().unwrap();
+                    assert!(lines.iter().any(|line| line.contains(&prompt)), "{kind} finalized before final stdout line");
+                    if kind == "cli" {
+                        assert!(lines.iter().any(|line| line.contains("FINAL-STDERR")), "cli finalized before final stderr line");
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn exited_runner_with_descendant_holding_pipes_has_bounded_completion() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(CapturedLines::default());
+            let params = SpawnParams::builder(
+                "sh",
+                "cli",
+                root.path(),
+                root.path(),
+                root.path(),
+                String::new(),
+                "job".into(),
+                "run".into(),
+                5000,
+                Arc::new(NullSink),
+                store.clone(),
+                Arc::new(Mutex::new(Utc::now())),
+            )
+            .build();
+            let spec = BackendSpec {
+                command: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "sleep 30 & echo descendant=$!; echo FINAL".into(),
+                ],
+                stdin_payload: None,
+                event_kind: "runner.cli",
+                session_dir: None,
+                env: common_env(&params),
+            };
+            let handle = spawn_backend(spec, params).await.unwrap();
+            let outcome = tokio::time::timeout(Duration::from_secs(4), handle.wait())
+                .await
+                .expect("pipe drain hung after parent exited");
+            assert!(matches!(outcome, ExitKind::Normal));
+            let lines = store.0.lock().unwrap();
+            assert!(lines.iter().any(|line| line.contains("FINAL")));
+            let pid = lines
+                .iter()
+                .find_map(|line| {
+                    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+                    value["text"]
+                        .as_str()?
+                        .strip_prefix("descendant=")?
+                        .parse::<i32>()
+                        .ok()
+                })
+                .expect("descendant pid was captured");
+            assert!(
+                kill(Pid::from_raw(pid), None).is_err(),
+                "descendant {pid} survived pipe cleanup"
+            );
+        });
     }
 }

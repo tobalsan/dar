@@ -9,6 +9,8 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Cron jobs now open live transcripts with Logs and Metadata, with persistent scheduler-owned run history, crash recovery, and configurable `extensions.scheduler.historyRetention` (default 100 per job); successful quiet polls remain hidden.
+
 - chat-web: the sidebar now highlights only the conversation you are viewing; other conversations with an open backend show "Connected" (previously "Open") without being highlighted. "Connected" now reflects a live backend, so it clears after idle cleanup while the conversation stays selectable. "Running" is unchanged.
 - chat-web: a conversation's backend process is now closed after 5 idle minutes (configurable via `extensions.chat-web.idle_minutes`, `0` disables) and never while a turn is running; the next message reopens the same saved conversation. Conversations whose backend reports no session identity are not closed. This revives `idle_minutes`, previously ignored. Idle cleanup no longer races a just-started autonomous turn.
 - chat-opencode: resuming an explicit OpenCode session now fails (and stops the spawned server) when the session lookup errors or the session is missing, instead of silently starting a fresh conversation.

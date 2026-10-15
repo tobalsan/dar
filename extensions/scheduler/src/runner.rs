@@ -9,6 +9,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::history::RunRecorder;
 use anyhow::{Context, Result};
 use cap_runner::{
     ExitKind, KillReason, Runner, RunnerEventSink, RunnerEventStore, SpawnParams, TurnDecision,
@@ -42,6 +43,78 @@ struct CaptureStore {
     latest_assistant: Mutex<Option<String>>,
     text_deltas: Mutex<String>,
     latest_error: Mutex<Option<String>>,
+    recorder: Option<RunRecorder>,
+    pending: Mutex<(String, String)>,
+}
+
+impl CaptureStore {
+    fn emit(&self, kind: &str, text: &str, detail: &str) {
+        if let Some(recorder) = &self.recorder {
+            if let Err(error) = recorder.event(kind, text, detail) {
+                recorder.remember_error(&error);
+            }
+        }
+    }
+
+    fn flush_pending(&self) {
+        let mut pending = self.pending.lock().expect("pending mutex poisoned");
+        if !pending.1.is_empty() {
+            self.emit(&pending.0, &pending.1, "");
+            pending.1.clear();
+        }
+    }
+
+    fn record(&self, value: &serde_json::Value) {
+        let text = value["text"].as_str().unwrap_or_default();
+        match value["type"].as_str().unwrap_or_default() {
+            "text_delta" | "reasoning_delta" => {
+                let kind = if value["type"] == "text_delta" {
+                    "assistant"
+                } else {
+                    "thinking"
+                };
+                let mut pending = self.pending.lock().expect("pending mutex poisoned");
+                if pending.0 != kind && !pending.1.is_empty() {
+                    self.emit(&pending.0, &pending.1, "");
+                    pending.1.clear();
+                }
+                pending.0 = kind.into();
+                pending.1.push_str(text);
+            }
+            "protocol_event" => {
+                let kind = value["log_row"].as_str().unwrap_or_default();
+                if !kind.is_empty() {
+                    let detail = value["detail"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| value["detail"].to_string());
+                    self.emit(kind, text, &detail);
+                }
+            }
+            "tool_call" => {
+                self.flush_pending();
+                self.emit(
+                    "tool_call",
+                    value["name"].as_str().unwrap_or("tool"),
+                    &value["arguments"].to_string(),
+                );
+            }
+            "tool_result" => {
+                self.flush_pending();
+                self.emit(
+                    "tool_output",
+                    value["name"].as_str().unwrap_or("tool"),
+                    &value["result"].to_string(),
+                );
+            }
+            "completion" => self.flush_pending(),
+            "error" => {
+                self.flush_pending();
+                self.emit("error", value["message"].as_str().unwrap_or_default(), "");
+            }
+            _ => {}
+        }
+    }
 }
 
 impl RunnerEventStore for CaptureStore {
@@ -56,6 +129,7 @@ impl RunnerEventStore for CaptureStore {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
             return;
         };
+        self.record(&value);
         match value.get("type").and_then(|t| t.as_str()) {
             Some("protocol_event") => {
                 if value.get("log_row").and_then(|r| r.as_str()) != Some("assistant") {
@@ -100,6 +174,7 @@ impl RunnerEventStore for CaptureStore {
 
 /// All parameters for a single scheduler runner fire.
 pub struct FireRunnerRequest<'a> {
+    pub recorder: Option<RunRecorder>,
     pub runner_kind: &'a str,
     pub runner_command: &'a str,
     pub runner_model: Option<String>,
@@ -146,6 +221,7 @@ pub async fn fire_runner(
     mut shutdown: ShutdownToken,
 ) -> Result<RunOutcome> {
     let FireRunnerRequest {
+        recorder,
         runner_kind,
         runner_command,
         runner_model,
@@ -166,7 +242,10 @@ pub async fn fire_runner(
         .get_named::<dyn Runner>(runner_kind)
         .with_context(|| format!("resolving runner service {runner_kind:?}"))?;
 
-    let capture = Arc::new(CaptureStore::default());
+    let capture = Arc::new(CaptureStore {
+        recorder: recorder.clone(),
+        ..CaptureStore::default()
+    });
     let events: Arc<dyn RunnerEventSink> = Arc::new(NullSink);
     let store: Arc<dyn RunnerEventStore> = capture.clone();
     let last_event_at = Arc::new(std::sync::Mutex::new(Utc::now()));
@@ -187,7 +266,10 @@ pub async fn fire_runner(
         agent_root,
         prompt,
         format!("scheduler:{job_id}"),
-        format!("scheduler-{job_id}-{}", Utc::now().timestamp_millis()),
+        recorder
+            .as_ref()
+            .map(|recorder| recorder.id().to_owned())
+            .unwrap_or_else(|| format!("scheduler-{job_id}-{}", Utc::now().timestamp_millis())),
         max_run_timeout_ms,
         events,
         store,
@@ -209,6 +291,12 @@ pub async fn fire_runner(
         _ = shutdown.cancelled() => anyhow::bail!("scheduler shutdown before runner spawn"),
         handle = runner.spawn(params) => handle.context("spawning runner")?,
     };
+    if let Some(recorder) = &recorder {
+        if let Err(error) = recorder.pid(handle.pid()) {
+            handle.request_kill_and_wait(KillReason::OperatorStop).await;
+            return Err(error.context("persisting scheduler runner pid"));
+        }
+    }
 
     // Scheduler-owned per-run timeout. Poll the supervising task for completion
     // until the deadline; on elapse, kill the child and wait for it to exit so
@@ -249,6 +337,19 @@ pub async fn fire_runner(
             _ = tokio::time::sleep_until(next_poll) => {}
         }
     };
+
+    capture.flush_pending();
+    if let Some(recorder) = &recorder {
+        let exit_code = match exit {
+            ExitKind::Normal => Some(0),
+            ExitKind::Abnormal(code) => code,
+            ExitKind::Interrupted { .. } => None,
+        };
+        recorder.exit_code(exit_code)?;
+        if let Some(error) = recorder.storage_error() {
+            anyhow::bail!("persisting scheduler transcript: {error}");
+        }
+    }
 
     let response = capture
         .latest_assistant
@@ -422,6 +523,7 @@ mod tests {
 
         fire_runner(
             FireRunnerRequest {
+                recorder: None,
                 runner_kind: "fake",
                 runner_command: "",
                 runner_model: Some("model-a".to_string()),
@@ -481,6 +583,7 @@ mod tests {
 
         fire_runner(
             FireRunnerRequest {
+                recorder: None,
                 runner_kind: "fake",
                 runner_command: "",
                 runner_model: None,
@@ -522,6 +625,7 @@ mod tests {
 
         fire_runner(
             FireRunnerRequest {
+                recorder: None,
                 runner_kind: "fake",
                 runner_command: "",
                 runner_model: None,
@@ -563,6 +667,7 @@ mod tests {
 
         fire_runner(
             FireRunnerRequest {
+                recorder: None,
                 runner_kind: "fake",
                 runner_command: "",
                 runner_model: None,
@@ -602,6 +707,7 @@ mod tests {
 
         let err = match fire_runner(
             FireRunnerRequest {
+                recorder: None,
                 runner_kind: "fake",
                 runner_command: "",
                 runner_model: None,
@@ -684,6 +790,7 @@ mod tests {
         let run = tokio::spawn(async move {
             fire_runner(
                 FireRunnerRequest {
+                    recorder: None,
                     runner_kind: "fake",
                     runner_command: "",
                     runner_model: None,
@@ -778,6 +885,7 @@ mod tests {
 
         let outcome = fire_runner(
             FireRunnerRequest {
+                recorder: None,
                 runner_kind: "fake",
                 runner_command: "",
                 runner_model: None,
@@ -838,5 +946,101 @@ mod tests {
         store.insert_event(None, "x", "k", &protocol_event("assistant", "   "), ts);
         store.insert_event(None, "x", "k", r#"{"type":"spawn"}"#, ts);
         assert!(store.latest_assistant.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn builtin_finished_blocks_are_normalized_and_durable_before_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let history = crate::history::History::open(root.path(), 3).unwrap();
+        let recorder = history
+            .start("job", Some("builtin"), Some("model"), "agent")
+            .unwrap();
+        let store = CaptureStore {
+            recorder: Some(recorder.clone()),
+            ..CaptureStore::default()
+        };
+        let ts = Utc::now();
+        for payload in [
+            json!({"type":"reasoning_delta","text":"think "}),
+            json!({"type":"reasoning_delta","text":"first"}),
+            json!({"type":"text_delta","text":"I will "}),
+            json!({"type":"text_delta","text":"work"}),
+            json!({"type":"tool_call","name":"bash","arguments":{"command":"echo STEP-A"}}),
+            json!({"type":"tool_result","name":"bash","result":{"content":"STEP-A"}}),
+        ] {
+            store.insert_event(None, "job", "builtin", &payload.to_string(), ts);
+        }
+        // The runner has not completed; finished text/thinking/tool events are
+        // already available to a second connection reading the persisted WAL.
+        let events = history.events(recorder.id(), 0).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["thinking", "assistant", "tool_call", "tool_output"]
+        );
+        assert_eq!(events[0].text, "think first");
+        assert_eq!(events[1].text, "I will work");
+        assert!(events[2].detail.contains("echo STEP-A"));
+        assert!(events[3].detail.contains("STEP-A"));
+        store.insert_event(
+            None,
+            "job",
+            "builtin",
+            &json!({"type":"text_delta","text":"DONE"}).to_string(),
+            ts,
+        );
+        store.insert_event(
+            None,
+            "job",
+            "builtin",
+            &json!({"type":"completion"}).to_string(),
+            ts,
+        );
+        assert_eq!(
+            history.events(recorder.id(), events[3].id).unwrap()[0].text,
+            "DONE"
+        );
+    }
+
+    #[test]
+    fn finished_protocol_events_and_plain_cli_fake_lines_are_persisted() {
+        let root = tempfile::tempdir().unwrap();
+        let history = crate::history::History::open(root.path(), 3).unwrap();
+        for runner in ["pi", "codex", "opencode", "cli", "fake"] {
+            let recorder = history.start(runner, Some(runner), None, "agent").unwrap();
+            let store = CaptureStore {
+                recorder: Some(recorder.clone()),
+                ..CaptureStore::default()
+            };
+            for row in ["assistant", "thinking", "tool_call", "tool_output"] {
+                store.insert_event(
+                    None,
+                    runner,
+                    "test",
+                    &protocol_event(row, "finished"),
+                    Utc::now(),
+                );
+            }
+            if matches!(runner, "cli" | "fake") {
+                let line = runner_core::classify_protocol_line("stdout", "emitted line");
+                store.insert_event(
+                    None,
+                    runner,
+                    "test",
+                    &protocol_event(line.row_type, &line.text),
+                    Utc::now(),
+                );
+            }
+            let events = history.events(recorder.id(), 0).unwrap();
+            assert_eq!(events[0].kind, "assistant");
+            assert_eq!(events[1].kind, "thinking");
+            assert_eq!(events[2].kind, "tool_call");
+            assert_eq!(events[3].kind, "tool_output");
+            if matches!(runner, "cli" | "fake") {
+                assert_eq!(events[4].text, "emitted line");
+            }
+        }
     }
 }

@@ -23,6 +23,7 @@
 //! (tracked separately): no per-job model override, no `sessionId` continuity,
 //! no CLI.
 
+mod history;
 mod http;
 mod output;
 mod runner;
@@ -62,6 +63,7 @@ pub struct SchedulerExtension {
     /// loop.
     state: OnceLock<Arc<SchedulerState>>,
     host_http_addr: Arc<Mutex<Option<std::net::SocketAddr>>>,
+    loop_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 pub fn extension() -> Box<dyn Extension> {
@@ -107,6 +109,8 @@ struct SchedulerSettings {
     poll_interval_ms: u64,
     #[serde(rename = "jobTimeoutMs")]
     job_timeout_ms: Option<u64>,
+    #[serde(rename = "historyRetention")]
+    history_retention: usize,
 }
 
 impl Default for SchedulerSettings {
@@ -115,6 +119,7 @@ impl Default for SchedulerSettings {
             enabled: true,
             poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
             job_timeout_ms: None,
+            history_retention: 100,
         }
     }
 }
@@ -128,6 +133,9 @@ impl SchedulerSettings {
             .map_err(|e| anyhow::anyhow!("invalid extensions.scheduler config: {e}"))?;
         if settings.job_timeout_ms == Some(0) {
             bail!("invalid extensions.scheduler config: jobTimeoutMs must be greater than 0");
+        }
+        if settings.history_retention == 0 {
+            bail!("invalid extensions.scheduler config: historyRetention must be greater than 0");
         }
         Ok(settings)
     }
@@ -182,7 +190,8 @@ impl Extension for SchedulerExtension {
             let root = ctx.paths.root().to_path_buf();
             let jobs = crate::store::load_jobs_checked(&root)
                 .map_err(|err| anyhow::anyhow!("[scheduler] {err}"))?;
-            let state = Arc::new(SchedulerState::new(jobs));
+            let history = history::History::open(&root, settings.history_retention)?;
+            let state = Arc::new(SchedulerState::with_history(jobs, history));
             let _ = self.state.set(Arc::clone(&state));
 
             // Contribute the read-only "Cron" dashboard tab via the
@@ -269,6 +278,9 @@ impl Extension for SchedulerExtension {
                     .expect("scheduler state must be initialized during register when enabled"),
             );
 
+            if let Some(history) = &state.history {
+                history.recover()?;
+            }
             let root = ctx.paths.root().to_path_buf();
             *self
                 .host_http_addr
@@ -281,11 +293,32 @@ impl Extension for SchedulerExtension {
                 Arc::clone(&self.host_http_addr),
             );
 
+            state.set_shutdown(ctx.shutdown.clone());
             let services = ctx.host.services.clone();
             let shutdown = ctx.shutdown.clone();
-            tokio::spawn(async move {
+            *self
+                .loop_task
+                .lock()
+                .expect("scheduler task mutex poisoned") = Some(tokio::spawn(async move {
                 service::run(config, services, state, shutdown).await;
-            });
+            }));
+            Ok(())
+        })
+    }
+
+    fn stop<'a>(&'a self) -> host_api::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let task = self
+                .loop_task
+                .lock()
+                .expect("scheduler task mutex poisoned")
+                .take();
+            if let Some(task) = task {
+                task.await?;
+            }
+            if let Some(state) = self.state.get() {
+                state.wait_manual_runs().await;
+            }
             Ok(())
         })
     }
@@ -513,5 +546,21 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("extensions.scheduler"), "named error: {err}");
+    }
+    #[test]
+    fn history_retention_is_positive_and_defaults_to_one_hundred() {
+        assert_eq!(
+            SchedulerSettings::parse(&serde_json::json!({}))
+                .unwrap()
+                .history_retention,
+            100
+        );
+        assert_eq!(
+            SchedulerSettings::parse(&serde_json::json!({"historyRetention": 3}))
+                .unwrap()
+                .history_retention,
+            3
+        );
+        assert!(SchedulerSettings::parse(&serde_json::json!({"historyRetention": 0})).is_err());
     }
 }
