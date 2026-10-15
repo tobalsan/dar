@@ -34,12 +34,19 @@ use tokio::sync::{broadcast, mpsc, watch, Mutex};
 const TAB_ID: &str = "chat";
 const MAX_UPLOAD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ATTACHMENTS: usize = 8;
+/// Default idle time before a resumable slot's backend is closed.
+const DEFAULT_IDLE_MINUTES: u64 = 5;
+const IDLE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// Bound on a reaped backend's `close()`; a hung close is abandoned.
+const IDLE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Config {
     backend: Option<String>,
     command: Option<String>,
+    /// Minutes of inactivity before an idle conversation's backend process is
+    /// closed (default 5, `0` disables). The conversation stays resumable.
     idle_minutes: Option<u64>,
     /// Runtime kill switch: `false` skips mounting routes, the dashboard tab,
     /// and the chat coordinator service, even though the extension still
@@ -75,8 +82,8 @@ impl Extension for ChatWebExtension {
                 root: ctx.paths.root().to_path_buf(),
                 start: std::sync::OnceLock::new(),
                 sessions: Mutex::new(HashMap::new()),
-                live_id: Mutex::new(None),
                 transition: Mutex::new(()),
+                slot_registry: Arc::default(),
                 meta: Mutex::new(load_meta(
                     &ctx.paths.root().join("data/chat/sessions-meta.json"),
                 )),
@@ -134,6 +141,27 @@ impl Extension for ChatWebExtension {
                 .start
                 .set(ctx)
                 .map_err(|_| anyhow::anyhow!("chat-web started twice"))?;
+            let idle_minutes = state.config.idle_minutes.unwrap_or(DEFAULT_IDLE_MINUTES);
+            if idle_minutes > 0 {
+                let state = Arc::clone(state);
+                let mut shutdown = state
+                    .start
+                    .get()
+                    .expect("start context set above")
+                    .shutdown
+                    .clone();
+                let idle = std::time::Duration::from_secs(idle_minutes.saturating_mul(60));
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = shutdown.cancelled() => break,
+                            _ = tokio::time::sleep(IDLE_SWEEP_INTERVAL) => {
+                                state.reap_idle(now_ms(), idle).await;
+                            }
+                        }
+                    }
+                });
+            }
             Ok(())
         })
     }
@@ -178,7 +206,7 @@ impl DashboardTab for ChatTab {
     }
     fn render(&self) -> Result<String> {
         Ok(format!(
-            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"><aside class="chat-sidebar" aria-label="Conversations"><div class="chat-sidebar-head"><strong>Chats</strong><button type="button" id="chat-sidebar-toggle" data-sidebar-toggle class="chat-icon" aria-label="Toggle sidebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button></div><input id="chat-search" class="chat-search" type="search" placeholder="Search conversations" aria-label="Search conversations"><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><header class="chat-header"><button type="button" data-sidebar-toggle class="chat-icon chat-mobile-sidebar-toggle" aria-label="Open conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button><div>{}<span class="chat-title"><strong>{}</strong>{}</span><span id="chat-token-meter" class="chat-meter"></span></div><button type="button" class="chat-new" onclick="fetch('/chat/main/new',{{method:'POST'}})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button></header><div class="chat-dropzone" id="chat-dropzone" hidden>Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite"></div><div class="chat-hero" id="chat-hero">{}<div class="chat-hero-line" id="chat-hero-line"></div></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips"></div><div class="chat-cap-hint" id="chat-cap-hint"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.4 11.1l-9.2 9.1a6 6 0 01-8.4-8.4L13 2.6a4 4 0 015.6 5.6l-9.2 9.2a2 2 0 01-2.8-2.8l8.5-8.5"/></svg></button><input type="file" id="chat-attachments" multiple hidden><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message {}" aria-label="Message"></textarea><button type="button" id="chat-abort" class="chat-icon" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon" aria-label="Send" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div><div id="chat-context-warning" class="chat-context-warning" hidden>Context is filling up — send /compact to summarize.</div></form></div></section><script>{}</script><script>{}</script><script>{}</script>"#,
+            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"><aside class="chat-sidebar" aria-label="Conversations"><div class="chat-sidebar-head"><strong>Chats</strong><button type="button" id="chat-sidebar-toggle" data-sidebar-toggle class="chat-icon" aria-label="Toggle sidebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button></div><input id="chat-search" class="chat-search" type="search" placeholder="Search conversations" aria-label="Search conversations"><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><header class="chat-header"><button type="button" data-sidebar-toggle class="chat-icon chat-mobile-sidebar-toggle" aria-label="Open conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button><div>{}<span class="chat-title"><strong>{}</strong>{}</span><span id="chat-token-meter" class="chat-meter"></span></div><button type="button" class="chat-new" onclick="window.__chatWeb&amp;&amp;window.__chatWeb.newChat()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button></header><div class="chat-dropzone" id="chat-dropzone" hidden>Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite"></div><div class="chat-hero" id="chat-hero">{}<div class="chat-hero-line" id="chat-hero-line"></div></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips"></div><div class="chat-cap-hint" id="chat-cap-hint"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.4 11.1l-9.2 9.1a6 6 0 01-8.4-8.4L13 2.6a4 4 0 015.6 5.6l-9.2 9.2a2 2 0 01-2.8-2.8l8.5-8.5"/></svg></button><input type="file" id="chat-attachments" multiple hidden><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message {}" aria-label="Message"></textarea><button type="button" id="chat-abort" class="chat-icon" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon" aria-label="Send" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div><div id="chat-context-warning" class="chat-context-warning" hidden>Context is filling up — send /compact to summarize.</div></form></div></section><script>{}</script><script>{}</script><script>{}</script>"#,
             include_str!("chat.css"),
             escape_html_attr(&self.agent_name),
             avatar_html(self.agent_avatar.as_ref(), "chat-avatar", &self.agent_name),
@@ -342,14 +370,17 @@ fn escape_html_attr(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
+type SlotRegistry = std::sync::Mutex<Vec<std::sync::Weak<Session>>>;
+
 struct AppState {
     config: Config,
     root: std::path::PathBuf,
     start: std::sync::OnceLock<StartCtx>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
-    live_id: Mutex<Option<String>>,
     meta: Mutex<HashMap<String, SessionMeta>>,
     transition: Mutex<()>,
+    /// Weak handles to every slot, so concurrent slots can exclude each other's archive ids.
+    slot_registry: Arc<SlotRegistry>,
 }
 #[cfg(test)]
 struct PublishPause {
@@ -376,8 +407,9 @@ struct Session {
     transcript_failed: std::sync::atomic::AtomicBool,
     suppress_resume: std::sync::atomic::AtomicBool,
     title_started: std::sync::atomic::AtomicBool,
-    opened_after_ms: std::sync::atomic::AtomicU64,
     resolved_live_id: std::sync::Mutex<Option<String>>,
+    /// Unix ms of the last open, accepted turn, or published event.
+    last_active_ms: std::sync::atomic::AtomicU64,
     abort_signal: watch::Sender<bool>,
     publish_lock: std::sync::Mutex<()>,
     command_ids: Mutex<HashSet<String>>,
@@ -484,7 +516,11 @@ struct SessionListEntry {
     start_time: Option<String>,
     modified_ms: u64,
     archived: bool,
-    is_live: bool,
+    /// Backend process currently open (not merely a retained identity).
+    connected: bool,
+    /// Client slot ids bound to this conversation; the focused one is selected.
+    slots: Vec<String>,
+    busy: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -557,10 +593,26 @@ fn write_meta(path: &std::path::Path, meta: &HashMap<String, SessionMeta>) -> Re
 
 async fn session_index(State(state): State<Arc<AppState>>) -> Json<Vec<SessionListEntry>> {
     let dir = state.root.join("data/chat/sessions");
-    if let Ok(session) = state.session("main").await {
-        state.resolve_live_id(&session).await;
+    // archive id -> (connected, busy, slot ids)
+    let mut live: HashMap<String, (bool, bool, Vec<String>)> = HashMap::new();
+    let slots: Vec<(String, Arc<Session>)> = state
+        .sessions
+        .lock()
+        .await
+        .iter()
+        .map(|(id, slot)| (id.clone(), Arc::clone(slot)))
+        .collect();
+    for (slot_id, slot) in slots {
+        if let Some(id) = state.resolve_live_id(&slot).await {
+            let busy = slot.active_turns.load(std::sync::atomic::Ordering::SeqCst) > 0;
+            // A locked backend is mid-open/turn/close, so treat it as connected.
+            let connected = slot.inner.try_lock().map_or(true, |inner| inner.is_some());
+            let entry = live.entry(id).or_default();
+            entry.0 |= connected;
+            entry.1 |= busy;
+            entry.2.push(slot_id);
+        }
     }
-    let live = state.live_id.lock().await.clone();
     let meta = state.meta.lock().await.clone();
     let mut sessions: Vec<_> = chat::archive::list(&dir)
         .into_iter()
@@ -577,7 +629,12 @@ async fn session_index(State(state): State<Arc<AppState>>) -> Json<Vec<SessionLi
             let item_meta = meta.get(&session.id).cloned().unwrap_or_default();
             let title = item_meta.title.filter(|title| !title.trim().is_empty());
             Some(SessionListEntry {
-                is_live: live.as_deref() == Some(&session.id),
+                connected: live.get(&session.id).is_some_and(|l| l.0),
+                busy: live.get(&session.id).is_some_and(|l| l.1),
+                slots: live
+                    .get(&session.id)
+                    .map(|l| l.2.clone())
+                    .unwrap_or_default(),
                 label: title.clone().unwrap_or(session.label),
                 id: session.id,
                 title,
@@ -652,11 +709,8 @@ async fn delete_session(
         return StatusCode::NOT_FOUND.into_response();
     };
     let _transition = state.transition.lock().await;
-    if let Ok(session) = state.session("main").await {
-        state.resolve_live_id(&session).await;
-    }
-    if state.live_id.lock().await.as_deref() == Some(&id) {
-        if let Err(error) = state.reset_session_unlocked("main").await {
+    if let Some((slot_id, _)) = state.slot_for_live(&id).await {
+        if let Err(error) = state.reset_session_unlocked(&slot_id).await {
             return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
         }
     }
@@ -677,7 +731,7 @@ struct ResumeRequest {
 }
 
 async fn resume_session(
-    Path(session_id): Path<String>,
+    Path(_current_slot): Path<String>,
     State(state): State<Arc<AppState>>,
     Json(body): Json<ResumeRequest>,
 ) -> impl IntoResponse {
@@ -686,15 +740,20 @@ async fn resume_session(
         return StatusCode::NOT_FOUND.into_response();
     }
     let _transition = state.transition.lock().await;
-    if let Err(error) = state.reset_session_unlocked(&session_id).await {
-        return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+    if let Some((slot, _)) = state.slot_for_live(&body.id).await {
+        return slot_response(&slot);
     }
-    let session = match state.session(&session_id).await {
+    let session = match state.session(&body.id).await {
         Ok(session) => session,
         Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     };
+    let already_replayed = !session
+        .history
+        .lock()
+        .expect("chat-web history mutex poisoned")
+        .is_empty();
     let mut offset = 0;
-    loop {
+    while !already_replayed {
         let Some(page) =
             chat::archive::read_events(&dir, &body.id, offset, chat::archive::READ_MAX)
         else {
@@ -738,11 +797,18 @@ async fn resume_session(
         .resolved_live_id
         .lock()
         .expect("chat-web identity mutex poisoned") = Some(body.id.clone());
-    *state.live_id.lock().await = Some(body.id);
     session
         .suppress_resume
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    StatusCode::ACCEPTED.into_response()
+    slot_response(&body.id)
+}
+
+fn slot_response(slot: &str) -> Response {
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "slot": slot })),
+    )
+        .into_response()
 }
 
 // Tells the fleet proxy (`dar dash`) this response's URLs are already
@@ -782,8 +848,8 @@ impl AppState {
             transcript_failed: std::sync::atomic::AtomicBool::new(false),
             suppress_resume: std::sync::atomic::AtomicBool::new(false),
             title_started: std::sync::atomic::AtomicBool::new(false),
-            opened_after_ms: std::sync::atomic::AtomicU64::new(0),
             resolved_live_id: std::sync::Mutex::new(None),
+            last_active_ms: std::sync::atomic::AtomicU64::new(now_ms()),
             abort_signal,
             publish_lock: std::sync::Mutex::new(()),
             command_ids: Mutex::new(HashSet::new()),
@@ -794,6 +860,10 @@ impl AppState {
             #[cfg(test)]
             pause_after_subscribe: std::sync::Mutex::new(None),
         });
+        self.slot_registry
+            .lock()
+            .expect("chat-web slot registry poisoned")
+            .push(Arc::downgrade(&session));
         sessions.insert(id.to_owned(), Arc::clone(&session));
         Ok(session)
     }
@@ -814,18 +884,15 @@ impl AppState {
             .with_context(|| format!("chat backend {backend_id:?} is not registered"))?;
         let session_dir = self.root.join("data/chat/sessions");
         std::fs::create_dir_all(&session_dir)?;
-        self.resolve_live_id(&session).await;
+        let resolved = self.resolve_live_id(&session).await;
         let resume_session_id = if session
             .suppress_resume
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             None
         } else {
-            self.live_id.lock().await.clone()
+            resolved
         };
-        session
-            .opened_after_ms
-            .store(now_ms(), std::sync::atomic::Ordering::SeqCst);
         let params = chat::agent_session_params(start, &session_dir)
             .command(self.config.command.as_deref().unwrap_or(""))
             .resume_session_id(resume_session_id)
@@ -834,85 +901,121 @@ impl AppState {
             .generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
+        session.touch();
         let (event_tx, mut event_rx) = mpsc::channel::<ChatEvent>(128);
         let sink = Arc::clone(&session);
         let identity_sink = Arc::clone(&session);
-        let identity_dir = session_dir.clone();
-        let identity_backend = backend_id.clone();
+        let identity_registry = Arc::clone(&self.slot_registry);
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                let terminal = matches!(
-                    event,
-                    ChatEvent::TurnFinished { .. } | ChatEvent::SessionClosed { .. }
-                );
+                if let ChatEvent::SessionIdentity { id } = &event {
+                    // Not a UI event: bind the slot's archive id (first binding wins).
+                    let mut resolved = identity_sink
+                        .resolved_live_id
+                        .lock()
+                        .expect("chat-web identity mutex poisoned");
+                    if resolved.is_none()
+                        && identity_sink
+                            .generation
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                            == generation
+                    {
+                        let others = held_ids_except(&identity_registry, &identity_sink);
+                        if others.contains(id) {
+                            tracing::warn!(
+                                id = %id,
+                                "chat backend reported a session id already bound to another chat-web slot"
+                            );
+                        }
+                        *resolved = Some(id.clone());
+                    }
+                    drop(resolved);
+                    let _ = sink.events.send(event);
+                    continue;
+                }
                 let _acceptance = sink.acceptance_lock.lock().await;
                 if sink.publish_if_current(generation, event.clone()) {
                     let _ = sink.events.send(event);
-                    if terminal {
-                        let opened_after = identity_sink
-                            .opened_after_ms
-                            .load(std::sync::atomic::Ordering::SeqCst);
-                        if let Some(found) =
-                            newest_session_since(&identity_dir, &identity_backend, opened_after)
-                        {
-                            // Reset bumps the generation before clearing the identity, so
-                            // rechecking under the identity lock drops a stale terminal event.
-                            let mut resolved = identity_sink
-                                .resolved_live_id
-                                .lock()
-                                .expect("chat-web identity mutex poisoned");
-                            if identity_sink
-                                .generation
-                                .load(std::sync::atomic::Ordering::SeqCst)
-                                == generation
-                            {
-                                *resolved = Some(found.id);
-                            }
-                        }
-                    }
                 }
             }
         });
         backend.open(params, event_tx).await
     }
 
-    /// Holds `live_id` throughout; reset clears the resolved identity and
-    /// open time before `live_id`, so a concurrent reset can't be undone here.
-    async fn resolve_live_id(&self, session: &Session) {
-        let mut live = self.live_id.lock().await;
-        if live.is_some() {
-            return;
+    /// Close backends of resumable, idle slots. Transcript, history and the
+    /// resolved archive id are kept, so the next send reopens the same
+    /// conversation via `resume_session_id`. Slots without a backend-reported
+    /// identity are never closed (a reopen would silently start fresh).
+    /// Closes run in detached, time-bounded tasks so a hung backend cannot
+    /// stall the sweep, other sessions, or the `transition` lock.
+    async fn reap_idle(&self, now_ms: u64, idle: std::time::Duration) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let idle_ms = idle.as_millis() as u64;
+        let is_idle = |s: &Session| {
+            s.active_turns.load(SeqCst) == 0
+                && now_ms.saturating_sub(s.last_active_ms.load(SeqCst)) >= idle_ms
+                && s.resolved_live_id
+                    .lock()
+                    .expect("chat-web identity mutex poisoned")
+                    .is_some()
+        };
+        let slots: Vec<Arc<Session>> = self.sessions.lock().await.values().cloned().collect();
+        for session in slots {
+            if !is_idle(&session) {
+                continue;
+            }
+            // Same order as submit/send/reset: transition, then inner.
+            let _transition = self.transition.lock().await;
+            // abort() skips `transition`; never wait on a busy slot.
+            let Ok(mut inner) = session.inner.try_lock() else {
+                continue;
+            };
+            // Order: transition, inner, acceptance (same as accept_turn). The
+            // event pump takes only acceptance, so autonomous TurnStarted
+            // cannot slip between the final idle check and the generation bump.
+            let _acceptance = session.acceptance_lock.lock().await;
+            if inner.is_none() || !is_idle(&session) {
+                continue;
+            }
+            let backend = inner.take().expect("checked above");
+            session.generation.fetch_add(1, SeqCst);
+            drop(_acceptance);
+            drop(inner);
+            tokio::spawn(async move {
+                match tokio::time::timeout(IDLE_CLOSE_TIMEOUT, backend.close()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "chat-web idle backend close failed")
+                    }
+                    Err(_) => tracing::warn!("chat-web idle backend close timed out"),
+                }
+            });
         }
-        let resolved = session
+    }
+
+    /// Archive id bound by the backend's `SessionIdentity` or a `/resume` replay.
+    async fn resolve_live_id(&self, session: &Session) -> Option<String> {
+        session
             .resolved_live_id
             .lock()
             .expect("chat-web identity mutex poisoned")
-            .clone();
-        if let Some(id) = resolved {
-            *live = Some(id);
-            return;
+            .clone()
+    }
+
+    async fn slot_for_live(&self, archive_id: &str) -> Option<(String, Arc<Session>)> {
+        let slots: Vec<(String, Arc<Session>)> = self
+            .sessions
+            .lock()
+            .await
+            .iter()
+            .map(|(id, slot)| (id.clone(), Arc::clone(slot)))
+            .collect();
+        for (id, slot) in slots {
+            if self.resolve_live_id(&slot).await.as_deref() == Some(archive_id) {
+                return Some((id, slot));
+            }
         }
-        let Some(start) = self.start.get() else {
-            return;
-        };
-        let opened_after = session
-            .opened_after_ms
-            .load(std::sync::atomic::Ordering::SeqCst);
-        if opened_after == 0 {
-            return;
-        }
-        let backend_id = chat::resolve_agent_backend(start, self.config.backend.as_deref());
-        if let Some(found) = newest_session_since(
-            &self.root.join("data/chat/sessions"),
-            &backend_id,
-            opened_after,
-        ) {
-            *session
-                .resolved_live_id
-                .lock()
-                .expect("chat-web identity mutex poisoned") = Some(found.id.clone());
-            *live = Some(found.id);
-        }
+        None
     }
 
     async fn finish_turn(
@@ -933,28 +1036,8 @@ impl AppState {
             return;
         };
         let backend_id = chat::resolve_agent_backend(start, self.config.backend.as_deref());
-        let dir = self.root.join("data/chat/sessions");
-        self.resolve_live_id(&web_session).await;
-        let current_id = self.live_id.lock().await.clone();
-        let id = match current_id {
-            Some(id) => id,
-            None => {
-                let opened_after = web_session
-                    .opened_after_ms
-                    .load(std::sync::atomic::Ordering::SeqCst);
-                let Some(session) = newest_session_since(&dir, &backend_id, opened_after) else {
-                    return;
-                };
-                if web_session
-                    .generation
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                    != generation
-                {
-                    return;
-                }
-                *self.live_id.lock().await = Some(session.id.clone());
-                session.id
-            }
+        let Some(id) = self.resolve_live_id(&web_session).await else {
+            return;
         };
         if self
             .meta
@@ -1083,10 +1166,6 @@ impl AppState {
             .resolved_live_id
             .lock()
             .expect("chat-web identity mutex poisoned") = None;
-        session
-            .opened_after_ms
-            .store(0, std::sync::atomic::Ordering::SeqCst);
-        *self.live_id.lock().await = None;
         let _ = session.abort_signal.send(false);
         {
             let _publish = session
@@ -1195,51 +1274,19 @@ fn shared_is_empty(path: &std::path::Path) -> Result<bool> {
     Ok(fs::read_dir(path)?.next().is_none())
 }
 
-struct PersistedSession {
-    id: String,
-    modified: std::time::SystemTime,
-}
-
-#[cfg(test)]
-fn newest_session(dir: &std::path::Path, backend_id: &str) -> Option<PersistedSession> {
-    newest_session_since(dir, backend_id, 0)
-}
-
-fn newest_session_since(
-    dir: &std::path::Path,
-    backend_id: &str,
-    modified_after_ms: u64,
-) -> Option<PersistedSession> {
-    fs::read_dir(dir)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            (path.file_stem().is_some_and(|stem| stem != "main")
-                && path.extension().is_some_and(|ext| ext == "jsonl"))
-            .then(|| {
-                let header = BufReader::new(fs::File::open(&path).ok()?)
-                    .lines()
-                    .find(|line| line.as_ref().is_ok_and(|line| !line.trim().is_empty()))
-                    .and_then(Result::ok)
-                    .and_then(|line| serde_json::from_str::<serde_json::Value>(&line).ok())?;
-                (header.get("type")?.as_str()? == "session").then_some(())?;
-                (header
-                    .get("backend")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("pi")
-                    == backend_id)
-                    .then_some(())?;
-                let id = header.get("id")?.as_str()?.to_owned();
-                let modified = entry.metadata().ok()?.modified().ok()?;
-                let modified_ms = modified
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .ok()?
-                    .as_millis() as u64;
-                (modified_ms >= modified_after_ms).then_some(PersistedSession { id, modified })
-            })?
+fn held_ids_except(registry: &SlotRegistry, session: &Session) -> HashSet<String> {
+    let slots = registry.lock().expect("chat-web slot registry poisoned");
+    slots
+        .iter()
+        .filter_map(std::sync::Weak::upgrade)
+        .filter(|slot| !std::ptr::eq(Arc::as_ptr(slot), session))
+        .filter_map(|slot| {
+            slot.resolved_live_id
+                .lock()
+                .expect("chat-web identity mutex poisoned")
+                .clone()
         })
-        .max_by_key(|session| session.modified)
+        .collect()
 }
 
 impl chat::ChatCoordinator for AppState {
@@ -1307,6 +1354,11 @@ impl chat::ChatCoordinator for AppState {
     }
 }
 impl Session {
+    fn touch(&self) {
+        self.last_active_ms
+            .store(now_ms(), std::sync::atomic::Ordering::SeqCst);
+    }
+
     async fn accept_turn(
         &self,
         backend: &mut dyn ChatSession,
@@ -1329,6 +1381,7 @@ impl Session {
         let _ = self.events.send(ChatEvent::User { text: display });
         self.active_turns
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.touch();
         Ok(())
     }
 
@@ -1639,6 +1692,7 @@ impl Session {
                 let _ = self.abort_signal.send(false);
             }
         }
+        self.touch();
         history.push_back(event.clone());
         let _ = self.tx.send(event);
         #[cfg(test)]
@@ -2280,12 +2334,36 @@ struct Compact {
     command_id: String,
 }
 
+static FRESH_SLOT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 async fn new_session_route(
     Path(id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    match state.reset_session(&id).await {
-        Ok(()) => StatusCode::ACCEPTED.into_response(),
+    let _transition = state.transition.lock().await;
+    let reusable = match state.sessions.lock().await.get(&id).cloned() {
+        Some(slot) => {
+            state.resolve_live_id(&slot).await.is_none()
+                && slot.inner.lock().await.is_none()
+                && slot
+                    .history
+                    .lock()
+                    .expect("chat-web history mutex poisoned")
+                    .is_empty()
+                && slot.active_turns.load(std::sync::atomic::Ordering::SeqCst) == 0
+        }
+        None => false,
+    };
+    if reusable {
+        return slot_response(&id);
+    }
+    let fresh = format!(
+        "w{}-{}",
+        now_ms(),
+        FRESH_SLOT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    );
+    match state.session(&fresh).await {
+        Ok(_) => slot_response(&fresh),
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     }
 }
@@ -2445,8 +2523,8 @@ mod tests {
             transcript_failed: std::sync::atomic::AtomicBool::new(false),
             suppress_resume: std::sync::atomic::AtomicBool::new(false),
             title_started: std::sync::atomic::AtomicBool::new(false),
-            opened_after_ms: std::sync::atomic::AtomicU64::new(0),
             resolved_live_id: std::sync::Mutex::new(None),
+            last_active_ms: std::sync::atomic::AtomicU64::new(now_ms()),
             abort_signal: watch::channel(false).0,
             publish_lock: std::sync::Mutex::new(()),
             command_ids: Mutex::new(HashSet::new()),
@@ -2503,8 +2581,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(sessions),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let extension = ChatWebExtension::default();
@@ -2678,34 +2756,6 @@ mod tests {
         std::env::temp_dir().join(uuid::Uuid::new_v4().to_string())
     }
 
-    #[test]
-    fn newest_session_resumes_and_idle_sessions_expire() {
-        let root = test_root();
-        let sessions = root.join("data/chat/sessions");
-        fs::create_dir_all(&sessions).unwrap();
-        fs::write(
-            sessions.join("2026-01-01_a.jsonl"),
-            r#"{"type":"session","id":"resume-me"}"#,
-        )
-        .unwrap();
-        fs::write(
-            sessions.join("2026-01-02_b.jsonl"),
-            r#"{"type":"session","id":"resume-oc","backend":"opencode"}"#,
-        )
-        .unwrap();
-
-        // The pi<->opencode cross-resume guard: an untagged (legacy pi)
-        // header resumes only under "pi", a "backend":"opencode" header only
-        // under "opencode" — never the other way around.
-        let pi_pick = newest_session(&sessions, "pi").unwrap();
-        assert_eq!(pi_pick.id, "resume-me");
-        let opencode_pick = newest_session(&sessions, "opencode").unwrap();
-        assert_eq!(opencode_pick.id, "resume-oc");
-
-        // idle_minutes remains accepted for config compatibility, but no
-        // longer influences fresh-by-default startup.
-    }
-
     fn register_ctx(root: PathBuf, config_value: serde_json::Value) -> host_api::RegisterCtx {
         let paths = host_api::HostPaths::new(root).unwrap();
         let (_, shutdown) = watch::channel(false);
@@ -2772,8 +2822,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::from(start_ctx(services)),
             sessions: Mutex::new(HashMap::new()),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
 
@@ -2835,8 +2885,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::from(start),
             sessions: Mutex::new(HashMap::new()),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
 
@@ -2872,8 +2922,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let mut events = s.events.subscribe();
@@ -2973,8 +3023,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("main".into(), session)])),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let transition = state.transition.lock().await;
@@ -3016,8 +3066,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::from(start_ctx(services)),
             sessions: Mutex::new(HashMap::new()),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         };
         let session = state.session("main").await.unwrap();
@@ -3039,6 +3089,326 @@ mod tests {
         assert_eq!(opens.load(Ordering::SeqCst), 1);
     }
 
+    const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+
+    struct IdleSession {
+        closes: Arc<std::sync::atomic::AtomicUsize>,
+        hang_close: bool,
+    }
+    impl ChatSession for IdleSession {
+        fn send_turn(&mut self, _prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn close(self: Box<Self>) -> cap_chat::BoxFuture<'static, Result<()>> {
+            Box::pin(async move {
+                self.closes.fetch_add(1, Ordering::SeqCst);
+                if self.hang_close {
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            })
+        }
+    }
+    struct IdleBackend {
+        resumes: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        closes: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl ChatBackend for IdleBackend {
+        fn open<'a>(
+            &'a self,
+            params: cap_chat::ChatSessionParams,
+            _tx: mpsc::Sender<ChatEvent>,
+        ) -> cap_chat::BoxFuture<'a, Result<Box<dyn ChatSession>>> {
+            self.resumes.lock().unwrap().push(params.resume_session_id);
+            let closes = Arc::clone(&self.closes);
+            Box::pin(async move {
+                Ok(Box::new(IdleSession {
+                    closes,
+                    hang_close: false,
+                }) as Box<dyn ChatSession>)
+            })
+        }
+    }
+    fn idle_slot(
+        closes: &Arc<std::sync::atomic::AtomicUsize>,
+        hang_close: bool,
+        id: Option<&str>,
+    ) -> Arc<Session> {
+        let slot = session(Box::new(IdleSession {
+            closes: Arc::clone(closes),
+            hang_close,
+        }));
+        *slot.resolved_live_id.lock().unwrap() = id.map(str::to_owned);
+        slot.last_active_ms.store(1_000, Ordering::SeqCst);
+        slot
+    }
+    fn idle_state(
+        slots: Vec<(&str, Arc<Session>)>,
+        services: dar_extension_sdk::ServiceRegistry,
+    ) -> AppState {
+        AppState {
+            config: Config {
+                backend: Some("fake".into()),
+                ..Config::default()
+            },
+            root: test_root(),
+            start: std::sync::OnceLock::from(start_ctx(services)),
+            sessions: Mutex::new(slots.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()),
+            transition: Mutex::new(()),
+            slot_registry: Arc::default(),
+            meta: Mutex::new(HashMap::new()),
+        }
+    }
+    async fn settle() {
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+    }
+    fn idle_ms() -> u64 {
+        IDLE.as_millis() as u64
+    }
+
+    #[tokio::test]
+    async fn idle_reaper_closes_at_threshold_and_keeps_conversation() {
+        let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let slot = idle_slot(&closes, false, Some("arch-1"));
+        slot.publish_user("hello".into(), vec![]).unwrap();
+        slot.last_active_ms.store(1_000, Ordering::SeqCst);
+        let state = idle_state(vec![("a", Arc::clone(&slot))], Default::default());
+        let before = slot.generation.load(Ordering::SeqCst);
+
+        state.reap_idle(1_000 + idle_ms() - 1, IDLE).await;
+        settle().await;
+        assert_eq!(closes.load(Ordering::SeqCst), 0);
+        assert!(slot.inner.lock().await.is_some());
+
+        state.reap_idle(1_000 + idle_ms(), IDLE).await;
+        settle().await;
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+        assert!(slot.inner.lock().await.is_none());
+        assert_eq!(slot.generation.load(Ordering::SeqCst), before + 1);
+        assert_eq!(slot.history.lock().unwrap().len(), 1);
+        assert_eq!(
+            slot.resolved_live_id.lock().unwrap().as_deref(),
+            Some("arch-1")
+        );
+        assert!(!slot.suppress_resume.load(Ordering::SeqCst));
+
+        state.reap_idle(1_000 + idle_ms() * 3, IDLE).await;
+        settle().await;
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn idle_reaper_never_closes_running_turn_or_unidentified_slot() {
+        let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let running = idle_slot(&closes, false, Some("arch-1"));
+        running.active_turns.store(1, Ordering::SeqCst);
+        let anonymous = idle_slot(&closes, false, None);
+        let state = idle_state(
+            vec![
+                ("running", Arc::clone(&running)),
+                ("anon", Arc::clone(&anonymous)),
+            ],
+            Default::default(),
+        );
+
+        state.reap_idle(u64::MAX / 2, IDLE).await;
+        settle().await;
+
+        assert_eq!(closes.load(Ordering::SeqCst), 0);
+        assert!(running.inner.lock().await.is_some());
+        assert!(anonymous.inner.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn idle_reaped_slot_reopens_same_conversation_on_next_send() {
+        let resumes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut services = dar_extension_sdk::ServiceRegistry::default();
+        services
+            .register::<dyn ChatBackend>(
+                "fake",
+                Arc::new(IdleBackend {
+                    resumes: Arc::clone(&resumes),
+                    closes: Arc::clone(&closes),
+                }),
+            )
+            .unwrap();
+        let slot = idle_slot(&closes, false, Some("arch-1"));
+        let state = idle_state(vec![("main", Arc::clone(&slot))], services);
+
+        state.reap_idle(1_000 + idle_ms(), IDLE).await;
+        settle().await;
+        chat::ChatCoordinator::send_turn(&state, "again".into(), "again".into())
+            .await
+            .unwrap();
+
+        assert_eq!(*resumes.lock().unwrap(), vec![Some("arch-1".to_owned())]);
+        assert_eq!(slot.active_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            slot.resolved_live_id.lock().unwrap().as_deref(),
+            Some("arch-1")
+        );
+        // Fresh activity: not idle again until a new threshold passes.
+        let reopened_at = slot.last_active_ms.load(Ordering::SeqCst);
+        slot.active_turns.store(0, Ordering::SeqCst);
+        state.reap_idle(reopened_at, IDLE).await;
+        settle().await;
+        assert!(slot.inner.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn idle_reaper_rechecks_after_autonomous_turn_started_under_acceptance_lock() {
+        let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let slot = idle_slot(&closes, false, Some("arch-1"));
+        let state = Arc::new(idle_state(
+            vec![("a", Arc::clone(&slot))],
+            Default::default(),
+        ));
+        let generation = slot.generation.load(Ordering::SeqCst);
+        // Event pump holds acceptance while publishing.
+        let acceptance = slot.acceptance_lock.lock().await;
+        let reaping = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { state.reap_idle(1_000 + idle_ms(), IDLE).await }
+        });
+        settle().await;
+        assert!(
+            !reaping.is_finished(),
+            "reaper must wait for acceptance lock"
+        );
+        assert!(slot.publish_if_current(
+            generation,
+            ChatEvent::TurnStarted {
+                origin: TurnOrigin::Autonomous
+            }
+        ));
+        drop(acceptance);
+        reaping.await.unwrap();
+        settle().await;
+
+        assert_eq!(closes.load(Ordering::SeqCst), 0);
+        assert!(slot.inner.lock().await.is_some());
+        assert_eq!(slot.generation.load(Ordering::SeqCst), generation);
+        assert_eq!(slot.active_turns.load(Ordering::SeqCst), 1);
+    }
+
+    struct FailingOpenBackend;
+    impl ChatBackend for FailingOpenBackend {
+        fn open<'a>(
+            &'a self,
+            _params: cap_chat::ChatSessionParams,
+            _tx: mpsc::Sender<ChatEvent>,
+        ) -> cap_chat::BoxFuture<'a, Result<Box<dyn ChatSession>>> {
+            Box::pin(async { anyhow::bail!("resume failed") })
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_reopen_failure_keeps_history_and_id_and_accepts_nothing() {
+        let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut services = dar_extension_sdk::ServiceRegistry::default();
+        services
+            .register::<dyn ChatBackend>("fake", Arc::new(FailingOpenBackend))
+            .unwrap();
+        let slot = idle_slot(&closes, false, Some("arch-1"));
+        slot.publish_user("hello".into(), vec![]).unwrap();
+        slot.last_active_ms.store(1_000, Ordering::SeqCst);
+        let state = idle_state(vec![("main", Arc::clone(&slot))], services);
+        state.reap_idle(1_000 + idle_ms(), IDLE).await;
+        settle().await;
+        let mut events = slot.events.subscribe();
+
+        assert!(
+            chat::ChatCoordinator::send_turn(&state, "again".into(), "again".into())
+                .await
+                .is_err()
+        );
+
+        assert!(slot.inner.lock().await.is_none());
+        assert_eq!(slot.active_turns.load(Ordering::SeqCst), 0);
+        assert_eq!(slot.history.lock().unwrap().len(), 1);
+        assert_eq!(
+            slot.resolved_live_id.lock().unwrap().as_deref(),
+            Some("arch-1")
+        );
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn idle_reaper_skips_slot_with_busy_backend_lock() {
+        let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let slot = idle_slot(&closes, false, Some("arch-1"));
+        let state = idle_state(vec![("a", Arc::clone(&slot))], Default::default());
+        let held = slot.inner.lock().await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state.reap_idle(1_000 + idle_ms(), IDLE),
+        )
+        .await
+        .expect("reaper must not wait on a busy backend lock");
+        drop(held);
+        settle().await;
+
+        assert_eq!(closes.load(Ordering::SeqCst), 0);
+        assert!(slot.inner.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn idle_reaper_serializes_with_transition_holders() {
+        let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let slot = idle_slot(&closes, false, Some("arch-1"));
+        let state = Arc::new(idle_state(
+            vec![("a", Arc::clone(&slot))],
+            Default::default(),
+        ));
+        let transition = state.transition.lock().await;
+        let reaping = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { state.reap_idle(1_000 + idle_ms(), IDLE).await }
+        });
+        settle().await;
+        assert!(!reaping.is_finished());
+        // An in-flight send accepts a turn before releasing transition.
+        slot.active_turns.store(1, Ordering::SeqCst);
+        drop(transition);
+        reaping.await.unwrap();
+        settle().await;
+
+        assert_eq!(closes.load(Ordering::SeqCst), 0);
+        assert!(slot.inner.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn idle_reaper_hung_close_does_not_block_others() {
+        let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hung = idle_slot(&closes, true, Some("arch-1"));
+        let ok = idle_slot(&closes, false, Some("arch-2"));
+        let state = idle_state(
+            vec![("hung", Arc::clone(&hung)), ("ok", Arc::clone(&ok))],
+            Default::default(),
+        );
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state.reap_idle(1_000 + idle_ms(), IDLE),
+        )
+        .await
+        .expect("hung close must not stall the sweep");
+        settle().await;
+
+        assert_eq!(closes.load(Ordering::SeqCst), 2);
+        assert!(hung.inner.lock().await.is_none());
+        assert!(ok.inner.lock().await.is_none());
+        // transition lock stays free for other work.
+        assert!(state.transition.try_lock().is_ok());
+    }
+
     #[tokio::test]
     async fn rejected_coordinator_send_has_no_user_event_or_active_turn() {
         let s = session(Box::new(RejectingSession));
@@ -3047,8 +3417,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("main".into(), Arc::clone(&s))])),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         };
         let mut events = s.events.subscribe();
@@ -3076,8 +3446,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
 
@@ -3126,8 +3496,8 @@ mod tests {
             root: root.clone(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let body = "--x\r\nContent-Disposition: form-data; name=\"command_id\"\r\n\r\nupload-1\r\n--x\r\nContent-Disposition: form-data; name=\"message\"\r\n\r\ninspect this\r\n--x\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"note.txt\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--x--\r\n";
@@ -3163,8 +3533,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let invalid = "--x\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"bad.exe\"\r\nContent-Type: application/octet-stream\r\n\r\nbad\r\n--x--\r\n";
@@ -3359,8 +3729,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let mut events = s.tx.subscribe();
@@ -3408,8 +3778,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let mut events = s.tx.subscribe();
@@ -3442,8 +3812,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let mut events = s.tx.subscribe();
@@ -3470,8 +3840,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let mut events = s.tx.subscribe();
@@ -3515,8 +3885,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::from(start_ctx(services)),
             sessions: Mutex::new(HashMap::new()),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let app = router(Arc::clone(&state));
@@ -3664,8 +4034,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let session = state.session("test").await.unwrap();
@@ -3736,8 +4106,8 @@ mod tests {
             root: root.clone(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let session = state.session("resume").await.unwrap();
@@ -3751,8 +4121,8 @@ mod tests {
             root,
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let mut headers = HeaderMap::new();
@@ -3783,8 +4153,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         state
@@ -3812,8 +4182,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let get = |uri: &str| {
@@ -3838,8 +4208,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let session = state.session("lag").await.unwrap();
@@ -3927,45 +4297,370 @@ mod tests {
         }
     }
 
+    struct CloseFlagSession(Arc<AtomicBool>);
+    impl ChatSession for CloseFlagSession {
+        fn send_turn(&mut self, _prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn close(self: Box<Self>) -> cap_chat::BoxFuture<'static, Result<()>> {
+            self.0.store(true, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn post(uri: &str, body: Body) -> axum::http::Request<Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(body)
+            .unwrap()
+    }
+
+    async fn slot_of(response: Response) -> String {
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["slot"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    fn slot_state(root: PathBuf, sessions: HashMap<String, Arc<Session>>) -> Arc<AppState> {
+        Arc::new(AppState {
+            config: Config::default(),
+            root,
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(sessions),
+            transition: Mutex::new(()),
+            slot_registry: Arc::default(),
+            meta: Mutex::new(HashMap::new()),
+        })
+    }
+
     #[tokio::test]
-    async fn new_endpoint_resets_transcript_and_persists_reset() {
-        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    async fn new_endpoint_returns_fresh_slot_and_keeps_old_backend_open() {
+        let closed = Arc::new(AtomicBool::new(false));
+        let s = session(Box::new(CloseFlagSession(Arc::clone(&closed))));
+        s.publish_user("hi".into(), vec![]).unwrap();
+        let before = load_transcript(&s.transcript).unwrap().len();
+        let state = slot_state(
+            test_root(),
+            HashMap::from([("test".into(), Arc::clone(&s))]),
+        );
+        let slot = slot_of(
+            router(Arc::clone(&state))
+                .oneshot(post("/test/new", Body::empty()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_ne!(slot, "test");
+        assert!(state.sessions.lock().await.contains_key(&slot));
+        assert!(!closed.load(Ordering::SeqCst));
+        assert!(s.inner.lock().await.is_some());
+        assert_eq!(load_transcript(&s.transcript).unwrap().len(), before);
+    }
+
+    struct ScriptedBackend {
+        identities: std::sync::Mutex<VecDeque<Option<String>>>,
+        txs: Arc<std::sync::Mutex<Vec<mpsc::Sender<ChatEvent>>>>,
+    }
+    impl ChatBackend for ScriptedBackend {
+        fn open<'a>(
+            &'a self,
+            _params: cap_chat::ChatSessionParams,
+            tx: mpsc::Sender<ChatEvent>,
+        ) -> cap_chat::BoxFuture<'a, Result<Box<dyn ChatSession>>> {
+            let identity = self.identities.lock().unwrap().pop_front().flatten();
+            self.txs.lock().unwrap().push(tx.clone());
+            Box::pin(async move {
+                if let Some(id) = identity {
+                    tx.send(ChatEvent::SessionIdentity { id }).await?;
+                }
+                Ok(Box::new(FakeSession {
+                    aborted: Arc::new(AtomicBool::new(false)),
+                    sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    abort_fails: false,
+                }) as Box<dyn ChatSession>)
+            })
+        }
+    }
+
+    fn scripted_state(
+        identities: Vec<Option<String>>,
+    ) -> (
+        Arc<AppState>,
+        Arc<std::sync::Mutex<Vec<mpsc::Sender<ChatEvent>>>>,
+    ) {
+        let txs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut services = dar_extension_sdk::ServiceRegistry::default();
+        services
+            .register::<dyn ChatBackend>(
+                "fake",
+                Arc::new(ScriptedBackend {
+                    identities: std::sync::Mutex::new(identities.into()),
+                    txs: Arc::clone(&txs),
+                }),
+            )
+            .unwrap();
+        let state = Arc::new(AppState {
+            config: Config {
+                backend: Some("fake".into()),
+                ..Config::default()
+            },
+            root: test_root(),
+            start: std::sync::OnceLock::from(start_ctx(services)),
+            sessions: Mutex::new(HashMap::new()),
+            meta: Mutex::new(HashMap::new()),
+            transition: Mutex::new(()),
+            slot_registry: Arc::default(),
+        });
+        (state, txs)
+    }
+
+    fn write_fake_archive(root: &std::path::Path, id: &str) {
+        let dir = root.join("data/chat/sessions");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!("2026-01-01T00-00-00Z_{id}.jsonl")),
+            format!("{{\"type\":\"session\",\"id\":\"{id}\",\"backend\":\"fake\"}}\n{{\"type\":\"message_end\",\"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n"),
+        )
+        .unwrap();
+    }
+
+    async fn wait_resolved(slot: &Session) -> String {
+        for _ in 0..200 {
+            if let Some(id) = slot.resolved_live_id.lock().unwrap().clone() {
+                return id;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("slot never resolved an archive id");
+    }
+
+    #[tokio::test]
+    async fn concurrent_slots_bind_backend_reported_identity() {
+        let (state, _txs) = scripted_state(vec![Some("id-a".into()), Some("id-b".into())]);
+        write_fake_archive(&state.root, "id-a");
+        write_fake_archive(&state.root, "id-b");
+        let a = state.session("a").await.unwrap();
+        let b = state.session("b").await.unwrap();
+        *a.inner.lock().await = Some(state.open_session(Arc::clone(&a)).await.unwrap());
+        *b.inner.lock().await = Some(state.open_session(Arc::clone(&b)).await.unwrap());
+        assert_eq!(wait_resolved(&a).await, "id-a");
+        assert_eq!(wait_resolved(&b).await, "id-b");
+        b.active_turns.store(1, Ordering::SeqCst);
+        let Json(index) = session_index(State(Arc::clone(&state))).await;
+        let entry = |id: &str| index.iter().find(|e| e.id == id).unwrap();
+        assert!(entry("id-a").connected && !entry("id-a").busy);
+        assert!(entry("id-b").connected && entry("id-b").busy);
+        assert_eq!(entry("id-a").slots, ["a"]);
+        assert_eq!(entry("id-b").slots, ["b"]);
+        assert_eq!(state.slot_for_live("id-b").await.unwrap().0, "b");
+    }
+
+    #[tokio::test]
+    async fn index_before_delayed_identity_leaves_slot_unresolved_then_binds() {
+        let (state, txs) = scripted_state(vec![None]);
+        write_fake_archive(&state.root, "id-a");
+        let a = state.session("a").await.unwrap();
+        *a.inner.lock().await = Some(state.open_session(Arc::clone(&a)).await.unwrap());
+        let Json(index) = session_index(State(Arc::clone(&state))).await;
+        assert!(a.resolved_live_id.lock().unwrap().is_none());
+        assert!(index.iter().all(|e| !e.connected && e.slots.is_empty()));
+        let tx = txs.lock().unwrap()[0].clone();
+        tx.send(ChatEvent::SessionIdentity { id: "id-a".into() })
+            .await
+            .unwrap();
+        assert_eq!(wait_resolved(&a).await, "id-a");
+        let Json(index) = session_index(State(Arc::clone(&state))).await;
+        assert!(index.iter().find(|e| e.id == "id-a").unwrap().connected);
+    }
+
+    #[tokio::test]
+    async fn index_reports_every_connected_slot_and_drops_connected_after_idle_close() {
+        let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = idle_state(
+            vec![
+                ("fresh-1", idle_slot(&closes, false, Some("id-a"))),
+                ("fresh-2", idle_slot(&closes, false, Some("id-b"))),
+            ],
+            dar_extension_sdk::ServiceRegistry::default(),
+        );
+        write_fake_archive(&state.root, "id-a");
+        write_fake_archive(&state.root, "id-b");
+        let Json(index) = session_index(State(Arc::new(state))).await;
+        let entry = |id: &str| index.iter().find(|e| e.id == id).unwrap();
+        // Both connected, but each names its own slot so the client can focus one.
+        assert!(entry("id-a").connected && entry("id-b").connected);
+        assert_eq!(entry("id-a").slots, ["fresh-1"]);
+        assert_eq!(entry("id-b").slots, ["fresh-2"]);
+    }
+
+    #[tokio::test]
+    async fn index_marks_idle_closed_conversation_disconnected_but_keeps_slot() {
+        let closes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = Arc::new(idle_state(
+            vec![("s", idle_slot(&closes, false, Some("id-a")))],
+            dar_extension_sdk::ServiceRegistry::default(),
+        ));
+        write_fake_archive(&state.root, "id-a");
+        state
+            .reap_idle(1_000 + 300_000, std::time::Duration::from_secs(300))
+            .await;
+        let Json(index) = session_index(State(Arc::clone(&state))).await;
+        let entry = index.iter().find(|e| e.id == "id-a").unwrap();
+        assert!(!entry.connected, "closed backend is not connected");
+        assert_eq!(entry.slots, ["s"], "slot stays focusable after idle close");
+    }
+
+    #[test]
+    fn sidebar_highlights_focused_slot_only_and_labels_connected() {
+        let js = include_str!("renderer.js");
+        assert!(js.contains("(s.slots || []).includes(focusedSlot) ? ' is-focused'"));
+        assert!(js.contains("s.connected ?"));
+        assert!(js.contains("Connected · "));
+        assert!(!js.contains("Open · ") && !js.contains("is_live"));
+        let css = include_str!("chat.css");
+        assert!(css.contains(".chat-session.is-focused") && !css.contains("is-live"));
+    }
+
+    #[tokio::test]
+    async fn new_endpoint_allocates_fresh_slot_when_restored_history_is_populated() {
+        let root = test_root();
+        let before = slot_state(root.clone(), HashMap::new());
+        before
+            .session("main")
+            .await
+            .unwrap()
+            .publish_user("hi".into(), vec![])
+            .unwrap();
+        // Restart: a new state reloads the persisted history into `main`.
+        let state = slot_state(root, HashMap::new());
+        assert!(!state
+            .session("main")
+            .await
+            .unwrap()
+            .history
+            .lock()
+            .unwrap()
+            .is_empty());
+        let slot = slot_of(
+            router(Arc::clone(&state))
+                .oneshot(post("/main/new", Body::empty()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_ne!(slot, "main");
+        assert!(slot.starts_with('w'));
+    }
+
+    #[tokio::test]
+    async fn new_endpoint_reuses_unused_slot() {
+        let state = slot_state(test_root(), HashMap::new());
+        state.session("main").await.unwrap();
+        let slot = slot_of(
+            router(state)
+                .oneshot(post("/main/new", Body::empty()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(slot, "main");
+    }
+
+    #[tokio::test]
+    async fn reset_session_clears_transcript_and_persists_reset() {
         let s = session(Box::new(FakeSession {
             aborted: Arc::new(AtomicBool::new(false)),
-            sends: Arc::clone(&sends),
+            sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             abort_fails: false,
         }));
         s.publish_user("hi".into(), vec![]).unwrap();
         let user_seq = load_transcript(&s.transcript).unwrap().back().unwrap().seq;
-        let state = Arc::new(AppState {
-            config: Config::default(),
-            root: test_root(),
-            start: std::sync::OnceLock::new(),
-            sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
-            live_id: Mutex::new(None),
-            transition: Mutex::new(()),
-            meta: Mutex::new(HashMap::new()),
-        });
-
-        assert_eq!(
-            router(state)
-                .oneshot(
-                    axum::http::Request::builder()
-                        .method("POST")
-                        .uri("/test/new")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::ACCEPTED
+        let state = slot_state(
+            test_root(),
+            HashMap::from([("test".into(), Arc::clone(&s))]),
         );
-
+        state.reset_session("test").await.unwrap();
         let events = load_transcript(&s.transcript).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "reset");
         assert!(events[0].seq > user_seq);
+    }
+
+    const ARCHIVE_ID: &str = "11111111-2222-3333-4444-555555555555";
+
+    fn write_archive(root: &std::path::Path) {
+        let dir = root.join("data/chat/sessions");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!("2026-01-01T00-00-00Z_{ARCHIVE_ID}.jsonl")),
+            format!("{{\"type\":\"session\",\"id\":\"{ARCHIVE_ID}\"}}\n{{\"type\":\"message_end\",\"message\":{{\"role\":\"user\",\"content\":\"remember this\"}}}}\n"),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn resume_does_not_touch_busy_slot_and_is_idempotent() {
+        let root = test_root();
+        write_archive(&root);
+        let closed = Arc::new(AtomicBool::new(false));
+        let busy = session(Box::new(CloseFlagSession(Arc::clone(&closed))));
+        busy.active_turns.store(1, Ordering::SeqCst);
+        let generation = busy.generation.load(Ordering::SeqCst);
+        let state = slot_state(root, HashMap::from([("main".into(), Arc::clone(&busy))]));
+        let app = router(Arc::clone(&state));
+        let resume = || {
+            post(
+                "/main/resume",
+                Body::from(format!("{{\"id\":\"{ARCHIVE_ID}\"}}")),
+            )
+        };
+        let slot = slot_of(app.clone().oneshot(resume()).await.unwrap()).await;
+        assert_eq!(slot, ARCHIVE_ID);
+        assert!(!closed.load(Ordering::SeqCst));
+        assert!(busy.inner.lock().await.is_some());
+        assert_eq!(busy.active_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(busy.generation.load(Ordering::SeqCst), generation);
+        assert!(busy.history.lock().unwrap().is_empty());
+
+        let opened = state.session(ARCHIVE_ID).await.unwrap();
+        let replayed = opened.history.lock().unwrap().len();
+        assert!(replayed > 0);
+        assert!(opened.history.lock().unwrap().iter().all(|e| e.historical));
+
+        // Second resume: slot already resolved to the id, no replay.
+        let again = slot_of(app.oneshot(resume()).await.unwrap()).await;
+        assert_eq!(again, ARCHIVE_ID);
+        assert_eq!(opened.history.lock().unwrap().len(), replayed);
+    }
+
+    #[tokio::test]
+    async fn resume_returns_existing_slot_that_resolved_to_id() {
+        let root = test_root();
+        write_archive(&root);
+        let live = session(Box::new(RejectingSession));
+        *live.resolved_live_id.lock().unwrap() = Some(ARCHIVE_ID.into());
+        let state = slot_state(root, HashMap::from([("w1".into(), Arc::clone(&live))]));
+        let slot = slot_of(
+            router(Arc::clone(&state))
+                .oneshot(post(
+                    "/main/resume",
+                    Body::from(format!("{{\"id\":\"{ARCHIVE_ID}\"}}")),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(slot, "w1");
+        assert!(live.history.lock().unwrap().is_empty());
+        assert_eq!(state.sessions.lock().await.len(), 1);
     }
 
     #[tokio::test]
@@ -4022,8 +4717,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let request = || {
@@ -4063,8 +4758,8 @@ mod tests {
             root: test_root(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
 
@@ -4150,8 +4845,8 @@ mod tests {
             root: root.clone(),
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let get = || async {
@@ -4206,8 +4901,8 @@ mod tests {
             root,
             start: std::sync::OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
-            live_id: Mutex::new(None),
             transition: Mutex::new(()),
+            slot_registry: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let app = router(state);
@@ -4239,49 +4934,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fresh_turn_title_resolution_does_not_deadlock_live_id() {
-        let root = test_root();
-        let dir = root.join("data/chat/sessions");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("backend.jsonl"),
-            "{\"type\":\"session\",\"id\":\"backend\",\"backend\":\"fake\"}\n",
-        )
-        .unwrap();
-        let mut services = dar_extension_sdk::ServiceRegistry::default();
-        services
-            .register::<dyn ChatBackend>(
-                "fake",
-                Arc::new(TitlerBackend {
-                    mode: TitlerMode::Success,
-                    closed: Arc::new(AtomicBool::new(false)),
-                }),
-            )
-            .unwrap();
-        let web = session(Box::new(RejectingSession));
-        let state = Arc::new(AppState {
-            config: Config {
-                backend: Some("fake".into()),
-                ..Config::default()
-            },
-            root,
-            start: std::sync::OnceLock::from(start_ctx(services)),
-            sessions: Mutex::new(HashMap::new()),
-            live_id: Mutex::new(None),
-            meta: Mutex::new(HashMap::new()),
-            transition: Mutex::new(()),
-        });
-        web.opened_after_ms.store(0, Ordering::SeqCst);
-        tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            state.finish_turn(web, 0, "hello".into(), "reply".into()),
-        )
-        .await
-        .expect("title resolution must not deadlock");
-        assert_eq!(state.live_id.lock().await.as_deref(), Some("backend"));
-    }
-
-    #[tokio::test]
     async fn titler_success_timeout_and_failure_are_isolated_and_cleaned() {
         for mode in [
             TitlerMode::Success,
@@ -4301,6 +4953,7 @@ mod tests {
                 )
                 .unwrap();
             let web = session(Box::new(RejectingSession));
+            *web.resolved_live_id.lock().unwrap() = Some("live".into());
             let state = AppState {
                 config: Config {
                     backend: Some("fake".into()),
@@ -4309,9 +4962,9 @@ mod tests {
                 root: root.clone(),
                 start: std::sync::OnceLock::from(start_ctx(services)),
                 sessions: Mutex::new(HashMap::new()),
-                live_id: Mutex::new(Some("live".into())),
                 meta: Mutex::new(HashMap::new()),
                 transition: Mutex::new(()),
+                slot_registry: Arc::default(),
             };
             state
                 .finish_turn(web, 0, "hello".into(), "reply".into())

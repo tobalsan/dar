@@ -87,7 +87,7 @@ body:has(.chat-web) #content {
   transition: background 0.15s;
 }
 .chat-session:hover,
-.chat-session.is-live {
+.chat-session.is-focused {
   background: var(--panel-2);
 }
 .chat-session-copy {
@@ -123,6 +123,14 @@ body:has(.chat-web) #content {
   height: 0.4rem;
   border-radius: 50%;
   background: var(--ok);
+}
+.chat-live-dot.is-busy {
+  animation: chat-pulse 1.2s ease-in-out infinite;
+}
+@keyframes chat-pulse {
+  50% {
+    opacity: 0.3;
+  }
 }
 .chat-session-actions {
   position: absolute;

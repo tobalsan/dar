@@ -143,7 +143,7 @@
   if (typeof module !== 'undefined') module.exports = { reduce, html, markdown, usageText, request };
   if (typeof document === 'undefined') return;
 
-  const SESSION = 'main', MAX_ATTACHMENTS = 8;
+  const MAX_ATTACHMENTS = 8;
   const $ = id => document.getElementById(id);
   let pasteSeq = 0;
 
@@ -222,7 +222,8 @@
     schedulePaint(app);
   };
 
-  const restoreDraft = (app, input, message, files, error) => {
+  const restoreDraft = (app, slot, input, message, files, error) => {
+    if (app.slot !== slot) return; // user switched chats while the request was in flight
     app.draft = message; input.value = message; app.pending = files;
     renderChips(app); autogrow(input); refreshBusy(app);
     render(app, { type: 'error', error: `Message not sent: ${error.message || 'request failed'}` });
@@ -231,24 +232,24 @@
   const sendFlow = async app => {
     let input = $('chat-input');
     if (!input || !sendEnabled(app)) return;
-    let message = input.value, files = app.pending.slice(), command_id = uuid();
+    let slot = app.slot, message = input.value, files = app.pending.slice(), command_id = uuid();
     let command = message.trim();
-    if (!files.length && command === '/stop') { fetch(`/chat/${SESSION}/abort`, { method: 'POST' }); app.draft=''; input.value=''; autogrow(input); refreshBusy(app); return; }
+    if (!files.length && command === '/stop') { fetch(`/chat/${app.slot}/abort`, { method: 'POST' }); app.draft=''; input.value=''; autogrow(input); refreshBusy(app); return; }
     if (!files.length && command === '/new') {
       app.draft = ''; input.value = ''; app.pending = []; renderChips(app); autogrow(input); refreshBusy(app);
       try {
-        await request(`/chat/${SESSION}/new`, { method: 'POST' });
+        await newChat(app);
       } catch (error) {
-        restoreDraft(app, input, message, files, error);
+        restoreDraft(app, slot, input, message, files, error);
       }
       return;
     }
     if (!files.length && command === '/compact') {
       app.draft = ''; input.value = ''; app.pending = []; renderChips(app); autogrow(input); refreshBusy(app);
       try {
-        await request(`/chat/${SESSION}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: uuid() }) });
+        await request(`/chat/${app.slot}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: uuid() }) });
       } catch (error) {
-        restoreDraft(app, input, message, files, error);
+        restoreDraft(app, slot, input, message, files, error);
       }
       return;
     }
@@ -258,12 +259,12 @@
         let body = new FormData();
         body.append('command_id', command_id); body.append('message', message);
         for (const file of files) body.append('attachment', file);
-        await request(`/chat/${SESSION}/upload`, { method: 'POST', body });
+        await request(`/chat/${app.slot}/upload`, { method: 'POST', body });
       } else {
-        await request(`/chat/${SESSION}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id, message }) });
+        await request(`/chat/${app.slot}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id, message }) });
       }
     } catch (error) {
-      restoreDraft(app, input, message, files, error);
+      restoreDraft(app, slot, input, message, files, error);
     }
   };
 
@@ -272,7 +273,7 @@
   const submitAnswer = async (app, block, answers) => {
     if (!block || block.done || app.qsent[block.id]) return;
     app.qsent[block.id] = true;
-    try { await request(`/chat/${SESSION}/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ request_id: block.id, answers }) }); }
+    try { await request(`/chat/${app.slot}/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ request_id: block.id, answers }) }); }
     catch (error) { delete app.qsent[block.id]; render(app, { type: 'error', error: `Answer not sent: ${error.message || 'request failed'}` }); }
   };
   // Single-select questions submit on first click (a block of several
@@ -346,7 +347,7 @@
       if (chip) { let removed = app.pending.splice(Number(chip.dataset.chip), 1)[0]; if (removed && removed._preview) URL.revokeObjectURL(removed._preview); renderChips(app); refreshBusy(app); return; }
       if (e.target.closest('#chat-attach')) { let f = $('chat-attachments'); if (f) f.click(); return; }
       let abort = e.target.closest('#chat-abort');
-      if (abort && !abort.disabled) { fetch(`/chat/${SESSION}/abort`, { method: 'POST' }); return; }
+      if (abort && !abort.disabled) { fetch(`/chat/${app.slot}/abort`, { method: 'POST' }); return; }
       let opt = e.target.closest('.chat-q-opt');
       if (opt) { answerFlow(app, Number(opt.dataset.qbi), Number(opt.dataset.qi), opt.dataset.label); return; }
       let qsend = e.target.closest('.chat-q-send');
@@ -414,19 +415,34 @@
 
   const relativeTime = ms => { let n=Math.max(0,Date.now()-ms), m=Math.floor(n/60000); if(m<1)return 'now'; if(m<60)return `${m}m`; let h=Math.floor(m/60); if(h<24)return `${h}h`; return `${Math.floor(h/24)}d`; };
   const groupName = ms => { let d=new Date(ms), now=new Date(), day=86400000, today=new Date(now.getFullYear(),now.getMonth(),now.getDate()).getTime(), t=new Date(d.getFullYear(),d.getMonth(),d.getDate()).getTime(); if(t===today)return 'Today'; if(t===today-day)return 'Yesterday'; let age=(today-t)/day; if(age<7)return 'Earlier this week'; if(d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear())return 'Earlier this month'; return d.toLocaleDateString([], {month:'long',year:'numeric'}); };
-  const sessionRow = s => `<div class="chat-session${s.is_live ? ' is-live' : ''}" data-session-id="${esc(s.id)}" role="button" tabindex="0" title="${esc(s.label)}">`
-    + `<div class="chat-session-copy"><span class="chat-session-label"><span>${esc(s.label)}</span></span><small>${s.is_live ? '<span class="chat-live-dot"></span>Live · ' : ''}${relativeTime(s.modified_ms)}</small></div>`
+  const sessionRow = (s, focusedSlot) => `<div class="chat-session${(s.slots || []).includes(focusedSlot) ? ' is-focused' : ''}${s.busy ? ' is-busy' : ''}" data-session-id="${esc(s.id)}" role="button" tabindex="0" title="${esc(s.label)}">`
+    + `<div class="chat-session-copy"><span class="chat-session-label"><span>${esc(s.label)}</span></span><small>${s.busy ? '<span class="chat-live-dot is-busy"></span>Running · ' : s.connected ? '<span class="chat-live-dot"></span>Connected · ' : ''}${relativeTime(s.modified_ms)}</small></div>`
     + `<div class="chat-session-actions">${actionButton('rename', s.id, 'Rename')}${s.archived ? actionButton('unarchive', s.id, 'Unarchive') : actionButton('archive', s.id, 'Archive')}${actionButton('delete', s.id, 'Delete')}</div></div>`;
-  const showHistoryList = async app => { let host=$('chat-history-list'); if(!host||app.editingSession)return; let sequence=++app.sidebarSequence; try { let all=await request('/chat/sessions').then(r=>r.json()); if(app.editingSession||sequence!==app.sidebarSequence)return; let q=($('chat-search')?.value||'').toLowerCase(), active=all.filter(s=>!s.archived&&s.label.toLowerCase().includes(q)), archived=all.filter(s=>s.archived&&s.label.toLowerCase().includes(q)), groups=[]; for(let s of active){let name=groupName(s.modified_ms), g=groups.at(-1);if(!g||g.name!==name)groups.push(g={name,items:[]});g.items.push(s)} host.innerHTML=groups.map(g=>`<div class="chat-session-group"><h3>${g.name}</h3>${g.items.map(sessionRow).join('')}</div>`).join('')+(archived.length?`<details class="chat-archived"${app.archivedOpen?' open':''}><summary>Archived (${archived.length})</summary>${archived.map(sessionRow).join('')}</details>`:'')||'<div class="chat-empty">No conversations</div>'; } catch(error){if(sequence===app.sidebarSequence&&!app.editingSession)host.textContent=`Sessions unavailable: ${error.message}`;} };
-  const resumeSession = async (app,id) => { try { await request(`/chat/${SESSION}/resume`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id})}); showHistoryList(app); } catch(error){render(app,{type:'error',error:`Session not resumed: ${error.message}`});} };
+  const showHistoryList = async app => { let host=$('chat-history-list'); if(!host||app.editingSession)return; let sequence=++app.sidebarSequence; try { let all=await request('/chat/sessions').then(r=>r.json()); if(app.editingSession||sequence!==app.sidebarSequence)return; let q=($('chat-search')?.value||'').toLowerCase(), active=all.filter(s=>!s.archived&&s.label.toLowerCase().includes(q)), archived=all.filter(s=>s.archived&&s.label.toLowerCase().includes(q)), groups=[]; for(let s of active){let name=groupName(s.modified_ms), g=groups.at(-1);if(!g||g.name!==name)groups.push(g={name,items:[]});g.items.push(s)} host.innerHTML=groups.map(g=>`<div class="chat-session-group"><h3>${g.name}</h3>${g.items.map(s=>sessionRow(s,app.slot)).join('')}</div>`).join('')+(archived.length?`<details class="chat-archived"${app.archivedOpen?' open':''}><summary>Archived (${archived.length})</summary>${archived.map(s=>sessionRow(s,app.slot)).join('')}</details>`:'')||'<div class="chat-empty">No conversations</div>'; } catch(error){if(sequence===app.sidebarSequence&&!app.editingSession)host.textContent=`Sessions unavailable: ${error.message}`;} };
+  // Slots run independently server-side; switching only repoints the stream.
+  const switchSlot = (app, slot) => {
+    if (!slot || slot === app.slot) return;
+    app.es?.close(); app.slot = slot;
+    // Composer state belongs to the old chat: drop draft + attachments (and their preview URLs).
+    for (const file of app.pending) if (file._preview) URL.revokeObjectURL(file._preview);
+    app.draft = ''; app.pending = [];
+    let input = $('chat-input'); if (input) { input.value = ''; autogrow(input); }
+    renderChips(app); refreshBusy(app);
+    render(app, { type: 'reset' });
+    app.es = new EventSource(`/chat/${slot}/stream`);
+    app.es.onmessage = e => render(app, JSON.parse(e.data));
+  };
+  const newChat = async app => { let r = await request(`/chat/${app.slot}/new`, { method: 'POST' }); switchSlot(app, (await r.json()).slot); showHistoryList(app); };
+  const resumeSession = async (app,id) => { try { let r = await request(`/chat/${app.slot}/resume`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id})}); switchSlot(app, (await r.json()).slot); showHistoryList(app); } catch(error){render(app,{type:'error',error:`Session not resumed: ${error.message}`});} };
   const sessionAction = async (app,action,id) => { try { if(action==='delete'){if(!confirm('Delete this conversation permanently?'))return;await request(`/chat/sessions/${encodeURIComponent(id)}`,{method:'DELETE'});} else if(action==='rename'){let row=document.querySelector(`[data-session-id="${CSS.escape(id)}"]`), label=row?.querySelector('.chat-session-label');if(!label)return;let input=document.createElement('input');input.className='chat-session-edit';input.value=label.textContent;label.replaceWith(input);input.focus();input.select();app.editingSession=id;let settled=false;let done=async save=>{if(settled)return;settled=true;app.editingSession=null;if(save)await request(`/chat/sessions/${encodeURIComponent(id)}`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({title:input.value.trim()})});showHistoryList(app)};input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();done(true)}if(e.key==='Escape'){e.preventDefault();done(false)}});input.addEventListener('blur',()=>done(true),{once:true});return;} else await request(`/chat/sessions/${encodeURIComponent(id)}`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({archived:action==='archive'})}); showHistoryList(app); } catch(error){render(app,{type:'error',error:`Session action failed: ${error.message}`});} };
   const toggleSidebar = () => { let root=$('chat-root'); if(matchMedia('(max-width: 760px)').matches){root.classList.toggle('sidebar-open');return;} let collapsed=!root.classList.contains('sidebar-collapsed');root.classList.toggle('sidebar-collapsed',collapsed);localStorage.setItem('dar-chat-sidebar',collapsed?'collapsed':'open'); };
 
   if (!window.__chatWeb) {
-    let app = { blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false, qsel: {}, qsent: {}, editingSession: null, sidebarSequence: 0, dragDepth: 0 };
+    let app = { slot: 'main', blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false, qsel: {}, qsent: {}, editingSession: null, sidebarSequence: 0, dragDepth: 0 };
     window.__chatWeb = app;
     window.renderChatEvent = event => render(app, event);
-    app.es = new EventSource(`/chat/${SESSION}/stream`);
+    app.newChat = () => newChat(app).catch(error => render(app, { type: 'error', error: `New chat failed: ${error.message}` }));
+    app.es = new EventSource(`/chat/${app.slot}/stream`);
     app.es.onmessage = e => render(app, JSON.parse(e.data));
     bindDocument(app);
     window.addEventListener('focus',()=>showHistoryList(app)); document.addEventListener('visibilitychange',()=>{if(!document.hidden)showHistoryList(app)}); if (typeof module === 'undefined') setInterval(()=>{if(!document.hidden)showHistoryList(app)},5000); document.addEventListener('input',e=>{if(e.target.id==='chat-search')showHistoryList(app)});

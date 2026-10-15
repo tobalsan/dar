@@ -66,8 +66,13 @@ extensions:
     enabled: true      # optional runtime kill switch; linking is by section presence
     backend: pi        # optional; default: follow runner.use, then pi
     command: ""        # optional backend binary override ("" = backend default)
-    idle_minutes: 360  # deprecated compatibility key; accepted but ignored
+    idle_minutes: 5    # optional; close an idle conversation's backend after N minutes (default 5, 0 = never)
 ```
+
+Idle conversations: after `idle_minutes` with no running turn, chat-web closes
+that conversation's backend process. Transcript and identity are kept; the next
+message transparently reopens the same saved conversation. Conversations whose
+backend never reported a session identity (e.g. codex) are never closed.
 
 Backend resolution matches the TUI: `backend` if set, else `runner.use` when
 that id has a registered chat backend, else `pi`. The web chat and the TUI
