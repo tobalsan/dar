@@ -126,12 +126,12 @@ When code changes are needed:
 
 **Create a new branch named `<issue-id>-<short-slug>` before any commit; never commit to or push `main`.**
 
-1. Make the focused change in the issue worktree.
+1. Follow the worker AGENTS.md design, seam-confirmation, and TDD requirements. Make the focused change in the issue worktree one observed red → minimal implementation → observed green slice at a time.
 2. If the repo has a `CHANGELOG.md`, add a concise line for your change in the same PR under the `## [Unreleased]` section (Added/Changed/Fixed) — create that section at the top if it is missing. User-facing changes only; skip pure chore/test/docs churn.
-3. Spawn a reviewer subagent and ask it to review the code changes.
+3. Spawn a reviewer subagent and ask it to review the code changes. Ask this existing in-process reviewer to check behavioral test quality and independent expected results, and meaningful depth behind small interfaces rather than shallow wrappers or horizontal scattering.
 4. Do not commit until the reviewer comes back clean.
 5. After a clean review, commit the work in the worktree.
-6. Create or update the GitHub PR using `gh`. Mint the token with the repo owner explicit — `GH_TOKEN=$(gh-app-token --owner <owner>)` (e.g. `--owner tobalsan` for `tobalsan/dar`). Do NOT call the credential helper without a repo path: with no owner it falls back to the default installation (a different account) and `gh pr create` fails with `Resource not accessible by integration`. `git push` works regardless because git supplies the owner automatically.
+6. Use `/pr` for the ready PR body (or read `$AGENT_HOME/skills/pr/SKILL.md` if slash tools are unavailable): Summary, Evidence, and Merge Danger. Create or update the GitHub PR using `gh`. Mint the token with the repo owner explicit — `GH_TOKEN=$(gh-app-token --owner <owner>)` (e.g. `--owner tobalsan` for `tobalsan/dar`). Do NOT call the credential helper without a repo path: with no owner it falls back to the default installation (a different account) and `gh pr create` fails with `Resource not accessible by integration`. `git push` works regardless because git supplies the owner automatically.
 7. Link the PR to the current tracker issue when the configured tracker supports it; otherwise include the PR URL in the final tracker comment. If PR can't be linked directly, you must include the issue ID directly in the PR title.
 8. Post your final handoff comment, following **Handoff comment format** (acceptance checklist included).
 9. Move the issue to `In Review` **last** (see ordering rule below).
