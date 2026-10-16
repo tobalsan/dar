@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::map_response;
 use axum::response::{IntoResponse, Response};
@@ -59,10 +59,13 @@ pub fn router(state: ApiState) -> Router {
             "/jobs/{id}",
             axum::routing::patch(update_job).delete(delete_job),
         )
-        .route("/jobs/{id}/run-now", axum::routing::post(run_now))
+        .route("/jobs/{id}/run-now", axum::routing::post(run_now_route))
         .route("/jobs/{id}/tail", get(tail))
         .route("/jobs/{id}/outputs/{name}", get(output_detail))
         .route("/jobs/{id}/detail", get(job_detail))
+        .route("/jobs/{id}/live", get(live_run))
+        .route("/jobs/{id}/runs/{run_id}", get(run_detail))
+        .route("/jobs/{id}/runs/{run_id}/logs", get(run_logs))
         .with_state(state)
         .layer(map_response(mark_prefix_aware))
 }
@@ -86,6 +89,9 @@ pub fn routes() -> Vec<String> {
         "/jobs/{id}/tail".to_string(),
         "/jobs/{id}/outputs/{name}".to_string(),
         "/jobs/{id}/detail".to_string(),
+        "/jobs/{id}/live".to_string(),
+        "/jobs/{id}/runs/{run_id}".to_string(),
+        "/jobs/{id}/runs/{run_id}/logs".to_string(),
     ]
 }
 
@@ -276,6 +282,42 @@ async fn delete_job(State(api): State<ApiState>, Path(id): Path<String>) -> Resp
 ///
 /// The schedule's next fire is preserved across the manual run, except when a
 /// scheduled fire was overlap-skipped during it (see [`run_job_now`]).
+#[derive(Default, Deserialize)]
+struct RunNowQuery {
+    #[serde(default)]
+    background: bool,
+}
+
+async fn run_now_route(
+    State(api): State<ApiState>,
+    Path(id): Path<String>,
+    Query(query): Query<RunNowQuery>,
+) -> Response {
+    if !query.background {
+        return run_now(State(api), Path(id)).await;
+    }
+    let Some(job) = api.state.jobs().into_iter().find(|job| job.id == id) else {
+        return not_found(&id);
+    };
+    if !job.enabled {
+        return json_ok(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": "job is disabled"}),
+        );
+    }
+    if api.state.runtime(&id).running_since_ms.is_some() {
+        return json_ok(
+            StatusCode::CONFLICT,
+            json!({"error": "job is already running"}),
+        );
+    }
+    // The server owns this task: closing the drawer or HTTP connection must not cancel a run.
+    tokio::spawn(async move {
+        run_job_now(&api.config, &api.services, &api.state, &id).await;
+    });
+    json_ok(StatusCode::ACCEPTED, json!({"status": "accepted"}))
+}
+
 async fn run_now(State(api): State<ApiState>, Path(id): Path<String>) -> Response {
     match run_job_now(&api.config, &api.services, &api.state, &id).await {
         RunNowOutcome::Unknown => not_found(&id),
@@ -524,12 +566,26 @@ async fn job_detail(State(api): State<ApiState>, Path(id): Path<String>) -> Resp
     let rt = api.state.runtime(&id);
     let now_ms = Utc::now().timestamp_millis();
     let outputs = crate::tab::list_output_files(&api.root, &id);
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html")],
-        render_job_detail_drawer(job, &rt, now_ms, &outputs),
-    )
-        .into_response()
+    let mut html = render_job_detail_drawer(job, &rt, now_ms, &outputs);
+    if let Some(history) = &api.state.history {
+        let runs = match history.list(&id) {
+            Ok(runs) => runs,
+            Err(error) => {
+                return error_drawer(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "History unavailable",
+                    &error.to_string(),
+                )
+            }
+        };
+        let history_html = render_run_history(&runs);
+        html = html.replacen(
+            "<div class=\"cron-outputs-head\">Prompt</div>",
+            &format!("{history_html}<div class=\"cron-outputs-head\">Prompt</div>"),
+            1,
+        );
+    }
+    (StatusCode::OK, [(header::CONTENT_TYPE, "text/html")], html).into_response()
 }
 
 /// Build the job-detail drawer body. All user-controlled strings (job name,
@@ -636,6 +692,247 @@ fn render_job_detail_drawer(
     html.push_str("</aside>");
     html
 }
+
+/// Open the latest in-flight run from a job row, falling back to its job detail
+/// if a successful quiet tick disappeared between the row render and the click.
+async fn live_run(State(api): State<ApiState>, Path(id): Path<String>) -> Response {
+    if let Some(history) = &api.state.history {
+        match history.list(&id) {
+            Ok(runs) => {
+                if let Some(run) = runs
+                    .iter()
+                    .find(|run| run.outcome == "running")
+                    .or(runs.first())
+                {
+                    return run_detail(State(api.clone()), Path((id, run.id.clone()))).await;
+                }
+            }
+            Err(error) => {
+                return error_drawer(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "History unavailable",
+                    &error.to_string(),
+                )
+            }
+        }
+    }
+    job_detail(State(api), Path(id)).await
+}
+
+async fn run_detail(
+    State(api): State<ApiState>,
+    Path((job_id, run_id)): Path<(String, String)>,
+) -> Response {
+    let Some(history) = &api.state.history else {
+        return error_drawer(
+            StatusCode::NOT_FOUND,
+            "Run not found",
+            "No scheduler history.",
+        );
+    };
+    let run = match history.get(&run_id) {
+        Ok(Some(run)) if run.job_id == job_id => run,
+        Ok(_) => {
+            return error_drawer(
+                StatusCode::NOT_FOUND,
+                "Run not found",
+                "No such scheduler run for this job.",
+            )
+        }
+        Err(error) => {
+            return error_drawer(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Run unavailable",
+                &error.to_string(),
+            )
+        }
+    };
+    let events = match history.events(&run_id, 0) {
+        Ok(events) => events,
+        Err(error) => {
+            return error_drawer(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Logs unavailable",
+                &error.to_string(),
+            )
+        }
+    };
+    let cursor = events.last().map(|event| event.id).unwrap_or(0);
+    let logs = if events.is_empty() {
+        "<p class=\"empty\">No log events yet.</p>".to_string()
+    } else {
+        events.iter().map(render_run_event).collect::<String>()
+    };
+    let mut html = format!(
+        r#"<aside class="drawer" id="cron-run-drawer" data-cursor="{cursor}" data-logs-url="/scheduler/jobs/{job}/runs/{id}/logs">
+<div class="drawer-head">{back}<h2>{job}</h2><span class="pill cron-run-status">{outcome}</span><button class="drawer-close" onclick="closeDrawer()">Close</button></div>
+<div class="tab-bar"><button class="tab-btn active" onclick="this.parentNode.querySelectorAll('button').forEach(b=>b.classList.remove('active'));this.classList.add('active');this.closest('aside').querySelector('.cron-run-logs').style.display='block';this.closest('aside').querySelector('.cron-run-metadata').style.display='none'">Logs</button><button class="tab-btn" onclick="this.parentNode.querySelectorAll('button').forEach(b=>b.classList.remove('active'));this.classList.add('active');this.closest('aside').querySelector('.cron-run-logs').style.display='none';this.closest('aside').querySelector('.cron-run-metadata').style.display='block'">Metadata</button></div>
+<div class="cron-run-notice" role="status"></div><div class="drawer-events cron-run-logs">{logs}</div><div class="drawer-meta cron-run-metadata" style="display:none;overflow-y:auto">{metadata}</div></aside>{style}"#,
+        job = escape_html(&job_id),
+        id = escape_html(&run_id),
+        outcome = escape_html(&run.outcome),
+        back = job_back_button(&job_id),
+        metadata = render_run_metadata(&run),
+        style = RUN_STYLE,
+    );
+    if run.outcome == "running" {
+        html.push_str("<script>");
+        html.push_str(include_str!("../templates/run_poll.js"));
+        html.push_str("</script>");
+    }
+    (StatusCode::OK, [(header::CONTENT_TYPE, "text/html")], html).into_response()
+}
+
+#[derive(Default, Deserialize)]
+struct LogsQuery {
+    #[serde(default)]
+    since: u64,
+}
+
+/// Cursor reads append only finished events. A newly opened drawer always reads
+/// from zero; disconnected requests can safely retry the same cursor.
+async fn run_logs(
+    State(api): State<ApiState>,
+    Path((job_id, run_id)): Path<(String, String)>,
+    Query(query): Query<LogsQuery>,
+) -> Response {
+    let Some(history) = &api.state.history else {
+        return not_found(&run_id);
+    };
+    // Final metadata is published after final events. Read metadata first so
+    // a finishing run cannot stop polling before its last events are read.
+    let run = match history.get(&run_id) {
+        Ok(Some(run)) if run.job_id == job_id => run,
+        Ok(_) => return not_found(&run_id),
+        Err(error) => return server_error(&error.to_string()),
+    };
+    let events = match history.events(&run_id, query.since) {
+        Ok(events) => events,
+        Err(error) => return server_error(&error.to_string()),
+    };
+    let events: Vec<Value> = events
+        .iter()
+        .map(|event| {
+            json!({
+                "id": event.id, "html": render_run_event(event),
+            })
+        })
+        .collect();
+    json_ok(
+        StatusCode::OK,
+        json!({
+            "events": events,
+            "outcome": run.outcome,
+            "metadata": render_run_metadata(&run),
+        }),
+    )
+}
+
+fn render_run_history(runs: &[crate::history::RunRecord]) -> String {
+    let mut html = format!(
+        "<div class=\"cron-outputs-head\">Run history ({})</div>",
+        runs.len()
+    );
+    if runs.is_empty() {
+        html.push_str("<p class=\"empty\">No retained runs.</p>");
+    }
+    for run in runs {
+        let class = match run.outcome.as_str() {
+            "running" => "live",
+            "succeeded" => "completed",
+            _ => "failed",
+        };
+        html.push_str(&format!(r##"<div class="cron-output-row" hx-get="/scheduler/jobs/{job}/runs/{id}" hx-target="#run-detail" hx-swap="innerHTML"><span>{started}</span><span class="pill {class}">{outcome}</span>{woke}</div>"##,
+            job = escape_html(&run.job_id), id = escape_html(&run.id),
+            started = escape_html(&run.started_at.format("%b %-d %H:%M:%S").to_string()),
+            outcome = escape_html(&run.outcome),
+            woke = if run.woke { "<span class=\"pill completed\">woken / real work</span>" } else { "" },
+        ));
+    }
+    html
+}
+
+fn render_run_metadata(run: &crate::history::RunRecord) -> String {
+    let duration = (run.finished_at.unwrap_or_else(Utc::now) - run.started_at)
+        .num_seconds()
+        .max(0);
+    let mut html = String::new();
+    for (key, value) in [
+        ("Run ID", run.id.clone()),
+        ("Outcome", run.outcome.clone()),
+        ("Runner", run.runner.clone().unwrap_or_else(|| "N/A".into())),
+        ("Model", run.model.clone().unwrap_or_else(|| "N/A".into())),
+        (
+            "PID",
+            run.pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "N/A".into()),
+        ),
+        ("Phase", run.phase.clone()),
+        ("Duration", format!("{duration}s")),
+        (
+            "Exit code",
+            run.exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "N/A".into()),
+        ),
+        ("Started", run.started_at.to_rfc3339()),
+        (
+            "Finished",
+            run.finished_at
+                .map(|time| time.to_rfc3339())
+                .unwrap_or_else(|| "N/A".into()),
+        ),
+    ] {
+        html.push_str(&format!(
+            "<div class=\"kv\"><span class=\"k\">{key}</span><span class=\"v\">{}</span></div>",
+            escape_html(&value)
+        ));
+    }
+    if let Some(error) = &run.error {
+        html.push_str(&format!(
+            "<p class=\"cron-error\">{}</p>",
+            escape_html(error)
+        ));
+    }
+    if let Some(file) = &run.output_file {
+        if let Some(name) = std::path::Path::new(file)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| is_safe_output_name(name))
+        {
+            html.push_str(&format!(r##"<button class="cron-btn" hx-get="/scheduler/jobs/{job}/outputs/{name}" hx-target="#run-detail" hx-swap="innerHTML">Final output: {name}</button>"##,
+                job = escape_html(&run.job_id), name = escape_html(name)));
+        }
+    }
+    html
+}
+
+fn render_run_event(event: &crate::history::RunEvent) -> String {
+    let phase = escape_html(&event.phase);
+    let kind = escape_html(&event.kind);
+    let text = escape_html(&event.text);
+    let detail = escape_html(&event.detail);
+    let timestamp = event.ts.format("%H:%M:%S");
+    let body = match event.kind.as_str() {
+        "thinking" => format!("<details class=\"log-think\" data-eid=\"{}\"><summary>Thinking</summary><pre class=\"log-pre\">{text}{detail}</pre></details>", event.id),
+        "tool_call" | "tool_output" => format!("<details class=\"log-tool\" data-eid=\"{}\"><summary><span class=\"log-pill\">{kind}</span><span>{text}</span></summary><pre class=\"log-pre\">{detail}</pre></details>", event.id),
+        _ => format!("<pre class=\"log-pre\">{text}{detail}</pre>"),
+    };
+    format!("<div class=\"cron-log-event\" data-event-id=\"{}\"><span class=\"log-ts\">{timestamp} · {phase} · {kind}</span>{body}</div>", event.id)
+}
+
+const RUN_STYLE: &str = r#"<style>
+.cron-run-logs { flex:1; overflow-y:auto; }
+.cron-log-event { padding:.4rem .2rem; border-bottom:1px solid var(--border); }
+.cron-log-event .log-ts { color:var(--muted); font-size:.68rem; }
+.cron-log-event .log-pre { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; margin:.3rem 0; padding:.4rem; background:var(--panel-2); }
+.cron-log-event summary { cursor:pointer; color:var(--accent); overflow-wrap:anywhere; }
+.cron-run-notice { color:var(--muted); }
+#cron-run-drawer .tab-bar { display:flex; gap:.4rem; border-bottom:1px solid var(--border); }
+#cron-run-drawer .tab-btn { background:none; border:none; color:var(--muted); cursor:pointer; padding:.5rem; }
+#cron-run-drawer .tab-btn.active { color:var(--accent); border-bottom:2px solid var(--accent); }
+</style>"#;
 
 fn output_sort_key(name: &str) -> Option<(String, u32)> {
     let stem = name.strip_suffix(".md")?;
@@ -794,6 +1091,11 @@ mod tests {
     async fn body_json(resp: Response) -> Value {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn body_text(resp: Response) -> String {
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
     }
 
     fn create_body(cron: &str, tz: &str, message: &str) -> Json<CreateBody> {
@@ -1489,5 +1791,150 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("2026-06-01_12-00-00.000-0001.md"));
+    }
+
+    #[tokio::test]
+    async fn live_run_drawer_cursor_reconnect_and_job_isolation() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let (mut api, dir) = api();
+        let job_id = create_one(&api).await;
+        let history = crate::history::History::open(dir.path(), 3).unwrap();
+        let recorder = history
+            .start(&job_id, Some("pi"), Some("gpt-6-luna"), "agent")
+            .unwrap();
+        recorder.event("tool_call", "bash", "echo STEP-A").unwrap();
+        let run_id = recorder.id().to_string();
+        let first_cursor = history.events(&run_id, 0).unwrap()[0].id;
+        api.state = Arc::new(SchedulerState::with_history(
+            api.state.jobs(),
+            history.clone(),
+        ));
+        let app = router(api.clone());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/jobs/{job_id}/live"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-prefix-aware"], "1");
+        let html = body_text(response).await;
+        for expected in [
+            "STEP-A",
+            ">Logs<",
+            ">Metadata<",
+            "gpt-6-luna",
+            "AbortController",
+            "MutationObserver",
+            "pagehide",
+            "1900",
+        ] {
+            assert!(html.contains(expected), "missing {expected}");
+        }
+        assert!(!html.contains("STEP-B"));
+        recorder.event("tool_output", "STEP-B", "").unwrap();
+        let response = run_logs(
+            State(api.clone()),
+            Path((job_id.clone(), run_id.clone())),
+            Query(LogsQuery {
+                since: first_cursor,
+            }),
+        )
+        .await;
+        let update = body_json(response).await;
+        assert_eq!(update["events"].as_array().unwrap().len(), 1);
+        assert!(update["events"][0]["html"]
+            .as_str()
+            .unwrap()
+            .contains("STEP-B"));
+        let cursor = update["events"][0]["id"].as_u64().unwrap();
+        let empty = body_json(
+            run_logs(
+                State(api.clone()),
+                Path((job_id.clone(), run_id.clone())),
+                Query(LogsQuery { since: cursor }),
+            )
+            .await,
+        )
+        .await;
+        assert!(empty["events"].as_array().unwrap().is_empty());
+        let reopened =
+            body_text(run_detail(State(api.clone()), Path((job_id.clone(), run_id.clone()))).await)
+                .await;
+        assert_eq!(reopened.matches("data-event-id=").count(), 2);
+        assert!(reopened.contains("STEP-A") && reopened.contains("STEP-B"));
+        let wrong_job = run_logs(
+            State(api.clone()),
+            Path(("other-job".into(), run_id.clone())),
+            Query(LogsQuery::default()),
+        )
+        .await;
+        assert_eq!(wrong_job.status(), StatusCode::NOT_FOUND);
+        recorder.exit_code(Some(0)).unwrap();
+        recorder.event("assistant", "DONE", "").unwrap();
+        recorder
+            .finalize(
+                "succeeded",
+                Some("2026-10-15_10-00-00.md"),
+                true,
+                None,
+                false,
+            )
+            .unwrap();
+        let final_poll = body_json(
+            run_logs(
+                State(api.clone()),
+                Path((job_id.clone(), run_id.clone())),
+                Query(LogsQuery { since: cursor }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(final_poll["outcome"], "succeeded");
+        assert!(final_poll["events"][0]["html"]
+            .as_str()
+            .unwrap()
+            .contains("DONE"));
+        assert!(final_poll["metadata"]
+            .as_str()
+            .unwrap()
+            .contains("Final output:"));
+        let detail = body_text(job_detail(State(api), Path(job_id)).await).await;
+        assert!(detail.contains("Run history (1)") && detail.contains("woken / real work"));
+    }
+
+    #[test]
+    fn normalized_finished_event_kinds_render_escaped() {
+        for kind in [
+            "assistant",
+            "thinking",
+            "tool_call",
+            "tool_output",
+            "stdout",
+            "stderr",
+            "error",
+            "phase",
+        ] {
+            let event = crate::history::RunEvent {
+                id: 42,
+                ts: Utc::now(),
+                phase: "agent".into(),
+                kind: kind.into(),
+                text: "visible <script>unsafe</script>".into(),
+                detail: "detail & result".into(),
+            };
+            let html = render_run_event(&event);
+            assert!(html.contains("data-event-id=\"42\""));
+            assert!(html.contains("visible &lt;script&gt;unsafe&lt;/script&gt;"));
+            assert!(html.contains("detail &amp; result"));
+            assert!(!html.contains("<script>"));
+        }
     }
 }

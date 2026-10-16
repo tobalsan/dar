@@ -1,0 +1,194 @@
+{
+  "E1": {
+    "pass": true,
+    "runningMs": 2353,
+    "latencies": [
+      {
+        "event": "STEP-A",
+        "latencyMs": 1809
+      },
+      {
+        "event": "STEP-B",
+        "latencyMs": 1413
+      },
+      {
+        "event": "STEP-C",
+        "latencyMs": 1254
+      }
+    ],
+    "runId": "1792099700378426000-66536"
+  },
+  "E2": {
+    "test": "E2",
+    "pass": true,
+    "url": "/scheduler/jobs/slow-agent/runs/1792099700378426000-66536",
+    "metadata": "RUN ID\n1792099700378426000-66536\nOUTCOME\nsucceeded\nRUNNER\npi\nMODEL\ngpt-6-luna\nPID\n68707\nPHASE\nagent\nDURATION\n23s\nEXIT CODE\n0\nSTARTED\n2026-10-15T21:28:20.378426+00:00\nFINISHED\n2026-10-15T21:28:43.906239+00:00\nFinal output: 2026-10-15_21-28-20.378.md",
+    "results": "21:28:23 \u00b7 agent \u00b7 tool_outputtool_outputSTEP-A\n\n21:28:31 \u00b7 agent \u00b7 tool_outputtool_output(no output)\n21:28:32 \u00b7 agent \u00b7 tool_outputtool_outputSTEP-B\n\n21:28:41 \u00b7 agent \u00b7 tool_outputtool_output(no output)\n21:28:42 \u00b7 agent \u00b7 tool_outputtool_outputSTEP-C\n"
+  },
+  "E3": {
+    "test": "E3",
+    "pass": true,
+    "lastStatus": "ok",
+    "lastRunAtMs": 1792099762648,
+    "historyCount": 0
+  },
+  "E4": {
+    "test": "E4",
+    "pass": true,
+    "lastStatus": "ok",
+    "events": [
+      "21:29:55 \u00b7 gate \u00b7 stdout{\"wakeAgent\":true}\n",
+      "21:29:55 \u00b7 agent \u00b7 phaseagent",
+      "21:29:56 \u00b7 agent \u00b7 assistant{\"id\":\"t1\",\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"started\"}}",
+      "21:29:56 \u00b7 agent \u00b7 userReply exactly WOKE.",
+      "21:29:56 \u00b7 agent \u00b7 userReply exactly WOKE.",
+      "21:29:57 \u00b7 agent \u00b7 assistantWOKE"
+    ],
+    "outputFile": "Final output: 2026-10-15_21-29-55.942.md"
+  },
+  "E5": {
+    "test": "E5",
+    "pass": true,
+    "lastStatus": "error",
+    "metadata": "RUN ID\n1792099799110696000-69377\nOUTCOME\nfailed\nRUNNER\nscript\nMODEL\nN/A\nPID\n70092\nPHASE\nscript\nDURATION\n0s\nEXIT CODE\n1\nSTARTED\n2026-10-15T21:29:59.110696+00:00\nFINISHED\n2026-10-15T21:29:59.117070+00:00\n\nscript failed (exit 1) stderr: BOOM stdout:\n\nFinal output: 2026-10-15_21-29-59.110.md",
+    "logs": "21:29:59 \u00b7 script \u00b7 stderrBOOM\n"
+  },
+  "E6": {
+    "test": "E6",
+    "pass": true,
+    "metadata": "RUN ID\n1792099815824139000-69377\nOUTCOME\ncrashed\nRUNNER\npi\nMODEL\ngpt-6-luna\nPID\n70300\nPHASE\nagent\nDURATION\n5s\nEXIT CODE\nN/A\nSTARTED\n2026-10-15T21:30:15.824139+00:00\nFINISHED\n2026-10-15T21:30:21.098832+00:00\n\ndar stopped before this run finished",
+    "outputs": [
+      "21:30:19 \u00b7 agent \u00b7 tool_outputtool_outputSTEP-A\n"
+    ],
+    "leftoverProcesses": []
+  },
+  "E7": {
+    "test": "E7",
+    "pass": true,
+    "metadata": "RUN ID\n1792099845459310000-70264\nOUTCOME\ntimed_out\nRUNNER\npi\nMODEL\ngpt-6-luna\nPID\n70620\nPHASE\nagent\nDURATION\n20s\nEXIT CODE\nN/A\nSTARTED\n2026-10-15T21:30:45.459310+00:00\nFINISHED\n2026-10-15T21:31:05.483652+00:00\n\nrun exceeded the 20000ms timeout and was killed\n\nFinal output: 2026-10-15_21-30-45.459.md",
+    "outputs": [
+      "21:30:48 \u00b7 agent \u00b7 tool_outputtool_outputSTEP-A\n",
+      "21:30:58 \u00b7 agent \u00b7 tool_outputtool_output(no output)",
+      "21:30:58 \u00b7 agent \u00b7 tool_outputtool_outputSTEP-B\n"
+    ]
+  },
+  "E8": {
+    "test": "E8",
+    "pass": true,
+    "fired": [
+      1792099875837,
+      1792099876057,
+      1792099876275,
+      1792099876504,
+      1792099876705
+    ],
+    "retainedUrls": [
+      "/scheduler/jobs/script-fail/runs/1792099876705077000-70264",
+      "/scheduler/jobs/script-fail/runs/1792099876504519000-70264",
+      "/scheduler/jobs/script-fail/runs/1792099876275955000-70264"
+    ],
+    "restartPending": true
+  },
+  "E8-restart": {
+    "test": "E8-restart",
+    "pass": true,
+    "retainedUrls": [
+      "/scheduler/jobs/script-fail/runs/1792099876705077000-70264",
+      "/scheduler/jobs/script-fail/runs/1792099876504519000-70264",
+      "/scheduler/jobs/script-fail/runs/1792099876275955000-70264"
+    ]
+  },
+  "E10": {
+    "test": "E10",
+    "pass": true,
+    "runsContent": "dar\nActive 0\nRecent 0\nLast tick 1s\nRate limit n/a\nPause\nResume\nStop\nalg-495-e2e \u00b7 /Users/agents/orchestration/worker/workspaces/ALG-495/validation/agent\npi\nopenai-codex/gpt-6-luna\nACTIVE RUNS\n\nIdle, nothing running.\n\nRECENT RUNS\n\nNo recent runs yet.",
+    "filesystemChecksPending": true,
+    "orchestrator": {
+      "storeExists": true,
+      "tables": {
+        "runs": {
+          "rows": 0,
+          "column": "issue_identifier"
+        },
+        "events": {
+          "rows": 0,
+          "column": "issue_identifier"
+        },
+        "claims": {
+          "rows": 0,
+          "column": "issue_identifier"
+        },
+        "heartbeats": {
+          "rows": 0,
+          "column": "issue_identifier"
+        }
+      }
+    }
+  },
+  "E9": {
+    "pass": true,
+    "runningMs": 2351,
+    "reopened": true,
+    "retried": true,
+    "networkErrors": [],
+    "isolationDuringLive": true,
+    "finalIds": [
+      "120",
+      "121",
+      "122",
+      "123",
+      "124",
+      "125",
+      "126",
+      "127",
+      "128",
+      "129",
+      "130",
+      "131",
+      "132",
+      "133",
+      "134",
+      "135",
+      "136",
+      "137",
+      "138"
+    ],
+    "latencies": [
+      {
+        "event": "STEP-A",
+        "latencyMs": 1955
+      },
+      {
+        "event": "STEP-B",
+        "latencyMs": 1483
+      },
+      {
+        "event": "STEP-C",
+        "latencyMs": 1289
+      }
+    ]
+  },
+  "activeShutdown": {
+    "test": "active-shutdown",
+    "signal": "SIGINT",
+    "pass": true,
+    "elapsedMs": 108,
+    "leftoverProcesses": []
+  },
+  "validation": {
+    "schedulerUnitTests": 181,
+    "schedulerIntegrationTests": 6,
+    "runnerCoreTests": 63,
+    "runnerAdapterTests": 86,
+    "total": 336,
+    "failed": 0,
+    "ignored": 0,
+    "clippy": "PASS",
+    "formatting": "PASS",
+    "reviewer": "clean",
+    "runner": "pi",
+    "provider": "openai-codex",
+    "model": "gpt-6-luna",
+    "date": "2026-10-15"
+  }
+}

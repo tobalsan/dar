@@ -14,6 +14,7 @@ extensions:
     enabled: true        # `false` = boot-time kill switch (CRUD stays live, no fires)
     jobTimeoutMs: 600000 # optional; default per-run timeout in ms (10 min)
     pollIntervalMs: 2000 # optional; hot-reload poll cadence in ms (floored at 250)
+    historyRetention: 100 # optional; completed runs kept per job (must be > 0)
 ```
 
 Invalid `extensions.scheduler` config (unknown field, wrong type, or a zero `jobTimeoutMs`) fails boot with a clean error naming the problem, rather than surfacing at first fire.
@@ -105,6 +106,12 @@ Scripts must be relative to and resolve inside the agent root: absolute paths, `
 ## Output files
 
 Every run normally writes `cron/output/<job_id>/<timestamp>.md`, with a `Status:` header of `ok`, `ok (silent tick)`, `woke agent`, or `script failed (exit N)`. `quietOutput: true` is for high-frequency script jobs: it omits only an empty-output successful script-only run or a gated silent tick. Errors, non-empty script output, and runs that wake the agent always keep an output file; runtime status still updates on every tick.
+
+## Live runs and history
+
+In the Cron dashboard tab, click a running job to open its live Logs and Metadata drawer. Finished messages, thinking blocks, and tool calls/results refresh every two seconds; script and gate stdout/stderr are captured too. Metadata includes the current phase, runner, model, PID, elapsed duration, outcome, exit code, and final output link when available. Open an idle job to browse its past runs. This also works through an agent opened in `dar dash`.
+
+Run history lives separately from orchestrator runs in `cron/history.db`. Each run is recorded before execution and its events are persisted incrementally. Failed and timed-out runs keep partial logs; after a restart, unfinished runs are marked crashed and their recorded child process groups are stopped. Script stdout and stderr each retain at most 64 KiB, with truncation shown. Successful `quietOutput` no-op ticks are removed atomically from history when classified, while the last-run status still updates. `historyRetention` bounds completed history per job; output markdown files keep their existing retention behavior.
 
 ## Delivering results
 

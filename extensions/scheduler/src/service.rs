@@ -41,6 +41,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::history::RunRecorder;
 use crate::runner::RunOutcome;
 use cap_deliver::{DeliverySink, Destination};
 use cap_runner::ExitKind;
@@ -219,6 +220,7 @@ pub async fn run(
     state: Arc<SchedulerState>,
     mut shutdown: ShutdownToken,
 ) {
+    state.set_shutdown(shutdown.clone());
     let mut armed = arm_jobs(&state);
     let mut fires = tokio::task::JoinSet::new();
     let mut fingerprint_seen = fingerprint(&config);
@@ -504,7 +506,11 @@ struct CapturedOutput {
 /// Drain a script pipe while retaining only a bounded prefix. Draining after
 /// the cap is reached is important: otherwise a chatty child can block on a
 /// full pipe before it exits or can be reaped on timeout.
-async fn capture_script_output<R>(mut reader: R) -> std::io::Result<CapturedOutput>
+async fn capture_script_output<R>(
+    mut reader: R,
+    recorder: Option<RunRecorder>,
+    stream: &'static str,
+) -> std::io::Result<CapturedOutput>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -519,6 +525,11 @@ where
         let read = reader.read(&mut buffer).await?;
         if read == 0 {
             break;
+        }
+        if let Some(recorder) = &recorder {
+            if let Err(err) = recorder.capture(stream, &buffer[..read]) {
+                recorder.remember_error(&err);
+            }
         }
         let remaining = MAX_SCRIPT_OUTPUT_BYTES.saturating_sub(retained.len());
         let keep = remaining.min(read);
@@ -549,6 +560,8 @@ async fn run_script(
     config: &SchedulerConfig,
     job: &ScheduleJob,
     timeout: Duration,
+    recorder: Option<RunRecorder>,
+    mut shutdown: ShutdownToken,
 ) -> Result<ScriptOutput, String> {
     let script = job
         .payload
@@ -593,63 +606,59 @@ async fn run_script(
     let mut child = command
         .spawn()
         .map_err(|err| format!("failed to start script: {err}"))?;
+    if let (Some(recorder), Some(pid)) = (&recorder, child.id()) {
+        if let Err(err) = recorder.pid(pid) {
+            recorder.remember_error(&err);
+        }
+    }
     let stdout = child.stdout.take().expect("stdout explicitly piped");
     let stderr = child.stderr.take().expect("stderr explicitly piped");
-    let stdout_task = tokio::spawn(capture_script_output(stdout));
-    let stderr_task = tokio::spawn(capture_script_output(stderr));
-
-    let timed_out = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => Some(status),
-        Ok(Err(err)) => {
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
-            return Err(format!("failed while waiting for script: {err}"));
-        }
-        Err(_) => {
-            // `kill_on_drop` is a final backstop, but explicitly kill and reap
-            // here so timeout never leaves a live child behind. On Unix kill
-            // the dedicated process group as well, covering shell children.
-            #[cfg(unix)]
-            let kill_result = match child.id() {
-                Some(pid) => nix::sys::signal::killpg(
-                    nix::unistd::Pid::from_raw(pid as i32),
-                    nix::sys::signal::Signal::SIGKILL,
-                )
-                .map_err(std::io::Error::other),
-                None => child.start_kill(),
-            };
-            #[cfg(not(unix))]
-            let kill_result = child.start_kill();
-            if let Err(err) = kill_result {
-                tracing::warn!("[scheduler] Failed to kill timed-out script: {err}");
-            }
-            // Also use Tokio's child kill path. It is harmless if the process
-            // group signal already reaped the leader and provides a fallback
-            // if group setup was unavailable on a target platform.
-            let _ = child.start_kill();
-            if let Err(err) = child.wait().await {
-                tracing::warn!("[scheduler] Failed to reap timed-out script: {err}");
-            }
-            None
-        }
+    // Include pipe draining in the deadline: a shell can exit successfully
+    // while a background descendant still holds stdout/stderr open.
+    let pid = child.id();
+    let completed = tokio::select! {
+        result = tokio::time::timeout(timeout, async {
+            tokio::join!(
+                child.wait(),
+                capture_script_output(stdout, recorder.clone(), "stdout"),
+                capture_script_output(stderr, recorder.clone(), "stderr"),
+            )
+        }) => result.ok(),
+        _ = shutdown.cancelled() => None,
     };
-    let stdout = stdout_task
-        .await
-        .map_err(|err| format!("failed to capture script stdout: {err}"))?
-        .map_err(|err| format!("failed to read script stdout: {err}"))?;
-    let stderr = stderr_task
-        .await
-        .map_err(|err| format!("failed to capture script stderr: {err}"))?
-        .map_err(|err| format!("failed to read script stderr: {err}"))?;
-
-    let Some(status) = timed_out else {
+    let Some((status, stdout, stderr)) = completed else {
+        // Keep the original group id even after child.wait reaps its leader.
+        #[cfg(unix)]
+        if let Some(pid) = pid {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+        if let Some(recorder) = &recorder {
+            if let Err(err) = recorder.exit_code(None) {
+                recorder.remember_error(&err);
+            }
+        }
+        if shutdown.is_cancelled() {
+            return Err("script interrupted by scheduler shutdown".to_string());
+        }
         return Err(format!(
-            "script exceeded the {}ms timeout and was killed\nstderr:\n{}\nstdout:\n{}",
+            "script exceeded the {}ms timeout and was killed",
             timeout.as_millis(),
-            stderr.text,
-            stdout.text
         ));
     };
+    let status = status.map_err(|err| format!("failed while waiting for script: {err}"))?;
+    if let Some(recorder) = &recorder {
+        if let Err(err) = recorder.exit_code(status.code()) {
+            recorder.remember_error(&err);
+        }
+    }
+    let stdout = stdout.map_err(|err| format!("failed to read script stdout: {err}"))?;
+    let stderr = stderr.map_err(|err| format!("failed to read script stderr: {err}"))?;
+
     if !status.success() {
         return Err(format!(
             "script failed (exit {})\nstderr:\n{}\nstdout:\n{}",
@@ -686,16 +695,25 @@ async fn persist_execute_result(
     config: &SchedulerConfig,
     state: &SchedulerState,
     job: &ScheduleJob,
-    name: &str,
     fired_at: chrono::DateTime<Utc>,
+    recorder: Option<&RunRecorder>,
     output: ExecutionOutput,
 ) -> ExecuteResult {
+    let name = if job.name.is_empty() {
+        &job.id
+    } else {
+        &job.name
+    };
     let finished_at = Utc::now();
     let ExecutionOutput {
-        status,
+        mut status,
         response,
-        error,
+        mut error,
     } = output;
+    if let Some(storage_error) = recorder.and_then(RunRecorder::storage_error) {
+        status = RunStatus::Error;
+        error = Some(format!("failed to persist run history: {storage_error}"));
+    }
     let delivery = deliver_result(
         services,
         job,
@@ -747,7 +765,7 @@ async fn persist_execute_result(
         .map(Some)
     };
 
-    let (status, error, output_path) = match written {
+    let (mut status, mut error, output_path) = match written {
         Ok(path) => {
             if let Some(path) = &path {
                 tracing::info!("[scheduler] Wrote output {}", path.display());
@@ -767,6 +785,31 @@ async fn persist_execute_result(
             (RunStatus::Error, error, None)
         }
     };
+    if let Some(recorder) = recorder {
+        let outcome = if status == RunStatus::Ok {
+            "succeeded"
+        } else if error
+            .as_deref()
+            .is_some_and(|error| error.contains("timeout"))
+        {
+            "timed_out"
+        } else {
+            "failed"
+        };
+        let output_file = output_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        if let Err(err) = recorder.finalize(
+            outcome,
+            output_file.as_deref(),
+            run_kind.as_deref() == Some("woke_agent"),
+            error.as_deref(),
+            uneventful,
+        ) {
+            status = RunStatus::Error;
+            error = Some(format!("failed to persist run history: {err:#}"));
+        }
+    }
     let final_status = match status {
         RunStatus::Ok => LastStatus::Ok,
         RunStatus::Error => LastStatus::Error,
@@ -807,10 +850,54 @@ async fn execute_job(
     // `try_claim_running`, which set `running_since_ms`. `execute_job` only
     // records the outcome.
     let fired_at = Utc::now();
-    let name = if job.name.is_empty() {
-        &job.id
+
+    let phase = if job.payload.script.is_some() {
+        if job.payload.no_agent {
+            "script"
+        } else {
+            "gate"
+        }
     } else {
-        &job.name
+        "agent"
+    };
+    let recorder = match state
+        .history
+        .as_ref()
+        .map(|history| {
+            history.start(
+                &job.id,
+                Some(if job.payload.no_agent {
+                    "script"
+                } else {
+                    &config.runner_kind
+                }),
+                if job.payload.no_agent {
+                    None
+                } else {
+                    config.runner_model.as_deref()
+                },
+                phase,
+            )
+        })
+        .transpose()
+    {
+        Ok(recorder) => recorder,
+        Err(err) => {
+            return persist_execute_result(
+                services,
+                config,
+                state,
+                job,
+                fired_at,
+                None,
+                ExecutionOutput {
+                    status: RunStatus::Error,
+                    response: None,
+                    error: Some(format!("failed to start run history: {err:#}")),
+                },
+            )
+            .await;
+        }
     };
 
     tracing::info!(
@@ -833,8 +920,8 @@ async fn execute_job(
                 config,
                 state,
                 job,
-                name,
                 fired_at,
+                recorder.as_ref(),
                 ExecutionOutput {
                     status: RunStatus::Error,
                     response: None,
@@ -847,33 +934,34 @@ async fn execute_job(
 
     let timeout = config.timeout_for(job);
     if job.payload.script.is_some() {
-        let script = match run_script(config, job, timeout).await {
-            Ok(script) => script,
-            Err(error) => {
-                return persist_execute_result(
-                    services,
-                    config,
-                    state,
-                    job,
-                    name,
-                    fired_at,
-                    ExecutionOutput {
-                        status: RunStatus::Error,
-                        response: None,
-                        error: Some(error),
-                    },
-                )
-                .await
-            }
-        };
+        let script =
+            match run_script(config, job, timeout, recorder.clone(), shutdown.clone()).await {
+                Ok(script) => script,
+                Err(error) => {
+                    return persist_execute_result(
+                        services,
+                        config,
+                        state,
+                        job,
+                        fired_at,
+                        recorder.as_ref(),
+                        ExecutionOutput {
+                            status: RunStatus::Error,
+                            response: None,
+                            error: Some(error),
+                        },
+                    )
+                    .await
+                }
+            };
         if job.payload.no_agent {
             return persist_execute_result(
                 services,
                 config,
                 state,
                 job,
-                name,
                 fired_at,
+                recorder.as_ref(),
                 ExecutionOutput {
                     status: RunStatus::Ok,
                     response: Some(script.stdout),
@@ -889,8 +977,8 @@ async fn execute_job(
                 config,
                 state,
                 job,
-                name,
                 fired_at,
+                recorder.as_ref(),
                 ExecutionOutput {
                     status: RunStatus::Ok,
                     response: Some("silent tick".to_string()),
@@ -898,6 +986,11 @@ async fn execute_job(
                 },
             )
             .await;
+        }
+        if let Some(recorder) = &recorder {
+            if let Err(err) = recorder.phase("agent") {
+                recorder.remember_error(&err);
+            }
         }
         let mut prompt = job.payload.message.clone().unwrap_or_default();
         if let Some(context) = context {
@@ -925,6 +1018,7 @@ async fn execute_job(
                 job_id: &job.id,
                 max_run_timeout_ms: config.max_run_timeout_ms,
                 job_timeout: timeout,
+                recorder: recorder.clone(),
             },
             services,
             shutdown,
@@ -936,8 +1030,8 @@ async fn execute_job(
             config,
             state,
             job,
-            name,
             fired_at,
+            recorder.as_ref(),
             ExecutionOutput {
                 status,
                 response: Some(format!(
@@ -971,6 +1065,7 @@ async fn execute_job(
             job_id: &job.id,
             max_run_timeout_ms: config.max_run_timeout_ms,
             job_timeout: timeout,
+            recorder: recorder.clone(),
         },
         services,
         shutdown,
@@ -983,8 +1078,8 @@ async fn execute_job(
         config,
         state,
         job,
-        name,
         fired_at,
+        recorder.as_ref(),
         ExecutionOutput {
             status,
             response,
@@ -1020,7 +1115,43 @@ pub enum RunNowOutcome {
 /// afterwards the pre-run next fire is restored — UNLESS a scheduled fire was
 /// overlap-skipped during the manual run, in which case the loop's recomputed
 /// next fire stands (the skipped occurrence is consumed, not replayed).
+struct ManualRunGuard(Arc<SchedulerState>);
+
+impl Drop for ManualRunGuard {
+    fn drop(&mut self) {
+        self.0.manual_finished();
+    }
+}
+
+// The fire belongs to the scheduler, even when a synchronous HTTP caller
+// disconnects. Track the task so extension shutdown waits for child cleanup.
 pub async fn run_job_now(
+    config: &SchedulerConfig,
+    services: &ServiceRegistry,
+    state: &Arc<SchedulerState>,
+    job_id: &str,
+) -> RunNowOutcome {
+    state.manual_started();
+    let guard = ManualRunGuard(Arc::clone(state));
+    let config = config.clone();
+    let services = services.clone();
+    let state = Arc::clone(state);
+    let job_id = job_id.to_string();
+    tokio::spawn(async move {
+        let _guard = guard;
+        if state
+            .shutdown()
+            .is_some_and(|shutdown| shutdown.is_cancelled())
+        {
+            return RunNowOutcome::Skipped;
+        }
+        run_job_now_inner(&config, &services, &state, &job_id).await
+    })
+    .await
+    .unwrap_or(RunNowOutcome::Skipped)
+}
+
+async fn run_job_now_inner(
     config: &SchedulerConfig,
     services: &ServiceRegistry,
     state: &Arc<SchedulerState>,
@@ -1068,7 +1199,8 @@ pub async fn run_job_now(
         }
     }
 
-    let (_shutdown_tx, shutdown) = never_shutdown();
+    let (_shutdown_tx, fallback_shutdown) = never_shutdown();
+    let shutdown = state.shutdown().unwrap_or(fallback_shutdown);
     let result = execute_job(config, services, state, &job, shutdown).await;
 
     // If a scheduled fire was overlap-skipped while this manual run was in
@@ -1394,7 +1526,8 @@ mod tests {
         let config = test_config(dir.path().to_path_buf(), 60_000);
         let job = script_job("script-failure", "cron/scripts/fail.sh", 60_000);
 
-        let error = run_script(&config, &job, Duration::from_secs(1))
+        let (_shutdown_tx, shutdown) = never_shutdown();
+        let error = run_script(&config, &job, Duration::from_secs(1), None, shutdown)
             .await
             .expect_err("non-zero script must fail");
         assert!(error.contains("exit 17"), "exit code retained: {error}");
@@ -1417,7 +1550,8 @@ mod tests {
         let job = script_job("script-timeout", "cron/scripts/sleep.sh", 50);
 
         let started = std::time::Instant::now();
-        let error = run_script(&config, &job, Duration::from_millis(50))
+        let (_shutdown_tx, shutdown) = never_shutdown();
+        let error = run_script(&config, &job, Duration::from_millis(50), None, shutdown)
             .await
             .expect_err("timed-out script must fail");
         assert!(
@@ -1425,6 +1559,70 @@ mod tests {
             "child was reaped"
         );
         assert!(error.contains("timeout"), "timeout retained: {error}");
+    }
+
+    #[tokio::test]
+    async fn exited_script_with_descendant_pipes_obeys_timeout_and_shutdown() {
+        for cancel in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            write_script(
+                dir.path(),
+                "background.sh",
+                "echo BEFORE-BACKGROUND\nsleep 30 &\necho $! > descendant.pid\n",
+            );
+            let config = test_config(dir.path().to_path_buf(), 60_000);
+            let job = script_job("background", "cron/scripts/background.sh", 100);
+            let history = crate::history::History::open(dir.path(), 3).unwrap();
+            let recorder = history
+                .start("background", Some("script"), None, "script")
+                .unwrap();
+            let (tx, shutdown) = never_shutdown();
+            let started = std::time::Instant::now();
+            let cancel_task = tokio::spawn(async move {
+                if cancel {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tx.send(true).unwrap();
+                } else {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            });
+            let timeout = if cancel {
+                Duration::from_secs(30)
+            } else {
+                Duration::from_millis(100)
+            };
+            let error = run_script(&config, &job, timeout, Some(recorder.clone()), shutdown)
+                .await
+                .unwrap_err();
+            cancel_task.abort();
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(error.contains(if cancel { "shutdown" } else { "timeout" }));
+            assert!(history
+                .events(recorder.id(), 0)
+                .unwrap()
+                .iter()
+                .any(|event| event.text.contains("BEFORE-BACKGROUND")));
+            let pid: i32 = std::fs::read_to_string(dir.path().join("descendant.pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let dead = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let output = std::process::Command::new("ps")
+                        .args(["-o", "stat=", "-p", &pid.to_string()])
+                        .output()
+                        .unwrap();
+                    let state = String::from_utf8_lossy(&output.stdout);
+                    if state.trim().is_empty() || state.trim().starts_with('Z') {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            assert!(dead.is_ok(), "background descendant was killed");
+        }
     }
 
     #[tokio::test]
@@ -1745,5 +1943,162 @@ mod tests {
         );
         assert_eq!(outcomes[0], "slack: delivered");
         assert!(outcomes[1].starts_with("missing: warning: sink unavailable"));
+    }
+    #[tokio::test]
+    async fn persistent_history_drops_only_successful_quiet_ticks() {
+        let dir = tempfile::tempdir().unwrap();
+        write_script(dir.path(), "silent.sh", "echo '{\"wakeAgent\":false}'\n");
+        write_script(dir.path(), "fail.sh", "echo BOOM >&2\nexit 1\n");
+        let config = test_config(dir.path().to_path_buf(), 60_000);
+        let history = crate::history::History::open(dir.path(), 3).unwrap();
+        let state = SchedulerState::with_history(vec![], history.clone());
+        let (services, _) = services_with(StdDuration::from_millis(1));
+        let mut job = script_job("quiet", "cron/scripts/silent.sh", 60_000);
+        job.payload.no_agent = false;
+        job.payload.message = Some("wake".into());
+        job.payload.quiet_output = true;
+        let (_tx, shutdown) = never_shutdown();
+        let result = execute_job(&config, &services, &state, &job, shutdown.clone()).await;
+        assert_eq!(result.status, RunStatus::Ok);
+        assert!(result.output_path.is_none());
+        assert!(history.list("quiet").unwrap().is_empty());
+        assert_eq!(state.runtime("quiet").last_status, Some(LastStatus::Ok));
+
+        job.payload.script = Some("cron/scripts/fail.sh".into());
+        let result = execute_job(&config, &services, &state, &job, shutdown).await;
+        assert_eq!(result.status, RunStatus::Error);
+        let record = history.list("quiet").unwrap().remove(0);
+        assert_eq!(record.outcome, "failed");
+        assert_eq!(record.exit_code, Some(1));
+        assert!(history
+            .events(&record.id, 0)
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "stderr" && event.text.contains("BOOM")));
+    }
+
+    #[tokio::test]
+    async fn script_output_is_durable_before_timeout_and_output_write_failure_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        write_script(dir.path(), "partial.sh", "echo BEFORE-TIMEOUT\nsleep 10\n");
+        let config = test_config(dir.path().to_path_buf(), 60_000);
+        let history = crate::history::History::open(dir.path(), 3).unwrap();
+        let job = script_job("partial", "cron/scripts/partial.sh", 300);
+        let state = Arc::new(SchedulerState::with_history(
+            vec![job.clone()],
+            history.clone(),
+        ));
+        let (services, _) = services_with(StdDuration::from_millis(1));
+        let task = {
+            let config = config.clone();
+            let state = state.clone();
+            let services = services.clone();
+            tokio::spawn(async move { run_job_now(&config, &services, &state, "partial").await })
+        };
+        let record = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(record) = history.list("partial").unwrap().first() {
+                    if history
+                        .events(&record.id, 0)
+                        .unwrap()
+                        .iter()
+                        .any(|event| event.text.contains("BEFORE-TIMEOUT"))
+                    {
+                        break record.clone();
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(record.outcome, "running");
+        assert!(!task.is_finished());
+        task.await.unwrap();
+        let record = history.get(&record.id).unwrap().unwrap();
+        assert_eq!(record.outcome, "timed_out");
+        assert!(history
+            .events(&record.id, 0)
+            .unwrap()
+            .iter()
+            .any(|event| event.text.contains("BEFORE-TIMEOUT")));
+
+        write_script(dir.path(), "ok.sh", "echo DONE\n");
+        // The timeout wrote an output directory; block this job's own output path.
+        std::fs::write(
+            dir.path().join("cron/output/write-fail"),
+            "blocks directory",
+        )
+        .unwrap();
+        let job = script_job("write-fail", "cron/scripts/ok.sh", 60_000);
+        let (_tx, shutdown) = never_shutdown();
+        let result = execute_job(&config, &services, &state, &job, shutdown).await;
+        assert_eq!(result.status, RunStatus::Error);
+        let record = history.list("write-fail").unwrap().remove(0);
+        assert_eq!(record.outcome, "failed");
+        assert_eq!(record.exit_code, Some(0));
+        assert!(record.error.unwrap().contains("persist run output"));
+        assert!(history
+            .events(&record.id, 0)
+            .unwrap()
+            .iter()
+            .any(|event| event.text.contains("DONE")));
+    }
+    #[tokio::test]
+    async fn shutdown_joins_manual_run_after_http_caller_disconnects() {
+        let dir = tempfile::tempdir().unwrap();
+        write_script(
+            dir.path(),
+            "shutdown.sh",
+            "echo BEFORE-SHUTDOWN\nsleep 10\n",
+        );
+        let config = test_config(dir.path().to_path_buf(), 60_000);
+        let history = crate::history::History::open(dir.path(), 3).unwrap();
+        let job = script_job("shutdown", "cron/scripts/shutdown.sh", 60_000);
+        let state = Arc::new(SchedulerState::with_history(vec![job], history.clone()));
+        let (services, _) = services_with(StdDuration::from_millis(1));
+        let (tx, shutdown) = never_shutdown();
+        state.set_shutdown(shutdown);
+        let caller = {
+            let config = config.clone();
+            let state = state.clone();
+            tokio::spawn(async move { run_job_now(&config, &services, &state, "shutdown").await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(record) = history.list("shutdown").unwrap().first() {
+                    if history
+                        .events(&record.id, 0)
+                        .unwrap()
+                        .iter()
+                        .any(|event| event.text.contains("BEFORE-SHUTDOWN"))
+                    {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        caller.abort();
+        tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), state.wait_manual_runs())
+            .await
+            .unwrap();
+        let record = history.list("shutdown").unwrap().remove(0);
+        assert_eq!(record.outcome, "failed");
+        assert!(record.error.unwrap().contains("shutdown"));
+        assert!(history
+            .events(&record.id, 0)
+            .unwrap()
+            .iter()
+            .any(|event| event.text.contains("BEFORE-SHUTDOWN")));
+        let pid = record.pid.unwrap();
+        assert!(std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| !status.success()));
     }
 }

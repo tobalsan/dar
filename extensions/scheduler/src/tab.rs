@@ -26,7 +26,7 @@
 //!
 //! Cron activity is surfaced *here*, at the scheduler's own level — scheduled
 //! runs never reach the orchestrator's `RunSnapshot` or its run list (the
-//! scheduler fires the runner service directly with a `NullSink` capture store
+//! scheduler fires the runner service directly with a scheduler-owned transcript sink
 //! and never publishes to the orchestrator's run topics).
 
 use std::path::Path;
@@ -301,7 +301,7 @@ fn render_job(row: &JobRow) -> String {
     let running = row
         .running_for
         .as_deref()
-        .map(|d| format!(" <span class=\"pill live\">running {d}</span>"))
+        .map(|d| format!(" <span class=\"pill live cron-name-link\" hx-get=\"/scheduler/jobs/{}/live\" hx-target=\"#run-detail\" hx-swap=\"innerHTML\">running {d}</span>", row.id))
         .unwrap_or_default();
     let disabled_pill = if row.enabled {
         String::new()
@@ -324,9 +324,10 @@ fn render_job(row: &JobRow) -> String {
 
     block.push_str("<div class=\"cron-title-line\">");
     block.push_str(&format!(
-        "<strong class=\"cron-name cron-name-link\" hx-get=\"/scheduler/jobs/{id}/detail\" hx-target=\"#run-detail\" hx-swap=\"innerHTML\">{name}</strong>",
+        "<strong class=\"cron-name cron-name-link\" hx-get=\"/scheduler/jobs/{id}/{entry}\" hx-target=\"#run-detail\" hx-swap=\"innerHTML\">{name}</strong>",
         id = row.id,
         name = row.name,
+        entry = if row.running_for.is_some() { "live" } else { "detail" },
     ));
     if let Some(delivery) = &row.delivery {
         block.push_str(&format!("<div class=\"cron-meta\">{delivery}</div>"));
@@ -338,7 +339,7 @@ fn render_job(row: &JobRow) -> String {
     block.push_str("<span class=\"spacer\"></span>");
     block.push_str("<div class=\"cron-controls\">");
     block.push_str(&format!(
-        "<button class=\"cron-btn\"{run_disabled_attr} onclick=\"fetch('/scheduler/jobs/{id}/run-now',{{method:'POST'}})\">Run now</button>",
+        "<button class=\"cron-btn\"{run_disabled_attr} onclick=\"fetch('/scheduler/jobs/{id}/run-now?background=true',{{method:'POST'}})\">Run now</button>",
         id = row.id,
     ));
     block.push_str(&format!(
@@ -738,7 +739,7 @@ mod tests {
         let html = tab.render().unwrap();
         assert!(
             html.contains(
-                "<button class=\"cron-btn\" disabled onclick=\"fetch('/scheduler/jobs/j/run-now'"
+                "<button class=\"cron-btn\" disabled onclick=\"fetch('/scheduler/jobs/j/run-now?background=true'"
             ),
             "run now disabled for a disabled job: {html}"
         );
@@ -751,7 +752,7 @@ mod tests {
         let tab = tab_with(state, dir.path().to_path_buf());
         let html = tab.render().unwrap();
         assert!(
-            html.contains("<button class=\"cron-btn\" onclick=\"fetch('/scheduler/jobs/j/run-now'"),
+            html.contains("<button class=\"cron-btn\" onclick=\"fetch('/scheduler/jobs/j/run-now?background=true'"),
             "run now enabled for an idle enabled job: {html}"
         );
     }
@@ -765,7 +766,7 @@ mod tests {
         let html = tab.render().unwrap();
         assert!(
             html.contains(
-                "<button class=\"cron-btn\" disabled onclick=\"fetch('/scheduler/jobs/j/run-now'"
+                "<button class=\"cron-btn\" disabled onclick=\"fetch('/scheduler/jobs/j/run-now?background=true'"
             ),
             "run now disabled while running: {html}"
         );
