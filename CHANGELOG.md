@@ -9,6 +9,8 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- chat-web: sidebar search now finds saved message content and renamed titles across all conversations, with matching text snippets.
+
 - Cron jobs now open live transcripts with Logs and Metadata, with persistent scheduler-owned run history, crash recovery, and configurable `extensions.scheduler.historyRetention` (default 100 per job); successful quiet polls remain hidden.
 
 - chat-web: the sidebar now highlights only the conversation you are viewing; other conversations with an open backend show "Connected" (previously "Open") without being highlighted. "Connected" now reflects a live backend, so it clears after idle cleanup while the conversation stays selectable. "Running" is unchanged.

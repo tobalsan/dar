@@ -108,6 +108,15 @@ body:has(.chat-web) #content {
 .chat-session-label > span {
   display: inline-block;
 }
+.chat-session-snippet {
+  color: var(--muted);
+  font-size: 0.75rem;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
 .chat-session:hover .chat-session-label > span {
   animation: revealTitle var(--title-ms, 4000ms) ease-in-out infinite;
 }
