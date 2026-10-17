@@ -12,7 +12,7 @@
 //! malformed newest file yields `None`, and the caller falls back to opening a
 //! fresh session rather than blocking the human from chatting.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -86,6 +86,27 @@ pub fn list(sessions_dir: &Path) -> Vec<SessionInfo> {
         .into_iter()
         .filter_map(|path| read_session_info(&path))
         .take(LIST_LIMIT)
+        .collect()
+}
+
+/// List all recallable top-level sessions newest-first, with no count cap.
+/// Duplicate header ids retain the newest file's entry. Invalid files and
+/// resume markers are skipped just as in [`list`].
+pub fn list_all(sessions_dir: &Path) -> Vec<SessionInfo> {
+    let mut files = match fs::read_dir(sessions_dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+            .collect::<Vec<_>>(),
+        Err(_) => return Vec::new(),
+    };
+    files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    let mut seen = HashSet::new();
+    files
+        .into_iter()
+        .filter_map(|path| read_session_info(&path))
+        .filter(|session| seen.insert(session.id.clone()))
         .collect()
 }
 
@@ -215,6 +236,46 @@ pub fn search(sessions_dir: &Path, query: &str) -> Vec<SearchHit> {
                     message_index: msg.index,
                     snippet,
                 });
+            }
+        }
+    }
+    hits
+}
+
+/// Search every top-level persisted session, returning only its first matching
+/// message per header id. Unlike [`search`], there is no global hit limit.
+pub fn search_sessions(sessions_dir: &Path, query: &str) -> Vec<SearchHit> {
+    let needle: String = lower_aligned_chars(query.trim()).into_iter().collect();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut files = match fs::read_dir(sessions_dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+            .collect::<Vec<_>>(),
+        Err(_) => return Vec::new(),
+    };
+    files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    let mut hits = Vec::new();
+    let mut seen = HashSet::new();
+    for path in files {
+        let Some(id) = read_session_id_opt(&path) else {
+            continue;
+        };
+        if seen.contains(&id) {
+            continue;
+        }
+        for msg in read_messages(&path) {
+            if let Some(snippet) = snippet_for(&msg.text, &needle) {
+                seen.insert(id.clone());
+                hits.push(SearchHit {
+                    session_id: id,
+                    message_index: msg.index,
+                    snippet,
+                });
+                break;
             }
         }
     }
@@ -1014,6 +1075,29 @@ mod tests {
     }
 
     #[test]
+    fn list_all_keeps_older_sessions_and_deduplicates_header_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        for i in 0..60 {
+            write(
+                temp.path(),
+                &format!("{i:03}_session.jsonl"),
+                &session_with_messages(&format!("session-{i}"), &[("user", "hello")]),
+            );
+        }
+        write(
+            temp.path(),
+            "999_duplicate.jsonl",
+            &session_with_messages("session-59", &[("user", "newer copy")]),
+        );
+        let sessions = list_all(temp.path());
+        assert_eq!(sessions.len(), 60);
+        assert_eq!(sessions[0].id, "session-59");
+        assert_eq!(sessions[0].label, "newer copy");
+        assert_eq!(sessions[59].id, "session-0");
+        assert_eq!(list(temp.path()).len(), 50);
+    }
+
+    #[test]
     fn list_label_is_truncated() {
         let temp = tempfile::tempdir().unwrap();
         let long = "x".repeat(LABEL_MAX + 50);
@@ -1059,6 +1143,141 @@ mod tests {
         assert_eq!(hits[0].session_id, "sess-a");
         assert_eq!(hits[0].message_index, 1);
         assert!(hits[0].snippet.contains("gadget"));
+    }
+
+    #[test]
+    fn search_sessions_keeps_first_match_without_crowding_out_older_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        for i in 0..60 {
+            write(
+                temp.path(),
+                &format!("{i:03}_session.jsonl"),
+                &session_with_messages(&format!("session-{i}"), &[("user", "a needle")]),
+            );
+        }
+        let mut crowded = session_with_messages(
+            "crowded",
+            &[("user", "hello"), ("assistant", "first NEEDLE")],
+        );
+        for _ in 0..60 {
+            crowded.push_str(MSG_LINE.replace("hi", "later needle").as_str());
+        }
+        write(temp.path(), "999_crowded.jsonl", &crowded);
+        let hits = search_sessions(temp.path(), " needle ");
+        assert_eq!(hits.len(), 61);
+        assert_eq!(
+            hits[0],
+            SearchHit {
+                session_id: "crowded".into(),
+                message_index: 1,
+                snippet: "first NEEDLE".into(),
+            }
+        );
+        assert_eq!(hits[60].session_id, "session-0");
+        assert_eq!(search(temp.path(), "needle").len(), 50);
+    }
+
+    #[test]
+    fn search_sessions_returns_at_most_one_hit_per_header_id() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "001_older.jsonl",
+            &session_with_messages("same-id", &[("assistant", "older needle")]),
+        );
+        write(
+            temp.path(),
+            "002_newer.jsonl",
+            &session_with_messages("same-id", &[("assistant", "newer needle")]),
+        );
+        assert_eq!(
+            search_sessions(temp.path(), "needle"),
+            vec![SearchHit {
+                session_id: "same-id".into(),
+                message_index: 0,
+                snippet: "newer needle".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn search_sessions_matches_decoded_joined_text_and_context_despite_partial_records() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "001_decoded.jsonl",
+            r#"{"type":"session","id":"decoded"}
+not json
+{"role":"tool","content":"ignored tool output"}
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"[context]\nagent policy"},{"type":"text","text":"say \"c\u0061fé\""},{"type":"text","text":"next\nline"}]}}
+{"type":"message_end","message":
+"#,
+        );
+        let hits = search_sessions(temp.path(), "say \"café\" next\nline");
+        assert_eq!(
+            hits,
+            vec![SearchHit {
+                session_id: "decoded".into(),
+                message_index: 0,
+                snippet: "[context]\nagent policy say \"café\" next\nline".into(),
+            }]
+        );
+        assert_eq!(search_sessions(temp.path(), "[context]").len(), 1);
+        assert!(search_sessions(temp.path(), "ignored tool output").is_empty());
+    }
+
+    #[test]
+    fn search_sessions_preserves_utf8_snippets_and_single_character_lowercase() {
+        let temp = tempfile::tempdir().unwrap();
+        let body = format!("{}CAFÉ{}", "İ".repeat(300), "界".repeat(300));
+        write(
+            temp.path(),
+            "001_unicode.jsonl",
+            &session_with_messages("unicode", &[("assistant", &body)]),
+        );
+        let hits = search_sessions(temp.path(), "café");
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.starts_with('…'));
+        assert!(hits[0].snippet.ends_with('…'));
+        assert!(hits[0].snippet.contains("CAFÉ"));
+        assert!(hits[0].snippet.chars().count() <= 200);
+        assert!(search_sessions(temp.path(), "i").is_empty());
+        assert_eq!(search_sessions(temp.path(), "İ").len(), 1);
+    }
+
+    #[test]
+    fn sidebar_archive_queries_only_include_top_level_recallable_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "001_valid.jsonl",
+            &session_with_messages("valid", &[("user", "needle")]),
+        );
+        write(temp.path(), "002_malformed.jsonl", "{unfinished");
+        write(temp.path(), "003_marker.jsonl", "{\"id\":\"marker\"}\n");
+        write(temp.path(), "main.jsonl", MSG_LINE);
+        write(
+            temp.path(),
+            "ignored.log",
+            &session_with_messages("not-jsonl", &[("user", "needle")]),
+        );
+        let nested = temp.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        write(
+            &nested,
+            "004_nested.jsonl",
+            &session_with_messages("nested", &[("user", "needle")]),
+        );
+        let sessions = list_all(temp.path());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "valid");
+        let hits = search_sessions(temp.path(), "needle");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_id, "valid");
+        assert!(search_sessions(temp.path(), " \t ").is_empty());
+        assert!(search_sessions(temp.path(), "absent").is_empty());
+        assert!(list_all(&temp.path().join("missing")).is_empty());
+        assert!(search_sessions(&temp.path().join("missing"), "needle").is_empty());
     }
 
     #[test]

@@ -507,12 +507,19 @@ struct SessionPage {
     count: Option<usize>,
 }
 
+#[derive(Default, Deserialize)]
+struct SessionQuery {
+    q: Option<String>,
+}
+
 #[derive(serde::Serialize)]
 struct SessionListEntry {
     id: String,
     label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snippet: Option<String>,
     start_time: Option<String>,
     modified_ms: u64,
     archived: bool,
@@ -591,7 +598,10 @@ fn write_meta(path: &std::path::Path, meta: &HashMap<String, SessionMeta>) -> Re
     Ok(())
 }
 
-async fn session_index(State(state): State<Arc<AppState>>) -> Json<Vec<SessionListEntry>> {
+async fn session_index(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionQuery>,
+) -> Result<Json<Vec<SessionListEntry>>, StatusCode> {
     let dir = state.root.join("data/chat/sessions");
     // archive id -> (connected, busy, slot ids)
     let mut live: HashMap<String, (bool, bool, Vec<String>)> = HashMap::new();
@@ -614,38 +624,62 @@ async fn session_index(State(state): State<Arc<AppState>>) -> Json<Vec<SessionLi
         }
     }
     let meta = state.meta.lock().await.clone();
-    let mut sessions: Vec<_> = chat::archive::list(&dir)
-        .into_iter()
-        .filter_map(|session| {
-            let path = chat::archive::session_file_by_id(&dir, &session.id)?;
-            let modified_ms = path
-                .metadata()
-                .ok()?
-                .modified()
-                .ok()?
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_millis() as u64;
-            let item_meta = meta.get(&session.id).cloned().unwrap_or_default();
-            let title = item_meta.title.filter(|title| !title.trim().is_empty());
-            Some(SessionListEntry {
-                connected: live.get(&session.id).is_some_and(|l| l.0),
-                busy: live.get(&session.id).is_some_and(|l| l.1),
-                slots: live
-                    .get(&session.id)
-                    .map(|l| l.2.clone())
-                    .unwrap_or_default(),
-                label: title.clone().unwrap_or(session.label),
-                id: session.id,
-                title,
-                start_time: session.start_time,
-                modified_ms,
-                archived: item_meta.archived.unwrap_or(false),
+    tokio::task::spawn_blocking(move || {
+        let query = query.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
+        let mut hits: HashMap<_, _> = query
+            .map(|q| chat::archive::search_sessions(&dir, q))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|hit| (hit.session_id, hit.snippet))
+            .collect();
+        let candidates = if query.is_some() {
+            chat::archive::list_all(&dir)
+        } else {
+            chat::archive::list(&dir)
+        };
+        let mut sessions: Vec<_> = candidates
+            .into_iter()
+            .filter_map(|session| {
+                let path = chat::archive::session_file_by_id(&dir, &session.id)?;
+                let modified_ms = path
+                    .metadata()
+                    .ok()?
+                    .modified()
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_millis() as u64;
+                let item_meta = meta.get(&session.id).cloned().unwrap_or_default();
+                let title = item_meta.title.filter(|title| !title.trim().is_empty());
+                let label = title.clone().unwrap_or(session.label);
+                let snippet = hits.remove(&session.id);
+                if query.is_some_and(|q| !label.to_lowercase().contains(&q.to_lowercase()))
+                    && snippet.is_none()
+                {
+                    return None;
+                }
+                Some(SessionListEntry {
+                    connected: live.get(&session.id).is_some_and(|l| l.0),
+                    busy: live.get(&session.id).is_some_and(|l| l.1),
+                    slots: live
+                        .get(&session.id)
+                        .map(|l| l.2.clone())
+                        .unwrap_or_default(),
+                    label,
+                    id: session.id,
+                    title,
+                    snippet,
+                    start_time: session.start_time,
+                    modified_ms,
+                    archived: item_meta.archived.unwrap_or(false),
+                })
             })
-        })
-        .collect();
-    sessions.sort_by_key(|session| std::cmp::Reverse(session.modified_ms));
-    Json(sessions)
+            .collect();
+        sessions.sort_by_key(|session| std::cmp::Reverse(session.modified_ms));
+        Json(sessions)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn session_transcript(
@@ -752,10 +786,9 @@ async fn resume_session(
         .lock()
         .expect("chat-web history mutex poisoned")
         .is_empty();
-    let mut offset = 0;
-    while !already_replayed {
-        let Some(page) =
-            chat::archive::read_events(&dir, &body.id, offset, chat::archive::READ_MAX)
+    let mut offset = (!already_replayed).then_some(0);
+    while let Some(start) = offset {
+        let Some(page) = chat::archive::read_events(&dir, &body.id, start, chat::archive::READ_MAX)
         else {
             return StatusCode::NOT_FOUND.into_response();
         };
@@ -788,10 +821,7 @@ async fn resume_session(
                 .push_back(event.clone());
             let _ = session.tx.send(event);
         }
-        match page.next_offset {
-            Some(next) => offset = next,
-            None => break,
-        }
+        offset = page.next_offset;
     }
     *session
         .resolved_live_id
@@ -4365,9 +4395,11 @@ mod tests {
         assert_eq!(load_transcript(&s.transcript).unwrap().len(), before);
     }
 
+    type EventSenders = Arc<std::sync::Mutex<Vec<mpsc::Sender<ChatEvent>>>>;
+
     struct ScriptedBackend {
         identities: std::sync::Mutex<VecDeque<Option<String>>>,
-        txs: Arc<std::sync::Mutex<Vec<mpsc::Sender<ChatEvent>>>>,
+        txs: EventSenders,
     }
     impl ChatBackend for ScriptedBackend {
         fn open<'a>(
@@ -4390,12 +4422,7 @@ mod tests {
         }
     }
 
-    fn scripted_state(
-        identities: Vec<Option<String>>,
-    ) -> (
-        Arc<AppState>,
-        Arc<std::sync::Mutex<Vec<mpsc::Sender<ChatEvent>>>>,
-    ) {
+    fn scripted_state(identities: Vec<Option<String>>) -> (Arc<AppState>, EventSenders) {
         let txs = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut services = dar_extension_sdk::ServiceRegistry::default();
         services
@@ -4432,6 +4459,119 @@ mod tests {
         .unwrap();
     }
 
+    async fn queried_sessions(state: Arc<AppState>, uri: &str) -> serde_json::Value {
+        let response = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn sidebar_query_finds_decoded_content_and_omits_nonmatches() {
+        let state = slot_state(test_root(), HashMap::new());
+        write_fake_archive(&state.root, "body-only");
+        let path = state
+            .root
+            .join("data/chat/sessions/2026-01-01T00-00-00Z_body-only.jsonl");
+        writeln!(OpenOptions::new().append(true).open(path).unwrap(),
+            r#"{{"type":"message_end","message":{{"role":"assistant","content":"Try a+b & café"}}}}"#).unwrap();
+        write_fake_archive(&state.root, "other");
+        let result = queried_sessions(
+            Arc::clone(&state),
+            "/sessions?q=%20a%2Bb%20%26%20caf%C3%A9%20",
+        )
+        .await;
+        assert_eq!(result.as_array().unwrap().len(), 1);
+        assert_eq!(result[0]["id"], "body-only");
+        assert_eq!(result[0]["label"], "hi");
+        assert_eq!(result[0]["snippet"], "Try a+b & café");
+        assert_eq!(
+            queried_sessions(state, "/sessions?q=absent").await,
+            serde_json::json!([])
+        );
+    }
+
+    #[tokio::test]
+    async fn sidebar_query_discovers_older_titles_and_content_with_metadata_and_live_slots() {
+        let (state, _txs) = scripted_state(vec![Some("00-body".into())]);
+        for n in 0..55 {
+            write_fake_archive(&state.root, &format!("new-{n:02}"));
+        }
+        write_fake_archive(&state.root, "00-body");
+        write_fake_archive(&state.root, "01-title");
+        let dir = state.root.join("data/chat/sessions");
+        let body_path = dir.join("2026-01-01T00-00-00Z_00-body.jsonl");
+        writeln!(
+            OpenOptions::new().append(true).open(&body_path).unwrap(),
+            r#"{{"type":"message_end","message":{{"role":"assistant","content":"hidden orchid"}}}}"#
+        )
+        .unwrap();
+        let app = router(Arc::clone(&state));
+        for (id, body) in [
+            ("00-body", r#"{"title":"Renamed body","archived":true}"#),
+            ("01-title", r#"{"title":"Orchid planning"}"#),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/sessions/{id}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+        }
+        let live = state.session("client-slot").await.unwrap();
+        *live.inner.lock().await = Some(state.open_session(Arc::clone(&live)).await.unwrap());
+        assert_eq!(wait_resolved(&live).await, "00-body");
+        live.active_turns.store(1, Ordering::SeqCst);
+        // Explicit mtimes make the ordering independent of filesystem timing.
+        for (path, secs) in [
+            (&body_path, 2),
+            (&dir.join("2026-01-01T00-00-00Z_01-title.jsonl"), 1),
+        ] {
+            fs::File::open(path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+                .unwrap();
+        }
+        let baseline = queried_sessions(Arc::clone(&state), "/sessions").await;
+        assert_eq!(baseline.as_array().unwrap().len(), 50);
+        assert!(baseline
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["id"] != "00-body" && s["id"] != "01-title" && s.get("snippet").is_none()));
+        for uri in ["/sessions?q=", "/sessions?q=%20%09%20"] {
+            assert_eq!(queried_sessions(Arc::clone(&state), uri).await, baseline);
+        }
+        let result = queried_sessions(Arc::clone(&state), "/sessions?q=OrChId").await;
+        assert_eq!(result.as_array().unwrap().len(), 2);
+        assert_eq!(result[0]["id"], "00-body");
+        assert_eq!(result[0]["label"], "Renamed body");
+        assert_eq!(result[0]["snippet"], "hidden orchid");
+        assert_eq!(result[0]["archived"], true);
+        assert_eq!(result[0]["connected"], true);
+        assert_eq!(result[0]["busy"], true);
+        assert_eq!(result[0]["slots"], serde_json::json!(["client-slot"]));
+        assert_eq!(result[1]["id"], "01-title");
+        assert_eq!(result[1]["title"], "Orchid planning");
+        assert!(result[1].get("snippet").is_none());
+        assert_eq!(result[1]["archived"], false);
+    }
+
     async fn wait_resolved(slot: &Session) -> String {
         for _ in 0..200 {
             if let Some(id) = slot.resolved_live_id.lock().unwrap().clone() {
@@ -4454,7 +4594,9 @@ mod tests {
         assert_eq!(wait_resolved(&a).await, "id-a");
         assert_eq!(wait_resolved(&b).await, "id-b");
         b.active_turns.store(1, Ordering::SeqCst);
-        let Json(index) = session_index(State(Arc::clone(&state))).await;
+        let Json(index) = session_index(State(Arc::clone(&state)), Query(SessionQuery::default()))
+            .await
+            .unwrap();
         let entry = |id: &str| index.iter().find(|e| e.id == id).unwrap();
         assert!(entry("id-a").connected && !entry("id-a").busy);
         assert!(entry("id-b").connected && entry("id-b").busy);
@@ -4469,7 +4611,9 @@ mod tests {
         write_fake_archive(&state.root, "id-a");
         let a = state.session("a").await.unwrap();
         *a.inner.lock().await = Some(state.open_session(Arc::clone(&a)).await.unwrap());
-        let Json(index) = session_index(State(Arc::clone(&state))).await;
+        let Json(index) = session_index(State(Arc::clone(&state)), Query(SessionQuery::default()))
+            .await
+            .unwrap();
         assert!(a.resolved_live_id.lock().unwrap().is_none());
         assert!(index.iter().all(|e| !e.connected && e.slots.is_empty()));
         let tx = txs.lock().unwrap()[0].clone();
@@ -4477,7 +4621,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wait_resolved(&a).await, "id-a");
-        let Json(index) = session_index(State(Arc::clone(&state))).await;
+        let Json(index) = session_index(State(Arc::clone(&state)), Query(SessionQuery::default()))
+            .await
+            .unwrap();
         assert!(index.iter().find(|e| e.id == "id-a").unwrap().connected);
     }
 
@@ -4493,7 +4639,9 @@ mod tests {
         );
         write_fake_archive(&state.root, "id-a");
         write_fake_archive(&state.root, "id-b");
-        let Json(index) = session_index(State(Arc::new(state))).await;
+        let Json(index) = session_index(State(Arc::new(state)), Query(SessionQuery::default()))
+            .await
+            .unwrap();
         let entry = |id: &str| index.iter().find(|e| e.id == id).unwrap();
         // Both connected, but each names its own slot so the client can focus one.
         assert!(entry("id-a").connected && entry("id-b").connected);
@@ -4512,7 +4660,9 @@ mod tests {
         state
             .reap_idle(1_000 + 300_000, std::time::Duration::from_secs(300))
             .await;
-        let Json(index) = session_index(State(Arc::clone(&state))).await;
+        let Json(index) = session_index(State(Arc::clone(&state)), Query(SessionQuery::default()))
+            .await
+            .unwrap();
         let entry = index.iter().find(|e| e.id == "id-a").unwrap();
         assert!(!entry.connected, "closed backend is not connected");
         assert_eq!(entry.slots, ["s"], "slot stays focusable after idle close");
@@ -4991,6 +5141,19 @@ mod tests {
                 matches!(mode, TitlerMode::Success).then_some("Useful title")
             );
         }
+    }
+
+    #[test]
+    fn browser_sidebar_search_behaviors() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let status = std::process::Command::new("node")
+            .args([
+                format!("{root}/tests/sidebar-search.js"),
+                format!("{root}/src/renderer.js"),
+            ])
+            .status()
+            .expect("node is available for browser renderer tests");
+        assert!(status.success());
     }
 
     #[test]
