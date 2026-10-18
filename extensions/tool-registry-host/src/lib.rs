@@ -33,9 +33,10 @@ impl Extension for ToolRegistryHostExtension {
             )?);
             let exports_path = ctx.paths.root().join("data/artifact-exports");
             std::fs::create_dir_all(&exports_path)?;
-            let exports = ExportRoot::open(exports_path)?;
+            let exports_path = exports_path.canonicalize()?;
+            let exports = ExportRoot::open(&exports_path)?;
             registry.register_tool(
-                artifact_publish_spec(),
+                artifact_publish_spec(&exports_path),
                 Arc::new(ArtifactPublish {
                     store: Arc::clone(&store),
                     exports,
@@ -49,10 +50,13 @@ impl Extension for ToolRegistryHostExtension {
     }
 }
 
-fn artifact_publish_spec() -> ToolSpec {
+fn artifact_publish_spec(exports_path: &Path) -> ToolSpec {
     ToolSpec::new(
         "artifact_publish",
-        "Publish a file up to 25 MiB from data/artifact-exports into host-private immutable storage.",
+        format!(
+            "Publish a file up to 25 MiB into host-private immutable storage. Export folder: {}. Copy the file into this export folder, then pass its relative path.",
+            exports_path.display()
+        ),
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -155,6 +159,42 @@ fn validate_filename(filename: String) -> Result<String> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[tokio::test]
+    async fn publish_description_shows_absolute_export_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = tempfile::tempdir().unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let mut ctx = RegisterCtx {
+            bus: Default::default(),
+            http: host_api::HttpRegistry::disabled(),
+            foreground: Default::default(),
+            services: Default::default(),
+            paths: host_api::HostPaths::new(dir.path())
+                .unwrap()
+                .with_artifact_root(vault.path())
+                .unwrap(),
+            config: Default::default(),
+            shutdown: host_api::ShutdownToken::new(rx),
+        };
+        ToolRegistryHostExtension.register(&mut ctx).await.unwrap();
+        let registry = ctx
+            .services
+            .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
+            .unwrap();
+        let spec = registry
+            .list()
+            .into_iter()
+            .find(|spec| spec.name == "artifact_publish")
+            .unwrap();
+        let exports = dir
+            .path()
+            .join("data/artifact-exports")
+            .canonicalize()
+            .unwrap();
+        assert!(exports.is_absolute());
+        assert!(spec.description.contains(exports.to_str().unwrap()));
+    }
 
     #[test]
     fn artifact_limit_matches_cross_surface_policy() {

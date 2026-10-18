@@ -40,3 +40,5 @@ mcp = { package = "dar-mcp", path = "../../extensions/mcp", version = "0.6" }
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+tool-registry-host = { package = "dar-tool-registry-host", path = "../../extensions/tool-registry-host", version = "0.6" }
+tracker-linear = { package = "dar-tracker-linear", path = "../../extensions/tracker-linear", version = "0.6" }
