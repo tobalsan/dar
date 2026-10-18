@@ -26,6 +26,7 @@ use serde_json::{json, Value};
 use tool_registry::{ToolRegistryHandle, TOOL_REGISTRY_SERVICE};
 
 mod linear_graphql;
+mod linear_upload_artifact;
 
 pub(crate) const DEFAULT_ENDPOINT: &str = "https://api.linear.app/graphql";
 /// Env var holding a personal Linear API key. Sent raw, with no prefix.
@@ -145,7 +146,24 @@ impl Extension for TrackerLinearExtension {
                 .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
             {
                 let endpoint = linear_graphql::linear_graphql_endpoint(ctx.config.get(self.id()));
-                linear_graphql::register_into(registry.as_ref(), endpoint, agent_env)?;
+                linear_graphql::register_into(
+                    registry.as_ref(),
+                    endpoint.clone(),
+                    agent_env.clone(),
+                )?;
+                if let Ok(store) = ctx
+                    .services
+                    .get_named::<dar_artifacts::ArtifactStore>("artifact-store")
+                {
+                    registry.register_tool(
+                        linear_upload_artifact::LinearUploadArtifactTool::spec(),
+                        Arc::new(linear_upload_artifact::LinearUploadArtifactTool::new(
+                            endpoint,
+                            linear_graphql::AuthSource::Env(agent_env),
+                            store,
+                        )?),
+                    )?;
+                }
             }
             Ok(())
         })

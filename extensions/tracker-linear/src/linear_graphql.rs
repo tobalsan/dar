@@ -68,7 +68,7 @@ pub enum AuthSource {
 
 impl AuthSource {
     /// Resolve the `Authorization` header value, or `None` when unset/empty.
-    fn resolve(&self) -> Option<String> {
+    pub(crate) fn resolve(&self) -> Option<String> {
         match self {
             AuthSource::Env(Some(env)) => resolve_linear_auth_header_from(env.as_ref()),
             AuthSource::Env(None) => resolve_linear_auth_header(),

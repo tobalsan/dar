@@ -614,6 +614,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn linear_upload_asset_url_survives_agent_facing_redaction() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use host_api::{
+            AgentEnv, ConfigStore, EventBus, ForegroundRegistry, HostPaths, HttpRegistry,
+            RegisterCtx, ServiceRegistry, ShutdownToken, AGENT_ENV_SERVICE,
+        };
+
+        const TOKEN: &str = "linear-bridge-test-token";
+        const ASSET_URL: &str = "https://uploads.linear.app/12345678-1234-1234-1234-123456789abc/23456789-2345-2345-2345-23456789abcd/34567890-3456-3456-3456-3456789abcde";
+
+        struct TestEnv;
+        impl AgentEnv for TestEnv {
+            fn get(&self, key: &str) -> Option<String> {
+                (key == "LINEAR_API_KEY").then(|| TOKEN.to_string())
+            }
+
+            fn secret_values(&self) -> Vec<String> {
+                vec![TOKEN.to_string()]
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route(
+                "/graphql",
+                post(
+                    |State(upload_url): State<String>, Json(request): Json<Value>| async move {
+                        let query = request["query"].as_str().unwrap();
+                        let data = if query.contains("fileUpload") {
+                            json!({"fileUpload": {"success": true, "uploadFile": {
+                                "uploadUrl": upload_url,
+                                "assetUrl": ASSET_URL,
+                                "headers": []
+                            }}})
+                        } else if query.contains("attachmentCreate") {
+                            json!({"attachmentCreate": {"success": true, "attachment": {
+                                "id": "attachment-bridge-test"
+                            }}})
+                        } else {
+                            json!({"issue": {
+                                "id": "45678901-4567-4567-4567-456789abcdef",
+                                "identifier": "ALG-511"
+                            }})
+                        };
+                        Json(json!({"data": data}))
+                    },
+                ),
+            )
+            .route(
+                "/upload",
+                axum::routing::put(|body: axum::body::Bytes| async move {
+                    assert_eq!(body.as_ref(), b"bridge validation evidence");
+                    axum::http::StatusCode::OK
+                }),
+            )
+            .with_state(format!(
+                "{endpoint}/upload?signature=host-only-upload-secret"
+            ));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let agent = tempfile::tempdir().unwrap();
+        let vault = tempfile::tempdir().unwrap();
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let mut ctx = RegisterCtx {
+            bus: EventBus::new(),
+            http: HttpRegistry::disabled(),
+            foreground: ForegroundRegistry::default(),
+            services: ServiceRegistry::default(),
+            paths: HostPaths::new(agent.path())
+                .unwrap()
+                .with_artifact_root(vault.path())
+                .unwrap(),
+            config: ConfigStore::from_values(std::collections::HashMap::from([(
+                "tracker-linear".to_string(),
+                json!({"endpoint": format!("{endpoint}/graphql")}),
+            )])),
+            shutdown: ShutdownToken::new(shutdown_rx),
+        };
+        ctx.services
+            .service::<dyn AgentEnv>(AGENT_ENV_SERVICE, Arc::new(TestEnv))
+            .unwrap();
+        tool_registry_host::ToolRegistryHostExtension
+            .register(&mut ctx)
+            .await
+            .unwrap();
+        tracker_linear::TrackerLinearExtension
+            .register(&mut ctx)
+            .await
+            .unwrap();
+        std::fs::write(
+            agent.path().join("data/artifact-exports/report.txt"),
+            "bridge validation evidence",
+        )
+        .unwrap();
+        let registry = ctx
+            .services
+            .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
+            .unwrap();
+        let published = registry
+            .dispatch("artifact_publish", json!({"path": "report.txt"}))
+            .await;
+        let artifact = match &published.content[0] {
+            tool_registry::ToolContent::ResourceLink { uri, .. } => uri,
+            other => panic!("expected published artifact, got {other:?}"),
+        };
+        let out = roundtrip_with(
+            registry,
+            Redactor::from_secret_values([TOKEN]),
+            &[json!({
+                "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+                "params": {"name": "linear_upload_artifact", "arguments": {
+                    "artifact": artifact, "issue": "ALG-511"
+                }}
+            })],
+        )
+        .await;
+        server.abort();
+
+        assert_eq!(out[0]["result"]["isError"], false, "{out:?}");
+        let payload: Value =
+            serde_json::from_str(out[0]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["assetUrl"], ASSET_URL);
+        assert_eq!(payload["attachmentId"], "attachment-bridge-test");
+        assert!(!out[0].to_string().contains("host-only-upload-secret"));
+        assert!(!out[0].to_string().contains(TOKEN));
+    }
+
+    #[tokio::test]
     async fn tools_call_redacts_secret_in_agent_facing_structured_error() {
         let secret = "shhh-agent-error-secret-123".to_string();
         let registry = leaky_registry("leaky_error", Arc::new(LeaksCodedSecret(secret.clone())));

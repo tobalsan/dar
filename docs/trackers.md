@@ -77,6 +77,30 @@ with project, team, label, and state filters using AND semantics.
 Safety "park" writes (stall, retries exhausted) use the `needs_human` state
 value and are the only orchestrator writes to Linear.
 
+When `tracker-linear` is linked with the host artifact store, the write tool
+`linear_upload_artifact` attaches published validation files to an issue's
+Resources using the same auth and endpoint as `linear_graphql`:
+
+1. Copy the file into the absolute export folder shown in `artifact_publish`'s
+   tool description (also the agent-visible path inside a sandbox).
+2. Call `artifact_publish` with its relative `path`, and optionally `mediaType`
+   and `caption`, to obtain a `dar-artifact://<uuid>` URI.
+3. Call `linear_upload_artifact` with `artifact` set to that URI and `issue`
+   set to an identifier such as `ALG-123` or an issue UUID. Optional `title`
+   overrides the artifact filename; the caption becomes the subtitle.
+4. Optionally embed the returned `assetUrl` in a comment through
+   `linear_graphql`, for example `![shot](assetUrl)`. Viewing the asset needs
+   Linear auth.
+
+The result contains `assetUrl`, `attachmentId`, the issue identifier, `filename`,
+`bytes`, and `deduplicated`. Repeating the same artifact/issue returns the first
+delivery; another active upload returns `upload_in_progress`. Failed deliveries
+release the claim for retry. A failure after Linear accepts an upload or creates
+an attachment can leave an orphan asset or duplicate attachment on retry.
+Artifacts must pass the host store's SHA-256 verification and 25 MiB limit;
+raw file paths are not accepted. The signed PUT URL and Linear token stay inside
+the host, and failures return structured error codes.
+
 ## Plane tracker
 
 Two separate switches. agent.yaml `tracker: {use: plane}` links the

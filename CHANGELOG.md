@@ -9,6 +9,9 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Added `linear_upload_artifact` to attach verified host artifacts to Linear issue Resources, with retry deduplication and host-held upload credentials.
+- `artifact_publish` now shows the absolute export folder in its tool description so workers can locate it from any workspace.
+
 - chat-web: sidebar search now finds saved message content and renamed titles across all conversations, with matching text snippets.
 
 - Cron jobs now open live transcripts with Logs and Metadata, with persistent scheduler-owned run history, crash recovery, and configurable `extensions.scheduler.historyRetention` (default 100 per job); successful quiet polls remain hidden.
