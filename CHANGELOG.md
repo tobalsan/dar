@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- chat-web: the agent `avatar` (emoji, image URL, or image file in the agent folder) is now also the browser favicon and the apple touch icon.
 - Added `linear_upload_artifact` to attach verified host artifacts to Linear issue Resources, with retry deduplication and host-held upload credentials.
 - `artifact_publish` now shows the absolute export folder in its tool description so workers can locate it from any workspace.
 

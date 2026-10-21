@@ -365,6 +365,34 @@
     document.addEventListener('scroll', e => { if (e.target.id === 'chat-transcript') { let t = e.target; app.stick = (t.scrollHeight - t.scrollTop - t.clientHeight) < 64; } }, true);
   };
 
+  // The dashboard page has no head hook for tabs, so the avatar becomes the favicon and apple touch icon here.
+  const setIcons = () => {
+    let root = $('chat-root'), head = document.head;
+    if (!root?.dataset || !head?.appendChild || !document.createElement) return;
+    let { iconText, iconSrc } = root.dataset, favicon, touch;
+    if (iconSrc) favicon = touch = /^https?:/.test(iconSrc) ? iconSrc : PREFIX + iconSrc;
+    else if (iconText) {
+      favicon = 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text x="50" y="50" font-size="80" text-anchor="middle" dominant-baseline="central">${esc(iconText)}</text></svg>`);
+      // iOS ignores SVG touch icons, so draw the emoji on a PNG canvas.
+      let ctx, canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 180;
+      ctx = canvas.getContext?.('2d');
+      if (ctx) {
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 180, 180);
+        ctx.font = '120px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(iconText, 90, 96);
+        touch = canvas.toDataURL('image/png');
+      }
+    }
+    for (const [rels, href] of [[['icon', 'shortcut icon'], favicon], [['apple-touch-icon'], touch]]) {
+      if (!href) continue;
+      for (const old of document.querySelectorAll?.(rels.map(r => `link[rel="${r}"]`).join(',')) || []) old.remove();
+      let link = document.createElement('link');
+      link.rel = rels[0]; link.href = href;
+      head.appendChild(link);
+    }
+  };
+
   const mount = app => {
     let transcript = $('chat-transcript'), input = $('chat-input');
     if (!transcript || !input) return;
@@ -375,6 +403,7 @@
     pickHeroLine();
     // Avatar images get their src here so the fleet dashboard prefix applies to local paths.
     for (const img of document.querySelectorAll?.('img[data-avatar-src]') || []) img.src = /^https?:/.test(img.dataset.avatarSrc) ? img.dataset.avatarSrc : PREFIX + img.dataset.avatarSrc;
+    setIcons();
     $('chat-root').classList?.toggle('sidebar-collapsed', typeof localStorage !== 'undefined' && localStorage.getItem('dar-chat-sidebar') === 'collapsed');
     showHistoryList(app);
   };

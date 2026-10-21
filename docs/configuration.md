@@ -14,7 +14,7 @@ fields now, silently ignored.
 id: my-agent
 name: "My Agent"
 # description: "Triages support tickets"  # shown under the name in web chat
-# avatar: assets/avatar.png  # web chat avatar: emoji ("🦉"), https URL, or image path in the agent folder
+# avatar: assets/avatar.png  # web chat avatar and favicon: emoji ("🦉"), https URL, or image path in the agent folder
 
 runner:
   use: pi                     # pi | codex | opencode | cli | fake | builtin

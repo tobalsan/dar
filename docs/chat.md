@@ -89,7 +89,9 @@ back to `Agent`). An optional top-level `avatar` in `agent.yaml` shows next to
 the name in the chat header and above the new-chat invite: an emoji
 (`avatar: "🦉"`), an `http(s)` image URL, or an image path relative to the
 agent folder (`avatar: assets/avatar.png`; png/jpg/gif/webp/svg), served at
-`GET /chat/avatar`. Paths outside the agent folder are ignored.
+`GET /chat/avatar`. Paths outside the agent folder are ignored. The avatar
+also becomes the browser favicon and the apple touch icon; without an avatar
+the page keeps its default icon.
 
 **New chat.** An empty chat shows a short invite with the composer centered
 below it; the composer glides down to its dock once the first message is
