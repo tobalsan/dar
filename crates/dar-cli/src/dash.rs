@@ -11,6 +11,7 @@
 //! Endpoints:
 //! * `GET /api/agents` — machine-readable JSON list of live agents.
 //! * `GET /` — a sidebar SPA whose content area is an agent iframe.
+//! * `GET /icon` — the app icon found in the launch folder (404 when none).
 //! * `/agent/{port}` and `/agent/{port}/{*rest}` — streaming loopback proxy
 //!   routes. HTML responses that do not declare `x-prefix-aware` have
 //!   root-absolute dashboard URLs rewritten for the proxy prefix; prefix-aware
@@ -57,10 +58,68 @@ struct DashState {
     registry: Registry,
     client: reqwest::Client,
     live_ports: Arc<LivePorts>,
+    icon: Option<Arc<AppIcon>>,
+}
+
+/// Image file used as the page favicon and apple touch icon.
+struct AppIcon {
+    path: PathBuf,
+    content_type: &'static str,
+}
+
+/// Find the app icon at the root of `dir` (no recursion). An exact stem of
+/// `icon` or `favicon` wins; otherwise the first file, sorted by name, whose
+/// name contains `icon`.
+fn find_app_icon(dir: &Path) -> Option<AppIcon> {
+    let mut candidates: Vec<(String, PathBuf, &'static str)> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_file())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let content_type = icon_content_type(Path::new(&name).extension()?.to_str()?)?;
+            Some((name, entry.path(), content_type))
+        })
+        .collect();
+    candidates.sort();
+    let is_exact = |name: &str| {
+        let stem = Path::new(name).file_stem().and_then(|s| s.to_str());
+        matches!(
+            stem.map(str::to_ascii_lowercase).as_deref(),
+            Some("icon" | "favicon")
+        )
+    };
+    let (_, path, content_type) = candidates
+        .iter()
+        .find(|(name, ..)| is_exact(name))
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|(name, ..)| name.to_ascii_lowercase().contains("icon"))
+        })?;
+    Some(AppIcon {
+        path: path.clone(),
+        content_type,
+    })
+}
+
+fn icon_content_type(extension: &str) -> Option<&'static str> {
+    match extension.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "svg" => Some("image/svg+xml"),
+        "ico" => Some("image/x-icon"),
+        "webp" => Some("image/webp"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        _ => None,
+    }
 }
 
 /// Boot the aggregator and serve until Ctrl-C.
 pub async fn serve(opts: DashOptions) -> Result<()> {
+    let icon = std::env::current_dir()
+        .ok()
+        .and_then(|dir| find_app_icon(&dir))
+        .map(Arc::new);
     let state = DashState {
         registry: Registry::new(&opts.registry_dir),
         client: reqwest::Client::builder()
@@ -71,10 +130,12 @@ pub async fn serve(opts: DashOptions) -> Result<()> {
             .build()
             .context("building dash proxy client")?,
         live_ports: Arc::new(LivePorts::new()),
+        icon,
     };
     let app = Router::new()
         .route("/", get(index))
         .route("/api/agents", get(api_agents))
+        .route("/icon", get(app_icon))
         .route("/agent/{port}", any(proxy::proxy_agent))
         .route("/agent/{port}/", any(proxy::proxy_agent))
         .route("/agent/{port}/{*rest}", any(proxy::proxy_agent))
@@ -135,10 +196,33 @@ async fn api_agents(State(state): State<DashState>) -> Response {
         .into_response()
 }
 
+/// `GET /icon` — the app icon file from the launch folder.
+async fn app_icon(State(state): State<DashState>) -> Response {
+    let Some(icon) = state.icon else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match std::fs::read(&icon.path) {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, icon.content_type),
+                (header::CACHE_CONTROL, "no-cache"),
+                // SVG icons may carry scripts; never let them run on this origin.
+                (
+                    header::CONTENT_SECURITY_POLICY,
+                    "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// `GET /` — sidebar + iframe shell over the live agents.
 async fn index(State(state): State<DashState>) -> Response {
     let agents = state.registry.read_live();
-    match render_shell(&agents) {
+    match render_shell(&agents, state.icon.is_some()) {
         Ok(html) => Html(html).into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "render error").into_response(),
     }
@@ -195,7 +279,7 @@ fn agent_meta(entry: &PresenceEntry) -> (Option<String>, Option<String>) {
     (clean(meta.name), clean(meta.description))
 }
 
-fn render_shell(agents: &[PresenceEntry]) -> Result<String> {
+fn render_shell(agents: &[PresenceEntry], has_icon: bool) -> Result<String> {
     let mut items = String::new();
     let mut first_url = String::new();
     if agents.is_empty() {
@@ -226,6 +310,11 @@ fn render_shell(agents: &[PresenceEntry]) -> Result<String> {
     } else {
         first_url
     };
+    let icon_links = if has_icon {
+        "<link rel=\"icon\" href=\"/icon\">\n<link rel=\"apple-touch-icon\" href=\"/icon\">\n"
+    } else {
+        ""
+    };
     Ok(format!(
         r#"<!doctype html>
 <html lang="en">
@@ -233,7 +322,7 @@ fn render_shell(agents: &[PresenceEntry]) -> Result<String> {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>dar fleet</title>
-<style>
+{icon_links}<style>
   :root {{ color-scheme: dark light; }}
   * {{ box-sizing: border-box; }}
   html, body {{ height: 100%; margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; }}
@@ -356,6 +445,7 @@ fn render_shell(agents: &[PresenceEntry]) -> Result<String> {
 </script>
 </body>
 </html>"#,
+        icon_links = icon_links,
         items = items,
         initial = he(&initial),
     ))
@@ -379,6 +469,7 @@ mod test_support {
             registry,
             client: reqwest::Client::new(),
             live_ports: Arc::new(LivePorts::new()),
+            icon: None,
         }
     }
 
@@ -420,7 +511,7 @@ mod tests {
         .unwrap();
         let e = entry("kal", dir.path().to_str().unwrap(), "0.0.0.0:1", 1);
         assert_eq!(agent_label(&e), "Kalel");
-        let html = render_shell(&[e]).unwrap();
+        let html = render_shell(&[e], false).unwrap();
         assert!(html.contains("<span class=\"afolder\">Ships PRs</span>"));
     }
 
@@ -463,7 +554,7 @@ mod tests {
             entry("ALG-1", "/agents/one", "0.0.0.0:50001", 1),
             entry("ALG-2", "/agents/two", "0.0.0.0:50002", 2),
         ];
-        let html = render_shell(&agents).unwrap();
+        let html = render_shell(&agents, false).unwrap();
         assert!(html.contains("ALG-1"));
         assert!(html.contains("ALG-2"));
         assert!(html.contains("/agent/50001/"));
@@ -481,7 +572,7 @@ mod tests {
             "0.0.0.0:50001",
             1,
         )];
-        let html = render_shell(&agents).unwrap();
+        let html = render_shell(&agents, false).unwrap();
         assert!(html.contains("ALG-1 \u{b7} wf-a-"));
     }
 
@@ -505,7 +596,7 @@ mod tests {
         let b_label = agent_label(&b);
         assert_ne!(a_label, b_label);
 
-        let html = render_shell(&[a, b]).unwrap();
+        let html = render_shell(&[a, b], false).unwrap();
         assert!(html.contains(&a_label));
         assert!(html.contains(&b_label));
     }
@@ -513,7 +604,7 @@ mod tests {
     #[test]
     fn render_shell_has_mobile_drawer() {
         let agents = vec![entry("ALG-1", "/agents/one", "0.0.0.0:50001", 1)];
-        let html = render_shell(&agents).unwrap();
+        let html = render_shell(&agents, false).unwrap();
         assert!(html.contains("@media (max-width: 760px)"));
         assert!(html.contains("id=\"drawerToggle\""));
         assert!(html.contains("id=\"scrim\""));
@@ -526,7 +617,7 @@ mod tests {
 
     #[test]
     fn render_empty_when_no_agents() {
-        let html = render_shell(&[]).unwrap();
+        let html = render_shell(&[], false).unwrap();
         assert!(html.contains("No live agents"));
         assert!(html.contains("about:blank"));
     }
@@ -534,7 +625,7 @@ mod tests {
     #[test]
     fn render_skips_entries_without_parseable_port() {
         let agents = vec![entry("ALG-BAD", "/agents/bad", "not-an-address", 1)];
-        let html = render_shell(&agents).unwrap();
+        let html = render_shell(&agents, false).unwrap();
         assert!(!html.contains("data-src=\"\""));
         assert!(!html.contains("ALG-BAD"));
     }
@@ -542,9 +633,103 @@ mod tests {
     #[test]
     fn render_escapes_ids() {
         let agents = vec![entry("<script>", "/a", "0.0.0.0:1", 1)];
-        let html = render_shell(&agents).unwrap();
+        let html = render_shell(&agents, false).unwrap();
         assert!(!html.contains("<script>x"));
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    fn icon_names(files: &[&str]) -> Option<String> {
+        let dir = tempfile::tempdir().unwrap();
+        for file in files {
+            std::fs::write(dir.path().join(file), b"x").unwrap();
+        }
+        find_app_icon(dir.path()).map(|icon| {
+            icon.path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+    }
+
+    #[test]
+    fn icon_discovery_prefers_exact_stem() {
+        assert_eq!(
+            icon_names(&["a-icon.png", "favicon.ico", "notes.md"]).as_deref(),
+            Some("favicon.ico")
+        );
+        assert_eq!(
+            icon_names(&["favicon.ico", "icon.png"]).as_deref(),
+            Some("favicon.ico")
+        );
+        assert_eq!(
+            icon_names(&["z-icon.png", "ICON.SVG"]).as_deref(),
+            Some("ICON.SVG")
+        );
+    }
+
+    #[test]
+    fn icon_discovery_falls_back_to_first_name_containing_icon() {
+        assert_eq!(
+            icon_names(&["logo.png", "my-icon.webp", "dar-dashboard-icon.png"]).as_deref(),
+            Some("dar-dashboard-icon.png")
+        );
+    }
+
+    #[test]
+    fn icon_discovery_ignores_non_images_subfolders_and_missing() {
+        assert_eq!(icon_names(&["icon.txt", "icon.md", "logo.png"]), None);
+        assert_eq!(icon_names(&[]), None);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("assets")).unwrap();
+        std::fs::write(dir.path().join("assets/icon.png"), b"x").unwrap();
+        std::fs::create_dir(dir.path().join("icon.png")).unwrap();
+        assert!(find_app_icon(dir.path()).is_none());
+    }
+
+    #[tokio::test]
+    async fn icon_route_serves_file_bytes_with_type() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("app-icon.png"), b"png-bytes").unwrap();
+        let mut st = state(Registry::new(dir.path()));
+        st.icon = find_app_icon(dir.path()).map(Arc::new);
+        let resp = app_icon(State(st)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "image/png");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"png-bytes");
+    }
+
+    #[tokio::test]
+    async fn icon_route_sandboxes_svg() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("icon.svg"), b"<svg/>").unwrap();
+        let mut st = state(Registry::new(dir.path()));
+        st.icon = find_app_icon(dir.path()).map(Arc::new);
+        let resp = app_icon(State(st)).await;
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "image/svg+xml");
+        assert!(resp.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("sandbox"));
+    }
+
+    #[tokio::test]
+    async fn icon_route_is_missing_without_icon() {
+        let dir = tempfile::tempdir().unwrap();
+        let resp = app_icon(State(state(Registry::new(dir.path())))).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn shell_links_icon_only_when_one_exists() {
+        let with = render_shell(&[], true).unwrap();
+        assert!(with.contains("rel=\"icon\" href=\"/icon\""));
+        assert!(with.contains("rel=\"apple-touch-icon\" href=\"/icon\""));
+        let without = render_shell(&[], false).unwrap();
+        assert!(!without.contains("/icon"));
     }
 
     #[tokio::test]

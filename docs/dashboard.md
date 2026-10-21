@@ -61,3 +61,15 @@ network. It returns `202` before rebuild/restart; concurrent requests return
 the changed dashboard boot identity and `/health`; `dar self rebuild <agent>`
 does this automatically. Name lookup requires dashboard presence and
 `--workflow` disambiguates multiple live workflows.
+
+## Fleet view (`dar dash`)
+
+`dar dash` shows every live agent on the host. At start, it looks for an app
+icon at the root of the folder where you ran it (no subfolders). It uses the
+icon as the favicon and apple touch icon, and serves it at `/icon`.
+
+- Accepted types: `png`, `svg`, `ico`, `webp`, `jpg`, `jpeg`.
+- A file named `icon.*` or `favicon.*` wins.
+- Otherwise `dar dash` uses the first file, sorted by name, with `icon` in the
+  name (for example `dar-dashboard-icon.png`).
+- With no match, the page has no icon links.
