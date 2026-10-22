@@ -27,6 +27,7 @@ const origin = externalOrigin || `http://127.0.0.1:${port}`;
 if (!externalOrigin) {
 await fs.writeFile(path.join(agent, 'agent.yaml'), `id: apps-acceptance\nname: Apps acceptance\nrunner:\n  use: fake\nforeground: logs\ndashboard:\n  bind: 127.0.0.1\n  port: ${port}\nextensions:\n  chat-web:\n    backend: pi\n    command: ${path.join(here, 'fixtures/apps-pi.cjs')}\n    idle_minutes: 0\n    apps:\n      sandbox_port: 0\n`);
 const fixtureEnv = process.env.APPS_SDK_HTML ? { DAR_APPS_TEST_HTML: path.resolve(process.env.APPS_SDK_HTML) } : {};
+if (process.env.APPS_PROTOCOL_VERSION) fixtureEnv.DAR_APPS_TEST_PROTOCOL_VERSION = process.env.APPS_PROTOCOL_VERSION;
 await fs.writeFile(path.join(agent, 'mcp.json'), JSON.stringify({ mcpServers: {
   canvas: { command: process.execPath, args: [path.join(here, 'fixtures/apps-server.cjs')], env: fixtureEnv },
   other: { command: process.execPath, args: [path.join(here, 'fixtures/apps-server.cjs')], env: fixtureEnv }
@@ -71,6 +72,12 @@ try {
     if (!drawing) await new Promise(resolve => setTimeout(resolve, 100));
   }
   assert.ok(drawing, `App drawing did not appear. Browser errors: ${failures.join(', ')}`);
+  if (process.env.APPS_PROTOCOL_VERSION === '2025-11-21') {
+    assert.equal(await drawing.getByLabel('Negotiated protocol', { exact: true }).textContent(), '2026-01-26');
+    assert.equal(await drawing.getByLabel('Invalid version request', { exact: true }).textContent(), 'rejected');
+    assert.equal(await drawing.getByLabel('Lifecycle violations', { exact: true }).textContent(), '0');
+    console.log('PASS unsupported app version negotiates host version and delivers after initialized; nonstring version rejected');
+  }
   await page.screenshot({ path: path.join(evidence, '01-inline.png'), fullPage: true });
   console.log('PASS inline MCP App shows real bridge tool result');
   await drawing.getByText('Undeclared network blocked', { exact: true }).waitFor();
@@ -101,6 +108,11 @@ try {
   console.log('PASS app-requested fullscreen sits beside usable chat; close returns inline');
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('draw second');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
+  if (process.env.APPS_PI_ALIAS || process.env.APPS_HOLD_RESULT) {
+    await drawing.getByRole('heading', { name: 'Drawing input: second', exact: true }).waitFor({ timeout: 750 });
+    assert.equal(await drawing.getByLabel('Results received', { exact: true }).textContent(), '1');
+    console.log('PASS reused-view tool input arrives before held result');
+  }
   await drawing.getByRole('heading', { name: 'Drawing: second', exact: true }).waitFor();
   assert.equal(await drawing.getByLabel('Results received', { exact: true }).textContent(), '2');
   assert.equal(await page.getByRole('region', { name: 'MCP App: canvas', exact: true }).count(), 1);

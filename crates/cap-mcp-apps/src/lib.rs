@@ -31,6 +31,8 @@ pub trait McpApps: Send + Sync {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ResultRecord {
     pub tool: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pi_tool_name: Option<String>,
     pub server: String,
     pub resource_uri: String,
     pub args: Value,
@@ -105,7 +107,9 @@ pub fn read_result(
         Ok(record) => record,
         Err(_) => return Ok(None),
     };
-    Ok((record.tool == normalize_tool_name(tool_name)).then_some(record))
+    Ok((record.tool == normalize_tool_name(tool_name)
+        || record.pi_tool_name.as_deref() == Some(tool_name))
+    .then_some(record))
 }
 
 impl ResultRecord {

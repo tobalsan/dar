@@ -26,7 +26,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       break;
     }
     case 'resources/read':
-      result = { contents: [{ uri: request.params.uri, mimeType: 'text/html;profile=mcp-app', text: fs.readFileSync(process.env.DAR_APPS_TEST_HTML || path.join(__dirname, 'drawing.html'), 'utf8') }] };
+      result = { contents: [{ uri: request.params.uri, mimeType: 'text/html;profile=mcp-app', text: fs.readFileSync(process.env.DAR_APPS_TEST_HTML || path.join(__dirname, 'drawing.html'), 'utf8').replace("const protocolVersion = '2026-01-26';", `const protocolVersion = ${JSON.stringify(process.env.DAR_APPS_TEST_PROTOCOL_VERSION || '2026-01-26')};`) }] };
       break;
     default:
       process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: { code: -32601, message: 'Unknown method' } }) + '\n');

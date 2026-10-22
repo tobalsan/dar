@@ -264,6 +264,7 @@ impl Extension for McpExtension {
                         ToolSpec::new(mapped, tool.description.unwrap_or_default(), schema),
                         Arc::new(Proxy {
                             client: Arc::clone(&client),
+                            registry: Arc::downgrade(&registry),
                             server: name.clone(),
                             upstream: tool.name.to_string(),
                             root: root.clone(),
@@ -365,10 +366,29 @@ async fn connect(
 
 struct Proxy {
     client: Arc<Client>,
+    registry: std::sync::Weak<dyn ToolRegistryHandle>,
     server: String,
     upstream: String,
     root: std::path::PathBuf,
     resource_uri: Option<String>,
+}
+
+fn pi_tool_name(mapped: &str) -> Option<String> {
+    let raw = format!("mcp__dar__{mapped}");
+    if !raw.is_ascii() || raw.len() > 64 {
+        return None;
+    }
+    Some(
+        raw.chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect(),
+    )
 }
 
 #[async_trait::async_trait]
@@ -409,8 +429,19 @@ impl ToolExecutor for Proxy {
                     self.server, self.upstream
                 );
             }
+            let tool = format!("{}__{}", self.server, self.upstream);
+            let pi_tool_name = self.registry.upgrade().and_then(|registry| {
+                let mut seen = std::collections::BTreeSet::new();
+                for spec in registry.list() {
+                    if !seen.insert(pi_tool_name(&spec.name)?) {
+                        return None;
+                    }
+                }
+                pi_tool_name(&tool)
+            });
             let record = dar_extension_sdk::mcp_apps::ResultRecord {
-                tool: format!("{}__{}", self.server, self.upstream),
+                tool,
+                pi_tool_name,
                 server: self.server.clone(),
                 resource_uri: uri.clone(),
                 args,

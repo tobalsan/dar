@@ -9,6 +9,8 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- MCP Apps now negotiate Dar's supported protocol version when an app requests a different version.
+- Pi chat now opens MCP Apps from Dar bridge tool results, including tools with hyphens in their names.
 - Web chat hosts MCP Apps in isolated inline views, with a resizable fullscreen panel beside chat, replay, and app tool/context actions across all runners; Docker sandboxes publish a second origin.
 - Self-updates and rollback now preserve `.env` reloads and secret scrubbing for child processes while keeping shell-set values; Linear poll authentication outages warn once and log recovery.
 - Chat web: an optional top-level `notification_sound` in `agent.yaml` names an audio file in the agent folder. That agent then plays this sound instead of the default one.

@@ -2,12 +2,15 @@
 <html lang="en"><meta charset="utf-8"><title>Acceptance canvas</title>
 <h1>Loading drawing</h1>
 <p aria-label="Results received">0</p><p aria-label="Network status">Checking network</p><p aria-label="Policy violation"></p>
+<p aria-label="Negotiated protocol"></p><p aria-label="Invalid version request"></p><p aria-label="Lifecycle violations">0</p>
 <button id="post">Post selection</button><button id="context">Select box</button>
 <button id="refresh">Refresh drawing</button><button id="foreign">Call another server</button>
 <button id="private">Call model-only tool</button><button id="expand">Expand drawing</button>
 <p role="status"></p>
 <script>
 let next = 0, results = 0, initialized = false;
+const protocolVersion = '2026-01-26';
+const lifecycleViolation = () => { document.querySelector('[aria-label="Lifecycle violations"]').textContent = '1'; };
 const pending = new Map();
 const status = text => document.querySelector('[role=status]').textContent = text;
 function request(method, params) {
@@ -26,10 +29,11 @@ addEventListener('message', event => {
     if (message.error) reject(new Error(message.error.message)); else resolve(message.result);
   }
   if (message.method === 'ui/notifications/tool-input') {
-    if (!initialized) status('Input before initialized');
+    if (!initialized) lifecycleViolation();
     document.querySelector('h1').textContent = 'Drawing input: ' + message.params.arguments.label;
   }
   if (message.method === 'ui/notifications/tool-result') {
+    if (!initialized) lifecycleViolation();
     document.querySelector('h1').textContent = 'Drawing: ' + message.params.structuredContent.label;
     document.querySelector('[aria-label="Results received"]').textContent = String(++results);
   }
@@ -40,7 +44,16 @@ document.getElementById('refresh').onclick = () => request('tools/call', { name:
 document.getElementById('foreign').onclick = () => request('tools/call', { name: 'other__refresh', arguments: {} }).then(() => status('Unexpected cross-server success')).catch(() => status('Cross-server call blocked'));
 document.getElementById('private').onclick = () => request('tools/call', { name: 'model_only', arguments: {} }).then(() => status('Unexpected model-only success')).catch(() => status('Model-only call blocked'));
 document.getElementById('expand').onclick = () => request('ui/request-display-mode', { mode: 'fullscreen' }).catch(e => status(e.message));
-request('ui/initialize', { protocolVersion: '2026-01-26', appInfo: { name: 'Acceptance canvas', version: '1' }, appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] } }).then(() => {
+const invalidVersion = protocolVersion === '2025-11-21'
+  ? request('ui/initialize', { protocolVersion: 42 }).then(() => 'accepted', () => 'rejected')
+  : Promise.resolve('not sent');
+invalidVersion.then(outcome => {
+  document.querySelector('[aria-label="Invalid version request"]').textContent = outcome;
+  return request('ui/initialize', { protocolVersion, appInfo: { name: 'Acceptance canvas', version: '1' }, appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] } });
+}).then(response => {
+  document.querySelector('[aria-label="Negotiated protocol"]').textContent = response.protocolVersion;
+  if (protocolVersion === '2025-11-21') return new Promise(resolve => setTimeout(resolve, 100));
+}).then(() => {
   initialized = true;
   notify('ui/notifications/initialized', {});
   notify('ui/notifications/size-changed', { height: 330, width: 500 });

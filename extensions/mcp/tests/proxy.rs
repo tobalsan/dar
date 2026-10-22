@@ -332,6 +332,115 @@ async fn ui_bridge_hides_app_only_tools_and_captures_each_identical_call() {
     }
 }
 
+#[tokio::test]
+async fn ui_bridge_records_unique_pi_alias_for_hyphenated_tool() {
+    use dar_extension_sdk::mcp_apps::{extract_marker, read_result};
+    let root = tempfile::tempdir().unwrap();
+    let bridge = bridge(
+        root.path(),
+        json!({"mcpServers": {
+            "canva": {"command": UPSTREAM,"env":{"APPS":"alias"}}
+        }}),
+    )
+    .await;
+    assert_eq!(bridge.names(), vec!["canva__generate-image"]);
+    let (_, text) = bridge
+        .call("canva__generate-image", json!({"text":"generated"}))
+        .await;
+    let (_, id) = extract_marker(&text);
+    let id = id.unwrap();
+    let record = read_result(root.path(), &id, "mcp__dar__canva__generate_image")
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.tool, "canva__generate-image");
+    assert_eq!(record.result["content"][0]["text"], "generated");
+}
+
+#[tokio::test]
+async fn ui_bridge_does_not_guess_a_colliding_pi_alias() {
+    use dar_extension_sdk::mcp_apps::{extract_marker, read_result};
+    let root = tempfile::tempdir().unwrap();
+    let bridge = bridge(
+        root.path(),
+        json!({"mcpServers": {
+            "canva": {"command": UPSTREAM,"env":{"APPS":"alias-collision"}}
+        }}),
+    )
+    .await;
+    assert_eq!(
+        bridge.names(),
+        vec!["canva__generate-image", "canva__generate_image"]
+    );
+    for raw in ["canva__generate-image", "canva__generate_image"] {
+        let (_, text) = bridge.call(raw, json!({"text":"generated"})).await;
+        let (_, id) = extract_marker(&text);
+        let id = id.unwrap();
+        assert!(read_result(root.path(), &id, raw).unwrap().is_some());
+        assert!(
+            read_result(root.path(), &id, "mcp__dar__canva__generate_image")
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn ui_bridge_rejects_alias_colliding_with_a_long_pi_tool_name() {
+    use dar_extension_sdk::mcp_apps::{extract_marker, read_result};
+    let root = tempfile::tempdir().unwrap();
+    let bridge = bridge(
+        root.path(),
+        json!({"mcpServers": {
+            "canva": {"command": UPSTREAM,"env":{"APPS":"alias-long-collision"}}
+        }}),
+    )
+    .await;
+    let long = "canva__aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let short = "canva__aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_53c600fb";
+    assert_eq!(bridge.names(), vec![short, long]);
+    for raw in [long, short] {
+        let (_, text) = bridge.call(raw, json!({"text":"generated"})).await;
+        let (_, id) = extract_marker(&text);
+        let id = id.unwrap();
+        assert!(read_result(root.path(), &id, raw).unwrap().is_some());
+        assert!(read_result(
+            root.path(),
+            &id,
+            "mcp__dar__canva__aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_53c600fb"
+        )
+        .unwrap()
+        .is_none());
+    }
+}
+
+#[tokio::test]
+async fn ui_bridge_rejects_a_forced_hash_shadow_name() {
+    use dar_extension_sdk::mcp_apps::{extract_marker, read_result};
+    let root = tempfile::tempdir().unwrap();
+    let bridge = bridge(
+        root.path(),
+        json!({"mcpServers": {
+            "canva": {"command": UPSTREAM,"env":{"APPS":"alias-forced-collision"}}
+        }}),
+    )
+    .await;
+    for raw in [
+        "canva__generate-image",
+        "canva__generate_image",
+        "canva__generate_image_ce231ecd",
+    ] {
+        let (_, text) = bridge.call(raw, json!({"text":"generated"})).await;
+        let (_, id) = extract_marker(&text);
+        let id = id.unwrap();
+        assert!(read_result(root.path(), &id, raw).unwrap().is_some());
+        assert!(
+            read_result(root.path(), &id, "mcp__dar__canva__generate_image_ce231ecd")
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
 // Approved doctor/dashboard public HTTP seam: a real provider registration
 // rejection must be distinguished from a view-host failure, without its body.
 #[tokio::test]

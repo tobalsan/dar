@@ -88,7 +88,7 @@
     }
     if(message.method==='ui/initialize' && message.id!==undefined && !view.initializing) {
       audit(view,'ui/initialize',params).catch(()=>{});
-      if(params.protocolVersion!=='2026-01-26') {reject(new Error('Unsupported MCP Apps protocol version'));return}
+      if(typeof params.protocolVersion!=='string') {reject(new Error('Invalid MCP Apps protocol version'));return}
       const modes=params.appCapabilities?.availableDisplayModes;
       if(modes!==undefined && (!Array.isArray(modes) || !modes.every(mode=>typeof mode==='string'))) {reject(new Error('Invalid display modes'));return}
       view.modes=modes || ['inline'];
@@ -123,7 +123,7 @@
     } catch(error) {if(message.id!==undefined)reject(error)}
   });
   const create = async (app,descriptor,anchor,key) => {
-    const view={key,app,server:descriptor.server,slot:app.slot,record:descriptor.recordId,callId:descriptor.callId,mode:'inline',modes:['inline'],ready:false};
+    const view={key,app,server:descriptor.server,slot:app.slot,record:descriptor.recordId,callId:descriptor.callId,piToolName:descriptor.piToolName,mode:'inline',modes:['inline'],ready:false};
     views.set(key,view);
     const section=document.createElement('section');section.className='chat-app';section.setAttribute('aria-label',`MCP App: ${descriptor.server}`);
     const header=document.createElement('header');const name=document.createElement('strong');name.textContent=`${descriptor.server} · MCP App`;
@@ -168,7 +168,7 @@
       let view=views.get(key);
       if(!view) {create(app,latest,anchor,key);view=views.get(key)}
       if(view && latest.recordId!==view.record) {
-        const record=latest.recordId;view.record=record;view.callId=latest.callId;
+        const record=latest.recordId;view.record=record;view.callId=latest.callId;view.tool=latest.tool;view.piToolName=latest.piToolName;
         request(`/chat/${encodeURIComponent(app.slot)}/apps/${encodeURIComponent(record)}`).then(data=>{if(view.record===record && !view.destroying){view.data=data;view.dataRecord=record;if(view.ready){view.frame.hidden=false;view.status.textContent=''}deliver(view)}}).catch(error=>{if(view.record===record && !view.destroying)fail(view,error)});
       }
       for(const d of descriptors.slice(1)) {
@@ -181,7 +181,7 @@
     if(message.type==='reset')for(const view of views.values())teardown(view);
     if(message.type==='aborted' || message.type==='closed')for(const view of views.values())if(view.slot===app.slot)notify(view,'ui/notifications/tool-cancelled',{reason:message.error || 'Tool cancelled'});
     if(message.type==='tool_output' && message.done && !message.app) for(const view of views.values())if(view.slot===app.slot && view.inputCallId===message.id) notify(view,'ui/notifications/tool-cancelled',{reason:message.is_error?'Tool failed':'UI result unavailable'});
-    if(message.type==='tool_call')for(const view of views.values())if(view.slot===app.slot && view.ready && !view.noReuse && normalize(message.name)===view.tool) {
+    if(message.type==='tool_call')for(const view of views.values())if(view.slot===app.slot && view.ready && !view.noReuse && (normalize(message.name)===view.tool || view.piToolName && message.name===view.piToolName)) {
       try{notify(view,'ui/notifications/tool-input',{arguments:JSON.parse(message.args)});view.inputCallId=message.id}catch{}
     }
   };

@@ -12,6 +12,7 @@ fn main() {
     let stall = std::env::var("STALL").as_deref() == Ok("1");
     let apps = std::env::var("APPS").is_ok();
     let blob = std::env::var("APPS").as_deref() == Ok("blob");
+    let alias = std::env::var("APPS").unwrap_or_default();
     let mut ui_advertised = false;
     let mut ui_reads = 0;
     let secret = std::env::var("ECHO_SECRET").unwrap_or_default();
@@ -43,6 +44,23 @@ fn main() {
             ui_reads += 1;
         }
         let result = match request["method"].as_str() {
+            Some("tools/list") if ui_advertised && alias.starts_with("alias") => {
+                let mut tools = vec![
+                    json!({"name":"generate-image","inputSchema":{"type":"object"},"_meta":{"ui":{"resourceUri":"ui://canvas/app"}}}),
+                ];
+                if alias == "alias-collision" || alias == "alias-forced-collision" {
+                    tools.push(json!({"name":"generate_image","inputSchema":{"type":"object"},"_meta":{"ui":{"resourceUri":"ui://canvas/app"}}}));
+                    if alias == "alias-forced-collision" {
+                        tools.push(json!({"name":"generate_image_ce231ecd","inputSchema":{"type":"object"},"_meta":{"ui":{"resourceUri":"ui://canvas/app"}}}));
+                    }
+                } else if alias == "alias-long-collision" {
+                    tools = vec![
+                        json!({"name":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","inputSchema":{"type":"object"},"_meta":{"ui":{"resourceUri":"ui://canvas/app"}}}),
+                        json!({"name":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_53c600fb","inputSchema":{"type":"object"},"_meta":{"ui":{"resourceUri":"ui://canvas/app"}}}),
+                    ];
+                }
+                json!({"tools":tools})
+            }
             Some("tools/list") if apps && ui_advertised && blob => json!({"tools":[
                 {"name":"blob","inputSchema":{"type":"object"},"_meta":{"ui":{"resourceUri":"ui://canvas/blob"}}},
                 {"name":"invalid-utf8","inputSchema":{"type":"object"},"_meta":{"ui":{"resourceUri":"ui://canvas/invalid-utf8"}}},

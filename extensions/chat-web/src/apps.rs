@@ -378,7 +378,7 @@ pub(super) fn capture_result(
             mcp_apps::read_result(root, &id, call.name.as_deref().unwrap_or(""))
         {
             event.app = Some(
-                json!({"recordId":id,"tool":record.tool,"server":record.server,"resourceUri":record.resource_uri,"args":record.args,"callId":event.id}),
+                json!({"recordId":id,"tool":record.tool,"piToolName":record.pi_tool_name,"server":record.server,"resourceUri":record.resource_uri,"args":record.args,"callId":event.id}),
             );
         }
     }

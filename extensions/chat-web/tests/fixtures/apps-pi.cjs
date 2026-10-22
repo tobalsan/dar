@@ -38,7 +38,8 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     if (command.message.includes('draw first') || command.message.includes('draw second')) {
       const label = command.message.includes('draw second') ? 'second' : 'first';
       const id = `drawing-${++call}`;
-      emit({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', toolCall: { id, name: 'canvas__draw', arguments: { label } } } });
+      emit({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', toolCall: { id, name: process.env.APPS_PI_ALIAS ? 'mcp__dar__canvas__draw' : 'canvas__draw', arguments: { label } } } });
+      if ((process.env.APPS_PI_ALIAS || process.env.APPS_HOLD_RESULT) && label === 'second') await new Promise(resolve => setTimeout(resolve, 1000));
       const result = await bridgeCall(label);
       emit({ type: 'tool_execution_end', toolCallId: id, result, isError: false });
     }

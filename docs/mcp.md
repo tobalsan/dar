@@ -69,6 +69,10 @@ are retained in `data/mcp-apps/results/` for 30 days; missing records or
 unavailable resources leave the text fallback visible with a short error.
 The model sees a small result-record marker in tool text; web transcripts
 hide it. TUI, Telegram, and Discord continue using text.
+Pi uses exact aliases recorded by the bridge when all its tool names are
+unambiguous ASCII names that need no shortening. If any tool name is non-ASCII,
+collides after sanitization or needs shortening, all Pi app results from that bridge
+retain the text fallback.
 
 View reuse across tool calls is a Dar extension to the stable spec. Servers
 that expect one result per view can be listed in
