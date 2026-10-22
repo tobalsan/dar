@@ -81,7 +81,8 @@ body:has(.chat-web) #content {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0.58rem 0.55rem;
+  padding: 0.42rem 0.55rem;
+  min-height: 2.1rem;
   border-radius: 0.65rem;
   cursor: pointer;
   transition: background 0.15s;
@@ -106,7 +107,9 @@ body:has(.chat-web) #content {
   font-size: 0.88rem;
 }
 .chat-session-label > span {
-  display: inline-block;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .chat-session-snippet {
   color: var(--muted);
@@ -117,15 +120,40 @@ body:has(.chat-web) #content {
   -webkit-line-clamp: 2;
   overflow-wrap: anywhere;
 }
-.chat-session:hover .chat-session-label > span {
-  animation: revealTitle var(--title-ms, 4000ms) ease-in-out infinite;
+.chat-session-info {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
-.chat-session small {
+.chat-session-tip {
+  position: fixed;
+  z-index: 50;
+  max-width: 16rem;
+  padding: 0.45rem 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  font-size: 0.78rem;
+  pointer-events: none;
+  overflow-wrap: anywhere;
+}
+.chat-session-tip[hidden] {
+  display: none;
+}
+.chat-session-tip > span {
   display: flex;
   align-items: center;
   gap: 0.3rem;
   color: var(--muted);
-  font-size: 0.7rem;
+  font-size: 0.72rem;
 }
 .chat-live-dot {
   width: 0.4rem;
@@ -190,20 +218,6 @@ body:has(.chat-web) #content {
 .chat-archived > summary {
   cursor: pointer;
   color: var(--muted);
-}
-/* forward travel fills 30% of the loop; the rest is pauses and the return */
-@keyframes revealTitle {
-  0%,
-  10% {
-    transform: translateX(0);
-  }
-  40%,
-  70% {
-    transform: translateX(calc(-1 * var(--title-shift, 0px)));
-  }
-  100% {
-    transform: translateX(0);
-  }
 }
 .chat-main {
   /* pinned so the hover flyout (absolute sidebar) can't pull it into the rail column */

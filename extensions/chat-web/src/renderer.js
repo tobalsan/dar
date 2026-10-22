@@ -362,7 +362,13 @@
     });
     // Keep the Archived section's open state across periodic list refreshes.
     document.addEventListener('toggle', e => { if (e.target.classList?.contains('chat-archived')) app.archivedOpen = e.target.open; }, true);
-    document.addEventListener('mouseover', e => { let row = e.target.closest?.('.chat-session'); if (row && !row.contains(e.relatedTarget)) revealTitle(row); });
+    const rowOf = e => e.target?.closest?.('.chat-session');
+    document.addEventListener('mouseover', e => { let row = rowOf(e); if (row && !row.contains(e.relatedTarget)) showTipSoon(row, 450); });
+    document.addEventListener('mouseout', e => { let row = rowOf(e); if (row && !row.contains(e.relatedTarget)) hideTip(); });
+    document.addEventListener('focusin', e => { let row = rowOf(e); if (row) showTipSoon(row, 0); });
+    document.addEventListener('focusout', hideTip);
+    document.addEventListener('mousedown', hideTip, true);
+    document.addEventListener('scroll', hideTip, true);
     document.addEventListener('scroll', e => { if (e.target.id === 'chat-transcript') { let t = e.target; app.stick = (t.scrollHeight - t.scrollTop - t.clientHeight) < 64; } }, true);
   };
 
@@ -425,14 +431,24 @@
     if (hero) hero.textContent = HERO_LINES[Math.floor(Math.random() * HERO_LINES.length)];
   };
 
-  // Slide an overflowing title left on hover so its tail clears the action icons.
-  const revealTitle = row => {
-    let box = row.querySelector('.chat-session-label'), text = box?.firstElementChild;
-    if (!text) return;
-    let reserve = row.querySelector('.chat-session-actions')?.offsetWidth || 0;
-    let shift = text.scrollWidth + reserve - box.clientWidth;
-    row.style.setProperty('--title-shift', `${Math.max(0, shift)}px`);
-    row.style.setProperty('--title-ms', `${Math.max(1200, shift * 16) / 0.3}ms`);
+  // Row details (full title, connection, last-message time) show in a fixed popover so the row stays one line.
+  let tipTimer = null, tipEl = null;
+  const hideTip = () => { clearTimeout(tipTimer); tipTimer = null; if (tipEl) tipEl.hidden = true; };
+  const showTipSoon = (row, delay) => {
+    hideTip();
+    tipTimer = setTimeout(() => {
+      let title = row.querySelector('.chat-session-label')?.textContent, info = row.querySelector('.chat-session-info');
+      if (!title || !info) return;
+      if (!tipEl?.isConnected) { tipEl = document.createElement('div'); tipEl.className = 'chat-session-tip'; tipEl.setAttribute('role', 'tooltip'); ($('chat-root') || document.body).appendChild(tipEl); }
+      let dot = info.dataset.live ? `<span class="chat-live-dot${info.dataset.live === 'busy' ? ' is-busy' : ''}"></span>` : '';
+      tipEl.innerHTML = `<strong></strong><span>${dot}<span class="chat-session-tip-text"></span></span>`;
+      tipEl.firstChild.textContent = title; tipEl.querySelector('.chat-session-tip-text').textContent = info.textContent;
+      tipEl.hidden = false; tipEl.style.visibility = 'hidden';
+      let r = row.getBoundingClientRect(), h = tipEl.offsetHeight;
+      tipEl.style.left = `${r.right + 8}px`;
+      tipEl.style.top = `${Math.max(8, Math.min(window.innerHeight - h - 8, r.top + r.height / 2 - h / 2))}px`;
+      tipEl.style.visibility = '';
+    }, delay);
   };
 
   const ICONS = {
@@ -460,9 +476,10 @@
     } catch {}
   };
   const isUnread = s => { let unread = readUnread(); return !s.busy && !s.archived && rowKeys(s).some(k => unread[k]); };
-  const sessionRow = (s, focusedSlot) => `<div class="chat-session${(s.slots || []).includes(focusedSlot) ? ' is-focused' : ''}${s.busy ? ' is-busy' : ''}" data-session-id="${esc(s.id)}" role="button" tabindex="0" title="${esc(s.label)}">`
+  const sessionRow = (s, focusedSlot) => `<div class="chat-session${(s.slots || []).includes(focusedSlot) ? ' is-focused' : ''}${s.busy ? ' is-busy' : ''}" data-session-id="${esc(s.id)}" role="button" tabindex="0" aria-describedby="info-${esc(s.id)}">`
     + (isUnread(s) ? '<span class="chat-unread-dot" role="img" aria-label="Unread messages"></span>' : '')
-    + `<div class="chat-session-copy"><span class="chat-session-label"><span>${esc(s.label)}</span></span>${s.snippet ? `<div class="chat-session-snippet">${esc(s.snippet)}</div>` : ''}<small>${s.busy ? '<span class="chat-live-dot is-busy"></span>Running · ' : s.connected ? '<span class="chat-live-dot"></span>Connected · ' : ''}${relativeTime(s.modified_ms)}</small></div>`
+    + `<div class="chat-session-copy"><span class="chat-session-label"><span>${esc(s.label)}</span></span>${s.snippet ? `<div class="chat-session-snippet">${esc(s.snippet)}</div>` : ''}</div>`
+    + `<span class="chat-session-info" id="info-${esc(s.id)}" data-live="${s.busy ? 'busy' : s.connected ? 'on' : ''}">${s.busy ? 'Running · ' : s.connected ? 'Connected · ' : ''}${relativeTime(s.modified_ms)}</span>`
     + `<div class="chat-session-actions">${actionButton('rename', s.id, 'Rename')}${s.archived ? actionButton('unarchive', s.id, 'Unarchive') : actionButton('archive', s.id, 'Archive')}${actionButton('delete', s.id, 'Delete')}</div></div>`;
   const sidebarQuery = () => ($('chat-search')?.value || '').trim();
   const showHistoryList = async app => { let host=$('chat-history-list'); if(!host||app.editingSession)return; let sequence=++app.sidebarSequence, q=sidebarQuery(); try { let all=await request('/chat/sessions'+(q?'?q='+encodeURIComponent(q):'')).then(r=>r.json()); if(app.editingSession||sequence!==app.sidebarSequence)return; clearViewed(all,app.slot); let active=all.filter(s=>!s.archived), archived=all.filter(s=>s.archived), groups=[]; for(let s of active){let name=groupName(s.modified_ms), g=groups.at(-1);if(!g||g.name!==name)groups.push(g={name,items:[]});g.items.push(s)} host.innerHTML=groups.map(g=>`<div class="chat-session-group"><h3>${g.name}</h3>${g.items.map(s=>sessionRow(s,app.slot)).join('')}</div>`).join('')+(archived.length?`<details class="chat-archived"${app.archivedOpen?' open':''}><summary>Archived (${archived.length})</summary>${archived.map(s=>sessionRow(s,app.slot)).join('')}</details>`:'')||'<div class="chat-empty">No conversations</div>'; } catch(error){if(sequence===app.sidebarSequence&&!app.editingSession)host.textContent=`Sessions unavailable: ${error.message}`;} };
