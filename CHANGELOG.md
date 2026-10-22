@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Host: an agent now refuses to start when another process already listens on its HTTP port. Before, on macOS, an agent on `127.0.0.1:P` could start next to a process on `*:P`, and the two processes split the traffic.
 - Chat web: a conversation shows a dot when a turn finishes there while you look elsewhere. The dot persists across reloads.
 - Chat web: a turn that finishes while no dashboard tab is open now shows the unread dot when you open the dashboard or the connection returns. No sound plays for these turns.
 - Chat web: each sidebar row now shows one line, the title. The status and last-message time moved to a popover that shows when you rest the mouse on a row or focus it with the keyboard.

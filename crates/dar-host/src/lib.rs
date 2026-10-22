@@ -125,6 +125,31 @@ pub async fn run_with_extensions(
     boot(extensions, HostOptions::new(root.as_ref())).await
 }
 
+/// Refuse to boot when another process already listens on `port`.
+///
+/// `bind()` alone misses overlaps: with SO_REUSEADDR (set by tokio and std on
+/// Unix), macOS lets `127.0.0.1:P` bind while another process holds `*:P`, and
+/// the two processes then split the traffic. A connect probe catches every
+/// overlap of the wildcard and specific addresses.
+fn ensure_port_free(bind: std::net::IpAddr, port: u16) -> Result<()> {
+    if port == 0 {
+        return Ok(());
+    }
+    let probe_ip = match bind {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => std::net::Ipv4Addr::LOCALHOST.into(),
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => std::net::Ipv6Addr::LOCALHOST.into(),
+        ip => ip,
+    };
+    let addr = std::net::SocketAddr::new(probe_ip, port);
+    if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok() {
+        anyhow::bail!(
+            "port {port} is already in use by another process ({addr} accepts connections). \
+             Stop that process or set a different `dashboard.port` in agent.yaml"
+        );
+    }
+    Ok(())
+}
+
 fn load_dotenv(root: &Path) -> Result<()> {
     agent_env::load_agent_env(root).map(|_| ())
 }
@@ -232,6 +257,7 @@ async fn boot_inner(
         let port = options.http_port;
         // Bind synchronously so an occupied port fails the boot before any
         // extension starts (and before anything can announce the HTTP URL).
+        ensure_port_free(bind, port).inspect_err(|e| report("-", e))?;
         let listener = tokio::net::TcpListener::bind((bind, port))
             .await
             .with_context(|| format!("binding host HTTP on {bind}:{port}"))
@@ -983,9 +1009,50 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(err.to_string().contains("binding host HTTP"));
+        assert!(err.to_string().contains("already in use"), "{err}");
         // Fail-fast: extensions registered but never started.
         assert_eq!(*log.lock().unwrap(), vec!["register:a"]);
+    }
+
+    #[tokio::test]
+    async fn wildcard_listener_blocks_loopback_boot() {
+        // Another agent holds `*:P`; a second agent asks for `127.0.0.1:P`.
+        let blocker = std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let port = blocker.local_addr().unwrap().port();
+        let temp = tempfile::tempdir().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let err = boot(
+            vec![Arc::new(RecordingExt {
+                id: "a",
+                log: Arc::clone(&log),
+            })],
+            HostOptions::new(temp.path())
+                .without_dotenv()
+                .http_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("already in use"), "{err}");
+        assert_eq!(*log.lock().unwrap(), vec!["register:a"]);
+    }
+
+    #[test]
+    fn loopback_listener_blocks_wildcard_bind() {
+        let blocker = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = blocker.local_addr().unwrap().port();
+        let err = ensure_port_free(std::net::Ipv4Addr::UNSPECIFIED.into(), port).unwrap_err();
+        assert!(err.to_string().contains("already in use"));
+    }
+
+    #[test]
+    fn free_port_passes_check() {
+        let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        assert!(ensure_port_free(std::net::Ipv4Addr::LOCALHOST.into(), port).is_ok());
     }
 
     #[test]
