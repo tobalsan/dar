@@ -611,6 +611,7 @@ pub struct Orchestrator {
     env_reload_consumers: Option<Arc<host_api::EnvReloadConsumers>>,
     paths: AgentPaths,
     tracker: Arc<dyn crate::tracker::Tracker>,
+    tracker_auth_failed: bool,
     runner: Arc<dyn cap_runner::Runner>,
     runner_services: host_api::ServiceRegistry,
     prompt: PromptRenderer,
@@ -683,6 +684,7 @@ impl Orchestrator {
             env_reload_consumers: None,
             paths,
             tracker,
+            tracker_auth_failed: false,
             runner,
             runner_services,
             prompt,
@@ -823,9 +825,24 @@ impl Orchestrator {
         // Poll candidates once per tick (after maybe_reload so config changes
         // apply to the filter immediately).
         let candidates = match self.tracker.poll_candidates() {
-            Ok(v) => v,
+            Ok(v) => {
+                if self.tracker_auth_failed {
+                    self.tracker_auth_failed = false;
+                    logging::ev(
+                        "-",
+                        "tracker_auth_recovered",
+                        "Linear tracker authentication recovered",
+                    );
+                }
+                v
+            }
             Err(e) => {
-                logging::ev("-", "poll_error", &format!("{e:#}"));
+                let error = format!("{e:#}");
+                if !self.tracker_auth_failed && error.contains("Linear API returned HTTP 401") {
+                    self.tracker_auth_failed = true;
+                    tracing::warn!(issue = %"-", event = %"tracker_auth_failed", "Linear tracker authentication failed; polling will retry");
+                }
+                logging::ev("-", "poll_error", &error);
                 Vec::new()
             }
         };
@@ -5015,6 +5032,174 @@ dashboard:
     // ---------------------------------------------------------------------------
     // poll_candidates called once per tick
     // ---------------------------------------------------------------------------
+
+    struct ScriptedPollTracker {
+        polls: Mutex<std::collections::VecDeque<Result<Vec<Issue>>>>,
+    }
+
+    impl Tracker for ScriptedPollTracker {
+        fn poll_candidates(&self) -> Result<Vec<Issue>> {
+            self.polls
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("scripted poll")
+        }
+
+        fn fetch_states(&self, _ids: &[String]) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_terminal(&self) -> Result<Vec<Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn fetch_one(&self, _id: &str) -> Result<Option<Issue>> {
+            Ok(Some(issue("AUTH-1", None, None)))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct PollLogOutput(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for PollLogOutput {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn run_poll_script(polls: Vec<Result<Vec<Issue>>>) -> Vec<String> {
+        let output = PollLogOutput::default();
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let temp = TempDir::new().unwrap();
+        // A rendering failure creates a due retry through ordinary dispatch.
+        std::fs::write(temp.path().join("WORKFLOW.md"), "{{ issue.missing }}").unwrap();
+        let cfg = test_agent_config();
+        let mut effective_cfg = EffectiveLoopConfig::resolve(&cfg, &test_frontmatter());
+        effective_cfg.retry_backoff_ms = 0;
+        let store = Arc::new(Store::open(&temp.path().join("store.db")).unwrap());
+        let (state, control_rx) = test_state(store);
+        let mut bus = host_api::EventBus::new();
+        bus.register_retained(RUN_SNAPSHOT_TOPIC, RunSnapshot::empty())
+            .unwrap();
+        let bus = Arc::new(bus);
+        let mut snapshots = bus
+            .subscribe_retained::<RunSnapshot>(RUN_SNAPSHOT_TOPIC)
+            .unwrap();
+        let tick_count = polls.len();
+        let tracker = Arc::new(ScriptedPollTracker {
+            polls: Mutex::new(polls.into()),
+        });
+        let mut orchestrator = Orchestrator::new(
+            cfg,
+            AgentPaths::new(temp.path().to_path_buf()),
+            tracker,
+            PromptRenderer::load(&temp.path().join("WORKFLOW.md")).unwrap(),
+            effective_cfg,
+            state,
+            control_rx,
+        )
+        .with_snapshot_bus(bus);
+        for _ in 0..tick_count {
+            orchestrator.tick().await;
+            assert!(
+                snapshots.has_changed().unwrap(),
+                "every tick publishes a snapshot"
+            );
+            snapshots.borrow_and_update();
+        }
+        let bytes = output.0.lock().unwrap().clone();
+        String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn poll_auth_outages_warn_once_and_recover_without_stopping_ticks() {
+        let logs = run_poll_script(vec![
+            Err(anyhow::anyhow!("another service returned HTTP 401")),
+            Ok(vec![issue("AUTH-1", None, None)]),
+            Err(anyhow::anyhow!("Linear API returned HTTP 401").context("poll failed")),
+            Err(anyhow::anyhow!(
+                "Linear API returned HTTP 401 after retry: Unauthorized"
+            )),
+            Err(anyhow::anyhow!("network unavailable")),
+            Err(anyhow::anyhow!("Linear API returned HTTP 401")),
+            Ok(Vec::new()),
+            Ok(Vec::new()),
+            Err(anyhow::anyhow!("Linear API returned HTTP 401")),
+            Ok(Vec::new()),
+        ])
+        .await;
+        let transitions: Vec<_> = logs
+            .iter()
+            .filter(|line| {
+                line.contains("event=tracker_auth_failed")
+                    || line.contains("event=tracker_auth_recovered")
+            })
+            .map(|line| {
+                if line.contains("WARN") {
+                    "failed"
+                } else {
+                    "recovered"
+                }
+            })
+            .collect();
+        assert_eq!(transitions, ["failed", "recovered", "failed", "recovered"]);
+        assert!(logs
+            .iter()
+            .filter(|line| line.contains("event=tracker_auth_recovered"))
+            .all(|line| line.contains("INFO")));
+        let poll_errors: Vec<_> = logs
+            .iter()
+            .filter(|line| line.contains("event=poll_error"))
+            .collect();
+        assert_eq!(poll_errors.len(), 6);
+        assert!(poll_errors.iter().all(|line| line.contains("INFO")));
+        assert!(
+            logs.iter().any(
+                |line| line.contains("event=dispatch") && line.contains("from retry attempt=1")
+            ),
+            "due retries still dispatch when polling fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_auth_outage_on_first_tick_warns_once() {
+        let logs = run_poll_script(vec![
+            Err(anyhow::anyhow!("Linear API returned HTTP 401")),
+            Err(anyhow::anyhow!("Linear API returned HTTP 401")),
+        ])
+        .await;
+        let warnings: Vec<_> = logs
+            .iter()
+            .filter(|line| line.contains("event=tracker_auth_failed"))
+            .collect();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("WARN"));
+        assert_eq!(
+            logs.iter()
+                .filter(|line| line.contains("event=poll_error") && line.contains("INFO"))
+                .count(),
+            2
+        );
+        assert!(!logs
+            .iter()
+            .any(|line| line.contains("event=tracker_auth_recovered")));
+    }
 
     struct CountingTracker {
         poll_count: Arc<std::sync::atomic::AtomicU32>,

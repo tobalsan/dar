@@ -66,6 +66,44 @@ fn failing_self_check_execs_into_prev() {
 }
 
 #[test]
+fn rollback_scrubs_file_env_preserves_shell_env_and_sets_guard() {
+    let _guard = SPAWN_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    let current = bin.join("dar");
+    let prev = bin.join("dar.prev");
+    install_current(&current);
+    fs::write(
+        bin.join(".env"),
+        "DAR_PROBE_FILE=file\nDAR_PROBE_EXTERNAL=fromfile\nDAR_SELF_CHECK_FALLBACK=file\n",
+    )
+    .unwrap();
+    fs::write(
+        &prev,
+        "#!/bin/sh\nset -eu\n[ \"${DAR_PROBE_FILE+x}\" != x ]\n[ \"$DAR_PROBE_EXTERNAL\" = shell ]\n[ \"$DAR_SELF_CHECK_FALLBACK\" = 1 ]\necho probe: rollback environment verified\n",
+    )
+    .unwrap();
+    fs::set_permissions(&prev, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = Command::new(&current)
+        .env("DAR_PROBE_SELF_CHECK_EXIT", "1")
+        .env("DAR_PROBE_CHECK_ENV", "1")
+        .env("DAR_PROBE_EXTERNAL", "shell")
+        .env_remove("DAR_PROBE_FILE")
+        .env_remove("DAR_SELF_CHECK_FALLBACK")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "rollback env checks failed: {output:?}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("probe: self-check inherited file value"));
+    assert!(stdout.contains("probe: rollback environment verified"));
+}
+
+#[test]
 fn failing_self_check_without_prev_errors_clearly() {
     let _guard = SPAWN_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().unwrap();

@@ -154,10 +154,10 @@ fn exec_prev(prev: &Path) -> Result<()> {
         prev.display()
     );
     let args = std::env::args_os().skip(1).collect::<Vec<OsString>>();
-    let err = Command::new(prev)
-        .args(args)
-        .env(FALLBACK_GUARD_ENV, "1")
-        .exec();
+    let mut command = Command::new(prev);
+    command.args(args);
+    agent_env::scrub_loaded_env(&mut command);
+    let err = command.env(FALLBACK_GUARD_ENV, "1").exec();
     Err(err).with_context(|| format!("execv failed for {}", prev.display()))
 }
 

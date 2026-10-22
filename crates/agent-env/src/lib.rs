@@ -717,18 +717,26 @@ mod tests {
     fn scrub_loaded_env_removes_only_file_loaded_keys_from_child() {
         let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".env"), "DOTENV_SCRUB=file\n").unwrap();
+        std::fs::write(
+            dir.path().join(".env"),
+            "DOTENV_SCRUB=file\nDOTENV_SCRUB_EXTERNAL=file\n",
+        )
+        .unwrap();
         std::env::remove_var("DOTENV_SCRUB");
+        std::env::set_var("DOTENV_SCRUB_EXTERNAL", "shell");
 
         load_agent_env(dir.path()).unwrap();
-        let mut command = std::process::Command::new("env");
+        let mut command = std::process::Command::new("sh");
+        command.args([
+            "-c",
+            "[ -z \"${DOTENV_SCRUB+x}\" ] && [ \"$DOTENV_SCRUB_EXTERNAL\" = shell ]",
+        ]);
         scrub_loaded_env(&mut command);
 
-        let removed = command
-            .get_envs()
-            .any(|(key, value)| key == "DOTENV_SCRUB" && value.is_none());
-        assert!(removed);
+        assert!(command.status().unwrap().success());
+        assert_eq!(std::env::var("DOTENV_SCRUB").as_deref(), Ok("file"));
 
         std::env::remove_var("DOTENV_SCRUB");
+        std::env::remove_var("DOTENV_SCRUB_EXTERNAL");
     }
 }
