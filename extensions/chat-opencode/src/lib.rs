@@ -1215,7 +1215,7 @@ PY"#;
     async fn completed_tool_state_delivers_input_and_output() {
         for running_input in [false, true] {
             let temp = tempfile::tempdir().unwrap();
-            let mut server = FAKE_SERVER.replace("python3 -", "uv run python -").replace(
+            let mut server = FAKE_SERVER.replace(
                 "\"output\":\"ok\"",
                 "\"input\":{\"cmd\":\"pwd\"},\"output\":\"ok\"",
             );
