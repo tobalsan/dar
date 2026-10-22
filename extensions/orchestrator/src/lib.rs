@@ -5127,8 +5127,29 @@ dashboard:
             .collect()
     }
 
+    fn run_poll_auth_test_in_subprocess(test_name: &str) -> bool {
+        const SENTINEL: &str = "DAR_TEST_POLL_AUTH_SUBPROCESS";
+        if std::env::var(SENTINEL).as_deref() == Ok(test_name) {
+            return false;
+        }
+        // Tracing callsite interest is process-global, even with a thread-local subscriber.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(SENTINEL, test_name)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "subprocess failed: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"));
+        true
+    }
+
     #[tokio::test]
     async fn poll_auth_outages_warn_once_and_recover_without_stopping_ticks() {
+        if run_poll_auth_test_in_subprocess(
+            "tests::poll_auth_outages_warn_once_and_recover_without_stopping_ticks",
+        ) {
+            return;
+        }
         let logs = run_poll_script(vec![
             Err(anyhow::anyhow!("another service returned HTTP 401")),
             Ok(vec![issue("AUTH-1", None, None)]),
@@ -5179,6 +5200,9 @@ dashboard:
 
     #[tokio::test]
     async fn poll_auth_outage_on_first_tick_warns_once() {
+        if run_poll_auth_test_in_subprocess("tests::poll_auth_outage_on_first_tick_warns_once") {
+            return;
+        }
         let logs = run_poll_script(vec![
             Err(anyhow::anyhow!("Linear API returned HTTP 401")),
             Err(anyhow::anyhow!("Linear API returned HTTP 401")),

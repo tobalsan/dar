@@ -15,6 +15,7 @@ fn subprocess(stage: &str) -> Command {
 fn assert_success(command: &mut Command) {
     let output = command.output().unwrap();
     assert!(output.status.success(), "subprocess failed: {output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"));
 }
 
 #[test]
