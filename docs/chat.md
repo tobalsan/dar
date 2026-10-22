@@ -162,23 +162,45 @@ extensions:
       sandbox_bind: 0.0.0.0
       # Defaults to dashboard.port + 1; ephemeral when dashboard.port is 0.
       sandbox_port: 7879
-      # Optional browser-visible origin, without a path.
-      # sandbox_origin: https://agent-apps.example.com
+      # Optional shared browser-visible origin, without a path.
+      # sandbox_origin: https://agent-apps.example.net
+      # Per-server origins override sandbox_origin; keys match mcp.json.
+      sandbox_origins:
+        tldraw: http://localhost:7879
       # Servers whose apps require a fresh view for every call:
-      no_reuse: []
+      no_reuse: [tldraw]
 ```
 
-The sandbox uses a second HTTP listener serving only the proxy page. With an
-ephemeral sandbox port, Dar publishes its actual bound port to the browser.
-Without `sandbox_origin`, the browser uses the chat page's scheme and host
-with that port. Views are disabled when the sandbox and chat origins match;
-`dar doctor` warns about matching configured origins.
+The tested tldraw app did not reliably execute a second result in the same
+view; use a fresh view per execution. Other servers reuse views by default.
+Both lists use server IDs from `mcp.json`; Dar has no built-in vendor exceptions.
 
-For TLS termination or remote access, proxy a second origin to the sandbox
-listener and set `sandbox_origin` to the externally reachable origin. The
-same applies when Docker's host `SANDBOX_PORT` differs from the container's
-port; see [Docker sandbox](sandbox.md). Forwarding both listeners to the
-same origin defeats isolation and disables views.
+The second HTTP listener serves the sandbox proxy and app documents, never
+the chat. Dar assigns each server a browser-visible origin and checks that
+assignment on both routes. With an ephemeral sandbox port, it publishes the
+actual bound port. By default, local apps use
+`http://<server>.localhost:<sandbox_port>`; views from one server share
+origin and storage, while different servers use different hostnames.
+
+The example reserves `localhost` for the MCP server named `tldraw`, whose
+view needs a real loopback URL. Open chat at `http://127.0.0.1:7878/chat`,
+not `localhost:7878`. Ports do not isolate cookies, and sibling remote
+hostnames can share cookies. Dar uses the Public Suffix List to reject
+overlapping cookie domains between chat and apps, and between servers in
+isolated mode. This also rejects parent-child hostname assignments. The
+local `localhost`/`<server>.localhost` arrangement is verified in Chromium;
+other browsers need separate validation. Invalid assignments show an error
+and retain text fallback.
+
+For TLS termination or remote access, proxy separate app cookie domains to the
+sandbox listener and configure their browser-visible URLs in
+`sandbox_origins`. An explicit global `sandbox_origin` is a shared-origin
+exception: servers without per-server overrides share its storage and
+cookies. App and chat cookie scopes must always remain separate, for example
+`https://agent-apps.example.net` beside `https://agent.example.com`.
+Local tldraw rendering does not guarantee rendering on a remote domain.
+When Docker's host `SANDBOX_PORT` differs from the container port, use
+browser-visible ports in these overrides; see [Docker sandbox](sandbox.md).
 
 An app can post a user message, update selection context for the next turn,
 call app-visible tools on its own server, read its server's resources, and

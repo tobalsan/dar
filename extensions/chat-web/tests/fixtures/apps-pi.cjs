@@ -7,7 +7,7 @@ const path = require('node:path');
 const emit = value => process.stdout.write(JSON.stringify(value) + '\n');
 let call = 0;
 let queue = Promise.resolve();
-async function bridgeCall(label) {
+async function bridgeCall(label, server) {
   const child = spawn(process.env.DAR_APPS_TEST_BINARY, ['__mcp-bridge', '--dir', process.cwd()], { stdio: ['pipe', 'pipe', 'pipe'] });
   const pending = new Map();
   const lines = readline.createInterface({ input: child.stdout });
@@ -18,7 +18,7 @@ async function bridgeCall(label) {
   });
   try {
     await request(1, 'initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'browser-test', version: '1' } });
-    const response = await request(2, 'tools/call', { name: 'canvas__draw', arguments: { label } });
+    const response = await request(2, 'tools/call', { name: `${server}__draw`, arguments: { label } });
     if (response.error) throw new Error(response.error.message);
     return response.result;
   } finally { child.stdin.end(); }
@@ -35,12 +35,13 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     emit({ type: 'agent_start' });
     emit({ type: 'message_start', message: { role: 'user' } });
     fs.appendFileSync(path.join(process.cwd(), 'prompts.jsonl'), JSON.stringify({ message: command.message }) + '\n');
-    if (command.message.includes('draw first') || command.message.includes('draw second')) {
-      const label = command.message.includes('draw second') ? 'second' : 'first';
+    if (command.message.includes('draw first') || command.message.includes('draw second') || command.message.includes('draw other')) {
+      const server = command.message.includes('draw other') ? 'other' : 'canvas';
+      const label = server === 'other' ? 'foreign' : command.message.includes('draw second') ? 'second' : 'first';
       const id = `drawing-${++call}`;
-      emit({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', toolCall: { id, name: process.env.APPS_PI_ALIAS ? 'mcp__dar__canvas__draw' : 'canvas__draw', arguments: { label } } } });
+      emit({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', toolCall: { id, name: process.env.APPS_PI_ALIAS ? `mcp__dar__${server}__draw` : `${server}__draw`, arguments: { label } } } });
       if ((process.env.APPS_PI_ALIAS || process.env.APPS_HOLD_RESULT) && label === 'second') await new Promise(resolve => setTimeout(resolve, 1000));
-      const result = await bridgeCall(label);
+      const result = await bridgeCall(label, server);
       emit({ type: 'tool_execution_end', toolCallId: id, result, isError: false });
     }
     emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Done.' } });

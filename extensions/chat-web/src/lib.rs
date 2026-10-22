@@ -2737,7 +2737,11 @@ mod tests {
     struct AppCatalog;
     impl dar_extension_sdk::mcp_apps::McpApps for AppCatalog {
         fn list_tools(&self) -> dar_extension_sdk::BoxFuture<'_, Result<serde_json::Value>> {
-            Box::pin(async { Ok(serde_json::json!([])) })
+            Box::pin(async {
+                Ok(serde_json::json!([
+                    {"server":"draw"}, {"server":"canva"}, {"server":"UPPER"}, {"server":"OTHER"}
+                ]))
+            })
         }
         fn read_ui_resource<'a>(
             &'a self,
@@ -2764,8 +2768,8 @@ mod tests {
             Box::pin(async { anyhow::bail!("not available") })
         }
     }
-    // Approved seam: result capture and browser bootstrap HTTP interfaces from Testing Decisions.
-    // Catches recorded-result authorization and fallback; misses browser enforcement of headers.
+    // Approved HTTP seam: ALG-530 comment d1fef21c-b9cc-4116-85c9-c00796ceda3e, section 5.
+    // Catches host/session/resource binding; misses browser enforcement of headers.
     #[tokio::test]
     async fn app_bootstrap_returns_html_and_full_result_only_to_owning_session() {
         let root = test_root();
@@ -2783,8 +2787,10 @@ mod tests {
                 Arc::new(AppCatalog),
             )
             .unwrap();
+        let config = Config::default();
+        config.apps.bound_port.set(28181).unwrap();
         let state = Arc::new(AppState {
-            config: Config::default(),
+            config,
             root,
             start: std::sync::OnceLock::from(start_ctx(services)),
             sessions: Mutex::new(HashMap::new()),
@@ -2804,12 +2810,15 @@ mod tests {
             is_error: false,
             done: true,
         });
+        let sandbox_app = apps::sandbox_router(Arc::clone(&state));
         let app = router(state);
         let response = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!("/test/apps/{id}"))
+                    .header("host", "CHAT.localhost:28180")
+                    .header("referer", "http://chat.localhost:28180/chat")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2821,16 +2830,486 @@ mod tests {
                 .unwrap();
         assert_eq!(body["html"], "<!doctype html><p>Canvas ready</p>");
         assert_eq!(body["result"]["_meta"]["secretViewData"], 17);
+        assert_eq!(body["sandboxOrigin"], "http://draw.localhost:28181");
+        let sandbox = url::Url::parse(body["sandboxUrl"].as_str().unwrap()).unwrap();
+        let content = url::Url::parse(body["contentUrl"].as_str().unwrap()).unwrap();
+        assert_eq!(sandbox.path(), format!("/sandbox/{id}"));
+        assert_eq!(content.path(), format!("/content/{id}"));
+        assert_eq!(sandbox.query(), content.query());
+        let content_path = format!("{}?{}", content.path(), content.query().unwrap());
+        let response = sandbox_app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&content_path)
+                    .header("host", "DRAW.localhost:28181")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert!(
+            csp.contains("connect-src 'none'; frame-src 'none';"),
+            "{csp}"
+        );
+        assert!(
+            csp.contains(
+                "frame-ancestors http://chat.localhost:28180 http://draw.localhost:28181;"
+            ),
+            "{csp}"
+        );
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "<!doctype html><p>Canvas ready</p>"
+        );
+        let proxy_path = format!("{}?{}", sandbox.path(), sandbox.query().unwrap());
+        let response = sandbox_app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&proxy_path)
+                    .header("host", "draw.localhost:28181")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert!(
+            csp.contains("frame-src http://draw.localhost:28181;"),
+            "{csp}"
+        );
+        assert!(csp.contains("worker-src 'none';"), "{csp}");
+        for path in [&content_path, &proxy_path] {
+            for host in [
+                "other.localhost:28181",
+                "127.0.0.1:28180",
+                "draw.localhost:28182",
+            ] {
+                let response = sandbox_app
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri(path)
+                            .header("host", host)
+                            .header("x-forwarded-host", "draw.localhost:28181")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{host}");
+            }
+            let response = sandbox_app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path.replace("session=test", "session=other"))
+                        .header("host", "draw.localhost:28181")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
         let response = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!("/other/apps/{id}"))
+                    .header("host", "chat.localhost:28180")
+                    .header("referer", "http://chat.localhost:28180/chat")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        fs::remove_file(records.join(format!("{id}.json"))).unwrap();
+        for path in [&content_path, &proxy_path] {
+            let response = sandbox_app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path)
+                        .header("host", "draw.localhost:28181")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    async fn apps_http_state(
+        config: Config,
+        catalog: Arc<dyn dar_extension_sdk::mcp_apps::McpApps>,
+    ) -> Arc<AppState> {
+        let root = test_root();
+        let records = root.join("data/mcp-apps/results");
+        fs::create_dir_all(&records).unwrap();
+        let mut services = dar_extension_sdk::ServiceRegistry::default();
+        services
+            .register::<dyn dar_extension_sdk::mcp_apps::McpApps>(
+                dar_extension_sdk::mcp_apps::MCP_APPS_SERVICE,
+                catalog,
+            )
+            .unwrap();
+        config.apps.bound_port.set(28181).unwrap();
+        let state = Arc::new(AppState {
+            config,
+            root,
+            start: std::sync::OnceLock::from(start_ctx(services)),
+            sessions: Mutex::new(HashMap::new()),
+            transition: Mutex::new(()),
+            slot_registry: Arc::default(),
+            meta: Mutex::new(HashMap::new()),
+        });
+        let session = state.session("test").await.unwrap();
+        for (server, id) in [
+            ("draw", "0123456789abcdef0123456789abcdef"),
+            ("canva", "abcdef0123456789abcdef0123456789"),
+            ("UPPER", "11111111111111111111111111111111"),
+            ("OTHER", "22222222222222222222222222222222"),
+        ] {
+            let tool = format!("{server}__canvas");
+            fs::write(records.join(format!("{id}.json")), serde_json::to_vec(&serde_json::json!({
+                "tool":tool, "server":server, "resource_uri":"ui://canvas", "args":{}, "result":{}, "created_at":now_ms()
+            })).unwrap()).unwrap();
+            session.publish(ChatEvent::ToolCall {
+                id: server.into(),
+                name: tool,
+                args: "{}".into(),
+            });
+            session.publish(ChatEvent::ToolOutput {
+                id: server.into(),
+                text: format!("ready [mcp-app-result:{id}]"),
+                is_error: false,
+                done: true,
+            });
+        }
+        state
+    }
+
+    // Approved HTTP seam, comment d1fef21c-b9cc-4116-85c9-c00796ceda3e section 5.
+    // Catches usable isolated defaults for supported server IDs; misses browser DNS resolution.
+    #[tokio::test]
+    async fn uppercase_app_servers_load_on_distinct_default_origins() {
+        let state = apps_http_state(Config::default(), Arc::new(AppCatalog)).await;
+        let app = router(Arc::clone(&state));
+        let sandbox = apps::sandbox_router(state);
+        let mut views = vec![];
+        for id in [
+            "11111111111111111111111111111111",
+            "22222222222222222222222222222222",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/test/apps/{id}"))
+                        .header("host", "127.0.0.1:28180")
+                        .header("referer", "http://127.0.0.1:28180/")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            views.push(body);
+        }
+        assert_ne!(views[0]["sandboxOrigin"], views[1]["sandboxOrigin"]);
+        for (view, other) in [(&views[0], &views[1]), (&views[1], &views[0])] {
+            let content = url::Url::parse(view["contentUrl"].as_str().unwrap()).unwrap();
+            let other = url::Url::parse(other["sandboxOrigin"].as_str().unwrap()).unwrap();
+            for (host, status) in [(&content, StatusCode::OK), (&other, StatusCode::NOT_FOUND)] {
+                let response = sandbox
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri(format!("{}?{}", content.path(), content.query().unwrap()))
+                            .header(
+                                "host",
+                                &host[url::Position::BeforeHost..url::Position::AfterPort],
+                            )
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), status);
+                if status == StatusCode::OK {
+                    assert_eq!(
+                        response.into_body().collect().await.unwrap().to_bytes(),
+                        "<!doctype html><p>Canvas ready</p>"
+                    );
+                }
+            }
+        }
+    }
+
+    // Approved public HTTP seam, comment d1fef21c-b9cc-4116-85c9-c00796ceda3e section 5.
+    // Catches configured host assignment and chat-origin validation; misses browser isolation.
+    #[tokio::test]
+    async fn app_origin_configuration_keeps_local_servers_separate_and_remote_sharing_explicit() {
+        let id = "0123456789abcdef0123456789abcdef";
+        for (apps, chat, expected) in [
+            (
+                serde_json::json!({}),
+                "http://127.0.0.1:28180",
+                Some("http://draw.localhost:28181"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"http://localhost:28181"}}),
+                "http://127.0.0.1:28180",
+                Some("http://localhost:28181"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"http://localhost:28181"}}),
+                "http://localhost:28180",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"http://localhost:28181","canva":"http://localhost:28182"}}),
+                "http://127.0.0.1:28180",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"https://apps.example"}),
+                "https://chat.example",
+                Some("https://apps.example"),
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"https://apps.example","sandbox_origins":{"canva":"https://apps.example:8443"}}),
+                "https://chat.example",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"data:text/html,unsafe"}}),
+                "http://127.0.0.1:28180",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"https://fallback.example.edu","sandbox_origins":{"draw":"https://canvas.example.com","canva":"https://other.example.com"}}),
+                "https://chat.example.net",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"https://fallback.example.edu","sandbox_origins":{"draw":"https://canvas.example.com","canva":"https://other.example.org"}}),
+                "https://agent.example.com",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"https://fallback.example.edu","sandbox_origins":{"draw":"https://canvas.example.com","canva":"https://deep.canvas.example.com"}}),
+                "https://chat.example.net",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"https://apps.example.com"}),
+                "https://agent.example.com",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"https://fallback.example.edu","sandbox_origins":{"draw":"https://canvas.example.net","canva":"https://other.example.org"}}),
+                "https://agent.example.com",
+                Some("https://canvas.example.net"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"http://alpha.localhost:28181","canva":"http://deep.alpha.localhost:28181"}}),
+                "http://127.0.0.1:28180",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"invalid-id":"http://invalid-id.localhost:28181"}}),
+                "http://127.0.0.1:28180",
+                Some("http://draw.localhost:28181"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"http://draw.localhost.:28181"}}),
+                "http://127.0.0.1:28180",
+                None,
+            ),
+        ] {
+            let config: Config = serde_json::from_value(serde_json::json!({"apps":apps})).unwrap();
+            let state = apps_http_state(config, Arc::new(AppCatalog)).await;
+            let host = url::Url::parse(chat).unwrap();
+            let response = router(state)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/test/apps/{id}"))
+                        .header(
+                            "host",
+                            &host[url::Position::BeforeHost..url::Position::AfterPort],
+                        )
+                        .header("referer", format!("{chat}/chat"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if let Some(expected) = expected {
+                assert_eq!(response.status(), StatusCode::OK, "{apps}");
+                let body: serde_json::Value = serde_json::from_slice(
+                    &response.into_body().collect().await.unwrap().to_bytes(),
+                )
+                .unwrap();
+                assert_eq!(body["sandboxOrigin"], expected);
+            } else {
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{apps}");
+            }
+        }
+        let state = apps_http_state(Config::default(), Arc::new(AppCatalog)).await;
+        for referer in [None, Some("http://attacker.example/chat")] {
+            let mut request = axum::http::Request::builder()
+                .uri(format!("/test/apps/{id}"))
+                .header("host", "127.0.0.1:28180")
+                .header("x-forwarded-host", "attacker.example");
+            if let Some(referer) = referer {
+                request = request.header("referer", referer);
+            }
+            let response = router(Arc::clone(&state))
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    struct ChangingAppCatalog(std::sync::atomic::AtomicUsize);
+    impl dar_extension_sdk::mcp_apps::McpApps for ChangingAppCatalog {
+        fn list_tools(&self) -> dar_extension_sdk::BoxFuture<'_, Result<serde_json::Value>> {
+            Box::pin(async { Ok(serde_json::json!([{"server":"draw"},{"server":"canva"}])) })
+        }
+        fn read_ui_resource<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+        ) -> dar_extension_sdk::BoxFuture<'a, Result<serde_json::Value>> {
+            let version = self.0.fetch_add(1, Ordering::SeqCst) + 1;
+            Box::pin(async move {
+                Ok(
+                    serde_json::json!({"html":format!("<p>Resource version {version}</p>"),
+                "meta":{"ui":{"csp":{"resourceDomains":[format!("https://version{version}.example")]}}}}),
+                )
+            })
+        }
+        fn call_tool<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+            _: serde_json::Value,
+        ) -> dar_extension_sdk::BoxFuture<'a, Result<serde_json::Value>> {
+            Box::pin(async { anyhow::bail!("not available") })
+        }
+        fn read_resource<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+        ) -> dar_extension_sdk::BoxFuture<'a, Result<serde_json::Value>> {
+            Box::pin(async { anyhow::bail!("not available") })
+        }
+    }
+
+    // Approved public HTTP seam, comment d1fef21c-b9cc-4116-85c9-c00796ceda3e section 5.
+    // Catches immutable resource/CSP tickets and cross-server record rejection; misses browser CSP.
+    #[tokio::test]
+    async fn app_tickets_bind_exact_resource_snapshot_and_server_record() {
+        let state = apps_http_state(
+            Config::default(),
+            Arc::new(ChangingAppCatalog(std::sync::atomic::AtomicUsize::new(0))),
+        )
+        .await;
+        let app = router(Arc::clone(&state));
+        let sandbox = apps::sandbox_router(state);
+        let mut tickets = vec![];
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/test/apps/0123456789abcdef0123456789abcdef")
+                        .header("host", "127.0.0.1:28180")
+                        .header("referer", "http://127.0.0.1:28180/")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            tickets.push(body);
+        }
+        for (ticket, text, domain) in [
+            (
+                &tickets[0],
+                "<p>Resource version 1</p>",
+                "https://version1.example",
+            ),
+            (
+                &tickets[1],
+                "<p>Resource version 2</p>",
+                "https://version2.example",
+            ),
+        ] {
+            let url = url::Url::parse(ticket["contentUrl"].as_str().unwrap()).unwrap();
+            let path = format!("{}?{}", url.path(), url.query().unwrap());
+            let response = sandbox
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(&path)
+                        .header("host", "draw.localhost:28181")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap();
+            assert!(csp.contains(domain), "{csp}");
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                text
+            );
+            for route in ["content", "sandbox"] {
+                let path = path.replace("/content/", &format!("/{route}/")).replace(
+                    "0123456789abcdef0123456789abcdef",
+                    "abcdef0123456789abcdef0123456789",
+                );
+                let response = sandbox
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri(path)
+                            .header("host", "canva.localhost:28181")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            }
+        }
     }
 
     struct ContextSession {

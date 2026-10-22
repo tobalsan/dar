@@ -143,12 +143,12 @@
       const [config,data]=await Promise.all([configuration(),request(`/chat/${encodeURIComponent(app.slot)}/apps/${encodeURIComponent(descriptor.recordId)}`)]);
       if(view.destroying)return;
       if(config.sandboxPort==null)throw new Error('Sandbox listener unavailable');
-      const origin=new URL(config.sandboxOrigin || `${location.protocol}//${location.hostname}:${config.sandboxPort}`);
-      if(!['http:','https:'].includes(origin.protocol) || origin.origin===location.origin)throw new Error('Sandbox origin must differ from chat origin');
+      const origin=new URL(data.sandboxOrigin);
+      if(!['http:','https:'].includes(origin.protocol) || origin.hostname===location.hostname)throw new Error('App and chat must use separate hostnames. Open local chat at 127.0.0.1.');
       view.origin=origin.origin;view.noReuse=config.noReuse.includes(descriptor.server);
       if(view.record===descriptor.recordId || !view.data) {view.data=data;view.dataRecord=descriptor.recordId;}
-      const url=new URL(`/sandbox/${encodeURIComponent(descriptor.recordId)}`,origin);
-      url.searchParams.set('session',app.slot);url.searchParams.set('hostOrigin',location.origin);
+      const url=new URL(data.sandboxUrl);
+      if(url.origin!==origin.origin)throw new Error('Invalid sandbox assignment');
       frame.src=url.href;
       view.timer=setTimeout(()=>fail(view,new Error('App initialization timed out')),15000);
     }catch(error){fail(view,error)}

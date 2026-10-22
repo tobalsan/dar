@@ -2,6 +2,7 @@
   const esc = s => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 
   const PREFIX = (typeof window !== 'undefined' && window.__dashPrefix) || '';
+  const SLOT_KEY = `dar-chat-slot:${PREFIX}`;
 
   // crypto.randomUUID only exists in secure contexts (https/localhost); dashboards served over plain http (e.g. tailnet hostnames) need the fallback.
   const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
@@ -503,6 +504,7 @@
   const switchSlot = (app, slot) => {
     if (!slot || slot === app.slot) return;
     app.es?.close(); app.slot = slot;
+    try { sessionStorage.setItem(SLOT_KEY, slot); } catch {}
     // Composer state belongs to the old chat: drop draft + attachments (and their preview URLs).
     for (const file of app.pending) if (file._preview) URL.revokeObjectURL(file._preview);
     app.draft = ''; app.pending = [];
@@ -518,7 +520,9 @@
   const toggleSidebar = () => { let root=$('chat-root'); if(matchMedia('(max-width: 760px)').matches){root.classList.toggle('sidebar-open');return;} let collapsed=!root.classList.contains('sidebar-collapsed');root.classList.toggle('sidebar-collapsed',collapsed);localStorage.setItem('dar-chat-sidebar',collapsed?'collapsed':'open'); };
 
   if (!window.__chatWeb) {
-    let app = { slot: 'main', blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false, qsel: {}, qsent: {}, editingSession: null, sidebarSequence: 0, dragDepth: 0 };
+    let slot = 'main';
+    try { slot = sessionStorage.getItem(SLOT_KEY) || slot; } catch {}
+    let app = { slot, blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false, qsel: {}, qsent: {}, editingSession: null, sidebarSequence: 0, dragDepth: 0 };
     window.__chatWeb = app;
     window.renderChatEvent = event => render(app, event);
     app.newChat = () => newChat(app).catch(error => render(app, { type: 'error', error: `New chat failed: ${error.message}` }));

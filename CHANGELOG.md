@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- MCP Apps now load real HTTP documents on separate per-server hostnames, with `sandbox_origins` overrides for local tldraw and mapped ports; Dar rejects overlapping chat and app cookie domains and restores the selected conversation after reload.
 - MCP Apps with declared CSP can load blob scripts and images while workers remain blocked; apps that omit display modes can expand alongside chat, while explicit mode lists remain enforced.
 - MCP Apps now negotiate Dar's supported protocol version when an app requests a different version.
 - Pi chat now opens MCP Apps from Dar bridge tool results, including tools with hyphens in their names.

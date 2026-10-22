@@ -2,6 +2,7 @@
 use super::*;
 use dar_extension_sdk::mcp_apps::{self, McpApps, ResultRecord, MCP_APPS_SERVICE};
 use serde_json::{json, Value};
+use sha2::Digest;
 use std::time::Duration;
 
 #[cfg(not(test))]
@@ -15,9 +16,157 @@ pub(super) struct AppsConfig {
     pub sandbox_bind: Option<String>,
     pub sandbox_port: Option<u16>,
     pub sandbox_origin: Option<String>,
+    pub sandbox_origins: HashMap<String, String>,
     pub no_reuse: Vec<String>,
     #[serde(skip)]
     pub bound_port: Arc<std::sync::OnceLock<u16>>,
+    #[serde(skip)]
+    tickets: Arc<std::sync::Mutex<HashMap<String, PreparedView>>>,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedView {
+    session: String,
+    id: String,
+    record: ResultRecord,
+    chat_origin: String,
+    app_origin: String,
+    html: String,
+    csp: String,
+    created_at: u64,
+}
+
+fn origin(value: &str) -> Result<url::Url> {
+    let parsed = url::Url::parse(value)?;
+    anyhow::ensure!(
+        matches!(parsed.scheme(), "http" | "https")
+            && parsed.origin().ascii_serialization() == value
+            && parsed.host_str().is_some_and(|host| !host.ends_with('.')),
+        "invalid sandbox origin"
+    );
+    Ok(parsed)
+}
+
+fn cookie_scope(origin: &url::Url) -> Result<&str> {
+    let host = origin.host_str().context("sandbox hostname required")?;
+    Ok(if matches!(origin.host(), Some(url::Host::Domain(_))) {
+        psl::domain_str(host).unwrap_or(host)
+    } else {
+        host
+    })
+}
+
+fn chat_origin(headers: &HeaderMap) -> Result<String> {
+    let referer = url::Url::parse(
+        headers
+            .get(header::REFERER)
+            .context("chat Referer required")?
+            .to_str()?,
+    )?;
+    let chat = referer.origin().ascii_serialization();
+    let parsed = origin(&chat)?;
+    anyhow::ensure!(
+        matches_host(headers, &parsed),
+        "chat Host and Referer disagree"
+    );
+    Ok(chat)
+}
+
+fn matches_host(headers: &HeaderMap, assigned: &url::Url) -> bool {
+    headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|host| url::Url::parse(&format!("{}://{host}", assigned.scheme())).ok())
+        .is_some_and(|host| {
+            host.origin() == assigned.origin()
+                && host.username().is_empty()
+                && host.password().is_none()
+                && host.path() == "/"
+                && host.query().is_none()
+                && host.fragment().is_none()
+        })
+}
+
+async fn app_origin(state: &AppState, server: &str, chat: &str) -> Result<String> {
+    let port = state
+        .config
+        .apps
+        .bound_port
+        .get()
+        .context("sandbox listener unavailable")?;
+    let config = &state.config.apps;
+    let tools = tokio::time::timeout(CALL_TIMEOUT, catalog(state)?.list_tools())
+        .await
+        .context("view catalog timed out")??;
+    let mut servers = config
+        .sandbox_origins
+        .keys()
+        .cloned()
+        .collect::<HashSet<_>>();
+    servers.insert(server.to_owned());
+    servers.extend(
+        tools
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|tool| tool["server"].as_str())
+            .map(str::to_owned),
+    );
+    let chat_url = origin(chat)?;
+    let chat_scope = cookie_scope(&chat_url)?;
+    let chat_host = chat_url
+        .host_str()
+        .context("chat hostname required")?
+        .to_owned();
+    let mut scopes: HashMap<String, (String, bool, String)> = HashMap::new();
+    let mut selected = None;
+    for name in servers {
+        let shared = !config.sandbox_origins.contains_key(&name) && config.sandbox_origin.is_some();
+        let assigned = if let Some(value) = config
+            .sandbox_origins
+            .get(&name)
+            .or(config.sandbox_origin.as_ref())
+        {
+            value.clone()
+        } else {
+            anyhow::ensure!(
+                chat_host == "localhost"
+                    || chat_host.ends_with(".localhost")
+                    || chat_host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback()),
+                "remote access requires a browser-visible sandbox origin"
+            );
+            let label = if !name.is_empty()
+                && name.len() <= 63
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+                && !name.starts_with('-')
+                && !name.ends_with('-')
+            {
+                name.clone()
+            } else {
+                let hash = format!("{:x}", sha2::Sha256::digest(name.as_bytes()));
+                format!("mcp-{}", &hash[..59])
+            };
+            format!("http://{label}.localhost:{port}")
+        };
+        let parsed = origin(&assigned)?;
+        let scope = cookie_scope(&parsed)?.to_owned();
+        anyhow::ensure!(scope != chat_scope, "chat and app must use different cookie scopes; open local chat on 127.0.0.1 when an app uses localhost");
+        if let Some((other, other_shared, other_origin)) = scopes.get(&scope) {
+            anyhow::ensure!(
+                shared && *other_shared && other_origin == &assigned,
+                "sandbox cookie scope shared by {other} and {name}"
+            );
+        }
+        scopes.insert(scope, (name.clone(), shared, assigned.clone()));
+        if name == server {
+            selected = Some(assigned);
+        }
+    }
+    selected.context("sandbox origin unavailable")
 }
 
 fn catalog(state: &AppState) -> Result<Arc<dyn McpApps>> {
@@ -49,18 +198,38 @@ async fn record(state: &AppState, session: &str, id: &str) -> Result<ResultRecor
 pub(super) async fn resource(
     Path((session, id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
 ) -> Response {
     let outcome = async {
+        let chat = chat_origin(&headers)?;
         let record = record(&state, &session, &id).await?;
+        let app = app_origin(&state, &record.server, &chat).await?;
         let catalog = catalog(&state)?;
         let resource = tokio::time::timeout(CALL_TIMEOUT,
             catalog.read_ui_resource(&record.server, &record.resource_uri)).await
             .context("view loading timed out")??;
         let mut meta = resource["meta"].clone();
         meta["ui"]["permissions"] = json!({});
-        let (_,approved) = policy(meta.pointer("/ui/csp"));
+        let (csp,approved) = policy(meta.pointer("/ui/csp"));
         meta["ui"]["csp"] = approved;
+        let ticket = uuid::Uuid::new_v4().simple().to_string();
+        let mut sandbox_url = url::Url::parse(&format!("{app}/sandbox/{id}"))?;
+        sandbox_url.query_pairs_mut().append_pair("session", &session).append_pair("ticket", &ticket);
+        let mut content_url = sandbox_url.clone();
+        content_url.set_path(&format!("/content/{id}"));
+        let prepared = PreparedView { session: session.clone(), id: id.clone(), record: record.clone(),
+            chat_origin: chat, app_origin: app.clone(), html: resource["html"].as_str().context("view HTML required")?.to_owned(),
+            csp, created_at: now_ms() };
+        let mut tickets = state.config.apps.tickets.lock().expect("view tickets poisoned");
+        tickets.retain(|_, view| now_ms().saturating_sub(view.created_at) < 60 * 60 * 1000);
+        if tickets.len() >= 512 {
+            if let Some(oldest) = tickets.iter().min_by_key(|(_, view)| view.created_at).map(|(key, _)| key.clone()) {
+                tickets.remove(&oldest);
+            }
+        }
+        tickets.insert(ticket, prepared);
         Ok::<_, anyhow::Error>(json!({"html":resource["html"], "meta":meta,
+            "sandboxOrigin":app,"sandboxUrl":sandbox_url.as_str(),"contentUrl":content_url.as_str(),
             "server":record.server,"resourceUri":record.resource_uri,"args":record.args,"result":record.result}))
     }.await;
     match outcome {
@@ -234,9 +403,7 @@ pub(super) async fn start(state: Arc<AppState>) -> Result<()> {
         .set(port)
         .map_err(|_| anyhow::anyhow!("sandbox already started"))?;
     let mut shutdown = start.shutdown.clone();
-    let router = Router::new()
-        .route("/sandbox/{record}", get(proxy))
-        .with_state(state);
+    let router = sandbox_router(state);
     tokio::spawn(async move {
         if let Err(error) = axum::serve(listener, router)
             .with_graceful_shutdown(async move { shutdown.cancelled().await })
@@ -248,51 +415,63 @@ pub(super) async fn start(state: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn sandbox_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/sandbox/{record}", get(proxy))
+        .route("/content/{record}", get(content))
+        .with_state(state)
+}
+
 #[derive(Deserialize)]
 pub(super) struct ProxyQuery {
     session: String,
-    #[serde(rename = "hostOrigin")]
-    host_origin: String,
+    ticket: String,
 }
 
-// A separate origin serves this proxy only. The CSP comes from server-owned
-// metadata looked up by result id, never from a browser-supplied policy.
-async fn proxy(
-    Path(id): Path<String>,
-    Query(query): Query<ProxyQuery>,
-    State(state): State<Arc<AppState>>,
-) -> Response {
-    let outcome = async {
-        let origin = url::Url::parse(&query.host_origin)?;
-        anyhow::ensure!(
-            matches!(origin.scheme(), "http" | "https")
-                && origin.origin().ascii_serialization() == query.host_origin,
-            "invalid host origin"
-        );
-        let record = record(&state, &query.session, &id).await?;
-        let catalog = catalog(&state)?;
-        let resource = tokio::time::timeout(
-            CALL_TIMEOUT,
-            catalog.read_ui_resource(&record.server, &record.resource_uri),
-        )
-        .await
-        .context("view loading timed out")??;
-        let (csp, _) = policy(resource.pointer("/meta/ui/csp"));
-        tracing::info!(session=%query.session,server=%record.server,csp=%csp,"MCP App CSP");
-        let html = include_str!("sandbox.html").replace(
-            "__HOST_ORIGIN__",
-            &serde_json::to_string(&query.host_origin)?,
-        );
-        Ok::<_, anyhow::Error>((csp, html))
-    }
-    .await;
+async fn prepared(
+    state: &AppState,
+    id: &str,
+    query: &ProxyQuery,
+    headers: &HeaderMap,
+) -> Result<PreparedView> {
+    let view = state
+        .config
+        .apps
+        .tickets
+        .lock()
+        .expect("view tickets poisoned")
+        .get(&query.ticket)
+        .cloned()
+        .context("view ticket unavailable")?;
+    anyhow::ensure!(
+        view.id == id
+            && view.session == query.session
+            && now_ms().saturating_sub(view.created_at) < 60 * 60 * 1000,
+        "view ticket does not match this request"
+    );
+    let assigned = origin(&view.app_origin)?;
+    anyhow::ensure!(
+        matches_host(headers, &assigned),
+        "view belongs to another sandbox hostname"
+    );
+    let current = record(state, &query.session, id).await?;
+    anyhow::ensure!(
+        current.server == view.record.server
+            && current.resource_uri == view.record.resource_uri
+            && current.tool == view.record.tool
+            && current.args == view.record.args
+            && current.result == view.record.result
+            && current.created_at == view.record.created_at,
+        "view record changed"
+    );
+    Ok(view)
+}
+
+fn html_response(outcome: Result<(String, String)>) -> Response {
     match outcome {
         Ok((csp, html)) => (
             [
-                (
-                    header::CONTENT_SECURITY_POLICY,
-                    format!("{csp} frame-ancestors {};", query.host_origin),
-                ),
+                (header::CONTENT_SECURITY_POLICY, csp),
                 (header::CACHE_CONTROL, "no-store".to_owned()),
                 (header::CONTENT_TYPE, "text/html; charset=utf-8".to_owned()),
                 (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_owned()),
@@ -302,6 +481,46 @@ async fn proxy(
             .into_response(),
         Err(error) => (StatusCode::NOT_FOUND, error.to_string()).into_response(),
     }
+}
+
+// Both pages use the same prepared resource snapshot. The wrapper and content
+// share one untrusted server origin, while their policies serve different jobs.
+async fn proxy(
+    Path(id): Path<String>,
+    Query(query): Query<ProxyQuery>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    html_response(async {
+        let view = prepared(&state, &id, &query, &headers).await?;
+        let mut content = url::Url::parse(&format!("{}/content/{id}", view.app_origin))?;
+        content.query_pairs_mut().append_pair("session", &view.session).append_pair("ticket", &query.ticket);
+        let html = include_str!("sandbox.html")
+            .replace("__HOST_ORIGIN__", &serde_json::to_string(&view.chat_origin)?)
+            .replace("__CONTENT_URL__", &serde_json::to_string(content.as_str())?);
+        let csp = format!("default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; worker-src 'none'; frame-src {}; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors {};", view.app_origin, view.chat_origin);
+        Ok((csp, html))
+    }.await)
+}
+
+async fn content(
+    Path(id): Path<String>,
+    Query(query): Query<ProxyQuery>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    html_response(
+        async {
+            let view = prepared(&state, &id, &query, &headers).await?;
+            let csp = format!(
+                "{} frame-ancestors {} {};",
+                view.csp, view.chat_origin, view.app_origin
+            );
+            tracing::info!(session=%view.session,server=%view.record.server,csp=%csp,"MCP App CSP");
+            Ok((csp, view.html))
+        }
+        .await,
+    )
 }
 
 fn policy(declared: Option<&Value>) -> (String, Value) {

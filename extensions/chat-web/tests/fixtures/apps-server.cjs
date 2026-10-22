@@ -26,6 +26,10 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       break;
     }
     case 'resources/read':
+      if (process.env.DAR_APPS_TEST_POLICY === 'unavailable') {
+        process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: { code: -32000, message: 'unavailable resource' } }) + '\n');
+        return;
+      }
       result = { contents: [{ uri: request.params.uri, mimeType: 'text/html;profile=mcp-app', ...(process.env.DAR_APPS_TEST_POLICY === 'blob' ? { _meta: { ui: { csp: {} } } } : {}), text: fs.readFileSync(process.env.DAR_APPS_TEST_HTML || path.join(__dirname, 'drawing.html'), 'utf8').replace("const policy = '';", `const policy = ${JSON.stringify(process.env.DAR_APPS_TEST_POLICY || '')};`).replace("const protocolVersion = '2026-01-26';", `const protocolVersion = ${JSON.stringify(process.env.DAR_APPS_TEST_PROTOCOL_VERSION || '2026-01-26')};`) }] };
       break;
     default:

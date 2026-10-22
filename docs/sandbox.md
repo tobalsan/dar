@@ -83,12 +83,40 @@ A loopback `extensions.chat-web.apps.sandbox_bind` is refused because the
 host cannot reach container loopback. Keep both container listeners on
 `0.0.0.0` and expose only the required host loopback ports.
 
-When `SANDBOX_PORT` differs from the container port, set
-`extensions.chat-web.apps.sandbox_origin` to the browser-visible origin,
-for example `http://127.0.0.1:17879`. Set it to a separate HTTPS origin when
-TLS ends at a proxy or a second Tailscale Serve port. That origin must differ
-from the chat origin; proxy the sandbox port there as well as the dashboard
-port. The chat and app ports must both be reachable by the browser.
+Apps default to separate `<server>.localhost` hostnames. For local tldraw,
+reserve `localhost` for its MCP server ID and keep chat on `127.0.0.1`.
+When `SANDBOX_PORT` differs from the container port, set each server's
+browser-visible origin in `agent.yaml`, for example with host port 17879
+mapped to container port 7879:
+
+```yaml
+extensions:
+  chat-web:
+    apps:
+      sandbox_port: 7879
+      sandbox_origins:
+        tldraw: http://localhost:17879
+        excalidraw: http://excalidraw.localhost:17879
+        canva: http://canva.localhost:17879
+```
+
+Keys must match `mcp.json`; configure every server whose browser-visible
+port differs. Dar uses the Public Suffix List to reject overlapping cookie
+domains: different ports or sibling remote hostnames are insufficient.
+Parent-child server hostnames are also rejected. The local
+`localhost`/`<server>.localhost` arrangement is verified in Chromium; other
+browsers need separate validation. The backend rejects a resource requested
+on another server's assigned host. Views from the same server share storage.
+
+For TLS termination or remote access, proxy separate app cookie domains to the
+sandbox listener and set their `sandbox_origins` entries. A global
+`extensions.chat-web.apps.sandbox_origin`, such as
+`https://agent-apps.example.net` beside chat at `https://agent.example.com`,
+explicitly shares an origin among servers without per-server overrides.
+This exception shares their storage and cookies; it never permits overlap
+with chat's cookie scope. Proxy the sandbox port as well as the dashboard
+port, and ensure both are reachable by the browser. Local tldraw compatibility does
+not guarantee rendering on a remote domain.
 
 Existing sandboxes keep their compose file: add the second port mapping and
 the read-only `./mcp.json:/agent/mcp.json:ro` mount, or regenerate the file

@@ -2,10 +2,12 @@
 (() => {
   'use strict';
   const hostOrigin=__HOST_ORIGIN__;
+  const contentUrl=__CONTENT_URL__;
+  const appOrigin=new URL(contentUrl).origin;
   if (parent===window || location.origin===hostOrigin || !document.referrer || new URL(document.referrer).origin!==hostOrigin) return;
   const inner=document.createElement('iframe');
   inner.title='App content';
-  inner.sandbox='allow-scripts allow-forms';
+  inner.sandbox='allow-scripts allow-forms allow-same-origin';
   document.body.append(inner);
   let loaded=false;
   addEventListener('message',event=>{
@@ -15,11 +17,11 @@
       if(message.method==='ui/notifications/sandbox-resource-ready') {
         if(loaded || typeof message.params?.html!=='string') return;
         loaded=true;
-        inner.srcdoc=message.params.html;
+        inner.src=contentUrl;
       } else if (loaded && !message.method?.startsWith('ui/notifications/sandbox-')) {
-        inner.contentWindow.postMessage(message,'*');
+        inner.contentWindow.postMessage(message,appOrigin);
       }
-    } else if(event.source===inner.contentWindow && event.origin==='null' && !message.method?.startsWith('ui/notifications/sandbox-')) {
+    } else if(event.source===inner.contentWindow && event.origin===appOrigin && !message.method?.startsWith('ui/notifications/sandbox-')) {
       parent.postMessage(message,hostOrigin);
     }
   });

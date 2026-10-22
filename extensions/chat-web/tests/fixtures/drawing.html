@@ -48,7 +48,7 @@ document.getElementById('expand').onclick = () => request('ui/request-display-mo
 const invalidVersion = protocolVersion === '2025-11-21'
   ? request('ui/initialize', { protocolVersion: 42 }).then(() => 'accepted', () => 'rejected')
   : Promise.resolve('not sent');
-invalidVersion.then(outcome => {
+if (policy !== 'init-timeout') invalidVersion.then(outcome => {
   document.querySelector('[aria-label="Invalid version request"]').textContent = outcome;
   return request('ui/initialize', { protocolVersion, appInfo: { name: 'Acceptance canvas', version: '1' }, appCapabilities: policy === 'modes-absent' ? {} : { availableDisplayModes: policy === 'modes-inline' ? ['inline'] : ['inline', 'fullscreen'] } });
 }).then(response => {
@@ -80,8 +80,8 @@ if (policy === 'blob') {
     worker.onmessage = () => { report('Blob worker', 'running'); worker.terminate(); };
     worker.onerror = event => { event.preventDefault(); report('Blob worker', 'blocked'); };
   } catch { report('Blob worker', 'blocked'); }
-  try { void parent.document.body; report('Opaque isolation', 'accessible'); }
-  catch { report('Opaque isolation', 'isolated'); }
+  try { void top.document.body; report('Chat isolation', 'accessible'); }
+  catch { report('Chat isolation', 'isolated'); }
 }
 addEventListener('securitypolicyviolation', event => { if (policy === 'blob' && event.effectiveDirective !== 'connect-src') return; document.querySelector('[aria-label="Policy violation"]').textContent = event.effectiveDirective; });
 fetch('https://example.com/undeclared').then(() => { document.querySelector('[aria-label="Network status"]').textContent = 'Network unexpectedly allowed'; }).catch(() => { document.querySelector('[aria-label="Network status"]').textContent = 'Undeclared network blocked'; });

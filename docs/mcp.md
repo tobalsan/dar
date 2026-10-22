@@ -42,7 +42,8 @@ With chat-web enabled, the same `mcp.json` entries can provide interactive
 HTML views using the stable `io.modelcontextprotocol/ui` extension
 (2026-01-26, `text/html;profile=mcp-app`). Tools associate a view through
 `_meta.ui.resourceUri`; the deprecated `_meta["ui/resourceUri"]` is also read.
-No extra per-server setup is required. Remote servers use the existing OAuth
+Most servers need no extra setup; local origin overrides are described below.
+Remote servers use the existing OAuth
 login and credential refresh flow. Vendor access restrictions still apply:
 successful MCP Apps hosting does not grant access to a vendor's OAuth client
 allowlist or paid account.
@@ -54,14 +55,32 @@ own server's resources. Missing visibility means `["model", "app"]`.
 View calls require no per-call approval; Dar logs their method, server,
 tool, and status, together with each view's enforced CSP.
 
-Views run through a sandbox proxy on a separate origin. Network and asset
+Views run through a sandbox proxy and real HTTP app document with a separate
+cookie scope from chat. By default, each server gets `<server>.localhost` on the
+sandbox port; views from the same server share an origin and storage.
+The backend enforces each server's assigned host for both proxy and content
+requests. The proxy and its app document form one untrusted server boundary.
+Different servers remain isolated unless the operator explicitly configures
+the global shared `sandbox_origin` override.
+
+Network and asset
 access follow the resource's declared CSP domains; no CSP declaration means
 no external network access. Declared CSP also permits blob scripts and images,
-while workers remain blocked. Inner views use an opaque origin to prevent
-access to other servers' views. Camera, microphone, geolocation, and clipboard
+while workers remain blocked. Camera, microphone, geolocation, and clipboard
 permissions are currently withheld; the host reports no device grants.
-See [web chat](chat.md)
-for the second listener, reverse proxy configuration, and view controls.
+
+For local tldraw, reserve `http://localhost:<sandbox_port>` for that server
+with `extensions.chat-web.apps.sandbox_origins.tldraw`, and open chat at
+`http://127.0.0.1:<chat_port>`. Leave other servers on their own hostnames.
+The override key is the server ID from `mcp.json`, not a vendor name built
+into Dar. Ports and sibling remote hostnames do not isolate cookies: Dar rejects
+overlapping cookie domains using the Public Suffix List, including overlap
+between chat and any app. The local `localhost`/`<server>.localhost` setup
+has been verified in Chromium; other browsers need separate validation.
+An invalid origin assignment leaves the text fallback visible. This local
+setup does not establish tldraw compatibility
+on a remote HTTPS domain.
+See [web chat](chat.md) for configuration and view controls.
 
 Dar uses separate MCP connections for the model bridge and the web Apps
 catalog. Servers that maintain client-local state may treat them as separate
@@ -77,6 +96,10 @@ retain the text fallback.
 
 View reuse across tool calls is a Dar extension to the stable spec. Servers
 that expect one result per view can be listed in
-`extensions.chat-web.apps.no_reuse`. OpenAI Apps SDK (`window.openai`),
+`extensions.chat-web.apps.no_reuse`. Set `no_reuse: [tldraw]` when that is
+the server ID: repeated-result testing showed that the tldraw app needs a
+fresh view per execution. Other servers reuse views
+by default; this is configuration, not a built-in vendor exception.
+OpenAI Apps SDK (`window.openai`),
 picture-in-picture, partial tool inputs, host theming, and app-provided tools
 are not supported. Edits made inside a view need not survive reload.
