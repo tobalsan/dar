@@ -10,6 +10,7 @@ Breaking changes are marked **⚠ BREAKING**.
 ## [Unreleased]
 
 - Chat web: a conversation shows a dot when a turn finishes there while you look elsewhere. The dot persists across reloads.
+- Chat web: a turn that finishes while no dashboard tab is open now shows the unread dot when you open the dashboard or the connection returns. No sound plays for these turns.
 - Chat web: a short sound plays when a turn finishes in any conversation, on any dashboard tab, including a background browser tab. Only one browser tab plays it. A bell button mutes it. The choice persists and syncs across tabs.
 - `dar dash` now uses an app icon from the folder where you start it as the favicon and apple touch icon. It picks `icon.*` or `favicon.*`, otherwise the first image whose name contains `icon` (png, svg, ico, webp, jpg, jpeg). See [docs/dashboard.md](docs/dashboard.md).
 - chat-web: the agent `avatar` (emoji, image URL, or image file in the agent folder) is now also the browser favicon and the apple touch icon.

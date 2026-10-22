@@ -136,7 +136,72 @@ async function two_tabs_play_one_sound_per_turn() {
   assert.equal(first.played.length + second.played.length, 2, 'next turn plays again');
 }
 
+// Page load fetches the session list for catch-up; answer that request.
+async function catchUp(page, entries) {
+  for (let call of page.calls.filter(c => c.url.startsWith('/chat/sessions'))) call.resolve({ ok: true, json: async () => entries });
+  page.calls.length = 0;
+  await settle();
+}
+const NOW = Date.now();
+
+async function turn_missed_while_disconnected_shows_dot_without_sound() {
+  const store = { 'dar-chat-seen': JSON.stringify({ created: NOW - 100000, seen: { a: NOW - 50000, b: NOW - 50000 } }) };
+  const page = browser(store);
+  await catchUp(page, [session('a', 'Alpha', { slots: ['main'], modified_ms: NOW - 60000 }), session('b', 'Beta', { modified_ms: NOW - 10000 })]);
+  await wait(250);
+  await page.sidebar([session('a', 'Alpha', { slots: ['main'], modified_ms: NOW - 60000 }), session('b', 'Beta', { modified_ms: NOW - 10000 })]);
+  assert.equal(dots(page.html()), 1);
+  assert.ok(page.html().indexOf('Unread messages') < page.html().indexOf('<span>Beta'), 'dot sits on Beta');
+  assert.equal(page.played.length, 0, 'no sound for caught-up turns');
+}
+
+async function reconnect_runs_catch_up_again() {
+  const store = { 'dar-chat-seen': JSON.stringify({ created: NOW - 100000, seen: {} }) };
+  const page = browser(store);
+  await catchUp(page, []);
+  page.sources.find(s => s.url === '/chat/events').onopen();
+  await settle();
+  await catchUp(page, [session('b', 'Beta', { modified_ms: NOW - 10000 })]);
+  await page.sidebar([session('b', 'Beta', { modified_ms: NOW - 10000 })]);
+  assert.equal(dots(page.html()), 1);
+}
+
+async function own_viewed_chat_and_running_chat_get_no_dot() {
+  const store = { 'dar-chat-seen': JSON.stringify({ created: NOW - 100000, seen: {} }) };
+  const page = browser(store);
+  const entries = [session('a', 'Alpha', { slots: ['main'], modified_ms: NOW - 1000 }), session('c', 'Gamma', { busy: true, modified_ms: NOW - 1000 })];
+  await catchUp(page, entries);
+  await page.sidebar(entries);
+  assert.equal(dots(page.html()), 0);
+  page.push(ended('t9', 'main', { session: 'a' }));
+  await page.sidebar([session('a', 'Alpha', { slots: ['main'], modified_ms: NOW + 5 })]);
+  assert.equal(dots(page.html()), 0, 'turn finished while viewing leaves no dot');
+}
+
+async function first_run_does_not_flood_old_history() {
+  const page = browser();
+  const entries = [session('a', 'Alpha', { modified_ms: NOW - 86400000 }), session('b', 'Beta', { modified_ms: NOW - 3600000 })];
+  await catchUp(page, entries);
+  await page.sidebar(entries);
+  assert.equal(dots(page.html()), 0);
+}
+
+async function sending_marks_a_new_chat_as_seen() {
+  const store = { 'dar-chat-seen': JSON.stringify({ created: NOW - 100000, seen: {} }) };
+  const page = browser(store);
+  page.window.__chatSeen.mark(['other'], NOW);
+  const entries = [session('a', 'Alpha', { slots: ['other'], modified_ms: NOW - 1000 })];
+  await catchUp(page, entries);
+  await page.sidebar(entries);
+  assert.equal(dots(page.html()), 0);
+}
+
 (async () => {
+  await turn_missed_while_disconnected_shows_dot_without_sound();
+  await reconnect_runs_catch_up_again();
+  await own_viewed_chat_and_running_chat_get_no_dot();
+  await first_run_does_not_flood_old_history();
+  await sending_marks_a_new_chat_as_seen();
   await finished_turn_in_another_chat_plays_sound_and_marks_it_unread();
   await new_chat_answer_after_leaving_shows_unread();
   await finished_turn_in_the_viewed_chat_stays_read();

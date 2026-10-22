@@ -234,6 +234,7 @@
     if (!input || !sendEnabled(app)) return;
     let slot = app.slot, message = input.value, files = app.pending.slice(), command_id = uuid();
     let command = message.trim();
+    window.__chatSeen?.mark([slot]);
     if (!files.length && command === '/stop') { fetch(`/chat/${app.slot}/abort`, { method: 'POST' }); app.draft=''; input.value=''; autogrow(input); refreshBusy(app); return; }
     if (!files.length && command === '/new') {
       app.draft = ''; input.value = ''; app.pending = []; renderChips(app); autogrow(input); refreshBusy(app);
@@ -452,6 +453,7 @@
   const clearViewed = (all, focusedSlot) => {
     try {
       if (document.hidden || document.hasFocus?.() === false) return;
+      for (let s of all) if ((s.slots || []).includes(focusedSlot)) window.__chatSeen?.mark(rowKeys(s), Math.max(Date.now(), s.modified_ms || 0));
       let unread = readUnread(), changed = false;
       for (let s of all) if ((s.slots || []).includes(focusedSlot)) for (let k of rowKeys(s)) if (unread[k]) { delete unread[k]; changed = true; }
       if (changed) localStorage.setItem(UNREAD_KEY, JSON.stringify(unread));

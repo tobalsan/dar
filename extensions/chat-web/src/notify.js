@@ -11,6 +11,25 @@
   const viewing = slot => !!document.getElementById('chat-root') && !document.hidden
     && document.hasFocus?.() !== false && window.__chatWeb?.slot === slot;
 
+  // Per-browser last-seen times: { created, seen: { <session id or slot id>: ms } }.
+  // `created` is when this browser first ran the feature; older unknown sessions count as read.
+  const SEEN_KEY = 'dar-chat-seen';
+  const readSeen = () => {
+    try { let s = JSON.parse(localStorage.getItem(SEEN_KEY)); if (s && s.seen) return s; } catch {}
+    let fresh = { created: Date.now(), seen: {} };
+    try { localStorage.setItem(SEEN_KEY, JSON.stringify(fresh)); } catch {}
+    return fresh;
+  };
+  const markSeen = (keys, at = Date.now()) => {
+    try {
+      let store = readSeen();
+      for (let k of keys) if (k) store.seen[k] = Math.max(store.seen[k] || 0, at);
+      localStorage.setItem(SEEN_KEY, JSON.stringify(store));
+    } catch {}
+  };
+  window.__chatSeen = { mark: markSeen };
+  readSeen();
+
   const play = () => {
     try {
       if (localStorage.getItem(MUTE_KEY) === 'off') return;
@@ -34,7 +53,7 @@
   const onTurnEnded = ended => {
     if (ended.kind !== 'finished') return;
     claimAndPlay(ended.turn);
-    if (viewing(ended.slot)) return;
+    if (viewing(ended.slot)) { markSeen([ended.slot, ended.session]); return; }
     try {
       let unread = readUnread();
       unread[ended.slot] = true;
@@ -44,7 +63,29 @@
     } catch {}
   };
 
+  // Catch-up for turns that ended while no tab listened. Silent: no sound.
+  let catching = false;
+  const catchUp = async () => {
+    if (catching) return;
+    catching = true;
+    try {
+      let all = await fetch('/chat/sessions').then(r => r.json());
+      let store = readSeen(), unread = readUnread(), changed = false;
+      for (let s of all) {
+        if (s.archived || s.busy) continue;
+        let keys = [s.id, ...(s.slots || [])];
+        if ((s.slots || []).some(viewing)) { markSeen(keys, Math.max(Date.now(), s.modified_ms || 0)); continue; }
+        let seen = Math.max(store.created, ...keys.map(k => store.seen[k] || 0));
+        if ((s.modified_ms || 0) > seen && !unread[s.id]) { unread[s.id] = true; changed = true; }
+      }
+      if (changed) { localStorage.setItem(UNREAD_KEY, JSON.stringify(unread)); window.__chatWeb?.refreshSidebar?.(); }
+    } catch {}
+    catching = false;
+  };
+
   window.__chatNotifyHandle = onTurnEnded;
   let es = new EventSource('/chat/events');
+  es.onopen = catchUp;
+  catchUp();
   es.onmessage = e => { try { onTurnEnded(JSON.parse(e.data)); } catch {} };
 })();
