@@ -121,6 +121,7 @@ impl OpenCodeChatSession {
         let artifact_ready = params.artifact_ready.clone();
         let pump = tokio::spawn(async move {
             let mut user_messages: HashSet<String> = HashSet::new();
+            let mut tool_calls = HashSet::new();
             loop {
                 match events.next_event().await {
                     Ok(Some(event)) => {
@@ -141,7 +142,14 @@ impl OpenCodeChatSession {
                             }
                             continue;
                         }
-                        if let Some(chat_event) = map_event(&event, &mut user_messages) {
+                        for chat_event in
+                            map_event(&event, &mut user_messages).into_iter().flatten()
+                        {
+                            if let ChatEvent::ToolCall { id, .. } = &chat_event {
+                                if !tool_calls.insert(id.clone()) {
+                                    continue;
+                                }
+                            }
                             if tx.send(chat_event).await.is_err() {
                                 return;
                             }
@@ -400,7 +408,7 @@ fn artifact_ready_from_opencode(event: &OpenCodeEvent) -> Option<ArtifactReady> 
         .find_map(|resource| ArtifactReady::from_publish_resource("artifact_publish", resource))
 }
 
-fn map_event(event: &OpenCodeEvent, user_messages: &mut HashSet<String>) -> Option<ChatEvent> {
+fn map_event(event: &OpenCodeEvent, user_messages: &mut HashSet<String>) -> Option<Vec<ChatEvent>> {
     let value = event_payload(event)?;
     match value.get("type").and_then(|v| v.as_str()) {
         Some("message.updated") => {
@@ -421,11 +429,11 @@ fn map_event(event: &OpenCodeEvent, user_messages: &mut HashSet<String>) -> Opti
             }
             map_part(part)
         }
-        Some("session.idle") => Some(ChatEvent::TurnFinished {
+        Some("session.idle") => Some(vec![ChatEvent::TurnFinished {
             ok: true,
             error: None,
-        }),
-        Some("message.error") | Some("session.error") => Some(ChatEvent::TurnFinished {
+        }]),
+        Some("message.error") | Some("session.error") => Some(vec![ChatEvent::TurnFinished {
             ok: false,
             error: Some(
                 value
@@ -435,27 +443,27 @@ fn map_event(event: &OpenCodeEvent, user_messages: &mut HashSet<String>) -> Opti
                     .unwrap_or("opencode error")
                     .to_string(),
             ),
-        }),
+        }]),
         _ => None,
     }
 }
 
-fn map_part(part: &serde_json::Value) -> Option<ChatEvent> {
+fn map_part(part: &serde_json::Value) -> Option<Vec<ChatEvent>> {
     match part.get("type").and_then(|v| v.as_str()) {
-        Some("text") => Some(ChatEvent::Delta {
+        Some("text") => Some(vec![ChatEvent::Delta {
             role: ChatRole::Assistant,
             text: part_text(part),
-        }),
-        Some("reasoning") => Some(ChatEvent::Delta {
+        }]),
+        Some("reasoning") => Some(vec![ChatEvent::Delta {
             role: ChatRole::Thinking,
             text: part_text(part),
-        }),
+        }]),
         Some("tool") => map_tool(part),
         _ => None,
     }
 }
 
-fn map_tool(part: &serde_json::Value) -> Option<ChatEvent> {
+fn map_tool(part: &serde_json::Value) -> Option<Vec<ChatEvent>> {
     let id = part
         .get("id")
         .and_then(|v| v.as_str())
@@ -471,9 +479,10 @@ fn map_tool(part: &serde_json::Value) -> Option<ChatEvent> {
         return None;
     }
     let state = part.get("state").unwrap_or(part);
+    let mut events = Vec::new();
     if let Some(input) = state.get("input") {
-        return Some(ChatEvent::ToolCall {
-            id,
+        events.push(ChatEvent::ToolCall {
+            id: id.clone(),
             name,
             args: render_value(input),
         });
@@ -489,7 +498,7 @@ fn map_tool(part: &serde_json::Value) -> Option<ChatEvent> {
             .or_else(|| state.get("error"))
             .map(result_text)
             .unwrap_or_default();
-        return Some(ChatEvent::ToolOutput {
+        events.push(ChatEvent::ToolOutput {
             id,
             text,
             is_error,
@@ -499,7 +508,7 @@ fn map_tool(part: &serde_json::Value) -> Option<ChatEvent> {
             ),
         });
     }
-    None
+    (!events.is_empty()).then_some(events)
 }
 
 fn part_text(part: &serde_json::Value) -> String {
@@ -637,6 +646,7 @@ mod tests {
             },
             &mut user_messages,
         )
+        .and_then(|events| events.into_iter().next())
     }
 
     #[test]
@@ -982,6 +992,9 @@ mod tests {
             &mut user_messages,
         )
         .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
         {
             ChatEvent::Delta { role, text } => {
                 assert_eq!(role, ChatRole::Assistant);
@@ -1197,6 +1210,60 @@ class H(BaseHTTPRequestHandler):
 
 ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
 PY"#;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completed_tool_state_delivers_input_and_output() {
+        for running_input in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut server = FAKE_SERVER.replace("python3 -", "uv run python -").replace(
+                "\"output\":\"ok\"",
+                "\"input\":{\"cmd\":\"pwd\"},\"output\":\"ok\"",
+            );
+            if !running_input {
+                server = server.replace(
+                    r#""state":{"input":{"cmd":"pwd"}}"#,
+                    r#""state":{"status":"running"}"#,
+                );
+            } else {
+                server = server.replace(
+                    r#""state":{"input":{"cmd":"pwd"}}"#,
+                    r#""state":{"status":"running","input":{"cmd":"pwd"}}"#,
+                );
+            }
+            let script = write_script(temp.path(), &server);
+            let sessions = temp.path().join("sessions");
+            let params =
+                ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions)
+                    .build();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            let mut session = OpenCodeChatBackend.open(params, tx).await.unwrap();
+            session.send_turn("run pwd".to_string()).await.unwrap();
+            let mut calls = Vec::new();
+            let mut outputs = Vec::new();
+            loop {
+                match next_event(&mut rx).await {
+                    ChatEvent::ToolCall { id, name, args } => calls.push((id, name, args)),
+                    ChatEvent::ToolOutput {
+                        id,
+                        text,
+                        is_error,
+                        done,
+                    } => {
+                        assert!(!calls.is_empty(), "tool input must precede the result");
+                        outputs.push((id, text, is_error, done));
+                    }
+                    ChatEvent::TurnFinished { .. } => break,
+                    _ => {}
+                }
+            }
+            ChatSession::close(session).await.unwrap();
+            assert_eq!(
+                calls,
+                vec![("tool-1".into(), "bash".into(), r#"{"cmd":"pwd"}"#.into())]
+            );
+            assert_eq!(outputs, vec![("tool-1".into(), "ok".into(), false, true)]);
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn session_sends_steering_aborts_permissions_and_closes_server() {

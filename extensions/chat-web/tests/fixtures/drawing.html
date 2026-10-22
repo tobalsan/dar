@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Acceptance canvas</title>
+<h1>Loading drawing</h1>
+<p aria-label="Results received">0</p><p aria-label="Network status">Checking network</p><p aria-label="Policy violation"></p>
+<button id="post">Post selection</button><button id="context">Select box</button>
+<button id="refresh">Refresh drawing</button><button id="foreign">Call another server</button>
+<button id="private">Call model-only tool</button><button id="expand">Expand drawing</button>
+<p role="status"></p>
+<script>
+let next = 0, results = 0, initialized = false;
+const pending = new Map();
+const status = text => document.querySelector('[role=status]').textContent = text;
+function request(method, params) {
+  const id = ++next;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
+  });
+}
+function notify(method, params) { parent.postMessage({ jsonrpc: '2.0', method, params }, '*'); }
+addEventListener('message', event => {
+  if (event.source !== parent) return;
+  const message = event.data;
+  if (pending.has(message.id)) {
+    const { resolve, reject } = pending.get(message.id); pending.delete(message.id);
+    if (message.error) reject(new Error(message.error.message)); else resolve(message.result);
+  }
+  if (message.method === 'ui/notifications/tool-input') {
+    if (!initialized) status('Input before initialized');
+    document.querySelector('h1').textContent = 'Drawing input: ' + message.params.arguments.label;
+  }
+  if (message.method === 'ui/notifications/tool-result') {
+    document.querySelector('h1').textContent = 'Drawing: ' + message.params.structuredContent.label;
+    document.querySelector('[aria-label="Results received"]').textContent = String(++results);
+  }
+});
+document.getElementById('post').onclick = () => request('ui/message', { role: 'user', content: { type: 'text', text: 'Please inspect the selected box' } }).then(() => status('Message posted')).catch(e => status(e.message));
+document.getElementById('context').onclick = () => request('ui/update-model-context', { content: [{ type: 'text', text: 'Selected box: blue rectangle' }] }).then(() => status('Selection updated')).catch(e => status(e.message));
+document.getElementById('refresh').onclick = () => request('tools/call', { name: 'refresh', arguments: {} }).then(result => status(result.content[0].text)).catch(e => status(e.message));
+document.getElementById('foreign').onclick = () => request('tools/call', { name: 'other__refresh', arguments: {} }).then(() => status('Unexpected cross-server success')).catch(() => status('Cross-server call blocked'));
+document.getElementById('private').onclick = () => request('tools/call', { name: 'model_only', arguments: {} }).then(() => status('Unexpected model-only success')).catch(() => status('Model-only call blocked'));
+document.getElementById('expand').onclick = () => request('ui/request-display-mode', { mode: 'fullscreen' }).catch(e => status(e.message));
+request('ui/initialize', { protocolVersion: '2026-01-26', appInfo: { name: 'Acceptance canvas', version: '1' }, appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] } }).then(() => {
+  initialized = true;
+  notify('ui/notifications/initialized', {});
+  notify('ui/notifications/size-changed', { height: 330, width: 500 });
+});
+addEventListener('securitypolicyviolation', event => { document.querySelector('[aria-label="Policy violation"]').textContent = event.effectiveDirective; });
+fetch('https://example.com/undeclared').then(() => { document.querySelector('[aria-label="Network status"]').textContent = 'Network unexpectedly allowed'; }).catch(() => { document.querySelector('[aria-label="Network status"]').textContent = 'Undeclared network blocked'; });
+</script></html>

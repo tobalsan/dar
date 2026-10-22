@@ -103,6 +103,26 @@ pub async fn run(
 
     // 1b. System files: required entries present + containment.
     if let Some(cfg) = cfg.as_ref() {
+        if let Some(web) = cfg.extensions.get("chat-web") {
+            let origin = web["apps"]["sandbox_origin"]
+                .as_str()
+                .and_then(|origin| reqwest::Url::parse(origin).ok());
+            if web["enabled"].as_bool() != Some(false)
+                && origin.as_ref().is_some_and(|origin| {
+                    origin.scheme() == "http"
+                        && origin.port_or_known_default() == Some(cfg.dashboard.port)
+                        && origin.host_str().is_some_and(|host| {
+                            host.trim_matches(['[', ']'])
+                                .parse::<std::net::IpAddr>()
+                                .ok()
+                                == Some(cfg.dashboard.bind)
+                                || (host == "localhost" && cfg.dashboard.bind.is_loopback())
+                        })
+                })
+            {
+                eprintln!("doctor: warning: MCP Apps sandbox origin matches the dashboard; views require different origins (set extensions.chat-web.apps.sandbox_origin to a separate origin)");
+            }
+        }
         match system_context::resolve(&paths.root, cfg.system_files.as_deref()) {
             Ok(ctx) => pass(&format!(
                 "system files resolve ({} file(s))",

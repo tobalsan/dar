@@ -19,7 +19,8 @@ Update: `dar build`, then `docker compose restart`.
 
 Idempotent: writes only missing files, prints written/skipped lists. Edits
 `agent.yaml` as text (comments kept) by appending `sandboxed: true`, plus
-`dashboard: port: 7878` when chat-web needs it. Refuses agent.yaml forms it
+`dashboard: port: 7878` when chat-web needs it, and setting a missing
+`extensions.chat-web.apps.sandbox_port` to the dashboard port plus one. Refuses agent.yaml forms it
 can't edit safely (flow style, `...` end) and asks you to add the key by hand.
 
 Writes `Dockerfile`, `docker-compose.yml`, `.env.example`, `.env` (mode 600,
@@ -54,8 +55,8 @@ sandboxed agents.
 - Non-root (`user: UID:GID` from `.env`), `cap_drop: ALL`,
   `no-new-privileges`, read-only root fs, 2 CPU / 4 GiB / 512 PIDs.
 - No Docker socket, ever.
-- Read-only: `agent.yaml`, `AGENTS.md`, `TOOLS.md`, `WORKFLOW.md`, other
-  system files, `skills/`. Writable: `memory.md`, `memory/`, `data/`,
+- Read-only: `agent.yaml`, `AGENTS.md`, `TOOLS.md`, `WORKFLOW.md`, `mcp.json`
+  when present, other system files, `skills/`. Writable: `memory.md`, `memory/`, `data/`,
   `logs/`, `workspaces/`, `cron/` (+ `pi-agent/`).
 - Not mounted: `Dockerfile`, `docker-compose.yml`, `.env` — the agent cannot
   plant code the host later runs.
@@ -74,6 +75,25 @@ chat-web is served by the dashboard server, whose port defaults to `0`
 A loopback `dashboard.bind` or ephemeral port is refused. For remote access
 put a proxy (e.g. `tailscale serve`) in front. Use `foreground: logs`; the
 container has no TTY for the TUI.
+
+MCP Apps use a second origin, published on host loopback at the configured
+`extensions.chat-web.apps.sandbox_port` (7879 by default). Override its host
+port with `SANDBOX_PORT` in `.env`; the container port remains fixed.
+A loopback `extensions.chat-web.apps.sandbox_bind` is refused because the
+host cannot reach container loopback. Keep both container listeners on
+`0.0.0.0` and expose only the required host loopback ports.
+
+When `SANDBOX_PORT` differs from the container port, set
+`extensions.chat-web.apps.sandbox_origin` to the browser-visible origin,
+for example `http://127.0.0.1:17879`. Set it to a separate HTTPS origin when
+TLS ends at a proxy or a second Tailscale Serve port. That origin must differ
+from the chat origin; proxy the sandbox port there as well as the dashboard
+port. The chat and app ports must both be reachable by the browser.
+
+Existing sandboxes keep their compose file: add the second port mapping and
+the read-only `./mcp.json:/agent/mcp.json:ro` mount, or regenerate the file
+after saving local changes. Create `mcp.json` before scaffolding so its mount
+is included; absent files are left unmounted.
 
 ## Workspace mounts
 

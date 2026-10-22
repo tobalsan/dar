@@ -26,6 +26,7 @@ orchestrator-api = { package = "dar-orchestrator-api", path = "../../crates/orch
 tokio = { version = "1.43", features = ["rt", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
+url = "2"
 
 [dev-dependencies]
 uuid = { version = "1", features = ["v4"] }

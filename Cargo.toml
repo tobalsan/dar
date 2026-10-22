@@ -7,6 +7,7 @@ members = [
     "crates/artifacts",
     "crates/agent-env",
     "crates/cap-chat",
+    "crates/cap-mcp-apps",
     "crates/cap-deliver",
     "crates/cap-dashboard-tab",
     "crates/cap-tracker",

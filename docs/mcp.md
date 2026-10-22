@@ -35,3 +35,43 @@ On an interactive terminal, `dar run` probes configured HTTP servers without sta
 Agents with configured MCP servers expose an **MCP** dashboard tab. It shows transport and local credential status without contacting or spawning servers. OAuth-capable HTTP servers can be connected, reconnected, or disconnected there. OAuth state expires after ten minutes. Running agents' runners use changed credentials on their next MCP bridge start.
 
 Runners reach these tools through the host bridge they already use, so `pi`, `codex`, `opencode`, and `builtin` need no extra setup. The `pi` runner needs `pi-mcp-adapter` installed on the host (it provides `--mcp-config`); without it pi exits with `Unknown option: --mcp-config`. MCP servers a runner already loads from its own config keep working alongside these.
+
+## MCP Apps in web chat
+
+With chat-web enabled, the same `mcp.json` entries can provide interactive
+HTML views using the stable `io.modelcontextprotocol/ui` extension
+(2026-01-26, `text/html;profile=mcp-app`). Tools associate a view through
+`_meta.ui.resourceUri`; the deprecated `_meta["ui/resourceUri"]` is also read.
+No extra per-server setup is required. Remote servers use the existing OAuth
+login and credential refresh flow. Vendor access restrictions still apply:
+successful MCP Apps hosting does not grant access to a vendor's OAuth client
+allowlist or paid account.
+
+The model always receives the tool's text fallback. Tools whose
+`_meta.ui.visibility` excludes `"model"` stay out of its tool list. A view
+can call only its own server's tools with `"app"` visibility and read its
+own server's resources. Missing visibility means `["model", "app"]`.
+View calls require no per-call approval; Dar logs their method, server,
+tool, and status, together with each view's enforced CSP.
+
+Views run through a sandbox proxy on a separate origin. Network and asset
+access follow the resource's declared CSP domains; no CSP declaration means
+no external network access. Inner views use an opaque origin to prevent
+access to other servers' views. Camera, microphone, geolocation, and clipboard
+permissions are currently withheld; the host reports no device grants.
+See [web chat](chat.md)
+for the second listener, reverse proxy configuration, and view controls.
+
+Dar uses separate MCP connections for the model bridge and the web Apps
+catalog. Servers that maintain client-local state may treat them as separate
+sessions. The catalog caches HTML for its connection lifetime. Tool results
+are retained in `data/mcp-apps/results/` for 30 days; missing records or
+unavailable resources leave the text fallback visible with a short error.
+The model sees a small result-record marker in tool text; web transcripts
+hide it. TUI, Telegram, and Discord continue using text.
+
+View reuse across tool calls is a Dar extension to the stable spec. Servers
+that expect one result per view can be listed in
+`extensions.chat-web.apps.no_reuse`. OpenAI Apps SDK (`window.openai`),
+picture-in-picture, partial tool inputs, host theming, and app-provided tools
+are not supported. Edits made inside a view need not survive reload.

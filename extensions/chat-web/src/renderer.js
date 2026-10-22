@@ -45,7 +45,7 @@
         while (index >= 0 && (next[index].kind !== 'tool' || next[index].id !== event.id)) index--;
         let tool = next[index];
         if (!tool) { tool = { kind: 'tool', id: event.id, name: event.id, args: '', text: '', is_error: false, done: false }; next.push(tool); index = next.length - 1; }
-        tool.text = text; tool.is_error = !!event.is_error; tool.done = !!event.done; return index;
+        tool.app = event.app || tool.app; tool.text = text; tool.is_error = !!event.is_error; tool.done = !!event.done; return index;
       }
       case 'question': next.push({ kind: 'question', id: event.id, questions: event.questions || [], done: false, rejected: false, answerText: '' }); return next.length - 1;
       case 'question_done': { let index = next.length - 1; while (index >= 0 && (next[index].kind !== 'question' || next[index].id !== event.id)) index--; let q = next[index]; if (q) { q.done = true; q.rejected = !!event.is_error; q.answerText = event.text || ''; } return index >= 0 ? index : next.length - 1; }
@@ -86,7 +86,7 @@
     if (block.kind === 'tool') {
       let state = block.is_error ? 'bad' : block.done ? 'done' : 'live';
       let label = block.is_error ? 'error' : block.done ? 'done' : 'running';
-      return `<details class="chat-tool" data-tool-id="${esc(block.id)}" data-bi="${i}"><summary><span class="chat-pill chat-pill-${state}">${label}</span><span class="chat-tool-name">${esc(block.name)}</span><span class="chat-tool-summary">${esc(argSummary(block.args))}</span></summary><pre class="chat-tool-args">${esc(block.args)}</pre><pre class="chat-tool-output${block.is_error ? ' is-error' : ''}${block.done ? ' is-done' : ''}">${esc(block.text)}</pre></details>`;
+      return `<details class="chat-tool" data-tool-id="${esc(block.id)}" data-bi="${i}"><summary><span class="chat-pill chat-pill-${state}">${label}</span><span class="chat-tool-name">${esc(block.name)}</span><span class="chat-tool-summary">${esc(argSummary(block.args))}</span></summary><pre class="chat-tool-args">${esc(block.args)}</pre><pre class="chat-tool-output${block.is_error ? ' is-error' : ''}${block.done ? ' is-done' : ''}">${esc(block.text)}</pre></details>${block.app ? `<div data-app-anchor="${esc(block.app.recordId)}"></div>` : ''}`;
     }
     if (block.kind === 'question') {
       let state = block.done ? (block.rejected ? 'bad' : 'done') : 'live';
@@ -199,7 +199,22 @@
     let last = app.blocks[app.blocks.length - 1];
     let pending = app.turns > 0 && last && last.kind === 'user';
     let open = new Set(Array.from(transcript.querySelectorAll('details[open]'), d => d.dataset.bi));
-    transcript.innerHTML = html(app.blocks, app.qsel) + (pending ? pendingHtml(app.workingWord || 'Working') : '');
+    if (!window.DarMcpApps) {
+      transcript.innerHTML = html(app.blocks, app.qsel) + (pending ? pendingHtml(app.workingWord || 'Working') : '');
+    } else {
+    const staging = document.createElement('div');
+    staging.innerHTML = html(app.blocks, app.qsel) + (pending ? pendingHtml(app.workingWord || 'Working') : '');
+    const nodes = Array.from(staging.children);
+    const existing = Array.from(transcript.children).filter(node=>node.dataset.appRetiring===undefined);
+    for (let i=0;i<nodes.length;i++) {
+      const current=existing[i], fresh=nodes[i];
+      if(current?.dataset.appAnchor && current.dataset.appAnchor===fresh.dataset.appAnchor) continue;
+      if(!current) transcript.append(fresh);
+      else if(current.outerHTML!==fresh.outerHTML) current.replaceWith(fresh);
+    }
+    for(const node of existing.slice(nodes.length)) node.remove();
+    window.DarMcpApps.sync(app);
+    }
     for (const d of transcript.querySelectorAll('details')) if (open.has(d.dataset.bi)) d.open = true;
     if (stick) transcript.scrollTop = transcript.scrollHeight;
   };
@@ -213,6 +228,7 @@
   };
 
   const render = (app, event) => {
+    window.DarMcpApps?.event(app,event);
     if (event.type === 'context_usage') { let m = $('chat-token-meter'), w=$('chat-context-warning'); if (m) m.textContent = usageText(event); if(w) w.hidden=!(event.context_window && event.tokens_used/event.context_window>=.7); return; }
     if (event.type === 'reset') { app.turns=0; app.qsel={}; app.qsent={}; let m=$('chat-token-meter'),w=$('chat-context-warning'); if(m)m.textContent=''; if(w)w.hidden=true; }
     if (!event.historical && event.type === 'started' && event.origin === 'autonomous') { app.turns++; refreshBusy(app); return; }

@@ -40,6 +40,12 @@ async fn login_with(root: &Path, name: &str, wait: Duration, need_browser: bool)
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let redirect = format!("http://{}/callback", listener.local_addr()?);
     let (mut manager, store, auth_url) = begin_authorization(root, name, url, &redirect).await?;
+    let expected_state = url::Url::parse(&auth_url)?
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .context("authorization URL missing state")?
+        .1
+        .into_owned();
     println!("Open this URL to authorize {name}:\n{auth_url}");
     if !open_browser(&auth_url).await && need_browser {
         bail!("could not open a browser; run `dar mcp login {name}` or use the dashboard");
@@ -84,10 +90,19 @@ async fn login_with(root: &Path, name: &str, wait: Duration, need_browser: bool)
             let params = parsed
                 .query_pairs()
                 .collect::<std::collections::HashMap<_, _>>();
-            let code = params.get("code").context("OAuth callback missing code")?;
             let state = params
                 .get("state")
                 .context("OAuth callback missing state")?;
+            if state.as_ref() != expected_state {
+                respond(&mut stream, "400 Bad Request", "Unknown OAuth state").await?;
+                continue;
+            }
+            if let Some(error) = params.get("error") {
+                let reason = authorization_rejected(root, name, error)?;
+                respond(&mut stream, "400 Bad Request", reason).await?;
+                break Err(anyhow::anyhow!(reason));
+            }
+            let code = params.get("code").context("OAuth callback missing code")?;
             let issuer = params.get("iss").map(|value| value.as_ref());
             match exchange_and_save(&mut manager, &store, code, state, issuer).await {
                 Ok(()) => {
@@ -174,7 +189,21 @@ pub(crate) async fn begin_authorization(
     manager.set_credential_store(store.clone());
     let metadata = manager.resolve_metadata().await?;
     manager.set_metadata(metadata.metadata);
-    manager.register_client("dar", redirect, &[]).await?;
+    if let Err(error) = manager.register_client("dar", redirect, &[]).await {
+        if matches!(&error, rmcp::transport::AuthError::RegistrationFailed(reason)
+            if ["HTTP 400 ", "HTTP 401 ", "HTTP 403 "].iter().any(|status| reason.starts_with(status)))
+        {
+            remember_rejection(root, name, "registration")?;
+            bail!(REGISTRATION_REJECTED);
+        }
+        return Err(error.into());
+    }
+    let rejection = root.join("data/mcp-auth").join(format!("{name}.rejection"));
+    match std::fs::remove_file(rejection) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     let auth_url = manager.get_authorization_url(&[]).await?;
     Ok((manager, store, auth_url))
 }
@@ -196,4 +225,38 @@ async fn open_browser(url: &str) -> bool {
         tokio::time::timeout(Duration::from_secs(10), child.wait()).await,
         Ok(Ok(status)) if status.success()
     )
+}
+
+const REGISTRATION_REJECTED: &str = "Vendor rejected Dar OAuth client registration; check the vendor OAuth policy and allowed redirects; MCP App view hosting has not started";
+const AUTHORIZATION_REJECTED: &str = "Vendor rejected Dar OAuth authorization; check the vendor OAuth policy and account access; MCP App view hosting has not started";
+
+pub(crate) fn oauth_rejection(root: &Path, name: &str) -> Option<&'static str> {
+    let path = root.join("data/mcp-auth").join(format!("{name}.rejection"));
+    match std::fs::read(path).ok()?.as_slice() {
+        b"registration" => Some(REGISTRATION_REJECTED),
+        b"authorization" => Some(AUTHORIZATION_REJECTED),
+        _ => None,
+    }
+}
+
+pub(crate) fn authorization_rejected(root: &Path, name: &str, error: &str) -> Result<&'static str> {
+    if matches!(
+        error,
+        "unauthorized_client" | "invalid_client" | "access_denied" | "invalid_redirect_uri"
+    ) {
+        remember_rejection(root, name, "authorization")?;
+        Ok(AUTHORIZATION_REJECTED)
+    } else {
+        Ok("OAuth authorization failed; retry the vendor login")
+    }
+}
+
+fn remember_rejection(root: &Path, name: &str, kind: &str) -> Result<()> {
+    use std::io::Write;
+    let directory = root.join("data/mcp-auth");
+    // FileCredentialStore::new has already checked/created this directory.
+    let mut file = tempfile::NamedTempFile::new_in(&directory)?;
+    file.write_all(kind.as_bytes())?;
+    file.persist(directory.join(format!("{name}.rejection")))?;
+    Ok(())
 }

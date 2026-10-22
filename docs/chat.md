@@ -137,6 +137,56 @@ Session routes (all under `/chat`): `GET /sessions` lists sessions,
 `{"title"?, "archived"?}` renames/archives (empty title clears it), and
 `DELETE /sessions/{id}` deletes.
 
+### MCP App views
+
+Tools from servers in `mcp.json` that declare an MCP App appear as a framed
+view under their tool call, labeled with the server name. The view receives
+the tool arguments before the full result, once its initialization finishes.
+Inline height follows the view's size reports, within a host cap.
+**Expand** displays the app in a resizable panel alongside the chat; the
+composer remains usable. Close the panel to return inline. App-requested
+fullscreen is accepted only if the app declared support for that mode.
+
+A second call to the same server and resource updates the open view. The new
+tool row links to that view. Reload and saved-session replay restore the last
+input and result for each reused view; user edits inside the app are not
+persisted. Missing result records, a stopped server, or a missing HTML
+resource retain the tool's text fallback.
+
+```yaml
+extensions:
+  chat-web:
+    apps:
+      # Defaults to dashboard.bind.
+      sandbox_bind: 0.0.0.0
+      # Defaults to dashboard.port + 1; ephemeral when dashboard.port is 0.
+      sandbox_port: 7879
+      # Optional browser-visible origin, without a path.
+      # sandbox_origin: https://agent-apps.example.com
+      # Servers whose apps require a fresh view for every call:
+      no_reuse: []
+```
+
+The sandbox uses a second HTTP listener serving only the proxy page. With an
+ephemeral sandbox port, Dar publishes its actual bound port to the browser.
+Without `sandbox_origin`, the browser uses the chat page's scheme and host
+with that port. Views are disabled when the sandbox and chat origins match;
+`dar doctor` warns about matching configured origins.
+
+For TLS termination or remote access, proxy a second origin to the sandbox
+listener and set `sandbox_origin` to the externally reachable origin. The
+same applies when Docker's host `SANDBOX_PORT` differs from the container's
+port; see [Docker sandbox](sandbox.md). Forwarding both listeners to the
+same origin defeats isolation and disables views.
+
+An app can post a user message, update selection context for the next turn,
+call app-visible tools on its own server, read its server's resources, and
+open HTTP(S) links in a new tab. Context is added at the common submission
+point for pi, codex, opencode, and builtin, and cleared after the backend
+accepts that message. A failed submission keeps the context for retry.
+See [MCP servers](mcp.md#mcp-apps-in-web-chat) for visibility, audit, OAuth,
+and compatibility limits.
+
 When the agent is passive (no orchestration loop configured), the dashboard
 opens on the Chat tab by default; the composer sends with Enter (Shift+Enter
 inserts a newline), and while the chat tab is active the dashboard's periodic

@@ -647,6 +647,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dar-cap-mcp-apps"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "dar-cap-runner"
 version = "0.6.0"
 dependencies = [
@@ -733,6 +744,7 @@ dependencies = [
  "tokio-stream",
  "tower",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -846,6 +858,7 @@ dependencies = [
  "dar-artifacts",
  "dar-cap-chat",
  "dar-cap-deliver",
+ "dar-cap-mcp-apps",
  "dar-host-api",
  "dar-orchestrator-api",
  "dar-tool-registry",
@@ -901,6 +914,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.9",
+ "base64 0.22.1",
  "dar-cap-dashboard-tab",
  "dar-extension-sdk",
  "dar-host-api",
