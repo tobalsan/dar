@@ -752,6 +752,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tab_nav_has_sound_toggle_before_theme_toggle() {
+        let state = make_state();
+        let _ = state.bus.set(Arc::new(host_api::EventBus::new()));
+        let registry = Arc::new(DashboardTabs::default());
+        registry.add(Arc::new(ClaimTab)).unwrap();
+        let _ = state.tabs.set(registry);
+        let resp = index(axum::extract::State(state), axum::http::HeaderMap::new()).await;
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        let bell = html
+            .find(r#"id="sound-toggle""#)
+            .expect("sound toggle rendered");
+        let theme = html
+            .find(r#"id="theme-toggle""#)
+            .expect("theme toggle rendered");
+        assert!(bell < theme, "bell button sits before the theme toggle");
+        assert!(html.contains(r#"aria-pressed="true""#));
+    }
+
+    #[tokio::test]
     async fn index_passive_snapshot_activates_claiming_tab() {
         // No retained snapshot registered -> RunSnapshot::empty() (tracker
         // empty), which is the passive case.

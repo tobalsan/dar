@@ -116,6 +116,9 @@ impl Extension for ChatWebExtension {
                     "/sessions".into(),
                     "/sessions/{id}".into(),
                     "/avatar".into(),
+                    "/notify.mp3".into(),
+                    "/notify.js".into(),
+                    "/events".into(),
                     "/{session}/resume".into(),
                     "/{session}/stream".into(),
                     "/{session}/history".into(),
@@ -345,6 +348,69 @@ fn avatar_icon_attr(avatar: Option<&Avatar>) -> String {
     }
 }
 
+/// A live turn end in any conversation of this agent. Never replayed.
+#[derive(Clone, Serialize)]
+struct TurnEnded {
+    /// Unique per turn end. Browser tabs use it to play one sound each.
+    turn: String,
+    slot: String,
+    /// Archive id when the backend already reported it.
+    session: Option<String>,
+    kind: &'static str,
+}
+
+fn turn_events() -> &'static broadcast::Sender<TurnEnded> {
+    static EVENTS: std::sync::OnceLock<broadcast::Sender<TurnEnded>> = std::sync::OnceLock::new();
+    EVENTS.get_or_init(|| broadcast::channel(64).0)
+}
+
+async fn turn_events_stream(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let stream = futures_util::stream::unfold(turn_events().subscribe(), |mut live| async move {
+        loop {
+            match live.recv().await {
+                Ok(ended) => return Some((ended, live)),
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    let shutdown_signal: dar_extension_sdk::BoxFuture<'static, ()> =
+        match state.start.get().map(|start| start.shutdown.clone()) {
+            Some(mut token) => Box::pin(async move { token.cancelled().await }),
+            None => Box::pin(std::future::pending()),
+        };
+    Sse::new(
+        stream
+            .map(|ended| {
+                Ok::<_, std::convert::Infallible>(
+                    Event::default().data(serde_json::to_string(&ended).expect("serializes")),
+                )
+            })
+            .take_until(shutdown_signal),
+    )
+    .keep_alive(KeepAlive::default())
+}
+
+async fn notify_script() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("notify.js"),
+    )
+}
+
+async fn notify_sound() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "audio/mpeg"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_bytes!("../assets/notify.mp3").as_slice(),
+    )
+}
+
 async fn avatar(State(state): State<Arc<AppState>>) -> axum::response::Response {
     let Some(Avatar::File(file)) = agent_avatar(&state.root) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -484,6 +550,9 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/", get(index))
         .route("/sessions", get(session_index))
         .route("/avatar", get(avatar))
+        .route("/notify.mp3", get(notify_sound))
+        .route("/notify.js", get(notify_script))
+        .route("/events", get(turn_events_stream))
         .route(
             "/sessions/{id}",
             get(session_transcript)
@@ -1736,6 +1805,27 @@ impl Session {
         }
         self.touch();
         history.push_back(event.clone());
+        if matches!(kind, "finished" | "aborted") {
+            let slot = self
+                .transcript
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let _ = turn_events().send(TurnEnded {
+                turn: format!("{slot}:{}", event.seq),
+                session: self
+                    .resolved_live_id
+                    .lock()
+                    .expect("chat-web live id mutex poisoned")
+                    .clone(),
+                slot,
+                kind: if kind == "finished" {
+                    "finished"
+                } else {
+                    "aborted"
+                },
+            });
+        }
         let _ = self.tx.send(event);
         #[cfg(test)]
         {
@@ -5168,6 +5258,19 @@ mod tests {
         let status = std::process::Command::new("node")
             .args([
                 format!("{root}/tests/avatar-icons.js"),
+                format!("{root}/src/renderer.js"),
+            ])
+            .status()
+            .expect("node is available for browser renderer tests");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn browser_unread_and_notify_behaviors() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let status = std::process::Command::new("node")
+            .args([
+                format!("{root}/tests/unread-notify.js"),
                 format!("{root}/src/renderer.js"),
             ])
             .status()

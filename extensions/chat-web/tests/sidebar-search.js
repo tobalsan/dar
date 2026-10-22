@@ -197,7 +197,20 @@ async function slow_or_failed_search_does_not_block_chat() {
   assert.equal(page.calls[3].url, '/chat/main/send');
 }
 
+async function row_status_and_time_are_described_not_inline() {
+  const page = browser();
+  await page.respond(page.calls[0], [
+    session('live', 'Live chat', { connected: true }),
+    session('old', 'Old chat', { modified_ms: Date.now() - 22 * 3600000 }),
+  ]);
+  assert.match(page.html(), /aria-describedby="info-live"/);
+  assert.match(page.html(), /id="info-live"[^>]*>Connected · now</);
+  assert.match(page.html(), /id="info-old"[^>]*>22h</);
+  assert.doesNotMatch(page.html(), /<small/);
+}
+
 (async () => {
+  await row_status_and_time_are_described_not_inline();
   await debounced_server_search();
   await changing_input_invalidates_pending_results();
   await snippets_are_escaped();
@@ -205,5 +218,5 @@ async function slow_or_failed_search_does_not_block_chat() {
   await clearing_restores_groups_and_cancels_search();
   await refreshes_keep_the_query_and_reexecution_has_one_listener();
   await slow_or_failed_search_does_not_block_chat();
-  console.log('sidebar search: 7 browser scenarios passed');
+  console.log('sidebar search: 8 browser scenarios passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

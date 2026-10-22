@@ -128,6 +128,8 @@
       border-bottom: 1px solid var(--border); background: var(--panel);
     }
     .theme-toggle { margin-left: auto; align-self: center; border-radius: 999px; }
+    .sound-toggle { margin-left: auto; margin-right: .35rem; align-self: center; border-radius: 999px; display: inline-flex; align-items: center; }
+    .sound-toggle + .theme-toggle { margin-left: 0; }
     .dash-tab {
       border: 1px solid var(--border); border-bottom: none; background: var(--panel-2);
       color: var(--muted); border-radius: 6px 6px 0 0; padding: .4rem .8rem;
@@ -152,6 +154,7 @@
     <button class="dash-tab{% if active_tab == t.id %} active{% endif %}" data-tab-url="/tabs/{{ t.id }}" data-self-refreshing="{{ t.self_refreshing }}"
             onclick="activateDashTab(this,'/tabs/{{ t.id }}')">{{ t.title }}</button>
     {% endfor %}
+    <button type="button" class="sound-toggle" id="sound-toggle" aria-pressed="true" aria-label="Notification sound on" title="Notification sound"><span id="sound-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 01-3.4 0"/></svg></span></button>
     <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle light and dark theme" title="Toggle theme">◐</button>
   </nav>
   {% endif %}
@@ -174,6 +177,32 @@
         document.documentElement.dataset.theme = theme;
         localStorage.setItem('dar-theme', theme);
       });
+    })();
+    (function () {
+      var BELL = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 01-3.4 0"/>';
+      var button = document.getElementById('sound-toggle');
+      var icon = document.getElementById('sound-icon');
+      if (!button) return;
+      function on() { try { return localStorage.getItem('dar-notify-sound') !== 'off'; } catch (e) { return true; } }
+      function paint() {
+        var enabled = on();
+        button.setAttribute('aria-pressed', String(enabled));
+        button.setAttribute('aria-label', enabled ? 'Notification sound on' : 'Notification sound off');
+        icon.innerHTML = BELL + (enabled ? '' : '<path d="M3 3l18 18"/>') + '</svg>';
+      }
+      button.addEventListener('click', function () {
+        try { localStorage.setItem('dar-notify-sound', on() ? 'off' : 'on'); } catch (e) {}
+        paint();
+      });
+      window.addEventListener('storage', function (e) { if (e.key === 'dar-notify-sound') paint(); });
+      paint();
+    })();
+    // Agent-wide turn notifications (sound + unread dots) run from the shell so
+    // they survive tab switches. A 404 (no chat extension) is harmless.
+    (function () {
+      var script = document.createElement('script');
+      script.src = (window.__dashPrefix || '') + '/chat/notify.js';
+      document.body.appendChild(script);
     })();
     // Active tab URL/liveness the #content poller reads. Initialized from the
     // server-rendered active tab button so a page load lands on whatever tab
