@@ -478,13 +478,19 @@ fn exec_current_process() -> Result<()> {
         .next()
         .context("current process argv[0] is missing")?;
     let args = std::env::args_os().skip(1).collect::<Vec<OsString>>();
-    let err = Command::new(&argv0).args(args).exec();
+    let mut command = Command::new(&argv0);
+    command.args(args);
+    agent_env::scrub_loaded_env(&mut command);
+    let err = command.exec();
     Err(err).with_context(|| format!("execv failed for {}", Path::new(&argv0).display()))
 }
 
 fn exec_agent_run(agent: &Path, args: &[OsString]) -> Result<()> {
     let executable = agent.join("bin/dar");
-    let err = Command::new(&executable).args(args).exec();
+    let mut command = Command::new(&executable);
+    command.args(args);
+    agent_env::scrub_loaded_env(&mut command);
+    let err = command.exec();
     Err(err).with_context(|| format!("execv failed for {}", executable.display()))
 }
 
