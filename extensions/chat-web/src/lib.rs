@@ -116,6 +116,7 @@ impl Extension for ChatWebExtension {
                     "/sessions".into(),
                     "/sessions/{id}".into(),
                     "/avatar".into(),
+                    "/notify.mp3".into(),
                     "/{session}/resume".into(),
                     "/{session}/stream".into(),
                     "/{session}/history".into(),
@@ -345,6 +346,16 @@ fn avatar_icon_attr(avatar: Option<&Avatar>) -> String {
     }
 }
 
+async fn notify_sound() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "audio/mpeg"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_bytes!("../assets/notify.mp3").as_slice(),
+    )
+}
+
 async fn avatar(State(state): State<Arc<AppState>>) -> axum::response::Response {
     let Some(Avatar::File(file)) = agent_avatar(&state.root) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -484,6 +495,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/", get(index))
         .route("/sessions", get(session_index))
         .route("/avatar", get(avatar))
+        .route("/notify.mp3", get(notify_sound))
         .route(
             "/sessions/{id}",
             get(session_transcript)
@@ -5168,6 +5180,19 @@ mod tests {
         let status = std::process::Command::new("node")
             .args([
                 format!("{root}/tests/avatar-icons.js"),
+                format!("{root}/src/renderer.js"),
+            ])
+            .status()
+            .expect("node is available for browser renderer tests");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn browser_unread_and_notify_behaviors() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let status = std::process::Command::new("node")
+            .args([
+                format!("{root}/tests/unread-notify.js"),
                 format!("{root}/src/renderer.js"),
             ])
             .status()

@@ -9,6 +9,8 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Chat web: conversations with new agent output that you have not seen show a dot in the sidebar. The dot persists across reloads.
+- Chat web: a short sound plays when an agent turn finishes. A bell button before the theme toggle mutes it. The choice persists in the browser.
 - `dar dash` now uses an app icon from the folder where you start it as the favicon and apple touch icon. It picks `icon.*` or `favicon.*`, otherwise the first image whose name contains `icon` (png, svg, ico, webp, jpg, jpeg). See [docs/dashboard.md](docs/dashboard.md).
 - chat-web: the agent `avatar` (emoji, image URL, or image file in the agent folder) is now also the browser favicon and the apple touch icon.
 - Added `linear_upload_artifact` to attach verified host artifacts to Linear issue Resources, with retry deduplication and host-held upload credentials.

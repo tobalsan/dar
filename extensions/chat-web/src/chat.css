@@ -133,6 +133,13 @@ body:has(.chat-web) #content {
   border-radius: 50%;
   background: var(--ok);
 }
+.chat-unread-dot {
+  flex: none;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--accent);
+}
 .chat-live-dot.is-busy {
   animation: chat-pulse 1.2s ease-in-out infinite;
 }
