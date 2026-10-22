@@ -212,23 +212,12 @@
     raf(() => { app.paintScheduled = false; paint(app); refreshBusy(app); });
   };
 
-  // Muted via the dashboard bell button, which owns this key. Default is on.
-  const playNotifySound = () => {
-    try {
-      if (localStorage.getItem('dar-notify-sound') === 'off') return;
-      let audio = window.__chatNotifyAudio ||= new Audio(PREFIX + '/chat/notify.mp3');
-      audio.volume = 0.6; audio.currentTime = 0;
-      audio.play()?.catch(() => {}); // autoplay policy: ignore until the user has interacted
-    } catch {}
-  };
-
   const render = (app, event) => {
     if (event.type === 'context_usage') { let m = $('chat-token-meter'), w=$('chat-context-warning'); if (m) m.textContent = usageText(event); if(w) w.hidden=!(event.context_window && event.tokens_used/event.context_window>=.7); return; }
     if (event.type === 'reset') { app.turns=0; app.qsel={}; app.qsent={}; let m=$('chat-token-meter'),w=$('chat-context-warning'); if(m)m.textContent=''; if(w)w.hidden=true; }
     if (!event.historical && event.type === 'started' && event.origin === 'autonomous') { app.turns++; refreshBusy(app); return; }
     if (!event.historical && event.type === 'user') { app.turns++; app.workingWord = WORKING_WORDS[Math.floor(Math.random() * WORKING_WORDS.length)]; }
     if (!event.historical && (event.type === 'finished' || event.type === 'aborted' || event.type === 'closed')) app.turns = Math.max(0, app.turns - 1);
-    if (!event.historical && event.type === 'finished') playNotifySound();
     app.blocks = reduce(app.blocks, event);
     schedulePaint(app);
   };
@@ -455,26 +444,26 @@
 
   const relativeTime = ms => { let n=Math.max(0,Date.now()-ms), m=Math.floor(n/60000); if(m<1)return 'now'; if(m<60)return `${m}m`; let h=Math.floor(m/60); if(h<24)return `${h}h`; return `${Math.floor(h/24)}d`; };
   const groupName = ms => { let d=new Date(ms), now=new Date(), day=86400000, today=new Date(now.getFullYear(),now.getMonth(),now.getDate()).getTime(), t=new Date(d.getFullYear(),d.getMonth(),d.getDate()).getTime(); if(t===today)return 'Today'; if(t===today-day)return 'Yesterday'; let age=(today-t)/day; if(age<7)return 'Earlier this week'; if(d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear())return 'Earlier this month'; return d.toLocaleDateString([], {month:'long',year:'numeric'}); };
-  // Unread = the conversation changed since the user last saw it and no turn is running.
-  // Last-seen marks live in localStorage so they survive reloads and browser restarts.
-  const SEEN_KEY = 'dar-chat-seen';
-  const readSeen = () => { try { return JSON.parse(localStorage.getItem(SEEN_KEY)) || {}; } catch { return {}; } };
-  const markSeen = (all, focusedSlot) => {
+  // Unread marks come from notify.js (live turn ends) and live in localStorage.
+  // A row is unread while its archive id or one of its slot ids is marked.
+  const UNREAD_KEY = 'dar-chat-unread';
+  const readUnread = () => { try { return JSON.parse(localStorage.getItem(UNREAD_KEY)) || {}; } catch { return {}; } };
+  const rowKeys = s => [s.id, ...(s.slots || [])];
+  const clearViewed = (all, focusedSlot) => {
     try {
-      let seen = readSeen(), viewing = !document.hidden && document.hasFocus?.() !== false, changed = false;
-      for (let s of all) {
-        if (seen[s.id] === undefined || (viewing && (s.slots || []).includes(focusedSlot) && seen[s.id] !== s.modified_ms)) { seen[s.id] = s.modified_ms; changed = true; }
-      }
-      if (changed) localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
+      if (document.hidden || document.hasFocus?.() === false) return;
+      let unread = readUnread(), changed = false;
+      for (let s of all) if ((s.slots || []).includes(focusedSlot)) for (let k of rowKeys(s)) if (unread[k]) { delete unread[k]; changed = true; }
+      if (changed) localStorage.setItem(UNREAD_KEY, JSON.stringify(unread));
     } catch {}
   };
-  const isUnread = s => { let seen = readSeen()[s.id]; return !s.busy && !s.archived && seen !== undefined && s.modified_ms > seen; };
+  const isUnread = s => { let unread = readUnread(); return !s.busy && !s.archived && rowKeys(s).some(k => unread[k]); };
   const sessionRow = (s, focusedSlot) => `<div class="chat-session${(s.slots || []).includes(focusedSlot) ? ' is-focused' : ''}${s.busy ? ' is-busy' : ''}" data-session-id="${esc(s.id)}" role="button" tabindex="0" title="${esc(s.label)}">`
     + (isUnread(s) ? '<span class="chat-unread-dot" role="img" aria-label="Unread messages"></span>' : '')
     + `<div class="chat-session-copy"><span class="chat-session-label"><span>${esc(s.label)}</span></span>${s.snippet ? `<div class="chat-session-snippet">${esc(s.snippet)}</div>` : ''}<small>${s.busy ? '<span class="chat-live-dot is-busy"></span>Running · ' : s.connected ? '<span class="chat-live-dot"></span>Connected · ' : ''}${relativeTime(s.modified_ms)}</small></div>`
     + `<div class="chat-session-actions">${actionButton('rename', s.id, 'Rename')}${s.archived ? actionButton('unarchive', s.id, 'Unarchive') : actionButton('archive', s.id, 'Archive')}${actionButton('delete', s.id, 'Delete')}</div></div>`;
   const sidebarQuery = () => ($('chat-search')?.value || '').trim();
-  const showHistoryList = async app => { let host=$('chat-history-list'); if(!host||app.editingSession)return; let sequence=++app.sidebarSequence, q=sidebarQuery(); try { let all=await request('/chat/sessions'+(q?'?q='+encodeURIComponent(q):'')).then(r=>r.json()); if(app.editingSession||sequence!==app.sidebarSequence)return; markSeen(all,app.slot); let active=all.filter(s=>!s.archived), archived=all.filter(s=>s.archived), groups=[]; for(let s of active){let name=groupName(s.modified_ms), g=groups.at(-1);if(!g||g.name!==name)groups.push(g={name,items:[]});g.items.push(s)} host.innerHTML=groups.map(g=>`<div class="chat-session-group"><h3>${g.name}</h3>${g.items.map(s=>sessionRow(s,app.slot)).join('')}</div>`).join('')+(archived.length?`<details class="chat-archived"${app.archivedOpen?' open':''}><summary>Archived (${archived.length})</summary>${archived.map(s=>sessionRow(s,app.slot)).join('')}</details>`:'')||'<div class="chat-empty">No conversations</div>'; } catch(error){if(sequence===app.sidebarSequence&&!app.editingSession)host.textContent=`Sessions unavailable: ${error.message}`;} };
+  const showHistoryList = async app => { let host=$('chat-history-list'); if(!host||app.editingSession)return; let sequence=++app.sidebarSequence, q=sidebarQuery(); try { let all=await request('/chat/sessions'+(q?'?q='+encodeURIComponent(q):'')).then(r=>r.json()); if(app.editingSession||sequence!==app.sidebarSequence)return; clearViewed(all,app.slot); let active=all.filter(s=>!s.archived), archived=all.filter(s=>s.archived), groups=[]; for(let s of active){let name=groupName(s.modified_ms), g=groups.at(-1);if(!g||g.name!==name)groups.push(g={name,items:[]});g.items.push(s)} host.innerHTML=groups.map(g=>`<div class="chat-session-group"><h3>${g.name}</h3>${g.items.map(s=>sessionRow(s,app.slot)).join('')}</div>`).join('')+(archived.length?`<details class="chat-archived"${app.archivedOpen?' open':''}><summary>Archived (${archived.length})</summary>${archived.map(s=>sessionRow(s,app.slot)).join('')}</details>`:'')||'<div class="chat-empty">No conversations</div>'; } catch(error){if(sequence===app.sidebarSequence&&!app.editingSession)host.textContent=`Sessions unavailable: ${error.message}`;} };
   // Slots run independently server-side; switching only repoints the stream.
   const switchSlot = (app, slot) => {
     if (!slot || slot === app.slot) return;
@@ -501,6 +490,8 @@
     app.es = new EventSource(`/chat/${app.slot}/stream`);
     app.es.onmessage = e => render(app, JSON.parse(e.data));
     bindDocument(app);
+    app.refreshSidebar = () => showHistoryList(app);
+    window.addEventListener('storage', e => { if (e.key === UNREAD_KEY) showHistoryList(app); });
     window.addEventListener('focus',()=>showHistoryList(app)); document.addEventListener('visibilitychange',()=>{if(!document.hidden)showHistoryList(app)}); if (typeof module === 'undefined') setInterval(()=>{if(!document.hidden&&!sidebarQuery())showHistoryList(app)},5000); document.addEventListener('input',e=>{if(e.target.id!=='chat-search')return;++app.sidebarSequence;clearTimeout(app.sidebarTimer);if(sidebarQuery())app.sidebarTimer=setTimeout(()=>showHistoryList(app),250);else showHistoryList(app)});
   }
   mount(window.__chatWeb);

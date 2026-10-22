@@ -194,7 +194,15 @@
         try { localStorage.setItem('dar-notify-sound', on() ? 'off' : 'on'); } catch (e) {}
         paint();
       });
+      window.addEventListener('storage', function (e) { if (e.key === 'dar-notify-sound') paint(); });
       paint();
+    })();
+    // Agent-wide turn notifications (sound + unread dots) run from the shell so
+    // they survive tab switches. A 404 (no chat extension) is harmless.
+    (function () {
+      var script = document.createElement('script');
+      script.src = (window.__dashPrefix || '') + '/chat/notify.js';
+      document.body.appendChild(script);
     })();
     // Active tab URL/liveness the #content poller reads. Initialized from the
     // server-rendered active tab button so a page load lands on whatever tab
