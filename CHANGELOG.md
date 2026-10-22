@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- MCP Apps with declared CSP can load blob scripts and images while workers remain blocked; apps that omit display modes can expand alongside chat, while explicit mode lists remain enforced.
 - MCP Apps now negotiate Dar's supported protocol version when an app requests a different version.
 - Pi chat now opens MCP Apps from Dar bridge tool results, including tools with hyphens in their names.
 - Web chat hosts MCP Apps in isolated inline views, with a resizable fullscreen panel beside chat, replay, and app tool/context actions across all runners; Docker sandboxes publish a second origin.

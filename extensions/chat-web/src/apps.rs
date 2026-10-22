@@ -355,7 +355,7 @@ fn policy(declared: Option<&Value>) -> (String, Value) {
     let connections = join("connectDomains");
     let frames = join("frameDomains");
     let bases = join("baseUriDomains");
-    (format!("default-src 'none'; script-src 'self' 'unsafe-inline' {resources}; style-src 'self' 'unsafe-inline' {resources}; img-src 'self' data: {resources}; media-src 'self' data: {resources}; font-src 'self' {resources}; connect-src {}; frame-src {}; base-uri {}; object-src 'none'; form-action 'none';",
+    (format!("default-src 'none'; script-src 'self' 'unsafe-inline' blob: {resources}; style-src 'self' 'unsafe-inline' {resources}; img-src 'self' data: blob: {resources}; media-src 'self' data: {resources}; font-src 'self' {resources}; worker-src 'none'; connect-src {}; frame-src {}; base-uri {}; object-src 'none'; form-action 'none';",
         if connections.is_empty(){"'none'"}else{&connections},if frames.is_empty(){"'none'"}else{&frames},if bases.is_empty(){"'self'"}else{&bases}),approved)
 }
 

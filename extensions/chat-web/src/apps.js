@@ -91,7 +91,7 @@
       if(typeof params.protocolVersion!=='string') {reject(new Error('Invalid MCP Apps protocol version'));return}
       const modes=params.appCapabilities?.availableDisplayModes;
       if(modes!==undefined && (!Array.isArray(modes) || !modes.every(mode=>typeof mode==='string'))) {reject(new Error('Invalid display modes'));return}
-      view.modes=modes || ['inline'];
+      view.modes=modes || ['inline','fullscreen'];
       view.initializing=true;
       reply({protocolVersion:'2026-01-26',hostInfo:{name:'Dar',version:'1'},hostCapabilities:{openLinks:{},serverTools:{},serverResources:{},logging:{},sandbox:{csp:view.data.meta?.ui?.csp || {},permissions:view.data.meta?.ui?.permissions || {}}},hostContext:context(view)});
       return;

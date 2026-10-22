@@ -56,7 +56,8 @@ tool, and status, together with each view's enforced CSP.
 
 Views run through a sandbox proxy on a separate origin. Network and asset
 access follow the resource's declared CSP domains; no CSP declaration means
-no external network access. Inner views use an opaque origin to prevent
+no external network access. Declared CSP also permits blob scripts and images,
+while workers remain blocked. Inner views use an opaque origin to prevent
 access to other servers' views. Camera, microphone, geolocation, and clipboard
 permissions are currently withheld; the host reports no device grants.
 See [web chat](chat.md)

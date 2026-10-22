@@ -6,9 +6,10 @@
 <button id="post">Post selection</button><button id="context">Select box</button>
 <button id="refresh">Refresh drawing</button><button id="foreign">Call another server</button>
 <button id="private">Call model-only tool</button><button id="expand">Expand drawing</button>
-<p role="status"></p>
+<p role="status"></p><p aria-label="Requested display mode"></p>
 <script>
 let next = 0, results = 0, initialized = false;
+const policy = '';
 const protocolVersion = '2026-01-26';
 const lifecycleViolation = () => { document.querySelector('[aria-label="Lifecycle violations"]').textContent = '1'; };
 const pending = new Map();
@@ -43,13 +44,13 @@ document.getElementById('context').onclick = () => request('ui/update-model-cont
 document.getElementById('refresh').onclick = () => request('tools/call', { name: 'refresh', arguments: {} }).then(result => status(result.content[0].text)).catch(e => status(e.message));
 document.getElementById('foreign').onclick = () => request('tools/call', { name: 'other__refresh', arguments: {} }).then(() => status('Unexpected cross-server success')).catch(() => status('Cross-server call blocked'));
 document.getElementById('private').onclick = () => request('tools/call', { name: 'model_only', arguments: {} }).then(() => status('Unexpected model-only success')).catch(() => status('Model-only call blocked'));
-document.getElementById('expand').onclick = () => request('ui/request-display-mode', { mode: 'fullscreen' }).catch(e => status(e.message));
+document.getElementById('expand').onclick = () => request('ui/request-display-mode', { mode: 'fullscreen' }).then(result => { document.querySelector('[aria-label="Requested display mode"]').textContent = result.mode; }).catch(e => status(e.message));
 const invalidVersion = protocolVersion === '2025-11-21'
   ? request('ui/initialize', { protocolVersion: 42 }).then(() => 'accepted', () => 'rejected')
   : Promise.resolve('not sent');
 invalidVersion.then(outcome => {
   document.querySelector('[aria-label="Invalid version request"]').textContent = outcome;
-  return request('ui/initialize', { protocolVersion, appInfo: { name: 'Acceptance canvas', version: '1' }, appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] } });
+  return request('ui/initialize', { protocolVersion, appInfo: { name: 'Acceptance canvas', version: '1' }, appCapabilities: policy === 'modes-absent' ? {} : { availableDisplayModes: policy === 'modes-inline' ? ['inline'] : ['inline', 'fullscreen'] } });
 }).then(response => {
   document.querySelector('[aria-label="Negotiated protocol"]').textContent = response.protocolVersion;
   if (protocolVersion === '2025-11-21') return new Promise(resolve => setTimeout(resolve, 100));
@@ -58,6 +59,30 @@ invalidVersion.then(outcome => {
   notify('ui/notifications/initialized', {});
   notify('ui/notifications/size-changed', { height: 330, width: 500 });
 });
-addEventListener('securitypolicyviolation', event => { document.querySelector('[aria-label="Policy violation"]').textContent = event.effectiveDirective; });
+// Approved observable seam: ALG-530 Testing Decisions, Thinh comment
+// 57463385-7106-4240-b1e9-2a90192f60f5; catches browser CSP/isolation, misses vendor transport.
+if (policy === 'blob') {
+  const report = (name, value) => {
+    let output = document.querySelector(`[aria-label="${name}"]`);
+    if (!output) { output = document.createElement('p'); output.setAttribute('aria-label', name); document.body.append(output); }
+    output.textContent = value;
+  };
+  window.blobLoaded = () => report('Blob script', 'loaded');
+  const script = document.createElement('script');
+  script.src = URL.createObjectURL(new Blob(['window.blobLoaded()'], { type: 'text/javascript' }));
+  document.body.append(script);
+  const image = new Image();
+  image.onload = () => report('Blob image', 'loaded');
+  image.src = URL.createObjectURL(new Blob(['<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>'], { type: 'image/svg+xml' }));
+  document.body.append(image);
+  try {
+    const worker = new Worker(URL.createObjectURL(new Blob(['postMessage("running")'], { type: 'text/javascript' })));
+    worker.onmessage = () => { report('Blob worker', 'running'); worker.terminate(); };
+    worker.onerror = event => { event.preventDefault(); report('Blob worker', 'blocked'); };
+  } catch { report('Blob worker', 'blocked'); }
+  try { void parent.document.body; report('Opaque isolation', 'accessible'); }
+  catch { report('Opaque isolation', 'isolated'); }
+}
+addEventListener('securitypolicyviolation', event => { if (policy === 'blob' && event.effectiveDirective !== 'connect-src') return; document.querySelector('[aria-label="Policy violation"]').textContent = event.effectiveDirective; });
 fetch('https://example.com/undeclared').then(() => { document.querySelector('[aria-label="Network status"]').textContent = 'Network unexpectedly allowed'; }).catch(() => { document.querySelector('[aria-label="Network status"]').textContent = 'Undeclared network blocked'; });
 </script></html>

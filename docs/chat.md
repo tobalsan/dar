@@ -145,7 +145,8 @@ the tool arguments before the full result, once its initialization finishes.
 Inline height follows the view's size reports, within a host cap.
 **Expand** displays the app in a resizable panel alongside the chat; the
 composer remains usable. Close the panel to return inline. App-requested
-fullscreen is accepted only if the app declared support for that mode.
+fullscreen is available unless the app explicitly lists display modes without
+fullscreen; omitting the list permits both inline and fullscreen views.
 
 A second call to the same server and resource updates the open view. The new
 tool row links to that view. Reload and saved-session replay restore the last

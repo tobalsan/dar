@@ -27,6 +27,7 @@ const origin = externalOrigin || `http://127.0.0.1:${port}`;
 if (!externalOrigin) {
 await fs.writeFile(path.join(agent, 'agent.yaml'), `id: apps-acceptance\nname: Apps acceptance\nrunner:\n  use: fake\nforeground: logs\ndashboard:\n  bind: 127.0.0.1\n  port: ${port}\nextensions:\n  chat-web:\n    backend: pi\n    command: ${path.join(here, 'fixtures/apps-pi.cjs')}\n    idle_minutes: 0\n    apps:\n      sandbox_port: 0\n`);
 const fixtureEnv = process.env.APPS_SDK_HTML ? { DAR_APPS_TEST_HTML: path.resolve(process.env.APPS_SDK_HTML) } : {};
+if (process.env.APPS_POLICY) fixtureEnv.DAR_APPS_TEST_POLICY = process.env.APPS_POLICY;
 if (process.env.APPS_PROTOCOL_VERSION) fixtureEnv.DAR_APPS_TEST_PROTOCOL_VERSION = process.env.APPS_PROTOCOL_VERSION;
 await fs.writeFile(path.join(agent, 'mcp.json'), JSON.stringify({ mcpServers: {
   canvas: { command: process.execPath, args: [path.join(here, 'fixtures/apps-server.cjs')], env: fixtureEnv },
@@ -72,6 +73,12 @@ try {
     if (!drawing) await new Promise(resolve => setTimeout(resolve, 100));
   }
   assert.ok(drawing, `App drawing did not appear. Browser errors: ${failures.join(', ')}`);
+  if (process.env.APPS_POLICY === 'blob') {
+    for (const name of ['Blob script', 'Blob image', 'Blob worker', 'Opaque isolation']) {
+      await drawing.getByLabel(name, { exact: true }).filter({ hasText: name === 'Blob worker' ? 'blocked' : name === 'Opaque isolation' ? 'isolated' : 'loaded' }).waitFor({ timeout: 5000 });
+    }
+    console.log('PASS declared CSP permits blob scripts/images; blob workers blocked; app remains opaque');
+  }
   if (process.env.APPS_PROTOCOL_VERSION === '2025-11-21') {
     assert.equal(await drawing.getByLabel('Negotiated protocol', { exact: true }).textContent(), '2026-01-26');
     assert.equal(await drawing.getByLabel('Invalid version request', { exact: true }).textContent(), 'rejected');
@@ -94,18 +101,31 @@ try {
   assert.ok(prompts.split('\n').filter(Boolean).map(line => JSON.parse(line).message)
     .some(message => message.includes('Please inspect the selected box') && message.includes('Selected box: blue rectangle')));
   console.log('PASS app button posts chat message with selected context on the runner wire');
-  await drawing.getByRole('button', { name: 'Expand drawing', exact: true }).click();
-  await page.getByRole('button', { name: 'Close expanded view: canvas', exact: true }).waitFor();
-  const panel = await page.getByRole('region', { name: 'MCP App: canvas', exact: true }).boundingBox();
-  const composer = await page.getByRole('textbox', { name: 'Message', exact: true }).boundingBox();
-  assert.ok(panel && composer && composer.x + composer.width <= panel.x + 1, 'Expanded view must sit beside the chat input');
-  await page.screenshot({ path: path.join(evidence, '02-fullscreen.png'), fullPage: true });
-  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('chat remains usable');
-  await page.getByRole('button', { name: 'Send', exact: true }).click();
-  await page.getByRole('log').getByText('chat remains usable', { exact: true }).waitFor();
-  await page.getByRole('button', { name: 'Close expanded view: canvas', exact: true }).click();
-  await page.getByRole('button', { name: 'Expand view: canvas', exact: true }).waitFor();
-  console.log('PASS app-requested fullscreen sits beside usable chat; close returns inline');
+  if (process.env.APPS_POLICY === 'modes-inline') {
+    assert.equal(await page.getByRole('button', { name: 'Expand view: canvas', exact: true }).isVisible(), false);
+    await drawing.getByRole('button', { name: 'Expand drawing', exact: true }).click();
+    await drawing.getByLabel('Requested display mode', { exact: true }).filter({ hasText: 'inline' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Close expanded view: canvas', exact: true }).count(), 0);
+    console.log('PASS explicit inline-only capability restricts user and app fullscreen');
+  } else {
+    if (process.env.APPS_POLICY === 'modes-absent') {
+      await page.getByRole('button', { name: 'Expand view: canvas', exact: true }).click({ timeout: 5000 });
+      await page.getByRole('button', { name: 'Close expanded view: canvas', exact: true }).click();
+      console.log('PASS absent display modes permits user fullscreen');
+    }
+    await drawing.getByRole('button', { name: 'Expand drawing', exact: true }).click();
+    await page.getByRole('button', { name: 'Close expanded view: canvas', exact: true }).waitFor();
+    const panel = await page.getByRole('region', { name: 'MCP App: canvas', exact: true }).boundingBox();
+    const composer = await page.getByRole('textbox', { name: 'Message', exact: true }).boundingBox();
+    assert.ok(panel && composer && composer.x + composer.width <= panel.x + 1, 'Expanded view must sit beside the chat input');
+    await page.screenshot({ path: path.join(evidence, '02-fullscreen.png'), fullPage: true });
+    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('chat remains usable');
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await page.getByRole('log').getByText('chat remains usable', { exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Close expanded view: canvas', exact: true }).click();
+    await page.getByRole('button', { name: 'Expand view: canvas', exact: true }).waitFor();
+    console.log('PASS app-requested fullscreen sits beside usable chat; close returns inline');
+  }
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('draw second');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   if (process.env.APPS_PI_ALIAS || process.env.APPS_HOLD_RESULT) {
