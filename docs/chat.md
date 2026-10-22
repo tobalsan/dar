@@ -93,6 +93,15 @@ agent folder (`avatar: assets/avatar.png`; png/jpg/gif/webp/svg), served at
 also becomes the browser favicon and the apple touch icon; without an avatar
 the page keeps its default icon.
 
+**Notification sound.** A short sound plays when a turn finishes. The bell
+button in the dashboard tab bar turns it on or off for all chats. To give an
+agent its own sound, put an audio file in the agent folder and name it with a
+top-level `notification_sound` in `agent.yaml`
+(`notification_sound: sounds/ping.mp3`). Use mp3, wav, ogg, or m4a. Chat web
+serves the file at `GET /chat/notify.mp3` and reads it again for each request.
+A change needs no restart. If the file is missing or outside the agent folder,
+chat web plays the default sound.
+
 **New chat.** An empty chat shows a short invite with the composer centered
 below it; the composer glides down to its dock once the first message is
 sent. The header's **New chat** button (or `/new`) starts a fresh chat; the

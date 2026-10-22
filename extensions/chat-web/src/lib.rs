@@ -401,14 +401,60 @@ async fn notify_script() -> impl IntoResponse {
     )
 }
 
-async fn notify_sound() -> impl IntoResponse {
+/// Optional top-level `notification_sound` in `agent.yaml`: an audio file
+/// inside the agent folder. Read on each request, so a change needs no restart.
+fn agent_notification_sound(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct AgentYaml {
+        notification_sound: Option<String>,
+    }
+    let value = fs::read_to_string(root.join("agent.yaml"))
+        .ok()
+        .and_then(|contents| serde_yaml::from_str::<AgentYaml>(&contents).ok())?
+        .notification_sound?;
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let file = root.join(value).canonicalize().ok().filter(|file| {
+        file.is_file() && root.canonicalize().is_ok_and(|root| file.starts_with(root))
+    });
+    if file.is_none() {
+        tracing::warn!(notification_sound = %value, "agent.yaml notification_sound is not a file inside the agent folder; using the default sound");
+    }
+    file
+}
+
+async fn notify_sound(State(state): State<Arc<AppState>>) -> axum::response::Response {
+    let custom = agent_notification_sound(&state.root)
+        .and_then(|file| fs::read(&file).ok().map(|bytes| (file, bytes)));
+    let (content_type, bytes) = match custom {
+        Some((file, bytes)) => {
+            let ext = file
+                .extension()
+                .map(|ext| ext.to_string_lossy().to_ascii_lowercase());
+            let content_type = match ext.as_deref() {
+                Some("wav") => "audio/wav",
+                Some("ogg") => "audio/ogg",
+                Some("m4a") => "audio/mp4",
+                _ => "audio/mpeg",
+            };
+            (content_type, bytes)
+        }
+        None => (
+            "audio/mpeg",
+            include_bytes!("../assets/notify.mp3").to_vec(),
+        ),
+    };
     (
         [
-            (header::CONTENT_TYPE, "audio/mpeg"),
+            (header::CONTENT_TYPE, content_type),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_bytes!("../assets/notify.mp3").as_slice(),
+        bytes,
     )
+        .into_response()
 }
 
 async fn avatar(State(state): State<Arc<AppState>>) -> axum::response::Response {
@@ -5046,6 +5092,26 @@ mod tests {
             prompt.contains("/agent/data/chat/uploads/main/upload-1/0-logo.png"),
             "{prompt}"
         );
+    }
+
+    #[test]
+    fn notification_sound_uses_contained_file_or_default() {
+        let root = test_root();
+        fs::create_dir_all(root.join("sounds")).unwrap();
+        fs::write(root.join("sounds/ping.mp3"), b"mp3").unwrap();
+        let sound_for = |value: &str| {
+            fs::write(
+                root.join("agent.yaml"),
+                format!("notification_sound: \"{value}\"\n"),
+            )
+            .unwrap();
+            agent_notification_sound(&root)
+        };
+        assert!(sound_for("sounds/ping.mp3").is_some_and(|f| f.ends_with("sounds/ping.mp3")));
+        assert_eq!(sound_for("missing.mp3"), None);
+        assert_eq!(sound_for("../outside.mp3"), None);
+        fs::write(root.join("agent.yaml"), "id: x\n").unwrap();
+        assert_eq!(agent_notification_sound(&root), None);
     }
 
     #[test]

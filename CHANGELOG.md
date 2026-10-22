@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Chat web: an optional top-level `notification_sound` in `agent.yaml` names an audio file in the agent folder. That agent then plays this sound instead of the default one.
 - Host: an agent now refuses to start when another process already listens on its HTTP port. Before, on macOS, an agent on `127.0.0.1:P` could start next to a process on `*:P`, and the two processes split the traffic.
 - Chat web: a conversation shows a dot when a turn finishes there while you look elsewhere. The dot persists across reloads.
 - Chat web: a turn that finishes while no dashboard tab is open now shows the unread dot when you open the dashboard or the connection returns. No sound plays for these turns.
