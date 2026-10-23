@@ -148,8 +148,10 @@
 <body>
   {% if !tabs.is_empty() %}
   <nav class="dash-tabs" id="dash-tabs" aria-label="Dashboard tabs">
+    {% if show_runs %}
     <button class="dash-tab{% if active_tab == "content" %} active{% endif %}" data-tab-url="/content" data-self-refreshing="false"
             onclick="activateDashTab(this,'/content')">Runs</button>
+    {% endif %}
     {% for t in tabs %}
     <button class="dash-tab{% if active_tab == t.id %} active{% endif %}" data-tab-url="/tabs/{{ t.id }}" data-self-refreshing="{{ t.self_refreshing }}"
             onclick="activateDashTab(this,'/tabs/{{ t.id }}')">{{ t.title }}</button>

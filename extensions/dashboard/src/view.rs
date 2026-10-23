@@ -23,6 +23,9 @@ pub struct DashboardTemplate {
     /// Pre-rendered fragment for `active_tab` when it is not `"content"`;
     /// `None` renders `content` (the Runs view) as the initial body.
     pub initial_fragment: Option<String>,
+    /// Whether to show the built-in Runs tab button. `false` for a passive
+    /// agent whose default tab replaced the Runs view.
+    pub show_runs: bool,
     /// Sanitized `X-Forwarded-Prefix` (e.g. `/agent/50123`), or `""` for
     /// direct access. Echoed into the asset `src` and `window.__dashPrefix`.
     pub prefix: String,
@@ -39,14 +42,14 @@ impl DashboardTemplate {
             tabs,
             active_tab: "content".to_string(),
             initial_fragment: None,
+            show_runs: true,
             prefix,
         }
     }
 
     /// Passive-agent variant: `active_tab_id` is the id of the tab that
-    /// claimed `passive_default()`, pre-rendered as `fragment`. The Runs view
-    /// is still built from `snapshot` (it just isn't the initial body) so a
-    /// tab render failure can fall back to it.
+    /// claimed `passive_default()`, pre-rendered as `fragment`. The Runs tab
+    /// button is hidden: a passive agent has no runs to show.
     pub fn page_with_active_tab(
         snapshot: RunSnapshot,
         tabs: Vec<TabNav>,
@@ -59,6 +62,7 @@ impl DashboardTemplate {
             tabs,
             active_tab: active_tab_id,
             initial_fragment: Some(fragment),
+            show_runs: false,
             prefix,
         }
     }
@@ -689,11 +693,9 @@ mod tests {
             snippet.contains("dash-tab active"),
             "chat button carries active class: {snippet}"
         );
-        let runs_btn = html.find("/content").expect("runs button present");
-        let snippet = &html[runs_btn.saturating_sub(60)..runs_btn];
         assert!(
-            !snippet.contains("active"),
-            "Runs button is not active when a passive tab claims default: {snippet}"
+            !html.contains(">Runs<"),
+            "Runs button is hidden when a passive tab claims default: {html}"
         );
     }
 

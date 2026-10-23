@@ -210,13 +210,15 @@ struct BusApiState {
     tabs: Arc<OnceLock<Arc<DashboardTabs>>>,
 }
 
+/// Tab buttons in registration order, except that tabs claiming
+/// `passive_default()` (the chat tab) come first.
 fn tab_nav(api: &BusApiState) -> Vec<TabNav> {
     api.tabs
         .get()
         .map(|registry| {
-            registry
-                .snapshot()
-                .iter()
+            let mut tabs = registry.snapshot();
+            tabs.sort_by_key(|t| !t.passive_default());
+            tabs.iter()
                 .map(|t| TabNav {
                     id: t.id().to_string(),
                     title: t.title().to_string(),
@@ -798,6 +800,17 @@ mod tests {
             snippet.contains("dash-tab active"),
             "claiming tab's button is active: {snippet}"
         );
+    }
+
+    #[test]
+    fn tab_nav_puts_passive_default_tab_first() {
+        let state = make_state();
+        let registry = Arc::new(DashboardTabs::default());
+        registry.add(Arc::new(SelfRefreshingTab)).unwrap();
+        registry.add(Arc::new(ClaimTab)).unwrap();
+        let _ = state.tabs.set(registry);
+        let ids: Vec<String> = tab_nav(&state).into_iter().map(|t| t.id).collect();
+        assert_eq!(ids.first().map(String::as_str), Some("claim"), "{ids:?}");
     }
 
     #[tokio::test]
