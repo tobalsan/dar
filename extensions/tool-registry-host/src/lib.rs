@@ -56,7 +56,7 @@ fn artifact_publish_spec(exports_path: &Path) -> ToolSpec {
     ToolSpec::new(
         "artifact_publish",
         format!(
-            "Publish a file up to 25 MiB into host-private immutable storage. Export folder: {}. Copy the file into this export folder, then pass its relative path. Web chat shows the published file to the user; use it to show a report instead of running open.",
+            "Publish a file up to 25 MiB into host-private immutable storage. Export folder: {}. Copy the file into this export folder, then pass its relative path. Web chat shows the published file to the user; use it to show a report instead of running open. Call this only after the file write finishes. Never call it in parallel with the command that writes the file.",
             exports_path.display()
         ),
         json!({
