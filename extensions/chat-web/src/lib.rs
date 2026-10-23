@@ -619,6 +619,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/apps/config", get(apps::config))
         .route("/{session}/apps/{record}", get(apps::resource))
         .route("/{session}/apps/{record}/download", get(apps::download))
+        .route("/{session}/apps/{record}/open", get(apps::open))
         .route("/{session}/apps/{record}/rpc", post(apps::rpc))
         .route(
             "/sessions/{id}",
@@ -2049,7 +2050,13 @@ async fn history(Path(id): Path<String>, State(state): State<Arc<AppState>>) -> 
                     .lock()
                     .expect("chat-web publish mutex poisoned");
                 match load_transcript(&session.transcript) {
-                    Ok(events) => events.into(),
+                    Ok(events) => events
+                        .into_iter()
+                        .map(|mut event| {
+                            event.historical = true;
+                            event
+                        })
+                        .collect(),
                     Err(error) => {
                         return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response()
                     }
@@ -2098,6 +2105,10 @@ async fn stream(
                 }
                 .into_iter()
                 .filter(|event| event.seq > last)
+                .map(|mut event| {
+                    event.historical = true;
+                    event
+                })
                 .collect();
                 #[cfg(test)]
                 if let Some(pause) = s.pause_after_subscribe.lock().unwrap().as_ref() {
@@ -3028,10 +3039,427 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    // ALG-534 Testing Decisions approve HTTP status, headers, and response bytes.
+    // Catches ticket/session/host checks and top-level policy; misses browser CSP enforcement.
     #[tokio::test]
-    async fn artifact_transcript_exposes_filename_and_title_for_replay() {
+    async fn artifact_open_uses_fresh_sandbox_ticket_and_serves_isolated_html() {
+        let (state, id, _) = artifact_http_state().await;
+        let app = router(Arc::clone(&state));
+        let sandbox = apps::sandbox_router(Arc::clone(&state));
+        let mut urls = vec![];
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/test/apps/{id}/open"))
+                        .header("host", "127.0.0.1:28180")
+                        .header("referer", "http://127.0.0.1:28180/chat")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+                "nosniff"
+            );
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            let url = url::Url::parse(body["url"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                url.origin().ascii_serialization(),
+                "http://dar.localhost:28181"
+            );
+            assert_eq!(url.path(), format!("/open/{id}"));
+            urls.push(url);
+        }
+        assert_ne!(urls[0].query(), urls[1].query());
+        let url = &urls[0];
+        let path = format!("{}?{}", url.path(), url.query().unwrap());
+        let response = sandbox
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&path)
+                    .header("host", "dar.localhost:28181")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "text/html");
+        assert_eq!(
+            response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox"));
+        assert!(csp.contains("connect-src 'none'"));
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "<h1>Quarterly report</h1>"
+        );
+        for (path, host) in [
+            (
+                format!("/open/{id}?session=test&ticket=wrong"),
+                "dar.localhost:28181",
+            ),
+            (
+                path.replace("session=test", "session=other"),
+                "dar.localhost:28181",
+            ),
+            (path, "draw.localhost:28181"),
+        ] {
+            let response = sandbox
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path)
+                        .header("host", host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(
+                response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+                "nosniff"
+            );
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/other/apps/{id}/open"))
+                    .header("host", "127.0.0.1:28180")
+                    .header("referer", "http://127.0.0.1:28180/chat")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn artifact_open_serves_supported_types_and_refuses_other_binary_files() {
+        use dar_extension_sdk::artifacts::{ArtifactMetadataInput, ArtifactStore, ExportRoot};
+        use dar_extension_sdk::mcp_apps::read_result;
+        let (state, template_id, _) = artifact_http_state().await;
+        let template = read_result(&state.root, &template_id, "artifact_publish")
+            .unwrap()
+            .unwrap();
+        let store = state
+            .start
+            .get()
+            .unwrap()
+            .host
+            .services
+            .get_named::<ArtifactStore>("artifact-store")
+            .unwrap();
+        let session = state.session("test").await.unwrap();
+        let app = router(Arc::clone(&state));
+        let sandbox = apps::sandbox_router(Arc::clone(&state));
+        for (filename, media_type, bytes, content_type, csp) in [
+            (
+                "report.pdf",
+                Some("application/pdf"),
+                "%PDF-1.7\n",
+                "application/pdf",
+                "default-src 'none'; frame-ancestors 'none'; sandbox",
+            ),
+            (
+                "note.md",
+                Some("text/markdown"),
+                "# A note",
+                "text/html; charset=utf-8",
+                "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
+            ),
+            (
+                "picture.png",
+                Some("image/png"),
+                "PNG",
+                "image/png",
+                "default-src 'none'; img-src 'self'",
+            ),
+            (
+                "picture.jpg",
+                Some("image/jpeg"),
+                "JPEG",
+                "image/jpeg",
+                "default-src 'none'; img-src 'self'",
+            ),
+            (
+                "picture.gif",
+                Some("image/gif"),
+                "GIF",
+                "image/gif",
+                "default-src 'none'; img-src 'self'",
+            ),
+            (
+                "picture.webp",
+                Some("image/webp"),
+                "WEBP",
+                "image/webp",
+                "default-src 'none'; img-src 'self'",
+            ),
+            (
+                "picture.svg",
+                Some("image/svg+xml"),
+                "<svg/>",
+                "image/svg+xml",
+                "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            ),
+            (
+                "note.txt",
+                Some(" TEXT/PLAIN; charset=utf-8 "),
+                "plain text",
+                "text/plain; charset=utf-8",
+                "default-src 'none'",
+            ),
+            (
+                "data.json",
+                Some("application/json"),
+                "{\"count\":2}",
+                "text/plain; charset=utf-8",
+                "default-src 'none'",
+            ),
+            (
+                "main.rs",
+                None,
+                "fn main() {}",
+                "text/plain; charset=utf-8",
+                "default-src 'none'",
+            ),
+            ("download.zip", Some("application/zip"), "ZIP", "", ""),
+            (
+                "opaque.html",
+                Some("application/octet-stream"),
+                "<h1>binary</h1>",
+                "",
+                "",
+            ),
+        ] {
+            fs::write(state.root.join("exports").join(filename), bytes).unwrap();
+            let metadata = store
+                .stage_from_export_root(
+                    &ExportRoot::open(state.root.join("exports")).unwrap(),
+                    filename,
+                    ArtifactMetadataInput {
+                        filename: filename.into(),
+                        media_type: media_type.map(str::to_owned),
+                        caption: None,
+                    },
+                )
+                .unwrap();
+            let mut record = template.clone();
+            record.args = serde_json::json!({"path":filename});
+            record.result["structuredContent"] = serde_json::json!({"uri":format!("dar-artifact://{}",metadata.id),"filename":filename,"mediaType":media_type,"bytes":bytes.len()});
+            let id = record.write(&state.root).unwrap();
+            session.publish(ChatEvent::ToolCall {
+                id: id.clone(),
+                name: "artifact_publish".into(),
+                args: record.args.to_string(),
+            });
+            session.publish(ChatEvent::ToolOutput {
+                id: id.clone(),
+                text: format!("published [mcp-app-result:{id}]"),
+                is_error: false,
+                done: true,
+            });
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/test/apps/{id}/open"))
+                        .header("host", "127.0.0.1:28180")
+                        .header("referer", "http://127.0.0.1:28180/chat")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if content_type.is_empty() {
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{filename}");
+                assert_eq!(
+                    response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+                    "nosniff"
+                );
+                assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                let response = app
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri(format!("/test/apps/{id}"))
+                            .header("host", "127.0.0.1:28180")
+                            .header("referer", "http://127.0.0.1:28180/chat")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body: serde_json::Value = serde_json::from_slice(
+                    &response.into_body().collect().await.unwrap().to_bytes(),
+                )
+                .unwrap();
+                let url = url::Url::parse(body["contentUrl"].as_str().unwrap()).unwrap();
+                let response = sandbox
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri(format!("/open/{id}?{}", url.query().unwrap()))
+                            .header("host", "dar.localhost:28181")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{filename}");
+                continue;
+            }
+            assert_eq!(response.status(), StatusCode::OK, "{filename}");
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            let url = url::Url::parse(body["url"].as_str().unwrap()).unwrap();
+            let response = sandbox
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("{}?{}", url.path(), url.query().unwrap()))
+                        .header("host", "dar.localhost:28181")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{filename}");
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                content_type,
+                "{filename}"
+            );
+            assert!(
+                response.headers()[header::CONTENT_SECURITY_POLICY]
+                    .to_str()
+                    .unwrap()
+                    .contains(csp),
+                "{filename}"
+            );
+            assert_eq!(
+                response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+                "nosniff"
+            );
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            if filename.ends_with(".pdf") {
+                assert_eq!(response.headers()[header::CONTENT_DISPOSITION], "inline");
+            }
+            if !filename.ends_with(".md") {
+                assert_eq!(
+                    response.into_body().collect().await.unwrap().to_bytes(),
+                    bytes,
+                    "{filename}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn artifact_open_refuses_third_party_records_even_with_valid_tickets() {
+        let state = apps_http_state(Config::default(), Arc::new(AppCatalog)).await;
+        let id = "0123456789abcdef0123456789abcdef";
+        let app = router(Arc::clone(&state));
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/test/apps/{id}/open"))
+                    .header("host", "127.0.0.1:28180")
+                    .header("referer", "http://127.0.0.1:28180/chat")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/test/apps/{id}"))
+                    .header("host", "127.0.0.1:28180")
+                    .header("referer", "http://127.0.0.1:28180/chat")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let url = url::Url::parse(body["contentUrl"].as_str().unwrap()).unwrap();
+        let response = apps::sandbox_router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/open/{id}?{}", url.query().unwrap()))
+                    .header("host", "draw.localhost:28181")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    }
+
+    #[tokio::test]
+    async fn artifact_open_errors_keep_security_headers_when_query_is_missing() {
+        let (state, id, _) = artifact_http_state().await;
+        let response = apps::sandbox_router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/open/{id}"))
+                    .header("host", "dar.localhost:28181")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|value| value.to_str().ok()),
+            Some("nosniff")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_transcript_describes_files_and_marks_only_replay_historical() {
         let (state, _, _) = artifact_http_state().await;
-        let response = router(state)
+        let response = router(Arc::clone(&state))
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/test/stream")
@@ -3053,65 +3481,62 @@ mod tests {
         }
         assert_eq!(events[1]["app"]["artifactFilename"], "report.html");
         assert_eq!(events[1]["app"]["artifactTitle"], "Quarterly report");
+        assert_eq!(events[1]["app"]["artifactMediaType"], "text/html");
+        assert_eq!(events[1]["app"]["artifactBytes"], 25);
+        assert!(events.iter().all(|event| event["historical"] == true));
+        state
+            .session("test")
+            .await
+            .unwrap()
+            .publish(ChatEvent::Delta {
+                role: ChatRole::Assistant,
+                text: "live after replay".into(),
+            });
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(1), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        let data = std::str::from_utf8(&frame)
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let event: serde_json::Value = serde_json::from_str(data).unwrap();
+        assert_eq!(event["text"], "live after replay");
+        assert!(event.get("historical").is_none());
     }
 
+    // ALG-534 Testing Decisions approve the public JSON-RPC seam.
+    // Catches refusals from artifact views; misses browser message relay isolation.
     #[tokio::test]
-    async fn artifact_context_keeps_different_files_and_replaces_the_same_filename() {
-        use dar_extension_sdk::mcp_apps::{read_result, ResultRecord};
-        let (state, first_id, _) = artifact_http_state().await;
-        let session = state.session("test").await.unwrap();
-        let prompts = Arc::new(std::sync::Mutex::new(vec![]));
-        *session.inner.lock().await = Some(Box::new(ContextSession {
-            prompts: prompts.clone(),
-            reject: Arc::new(AtomicBool::new(false)),
-        }));
-        let template = read_result(&state.root, &first_id, "artifact_publish")
-            .unwrap()
-            .unwrap();
-        let app = router(Arc::clone(&state));
-        for (filename, selection) in [
-            ("report.html", "outdated-report"),
-            ("notes.md", "notes-summary"),
-            ("report.html", "latest-report"),
+    async fn artifact_views_refuse_messages_and_model_context() {
+        let (state, id, _) = artifact_http_state().await;
+        let app = router(state);
+        for (method, params) in [
+            (
+                "ui/update-model-context",
+                serde_json::json!({"structuredContent":{"selection":"forged context"}}),
+            ),
+            (
+                "ui/message",
+                serde_json::json!({"role":"user","content":{"type":"text","text":"forged message"}}),
+            ),
         ] {
-            let mut record: ResultRecord = template.clone();
-            record.result["structuredContent"]["filename"] = serde_json::json!(filename);
-            record.args = serde_json::json!({"path":filename});
-            let id = record.write(&state.root).unwrap();
-            session.publish(ChatEvent::ToolCall {
-                id: id.clone(),
-                name: "artifact_publish".into(),
-                args: record.args.to_string(),
-            });
-            session.publish(ChatEvent::ToolOutput {
-                id: id.clone(),
-                text: format!("artifact published [mcp-app-result:{id}]"),
-                is_error: false,
-                done: true,
-            });
             let response = app.clone().oneshot(axum::http::Request::builder().method("POST")
                 .uri(format!("/test/apps/{id}/rpc")).header("content-type","application/json")
-                .body(Body::from(serde_json::to_vec(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"ui/update-model-context","params":{"structuredContent":{"selection":selection}}})).unwrap())).unwrap()).await.unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
+                .body(Body::from(serde_json::to_vec(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":method,"params":params})).unwrap())).unwrap()).await.unwrap();
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(body["error"]["code"], -32000, "{method}: {body}");
+            assert_eq!(
+                body["error"]["message"],
+                "artifact views cannot send messages or update model context"
+            );
         }
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri("/test/send")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"command_id":"artifact-context","message":"compare files"}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let delivered = prompts.lock().unwrap();
-        assert!(delivered[0].contains("notes-summary"));
-        assert!(delivered[0].contains("latest-report"));
-        assert!(!delivered[0].contains("outdated-report"));
     }
 
     struct AppCatalog;
@@ -3792,6 +4217,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["result"], serde_json::json!({}));
+        assert!(body.get("error").is_none());
         let send = |command: &str| {
             axum::http::Request::builder()
                 .method("POST")
@@ -5533,7 +5963,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_stream_fans_out_and_late_joiner_replays_identically() {
+    async fn http_stream_fans_out_and_late_joiner_replays_historical_events() {
         let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut services = dar_extension_sdk::ServiceRegistry::default();
         services
@@ -5650,7 +6080,24 @@ mod tests {
                 .unwrap();
             replay.push_str(core::str::from_utf8(&frame).unwrap());
         }
-        assert_eq!(concurrent[0], replay);
+        let parse = |text: &str| {
+            text.lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .map(|data| serde_json::from_str::<serde_json::Value>(data).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let live_events = parse(&concurrent[0]);
+        let mut replay_events = parse(&replay);
+        assert!(live_events
+            .iter()
+            .all(|event| event.get("historical").is_none()));
+        assert!(replay_events
+            .iter()
+            .all(|event| event["historical"] == true));
+        for event in &mut replay_events {
+            event.as_object_mut().unwrap().remove("historical");
+        }
+        assert_eq!(live_events, replay_events);
 
         assert_eq!(
             app.clone()

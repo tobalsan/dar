@@ -144,8 +144,9 @@ Session routes (all under `/chat`): `GET /sessions` lists sessions,
 four backends: pi, codex, opencode, and builtin. No `mcp.json` is needed.
 Publish a report instead of running `open`; an optional `title` labels its
 frame, otherwise the filename is used. HTML renders with styles and scripts,
-Markdown as sanitized formatted text, images (including SVG) as images, and
-text/code as preformatted text. Other formats show a file card.
+Markdown as sanitized formatted text with Mermaid diagrams, PDFs as pages,
+images (including SVG) as images, and text/code as preformatted text. Other
+formats show a file card. The artifact header shows its title, type, and size.
 
 The frame's **Download** button saves the exact original vault bytes. Publishing
 the same filename in the same conversation updates its existing view; a different
@@ -153,13 +154,49 @@ filename gets a separate view. The view moves to the latest tool call and reload
 Reload and saved-session replay restore views while their result records exist
 (30 days). A missing or unreadable file leaves the text fallback and a short error.
 
-HTML reports run in an additional opaque-origin frame. Scripts, styles, and fonts
+On screens wider than 760 px, every live publish opens its view in the side panel,
+replacing the previously expanded view, including when the same file is published
+again. A compact "Open in side panel" card remains in the transcript; click it to
+find the panel. Closing the panel restores the inline view. Reload, reconnect,
+and session replay keep artifacts inline; narrow screens do not auto-open.
+
+**PDFs.** PDF.js renders pages at the view width, with a page count and accessible
+page labels. The first 50 pages are shown; download the file for all pages of a
+longer document. Pages are drawn at high resolution for expansion, but are not
+redrawn on resize. Inline PDFs have no text selection, search, zoom controls,
+forms, or annotations; **Open in browser** provides the browser's PDF tools.
+PDF.js loads from jsDelivr. Offline, after a 10-second import timeout, or when a
+PDF is invalid, damaged, password-protected, or fails rendering, the file card
+remains available. Fonts not embedded in the file may use a system font or fail
+to display. Some CJK documents need unavailable CMaps. Images requiring Wasm
+decoders (including some JPEG 2000 and JBIG2 images) may be absent even when a
+page renders.
+
+**Markdown.** Mermaid code blocks render with Pele from jsDelivr. A failed load
+or invalid diagram leaves the source as code. Plain Markdown loads no CDN script
+and works offline; raw HTML remains sanitized. Links and internal anchors work
+as in HTML reports.
+
+**Open in browser** opens HTML, rendered Markdown, PDF, images, and text/code in
+a new tab on the sandbox origin. HTML keeps its styles, scripts, and allowed CDN
+assets; PDFs use the browser's viewer, and text/code opens as plain text. Other
+binary types (such as zip and docx) offer Download only. Each click obtains a
+fresh URL, even after the embedded view has been open for hours. A blocked popup
+or failed request shows a short error in the view header.
+
+HTML, Markdown, and PDF reports run in an additional opaque-origin frame.
+Only embedded Dar code and vendored Markdown/sanitization libraries run in the
+viewer; PDF.js, Pele, and report scripts run in the opaque report frame.
+Scripts, styles, and fonts
 can load from jsDelivr, cdnjs, unpkg, and Google Fonts; fetch, XHR, and WebSocket
 connections are blocked, including to those CDNs. This is not a complete guarantee
 against data leaks. Reports can follow internal anchors and open HTTP(S) links
 in a new tab. They cannot use the viewer's tool bridge. Only single files are
-supported: relative assets, Markdown Mermaid, editing, and version selection
-are not included. Slack and WhatsApp still upload files; other surfaces keep text.
+supported: relative assets, editing, and version selection are not included.
+HTML, Markdown, and SVG tabs also have opaque origins; browser tabs do not grant
+reports fetch, XHR, or WebSocket access. Artifact views cannot post chat messages
+or update model context. Open requests and refused calls are audited.
+Slack and WhatsApp still upload files; other surfaces keep text.
 
 Tools from servers in `mcp.json` that declare an MCP App appear as a framed
 view under their tool call, labeled with the server name. The view receives
