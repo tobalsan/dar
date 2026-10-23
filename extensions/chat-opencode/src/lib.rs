@@ -24,6 +24,9 @@ const CLOSE_GRACE: Duration = Duration::from_secs(5);
 /// full — keep it short: SIGTERM stops the server promptly, and host shutdown
 /// gives each extension only a few seconds to stop.
 const DISPOSE_GRACE: Duration = Duration::from_secs(1);
+/// Longest wait for the `session.idle` that ends a compaction, after the
+/// `summarize` response arrived. The compaction settles without it after this.
+const IDLE_GRACE: Duration = Duration::from_secs(3);
 /// Longest wait for the `summarize` response. Compaction runs a model call.
 const COMPACT_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -80,9 +83,10 @@ pub struct OpenCodeChatSession {
 struct CompactionState {
     /// The running `/compact` task. Whoever takes it settles the compaction.
     task: Option<JoinHandle<()>>,
-    /// `summarize` itself ends with a `session.idle`. After a successful
-    /// compaction the pump drops that one idle instead of reporting a turn.
-    trailing_idle: bool,
+    /// `summarize` itself ends with a `session.idle`. The pump consumes it
+    /// while the task is live, and the task waits for it before it settles.
+    idle_seen: bool,
+    idle: Arc<tokio::sync::Notify>,
     /// A prompt was sent and no finish has been reported yet. `/compact` waits
     /// for it, so the prompt's `session.idle` cannot be taken for the compaction's.
     prompt_in_flight: bool,
@@ -178,9 +182,8 @@ impl OpenCodeChatSession {
                             if matches!(chat_event, ChatEvent::TurnFinished { .. }) {
                                 let mut state = lock_compaction(&pump_compaction);
                                 if state.task.is_some() {
-                                    continue;
-                                }
-                                if std::mem::take(&mut state.trailing_idle) {
+                                    state.idle_seen = true;
+                                    state.idle.notify_one();
                                     continue;
                                 }
                                 state.prompt_in_flight = false;
@@ -311,7 +314,9 @@ impl OpenCodeChatSession {
             let running = guard.task.is_some();
             turn_running = guard.prompt_in_flight;
             if !running && !turn_running {
-                guard.trailing_idle = false;
+                guard.idle_seen = false;
+                guard.idle = Arc::new(tokio::sync::Notify::new());
+                let idle = guard.idle.clone();
                 // The task settles through the same lock, so it waits until its
                 // handle is stored below.
                 guard.task = Some(tokio::spawn(async move {
@@ -324,12 +329,17 @@ impl OpenCodeChatSession {
                         .unwrap_or_else(|_| Err(anyhow::anyhow!("compaction timed out"))),
                         None => Err(anyhow::anyhow!("compaction needs a configured model")),
                     };
+                    if result.is_ok() {
+                        let seen = lock_compaction(&state).idle_seen;
+                        if !seen {
+                            let _ = tokio::time::timeout(IDLE_GRACE, idle.notified()).await;
+                        }
+                    }
                     {
                         let mut guard = lock_compaction(&state);
                         if guard.task.take().is_none() {
                             return;
                         }
-                        guard.trailing_idle = result.is_ok();
                     }
                     let finished = match result {
                         Ok(()) => {
@@ -391,7 +401,6 @@ impl ChatSession for OpenCodeChatSession {
                 let mut state = lock_compaction(&self.compaction);
                 let compacting = state.task.is_some();
                 if !compacting {
-                    state.trailing_idle = false;
                     state.prompt_in_flight = true;
                 }
                 compacting
@@ -1197,7 +1206,7 @@ mod tests {
     }
 
     async fn next_event(rx: &mut Receiver<ChatEvent>) -> ChatEvent {
-        tokio::time::timeout(Duration::from_secs(3), rx.recv())
+        tokio::time::timeout(Duration::from_secs(6), rx.recv())
             .await
             .expect("timed out waiting for ChatEvent")
             .expect("chat event channel closed")
@@ -1379,6 +1388,8 @@ class H(BaseHTTPRequestHandler):
             self._reply(200, True)
             if os.path.exists("idle-after-summarize"):
                 idle_requests += 1
+            if os.path.exists("idle-late-summarize"):
+                threading.Timer(1.0, bump_idle).start()
             return
         if self.path == "/session/sess-1/abort":
             return self._reply(200, True)
@@ -1843,6 +1854,68 @@ PY"#;
         assert!(rx.try_recv().is_err(), "each request settles exactly once");
         let log = std::fs::read_to_string(temp.path().join("requests.log")).unwrap();
         assert!(!log.contains("prompt_async"), "{log}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn late_summarize_idle_stays_inside_the_compaction_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut session, mut rx) = open_compact_stub(temp.path()).await;
+
+        // The summarize idle arrives 1 s after the response.
+        std::fs::write(temp.path().join("idle-late-summarize"), "").unwrap();
+        session.send_turn("/compact".to_string()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        session.send_turn("hello".to_string()).await.unwrap();
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::TurnFinished {
+                ok: false,
+                error: Some(_)
+            }
+        ));
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::Delta {
+                role: ChatRole::Assistant,
+                ..
+            }
+        ));
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::TurnFinished {
+                ok: true,
+                error: None
+            }
+        ));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        ChatSession::close(session).await.unwrap();
+        assert!(rx.try_recv().is_err(), "one finish for each accepted turn");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compaction_settles_once_after_the_grace_when_no_idle_comes() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut session, mut rx) = open_compact_stub(temp.path()).await;
+
+        session.send_turn("/compact".to_string()).await.unwrap();
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::Delta {
+                role: ChatRole::Assistant,
+                ..
+            }
+        ));
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::TurnFinished {
+                ok: true,
+                error: None
+            }
+        ));
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        ChatSession::close(session).await.unwrap();
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test(flavor = "multi_thread")]
