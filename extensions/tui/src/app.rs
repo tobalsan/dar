@@ -166,9 +166,9 @@ impl App {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         // `/new` (exact, trimmed) is intercepted locally before `submit()` so
         // it never reaches the backend as a turn. `/compact` deliberately
-        // falls through to a normal submit instead: the backend CLI (pi)
-        // interprets it as its own compaction command and reports fresh
-        // context usage afterward — this is supported, not accidental. Any
+        // falls through to a normal submit instead: the chat backend maps it
+        // to its own compaction command (pi: the RPC `compact` command), so it
+        // never reaches the model as a prompt — this is supported, not accidental. Any
         // other text — including input that merely begins with `/` — also
         // falls through to a normal submit. Checked here, before the `input`
         // mutable borrow below, and only on a plain Enter (no Shift/Alt, which

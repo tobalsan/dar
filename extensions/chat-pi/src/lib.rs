@@ -146,6 +146,36 @@ impl TurnQueue {
                 self.error = None;
                 return Vec::new();
             }
+            Some("response")
+                if value["command"].as_str() == Some("compact")
+                    && self
+                        .in_flight
+                        .as_ref()
+                        .is_some_and(|prompt| value["id"].as_str() == Some(prompt.id.as_str())) =>
+            {
+                // `compact` produces no agent run, so its response settles the turn.
+                self.in_flight.take();
+                let failure = (value["success"].as_bool() != Some(true)).then(|| {
+                    value["error"]
+                        .as_str()
+                        .unwrap_or("compaction failed")
+                        .to_owned()
+                });
+                let mut events = vec![ChatEvent::TurnStarted {
+                    origin: TurnOrigin::Submitted,
+                }];
+                if failure.is_none() {
+                    events.push(ChatEvent::Delta {
+                        role: ChatRole::Assistant,
+                        text: "Context compacted.".to_owned(),
+                    });
+                }
+                events.push(ChatEvent::TurnFinished {
+                    ok: failure.is_none(),
+                    error: failure,
+                });
+                return events;
+            }
             Some("response") => {
                 let Some(prompt) = self
                     .in_flight
@@ -402,7 +432,20 @@ fn pi_args(params: &ChatSessionParams) -> Vec<OsString> {
     args
 }
 
+/// Pi RPC `prompt` runs only extension commands; the interactive `/compact`
+/// built-in would reach the model, so map it to the dedicated `compact` command.
 fn prompt_command(id: &str, message: &str) -> String {
+    let trimmed = message.trim();
+    if let Some(rest) = trimmed.strip_prefix("/compact") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let mut command = serde_json::json!({ "id": id, "type": "compact" });
+            let instructions = rest.trim();
+            if !instructions.is_empty() {
+                command["customInstructions"] = instructions.into();
+            }
+            return command.to_string() + "\n";
+        }
+    }
     serde_json::json!({ "id": id, "type": "prompt", "message": message }).to_string() + "\n"
 }
 
@@ -839,6 +882,49 @@ mod tests {
         assert_eq!(value["type"], "prompt");
         assert_eq!(value["id"], "t1");
         assert_eq!(value["message"], "Fix the failing test");
+    }
+
+    #[test]
+    fn compact_prompt_maps_to_compact_command() {
+        let plain: Value = serde_json::from_str(&prompt_command("t1", "/compact")).unwrap();
+        assert_eq!(plain["type"], "compact");
+        assert_eq!(plain["id"], "t1");
+        assert!(plain.get("customInstructions").is_none());
+        let custom: Value =
+            serde_json::from_str(&prompt_command("t2", " /compact  keep the plan\n")).unwrap();
+        assert_eq!(custom["type"], "compact");
+        assert_eq!(custom["customInstructions"], "keep the plan");
+        let other: Value = serde_json::from_str(&prompt_command("t3", "/compactor")).unwrap();
+        assert_eq!(other["type"], "prompt");
+    }
+
+    #[test]
+    fn compact_response_settles_the_turn() {
+        let mut queue = TurnQueue {
+            in_flight: Some(Prompt::new(prompt_command("t1", "/compact"))),
+            ..TurnQueue::default()
+        };
+        let ok = r#"{"type":"response","id":"t1","command":"compact","success":true,"data":{}}"#;
+        let value: Value = serde_json::from_str(ok).unwrap();
+        let events = queue.observe(&value, map_stdout_line(ok, None));
+        assert!(matches!(
+            events.first(),
+            Some(ChatEvent::TurnStarted { .. })
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(ChatEvent::TurnFinished { ok: true, .. })
+        ));
+        assert!(queue.in_flight.is_none());
+
+        queue.in_flight = Some(Prompt::new(prompt_command("t2", "/compact")));
+        let bad = r#"{"type":"response","id":"t2","command":"compact","success":false,"error":"Nothing to compact"}"#;
+        let value: Value = serde_json::from_str(bad).unwrap();
+        let events = queue.observe(&value, map_stdout_line(bad, None));
+        assert!(matches!(
+            events.last(),
+            Some(ChatEvent::TurnFinished { ok: false, error: Some(e) }) if e == "Nothing to compact"
+        ));
     }
 
     #[test]
