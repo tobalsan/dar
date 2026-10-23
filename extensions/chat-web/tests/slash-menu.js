@@ -26,13 +26,13 @@ function browser() {
     window: { innerHeight: 1000, addEventListener() {} },
     queueMicrotask, crypto: { randomUUID: () => 'command' }, EventSource: function () { this.close = () => {}; },
     setTimeout, clearTimeout, setInterval() {},
-    fetch: async (url, options) => { calls.push({ url, options }); return { ok: true, status: 202, json: async () => ({}), text: async () => '{}' }; },
+    fetch: async (url, options) => { calls.push({ url, options }); return { ok: true, status: 202, json: async () => (url.endsWith('/new') ? { slot: 'fresh' } : {}), text: async () => '{}' }; },
   };
   vm.runInContext(source, vm.createContext(sandbox));
   const input = elements['chat-input'];
   const fire = (type, extra = {}) => { const e = { target: input, preventDefault() { e.prevented = true; }, ...extra }; for (const fn of handlers[type] || []) fn(e); return e; };
   return {
-    calls, attrs, menu: elements['chat-slash-menu'], input,
+    calls, attrs, menu: elements['chat-slash-menu'], input, app: () => sandbox.window.__chatWeb,
     type(value) { input.value = value; fire('input'); },
     key(key, extra = {}) { return fire('keydown', { key, ...extra }); },
     clickOption(name) { fire('click', { target: { closest: s => s === '.chat-slash-option' ? { dataset: { command: name } } : null } }); },
@@ -102,4 +102,14 @@ const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(
   await settle();
   assert.equal(p.calls[0].url, '/chat/main/compact');
   assert.equal(JSON.parse(p.calls[0].options.body).instructions, 'keep the plan');
+
+  p = browser();
+  p.type('/');
+  p.key('Enter', { isComposing: true });
+  p.calls.length = 0;
+  p.app().newChat();
+  await settle();
+  assert.equal(p.menu.hidden, true, 'switching chats closes the menu');
+  p.key('Enter');
+  assert.equal(p.input.value, '', 'Enter after a chat switch does not complete a stale command');
 })().catch(err => { console.error(err); process.exit(1); });

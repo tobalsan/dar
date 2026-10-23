@@ -352,7 +352,8 @@
         let options = slashMatches(e.target.value);
         if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); updateSlash(app, (app.slashIndex || 0) + (e.key === 'ArrowDown' ? 1 : -1)); return; }
         if (e.key === 'Escape') { e.preventDefault(); app.slashDismissed = e.target.value; closeSlash(); return; }
-        if ((e.key === 'Tab' && !e.shiftKey) || (e.key === 'Enter' && !e.shiftKey)) { e.preventDefault(); completeSlash(app, options[app.slashIndex || 0].name); return; }
+        let selected = options[app.slashIndex || 0];
+        if (selected && ((e.key === 'Tab' && !e.shiftKey) || (e.key === 'Enter' && !e.shiftKey))) { e.preventDefault(); completeSlash(app, selected.name); return; }
       }
       if (e.target.id === 'chat-input' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendFlow(app); return; }
       // Session rows are role=button: Enter/Space resumes, like a click.
@@ -550,6 +551,7 @@
     for (const file of app.pending) if (file._preview) URL.revokeObjectURL(file._preview);
     app.draft = ''; app.pending = [];
     let input = $('chat-input'); if (input) { input.value = ''; autogrow(input); }
+    app.slashDismissed = null; closeSlash();
     renderChips(app); refreshBusy(app);
     render(app, { type: 'reset' });
     app.es = new EventSource(`/chat/${slot}/stream`);
