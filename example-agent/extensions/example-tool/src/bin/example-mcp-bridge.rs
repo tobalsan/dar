@@ -17,13 +17,34 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tool_registry::{ToolRegistry, ToolRegistryHandle};
+use tool_registry::{ToolExecutor, ToolOutcome, ToolRegistry, ToolRegistryHandle, ToolSpec};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let suffix = parse_suffix(std::env::args().skip(1));
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let suffix = parse_suffix(args.iter().cloned());
     let registry = ToolRegistry::new();
-    example_tool::register_into_with_config(&registry, example_tool::ExampleToolConfig { suffix })?;
+    example_tool::register_into_with_config(
+        &registry,
+        example_tool::ExampleToolConfig {
+            suffix: suffix.clone(),
+        },
+    )?;
+    if args.iter().any(|arg| arg == "--include-upstream") {
+        registry.register_tool(
+            ToolSpec::new(
+                "fixture__echo_upper",
+                "Uppercase text with the configured suffix through the upstream fixture.",
+                json!({
+                    "type": "object",
+                    "properties": { "text": { "type": "string" } },
+                    "required": ["text"],
+                    "additionalProperties": false,
+                }),
+            ),
+            Arc::new(UpstreamEchoUpper { suffix }),
+        )?;
+    }
     let registry: Arc<dyn ToolRegistryHandle> = Arc::new(registry);
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -79,6 +100,25 @@ async fn main() -> Result<()> {
         stdout.flush().await?;
     }
     Ok(())
+}
+
+/// A real upstream-style fixture tool, enabled only for discovery e2e tests.
+struct UpstreamEchoUpper {
+    suffix: String,
+}
+
+#[async_trait::async_trait]
+impl ToolExecutor for UpstreamEchoUpper {
+    async fn execute(&self, args: Value) -> Result<ToolOutcome> {
+        let Some(text) = args.get("text").and_then(Value::as_str) else {
+            return Ok(ToolOutcome::error("fixture__echo_upper requires text"));
+        };
+        Ok(ToolOutcome::ok(format!(
+            "{}{}",
+            text.to_uppercase(),
+            self.suffix
+        )))
+    }
 }
 
 /// Parse `--suffix <value>` (or `--suffix=<value>`) from the argument list,

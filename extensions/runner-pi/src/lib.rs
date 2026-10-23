@@ -1041,6 +1041,10 @@ mod tests {
         .unwrap();
         assert_eq!(written["mcpServers"]["dar"]["command"], "/opt/dar");
         assert_eq!(written["mcpServers"]["dar"]["exposure"], "direct");
+        assert_eq!(
+            written["mcpServers"]["dar"]["toolExposure"],
+            serde_json::json!({"*__*": "deferred"})
+        );
     }
 
     #[test]

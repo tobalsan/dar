@@ -17,6 +17,7 @@
 //! methods are answered per JSON-RPC (`-32601` for unknown requests; ignored for
 //! notifications).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -158,6 +159,7 @@ async fn handle_message(
                 "protocolVersion": PROTOCOL_VERSION,
                 "serverInfo": { "name": "dar", "version": env!("CARGO_PKG_VERSION") },
                 "capabilities": { "tools": {} },
+                "instructions": initialize_instructions(registry),
             }),
         ),
         Some("tools/list") => {
@@ -175,6 +177,38 @@ async fn handle_message(
         _ => error(id, -32601, "method not found"),
     };
     Some(response)
+}
+
+fn initialize_instructions(registry: &Arc<dyn ToolRegistryHandle>) -> String {
+    let mut servers = BTreeMap::new();
+    for tool in registry.list() {
+        if let Some((server, _)) = tool.name.split_once("__") {
+            *servers.entry(server.to_owned()).or_insert(0usize) += 1;
+        }
+    }
+    if servers.is_empty() {
+        return "Dar host tools.".into();
+    }
+    let mut instructions = "Dar host tools. Upstream MCP servers: ".to_owned();
+    let mut entries = servers.into_iter().peekable();
+    let mut separator = "";
+    while let Some((server, count)) = entries.next() {
+        let entry = format!("{separator}{server} ({count} tools)");
+        let ending = if entries.peek().is_some() {
+            ", …"
+        } else {
+            "."
+        };
+        if instructions.chars().count() + entry.chars().count() + ending.chars().count() > 250 {
+            instructions.push_str(separator);
+            instructions.push('…');
+            return instructions;
+        }
+        instructions.push_str(&entry);
+        separator = ", ";
+    }
+    instructions.push('.');
+    instructions
 }
 
 async fn handle_tools_call(
@@ -368,6 +402,95 @@ mod tests {
         let out = roundtrip(&[json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" })]).await;
         assert_eq!(out[0]["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert!(out[0]["result"]["capabilities"]["tools"].is_object());
+    }
+
+    #[tokio::test]
+    async fn initialize_describes_host_tools_without_upstream_servers() {
+        let out = roundtrip(&[json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" })]).await;
+        assert_eq!(out[0]["result"]["instructions"], "Dar host tools.");
+    }
+
+    fn registry_with_tools(names: &[String]) -> Arc<dyn ToolRegistryHandle> {
+        let reg = ToolRegistry::new();
+        for name in names {
+            reg.register_tool(
+                ToolSpec::new(name, "Tool", json!({ "type": "object" })),
+                Arc::new(EchoUpper),
+            )
+            .unwrap();
+        }
+        Arc::new(reg)
+    }
+
+    #[tokio::test]
+    async fn initialize_summarizes_upstream_servers_by_name_and_tool_count() {
+        let mut names: Vec<String> = (0..68).map(|i| format!("linear__tool__{i}")).collect();
+        names.extend((0..12).map(|i| format!("aimx__tool{i}")));
+        names.push("host_tool".into());
+        let out = roundtrip_with(
+            registry_with_tools(&names),
+            Redactor::default(),
+            &[json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" })],
+        )
+        .await;
+        assert_eq!(
+            out[0]["result"]["instructions"],
+            "Dar host tools. Upstream MCP servers: aimx (12 tools), linear (68 tools)."
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_limits_instructions_to_250_characters_with_complete_entries() {
+        let cases = [
+            (
+                vec![format!("{}__tool", "a".repeat(201))],
+                concat!(
+                    "Dar host tools. Upstream MCP servers: ",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "a (1 tools)."
+                ),
+                250,
+            ),
+            (
+                vec![
+                    "aimx__tool".into(),
+                    format!("{}__tool", "b".repeat(202)),
+                    "z__tool".into(),
+                ],
+                "Dar host tools. Upstream MCP servers: aimx (1 tools), …",
+                55,
+            ),
+            (
+                vec![format!("{}__tool", "a".repeat(202))],
+                "Dar host tools. Upstream MCP servers: …",
+                39,
+            ),
+            (
+                vec![format!("{}__tool", "a".repeat(199)), "z__tool".into()],
+                concat!(
+                    "Dar host tools. Upstream MCP servers: ",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (1 tools), …"
+                ),
+                250,
+            ),
+        ];
+        for (names, expected, expected_length) in cases {
+            let out = roundtrip_with(
+                registry_with_tools(&names),
+                Redactor::default(),
+                &[json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" })],
+            )
+            .await;
+            let instructions = out[0]["result"]["instructions"].as_str().unwrap();
+            assert_eq!(instructions, expected);
+            assert_eq!(instructions.chars().count(), expected_length);
+        }
     }
 
     #[tokio::test]

@@ -86,9 +86,9 @@ fn bridge_dial_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
 /// Advertise the host bridge to pi's native MCP support. Pi 1.0 reads servers
 /// only from `~/.pi/agent/mcp.json` and, for trusted projects, from
 /// `<cwd>/.pi/mcp.json` — there is no per-run config flag. So merge the bridge
-/// entry (`exposure: "direct"` → first-class pi tools) into the spawn cwd's
-/// project file, keeping any user-defined servers, and return `--approve` so pi
-/// trusts that project file for this run.
+/// entry (host tools direct, `<server>__<tool>` upstream tools deferred) into the
+/// spawn cwd's project file, keeping any user-defined servers, and return
+/// `--approve` so pi trusts that project file for this run.
 pub fn pi_mcp_config_args(cwd: &Path, bridge: &HostToolBridge) -> Result<BridgeInvocation> {
     let config_path = cwd.join(".pi").join("mcp.json");
     let mut config: Value = match std::fs::read_to_string(&config_path) {
@@ -118,6 +118,7 @@ pub fn pi_mcp_config_args(cwd: &Path, bridge: &HostToolBridge) -> Result<BridgeI
             "command": bridge.command,
             "args": bridge.args,
             "exposure": "direct",
+            "toolExposure": { "*__*": "deferred" },
         }),
     );
     std::fs::create_dir_all(config_path.parent().expect("has parent"))
@@ -334,7 +335,7 @@ mod tests {
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         std::fs::write(
             &config_path,
-            r#"{"mcpServers":{"user":{"command":"u"}},"other":1}"#,
+            r#"{"mcpServers":{"user":{"command":"u","exposure":"codemode","toolExposure":{"keep":"direct"}}},"other":1}"#,
         )
         .unwrap();
 
@@ -351,14 +352,22 @@ mod tests {
             json!(["__mcp-bridge", "--dir", "/tmp/agent"])
         );
         assert_eq!(server["exposure"], "direct");
-        assert_eq!(written["mcpServers"]["user"]["command"], "u");
+        assert_eq!(server["toolExposure"], json!({"*__*": "deferred"}));
+        assert_eq!(
+            written["mcpServers"]["user"],
+            json!({"command":"u","exposure":"codemode","toolExposure":{"keep":"direct"}})
+        );
         assert_eq!(written["other"], 1);
 
         // Idempotent and creates the file when missing.
         let fresh = tempfile::tempdir().unwrap();
         pi_mcp_config_args(fresh.path(), &bridge()).unwrap();
         pi_mcp_config_args(fresh.path(), &bridge()).unwrap();
-        assert!(fresh.path().join(".pi/mcp.json").exists());
+        let fresh_config: Value = serde_json::from_str(
+            &std::fs::read_to_string(fresh.path().join(".pi/mcp.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fresh_config["mcpServers"][BRIDGE_SERVER_NAME], *server);
     }
 
     #[test]
