@@ -51,6 +51,10 @@ pub struct AgentConfig {
     /// Absent key ⇒ `AGENTS.md` only.
     #[serde(default)]
     pub system_files: Option<Vec<system_files::SystemFileEntry>>,
+    /// Opt-in self-improvement prompt section: `true`, `false`, or
+    /// `{ enabled }`. Absent ⇒ off. Applied by the `system-context` extension.
+    #[serde(default)]
+    pub reflect: Option<system_files::ReflectConfig>,
     /// Marks the agent as Docker-sandboxed (`dar sandbox`); read by `dar build`.
     #[serde(default)]
     pub sandboxed: bool,
@@ -372,6 +376,19 @@ mod tests {
         assert_eq!(cfg.id, "a");
         assert_eq!(cfg.runner.use_, "fake");
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn reflect_parses_all_shapes() {
+        let on = |extra: &str| {
+            let cfg: AgentConfig = serde_yaml::from_str(&format!("{BASE}{extra}")).unwrap();
+            cfg.reflect.is_some_and(|r| r.is_enabled())
+        };
+        assert!(on("reflect: true\n"));
+        assert!(!on("reflect: false\n"));
+        assert!(!on("reflect:\n  enabled: false\n"));
+        assert!(on("reflect: {}\n"));
+        assert!(!on(""));
     }
 
     #[test]

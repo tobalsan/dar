@@ -4,7 +4,7 @@ This covers `agent.yaml` identity/host config, system files, exported child envi
 
 `agent.yaml` is agent **identity and host config only**: `id`, `name`,
 `description`, `avatar`, `runner`, `hitl`, `dashboard`, `foreground`, `providers`, `extensions`,
-`system_files`, `sandboxed`. The issue-loop config — tracker, polling, workspace — lives
+`system_files`, `reflect`, `sandboxed`. The issue-loop config — tracker, polling, workspace — lives
 entirely in `WORKFLOW.md` frontmatter (see [WORKFLOW.md](workflows.md) below);
 `agent.yaml` has no tracker/orchestrator/workspace keys of its own. Old
 `agent.yaml` files that still carry those keys keep parsing: they're unknown
@@ -65,6 +65,20 @@ A successful live self-rebuild restarts the host and reloads the current
 `agent.yaml`, `AGENTS.md`, declared `system_files`, and workspace skills. An
 offline `dar self rebuild --dir ...` only swaps the binary, so a running host
 keeps its existing context until manually restarted.
+
+## Self-improvement (`reflect`)
+
+```yaml
+reflect: true            # or: reflect: { enabled: true }
+```
+
+Off by default. When on, Dar adds a fixed "Self-improvement" section to the
+system context. It tells the agent to save lessons from corrections and
+finished work into `skills/<name>/SKILL.md`, or into `memory.md` for facts that
+apply to every session. The section reaches every surface that reads system
+context: issue runs, chat (including TUI and web chat), and scheduler jobs.
+`reflect: { enabled: false }` turns it off. An empty `reflect: {}` turns it on.
+Like other system context, it loads once at boot.
 
 ## Agent loop guard (`agent_loop`)
 

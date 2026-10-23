@@ -44,9 +44,10 @@ pub struct SystemContext {
 }
 
 impl SystemContext {
-    /// `true` when no files resolved (empty identity context).
+    /// `true` when there is no context text: no files resolved and nothing
+    /// else (skills, reflect section) was appended.
     pub fn is_empty(&self) -> bool {
-        self.files.is_empty()
+        self.files.is_empty() && self.text.is_empty()
     }
 }
 

@@ -32,6 +32,47 @@ pub mod bus;
 /// The conventional agent-identity file resolved first, when present.
 pub const AGENTS_MD: &str = "AGENTS.md";
 
+/// Fixed runtime-owned prompt section appended to the system context when
+/// `reflect` is on. It tells the agent to save lessons into skills and memory.
+pub const REFLECT_SECTION: &str = r#"## Self-improvement
+
+Learn during the conversation. When the user corrects you, states a preference or rule, or you finish a non-trivial process or debug, save the lesson before you end the turn.
+
+- Skills first. Put a procedure, pitfall, or user correction for a kind of task in the skill that governs that task: edit `skills/<name>/SKILL.md` in your workspace. Patch the skill you used before you create a new one. Write lessons, not logs: a rule and its reason, no dates or incident stories, one rule per lesson.
+- Use `memory.md` only for facts that apply to every session: who the user is, environment facts, standing conventions with no task home. Keep it small. When it grows, merge or replace stale entries. Do not skip the save.
+- Write facts, not orders. Write "User prefers short answers", not "Always answer short". An order is read later as a directive.
+- If a new workflow has no matching skill, ask the user before you create a new skill.
+- Do not save transient errors, environment-dependent failures, one-off task stories, task progress, or secrets.
+- Never edit AGENTS.md, agent.yaml, credentials, or read-only skills.
+- Some files can be read-only, for example in a sandbox without a writable workspace. If a save fails, do not retry. Tell the user in one line what you wanted to save and where.
+- After a save, tell the user in one short line which file changed. Do not repeat a save that succeeded.
+"#;
+
+/// The `reflect` key of `agent.yaml`: `true`, `false`, or `{ enabled }`
+/// (`enabled` defaults to true). Absent means off.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ReflectConfig {
+    Flag(bool),
+    Detailed {
+        #[serde(default = "default_reflect_enabled")]
+        enabled: bool,
+    },
+}
+
+fn default_reflect_enabled() -> bool {
+    true
+}
+
+impl ReflectConfig {
+    pub fn is_enabled(&self) -> bool {
+        match self {
+            ReflectConfig::Flag(on) => *on,
+            ReflectConfig::Detailed { enabled } => *enabled,
+        }
+    }
+}
+
 /// One declared `system_files` entry: a bare path or a `{ path, required? }`
 /// table. `required` defaults to `false`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

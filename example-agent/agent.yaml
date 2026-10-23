@@ -21,6 +21,10 @@ runner:
 #   - path: docs/policy.md
 #     required: true
 
+# Opt-in: add a self-improvement section to the system context. The agent then
+# saves lessons to skills/<name>/SKILL.md or memory.md. Off when absent.
+# reflect: true
+
 # Each agent's dashboard binds an OS-assigned free port on 0.0.0.0 by default,
 # so multiple agents never collide. Run `dar dash` for one unified view
 # over every live agent. Override here to pin a fixed bind/port if needed.

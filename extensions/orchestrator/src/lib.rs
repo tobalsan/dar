@@ -3136,6 +3136,7 @@ mod tests {
             providers: Default::default(),
             extensions: Default::default(),
             system_files: None,
+            reflect: None,
             sandboxed: false,
         };
 
@@ -3173,6 +3174,7 @@ mod tests {
             providers: Default::default(),
             extensions: Default::default(),
             system_files: None,
+            reflect: None,
             sandboxed: false,
         };
 
@@ -3549,6 +3551,7 @@ mod tests {
             providers: Default::default(),
             extensions: Default::default(),
             system_files: None,
+            reflect: None,
             sandboxed: false,
         }
     }
@@ -4836,6 +4839,7 @@ dashboard:
             providers: Default::default(),
             extensions: Default::default(),
             system_files: None,
+            reflect: None,
             sandboxed: false,
         }
     }

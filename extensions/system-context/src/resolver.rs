@@ -12,31 +12,33 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use system_files::bus::SystemContext;
-use system_files::{ResolveError, SystemFileEntry};
+use system_files::{ReflectConfig, ResolveError, SystemFileEntry, REFLECT_SECTION};
 
-/// Minimal view of `agent.yaml`: only the `system_files` key this extension
-/// needs. Decoupled from the orchestrator's full config tree so the substrate
+/// Minimal view of `agent.yaml`: only the `system_files` and `reflect` keys
+/// this extension needs. Decoupled from the orchestrator's full config tree so the substrate
 /// stays independent of the loop. Unknown keys are ignored.
 #[derive(Debug, Default, Deserialize)]
 struct SystemFilesConfig {
     #[serde(default)]
     system_files: Option<Vec<SystemFileEntry>>,
+    #[serde(default)]
+    reflect: Option<ReflectConfig>,
 }
 
-fn load_entries(root: &Path) -> Option<Vec<SystemFileEntry>> {
+fn load_config(root: &Path) -> SystemFilesConfig {
     let path = root.join("agent.yaml");
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(e) => {
             tracing::warn!("reading {} for system files: {e}", path.display());
-            return None;
+            return SystemFilesConfig::default();
         }
     };
     match serde_yaml::from_str::<SystemFilesConfig>(&raw) {
-        Ok(cfg) => cfg.system_files,
+        Ok(cfg) => cfg,
         Err(e) => {
             tracing::error!("parsing {} for system files: {e}", path.display());
-            None
+            SystemFilesConfig::default()
         }
     }
 }
@@ -46,14 +48,30 @@ fn load_entries(root: &Path) -> Option<Vec<SystemFileEntry>> {
 /// Warnings are logged; a hard error is logged and collapses to an empty
 /// context (boot continues — preflight is the gate that rejects bad config).
 pub fn resolve_for(root: &Path) -> SystemContext {
-    let entries = load_entries(root);
-    match resolve(root, entries.as_deref()) {
-        Ok(ctx) => ctx,
+    let cfg = load_config(root);
+    match resolve(root, cfg.system_files.as_deref()) {
+        Ok(mut ctx) => {
+            if cfg.reflect.is_some_and(|r| r.is_enabled()) {
+                append_reflect_section(&mut ctx.text);
+            }
+            ctx
+        }
         Err(e) => {
             tracing::error!("resolving system context: {e}");
             SystemContext::default()
         }
     }
+}
+
+/// Append the fixed self-improvement section, separated from prior text.
+fn append_reflect_section(text: &mut String) {
+    if !text.is_empty() {
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push('\n');
+    }
+    text.push_str(REFLECT_SECTION);
 }
 
 /// Resolve into the contract payload, surfacing any [`ResolveError`].
@@ -373,6 +391,46 @@ mod tests {
         assert_eq!(order, vec!["AGENTS.md", "SOUL.md"]);
         assert!(ctx.text.contains("i am passive"));
         assert!(ctx.text.contains("my soul"));
+    }
+
+    fn reflect_ctx(dir: &Path, reflect_line: &str) -> SystemContext {
+        write(
+            dir,
+            "agent.yaml",
+            &format!("id: a\nname: A\nrunner:\n  use: fake\n{reflect_line}"),
+        );
+        resolve_for(dir)
+    }
+
+    #[test]
+    fn reflect_on_appends_section_without_identity_files() {
+        let dir = TempDir::new().unwrap();
+        let ctx = reflect_ctx(dir.path(), "reflect: true\n");
+        assert!(ctx.text.contains("## Self-improvement"));
+        assert!(ctx.text.contains("memory.md"));
+        assert!(!ctx.is_empty());
+    }
+
+    #[test]
+    fn reflect_on_appends_section_after_identity() {
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), "AGENTS.md", "identity");
+        let ctx = reflect_ctx(dir.path(), "reflect:\n  enabled: true\n");
+        let id = ctx.text.find("identity").unwrap();
+        let sec = ctx.text.find("## Self-improvement").unwrap();
+        assert!(id < sec);
+    }
+
+    #[test]
+    fn reflect_off_or_absent_adds_nothing() {
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), "AGENTS.md", "identity");
+        for line in ["", "reflect: false\n", "reflect:\n  enabled: false\n"] {
+            let ctx = reflect_ctx(dir.path(), line);
+            assert!(!ctx.text.contains("Self-improvement"), "{line}");
+        }
+        let empty = TempDir::new().unwrap();
+        assert!(reflect_ctx(empty.path(), "").is_empty());
     }
 
     #[test]
