@@ -245,6 +245,21 @@ impl OpenCodeClient {
         Ok(())
     }
 
+    /// Start native compaction (`POST /session/{id}/summarize`). The server
+    /// reports completion through the event stream (`session.idle`).
+    pub async fn summarize_session(&self, session_id: &str, model: &str) -> Result<()> {
+        let body = parse_model(model).context("opencode compaction needs a provider/model id")?;
+        self.client
+            .post(self.url(&format!("/session/{session_id}/summarize")))
+            .json(&body)
+            .send()
+            .await
+            .context("compacting opencode session")?
+            .error_for_status()
+            .context("compacting opencode session")?;
+        Ok(())
+    }
+
     pub async fn events(&self) -> Result<EventStream> {
         let response = self
             .client

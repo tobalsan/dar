@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -68,6 +69,10 @@ pub struct OpenCodeChatSession {
     server: Option<OpenCodeServer>,
     pump: JoinHandle<()>,
     marker: Option<PathBuf>,
+    tx: Sender<ChatEvent>,
+    /// True from a `/compact` request until its turn settles. The event pump
+    /// turns the next `session.idle` into the compaction notice and finish.
+    compacting: Arc<AtomicBool>,
 }
 
 impl OpenCodeChatSession {
@@ -116,6 +121,9 @@ impl OpenCodeChatSession {
                 id: session_id.clone(),
             })
             .await;
+        let compacting = Arc::new(AtomicBool::new(false));
+        let pump_compacting = compacting.clone();
+        let pump_tx = tx.clone();
         let pump_client = client.clone();
         let pump_session = session_id.clone();
         let artifact_ready = params.artifact_ready.clone();
@@ -150,6 +158,17 @@ impl OpenCodeChatSession {
                                     continue;
                                 }
                             }
+                            if let ChatEvent::TurnFinished { ok, .. } = &chat_event {
+                                if pump_compacting.swap(false, Ordering::SeqCst) && *ok {
+                                    let notice = ChatEvent::Delta {
+                                        role: ChatRole::Assistant,
+                                        text: "Context compacted.".to_owned(),
+                                    };
+                                    if tx.send(notice).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
                             if tx.send(chat_event).await.is_err() {
                                 return;
                             }
@@ -176,6 +195,8 @@ impl OpenCodeChatSession {
             server: Some(server),
             pump,
             marker,
+            tx: pump_tx,
+            compacting,
         })
     }
 }
@@ -253,6 +274,28 @@ impl ChatSession for OpenCodeChatSession {
     fn send_turn(&mut self, prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             touch_marker(self.marker.as_deref());
+            // `/compact` runs the native summarize call and never reaches the
+            // model as a prompt. The API has no instruction field, so any
+            // instructions are ignored.
+            if cap_chat::parse_compact_command(&prompt).is_some() {
+                self.compacting.store(true, Ordering::SeqCst);
+                let started = match self.model.as_deref() {
+                    Some(model) => self.client.summarize_session(&self.session_id, model).await,
+                    None => Err(anyhow::anyhow!("compaction needs a configured model")),
+                };
+                if let Err(error) = started {
+                    if self.compacting.swap(false, Ordering::SeqCst) {
+                        let _ = self
+                            .tx
+                            .send(ChatEvent::TurnFinished {
+                                ok: false,
+                                error: Some(format!("{error:#}")),
+                            })
+                            .await;
+                    }
+                }
+                return Ok(());
+            }
             self.client
                 .send_prompt_with_system(
                     &self.session_id,
@@ -1158,6 +1201,74 @@ class H(BaseHTTPRequestHandler):
 ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
 PY"#;
 
+    const COMPACT_SERVER: &str = r#"PORT=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --port) shift; PORT="$1" ;;
+  esac
+  shift
+done
+python3 - "$PORT" <<'PY'
+import json, os, sys, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+port = int(sys.argv[1])
+summarized = 0
+dispose = False
+
+class H(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def log_message(self, *args): pass
+    def _reply(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        if self.path == "/global/health":
+            return self._reply(200, {"healthy": True, "version": "fake"})
+        if self.path == "/global/event":
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.end_headers()
+            sent = 0
+            while not dispose:
+                while summarized > sent:
+                    sent += 1
+                    self.wfile.write(b'data: {"payload":{"type":"session.idle","properties":{"sessionID":"sess-1"}}}\n\n')
+                    self.wfile.flush()
+                time.sleep(0.02)
+            return
+        self.send_error(404)
+    def do_POST(self):
+        global summarized, dispose
+        length = int(self.headers.get("content-length", "0") or "0")
+        body = self.rfile.read(length).decode()
+        with open("requests.log", "a") as f:
+            f.write(self.path + " " + body + "\n")
+        if self.path == "/session":
+            return self._reply(200, {"id": "sess-1"})
+        if self.path == "/session/sess-1/summarize":
+            if os.path.exists("fail-summarize"):
+                return self._reply(500, {"error": "nothing to compact"})
+            summarized += 1
+            return self._reply(200, True)
+        if self.path == "/session/sess-1/prompt_async":
+            self.send_response(204)
+            self.send_header("content-length", "0")
+            self.end_headers()
+            return
+        if self.path == "/instance/dispose":
+            dispose = True
+            return self._reply(200, True)
+        self.send_error(404)
+
+ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+PY
+"#;
+
     const DISPOSE_FAIL_SERVER: &str = r#"PORT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -1380,6 +1491,75 @@ PY"#;
         )
         .unwrap();
         assert_eq!(header["backend"], "opencode");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_uses_native_summarize_and_settles_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_script(temp.path(), COMPACT_SERVER);
+        let sessions = temp.path().join("data").join("tui").join("sessions");
+        let params = ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions)
+            .model(Some("anthropic/claude-sonnet".to_string()))
+            .build();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut session = OpenCodeChatBackend.open(params, tx).await.unwrap();
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::SessionIdentity { .. }
+        ));
+
+        session
+            .send_turn("/compact keep the plan".to_string())
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::Delta { role: ChatRole::Assistant, text } if text == "Context compacted."
+        ));
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::TurnFinished {
+                ok: true,
+                error: None
+            }
+        ));
+
+        std::fs::write(temp.path().join("fail-summarize"), "").unwrap();
+        session.send_turn("/compact".to_string()).await.unwrap();
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::TurnFinished {
+                ok: false,
+                error: Some(_)
+            }
+        ));
+
+        session.send_turn("/compactor".to_string()).await.unwrap();
+        ChatSession::close(session).await.unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "compaction must settle exactly once"
+        );
+        let log = std::fs::read_to_string(temp.path().join("requests.log")).unwrap();
+        let summarize: Vec<&str> = log
+            .lines()
+            .filter(|l| l.starts_with("/session/sess-1/summarize"))
+            .collect();
+        assert_eq!(summarize.len(), 2, "{log}");
+        assert!(
+            summarize[0].contains(r#""providerID":"anthropic""#),
+            "{log}"
+        );
+        assert!(
+            summarize[0].contains(r#""modelID":"claude-sonnet""#),
+            "{log}"
+        );
+        let prompts: Vec<&str> = log
+            .lines()
+            .filter(|l| l.starts_with("/session/sess-1/prompt_async"))
+            .collect();
+        assert_eq!(prompts.len(), 1, "{log}");
+        assert!(prompts[0].contains("/compactor"), "{log}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
