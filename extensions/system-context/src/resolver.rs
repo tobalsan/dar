@@ -53,6 +53,7 @@ pub fn resolve_for(root: &Path) -> SystemContext {
         Ok(mut ctx) => {
             if cfg.reflect.is_some_and(|r| r.is_enabled()) {
                 append_reflect_section(&mut ctx.text);
+                ctx.reflect = true;
             }
             ctx
         }
@@ -409,6 +410,21 @@ mod tests {
         assert!(ctx.text.contains("## Self-improvement"));
         assert!(ctx.text.contains("memory.md"));
         assert!(!ctx.is_empty());
+    }
+
+    #[test]
+    fn skills_only_agent_stays_empty_unless_reflect_on() {
+        let dir = TempDir::new().unwrap();
+        write(
+            dir.path(),
+            "skills/demo/SKILL.md",
+            "---\nname: demo\ndescription: a demo\n---\nbody\n",
+        );
+        let off = reflect_ctx(dir.path(), "");
+        assert!(off.is_empty());
+        assert!(!off.reflect);
+        let on = reflect_ctx(dir.path(), "reflect: true\n");
+        assert!(!on.is_empty());
     }
 
     #[test]

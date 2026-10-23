@@ -3190,6 +3190,7 @@ mod tests {
             files: vec![SystemContextFile {
                 path: "AGENTS.md".to_string(),
             }],
+            reflect: false,
         }
     }
 
@@ -3231,6 +3232,7 @@ mod tests {
             files: vec![SystemContextFile {
                 path: "AGENTS.md".to_string(),
             }],
+            reflect: false,
         };
         let rendered = "WORKFLOW".to_string();
 

@@ -41,13 +41,16 @@ pub struct SystemContextFile {
 pub struct SystemContext {
     pub text: String,
     pub files: Vec<SystemContextFile>,
+    /// `true` when the opt-in reflect section was appended to `text`.
+    #[serde(default)]
+    pub reflect: bool,
 }
 
 impl SystemContext {
-    /// `true` when there is no context text: no files resolved and nothing
-    /// else (skills, reflect section) was appended.
+    /// `true` when no identity files resolved and reflect is off. Skills-only
+    /// text alone does not make a context eligible (legacy behavior).
     pub fn is_empty(&self) -> bool {
-        self.files.is_empty() && self.text.is_empty()
+        self.files.is_empty() && !self.reflect
     }
 }
 

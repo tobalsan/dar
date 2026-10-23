@@ -26,6 +26,7 @@ impl From<crate::SystemContext> for SystemContext {
                     path: f.display_path,
                 })
                 .collect(),
+            reflect: false,
         }
     }
 }

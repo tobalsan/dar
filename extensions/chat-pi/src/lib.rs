@@ -1078,6 +1078,7 @@ mod tests {
             files: vec![orchestrator_api::SystemContextFile {
                 path: "AGENTS.md".to_string(),
             }],
+            reflect: false,
         };
         let ctx = start_ctx_with_system_context(temp.path(), Some(context.clone()));
         let session_dir = temp.path().join("sessions");
@@ -1097,6 +1098,25 @@ mod tests {
                 cap_chat::NO_REPLY_INSTRUCTION
             ))
         );
+    }
+
+    /// Skills-only context (no files, reflect off) keeps legacy behavior: no
+    /// `--system-prompt`. With reflect on, the reflect-only context reaches pi.
+    #[test]
+    fn sdk_chat_surface_reflect_gates_text_only_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_dir = temp.path().join("sessions");
+        let text_only = |reflect| orchestrator_api::SystemContext {
+            text: "skills block".to_string(),
+            files: vec![],
+            reflect,
+        };
+        for (reflect, expect) in [(false, false), (true, true)] {
+            let ctx = start_ctx_with_system_context(temp.path(), Some(text_only(reflect)));
+            let params = dar_extension_sdk::chat::agent_session_params(&ctx, &session_dir).build();
+            let has = pi_args(&params).contains(&OsString::from("--system-prompt"));
+            assert_eq!(has, expect, "reflect={reflect}");
+        }
     }
 
     /// Graceful degrade, matching the TUI: an absent `system.context` topic
