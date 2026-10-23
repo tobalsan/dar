@@ -167,7 +167,9 @@ impl App {
         // `/new` (exact, trimmed) is intercepted locally before `submit()` so
         // it never reaches the backend as a turn. `/compact` deliberately
         // falls through to a normal submit instead: the chat backend maps it
-        // to its own compaction command (pi: the RPC `compact` command), so it
+        // to its own compaction command (pi: RPC `compact`, codex:
+        // `thread/compact/start`, opencode: `summarize`, builtin: a summary
+        // request), so it
         // never reaches the model as a prompt — this is supported, not accidental. Any
         // other text — including input that merely begins with `/` — also
         // falls through to a normal submit. Checked here, before the `input`

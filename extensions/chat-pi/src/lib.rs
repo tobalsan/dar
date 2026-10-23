@@ -435,16 +435,12 @@ fn pi_args(params: &ChatSessionParams) -> Vec<OsString> {
 /// Pi RPC `prompt` runs only extension commands; the interactive `/compact`
 /// built-in would reach the model, so map it to the dedicated `compact` command.
 fn prompt_command(id: &str, message: &str) -> String {
-    let trimmed = message.trim();
-    if let Some(rest) = trimmed.strip_prefix("/compact") {
-        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-            let mut command = serde_json::json!({ "id": id, "type": "compact" });
-            let instructions = rest.trim();
-            if !instructions.is_empty() {
-                command["customInstructions"] = instructions.into();
-            }
-            return command.to_string() + "\n";
+    if let Some(instructions) = cap_chat::parse_compact_command(message) {
+        let mut command = serde_json::json!({ "id": id, "type": "compact" });
+        if let Some(instructions) = instructions {
+            command["customInstructions"] = instructions.into();
         }
+        return command.to_string() + "\n";
     }
     serde_json::json!({ "id": id, "type": "prompt", "message": message }).to_string() + "\n"
 }

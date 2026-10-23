@@ -17,6 +17,47 @@ pub use silence::{
     SilentReason, NO_REPLY_INSTRUCTION, NO_REPLY_TOKEN,
 };
 
+/// Parse the `/compact [instructions]` slash command.
+///
+/// Returns `Some(None)` for a bare `/compact`, `Some(Some(text))` when
+/// instructions follow, and `None` for any other prompt (`/compactor` too).
+pub fn parse_compact_command(prompt: &str) -> Option<Option<&str>> {
+    let rest = prompt.trim().strip_prefix("/compact")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let instructions = rest.trim();
+    Some((!instructions.is_empty()).then_some(instructions))
+}
+
+#[cfg(test)]
+mod compact_command_tests {
+    use super::parse_compact_command;
+
+    #[test]
+    fn parses_bare_and_instructed_compact() {
+        assert_eq!(parse_compact_command("/compact"), Some(None));
+        assert_eq!(
+            parse_compact_command(
+                "  /compact 
+"
+            ),
+            Some(None)
+        );
+        assert_eq!(
+            parse_compact_command(" /compact  keep the plan\n"),
+            Some(Some("keep the plan"))
+        );
+    }
+
+    #[test]
+    fn rejects_other_prompts() {
+        assert_eq!(parse_compact_command("/compactor"), None);
+        assert_eq!(parse_compact_command("please /compact"), None);
+        assert_eq!(parse_compact_command("hello"), None);
+    }
+}
+
 /// Named service used by chat surfaces that join the agent-wide live session.
 pub const CHAT_COORDINATOR_SERVICE: &str = "chat-coordinator";
 
