@@ -46,6 +46,14 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     await ready;
     fs.appendFileSync(sessionFile, JSON.stringify({ type: 'message', message: { role: 'user', content: [{ type: 'text', text: command.message }] } }) + '\n');
     emit({ type: 'response', command: 'prompt', id: command.id, success: true }); emit({ type: 'agent_start' }); emit({ type: 'message_start', message: { role: 'user' } });
+    if (command.message.startsWith('preview ')) {
+      const args = JSON.parse(command.message.slice(8));
+      const id = `preview-${process.pid}-${++calls}`;
+      emit({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', toolCall: { id, name: 'mcp__dar__web_preview', arguments: args } } });
+      const response = await request('tools/call', { name: 'web_preview', arguments: args });
+      if (response.error || response.result?.isError) throw new Error(JSON.stringify(response));
+      emit({ type: 'tool_execution_end', toolCallId: id, result: response.result, isError: false });
+    }
     const kind = /publish (html|markdown|mermaid|png|pdfvalid|pdflong|pdf|text|security|svg|zip)/.exec(command.message)?.[1];
     if (kind) {
       const files = {

@@ -198,6 +198,54 @@ reports fetch, XHR, or WebSocket access. Artifact views cannot post chat message
 or update model context. Open requests and refused calls are audited.
 Slack and WhatsApp still upload files; other surfaces keep text.
 
+**Web previews.** `web_preview {url, title?}` shows a live web page inline and in
+the side panel with pi, codex, opencode, and builtin. No `mcp.json` is needed.
+Use it for a local dev server or a public HTTPS page. The header shows the title
+or host, **Open in browser**, and **Expand**. Above the page, the URL, **Reload**,
+and **Open** remain available even if the browser blocks the frame. Forms and
+links work inside the page; popups and `target="_blank"` links are blocked.
+The page keeps its own origin, storage, cookies, and HMR WebSocket connection.
+
+The agent host makes a GET request with a five-second timeout before publishing.
+Any `X-Frame-Options` header or enforced CSP `frame-ancestors` directive other
+than `*` produces a link card explaining that the site refuses framing.
+Report-only CSP is ignored. A connection error or timeout produces a card saying
+the page did not answer from the agent host. HTTP error pages can still render.
+The model's text reports this header check, not proof that the browser displayed
+the page. Browser policy, changing headers, or local network access rules can
+still block it; use either Open action in that case.
+
+An actual tailnet HTTPS chat check on 2026-10-23 with Chromium 151.0.7922.34
+and an HTTP `dar.localhost` sandbox did not display the localhost preview.
+Local-network permission was initially `prompt`; explicitly granting it did
+not change the result. The outer sandbox received no referrer and stopped at
+its existing referrer check before creating the content frame. This does not
+establish whether the page itself would load with an HTTPS sandbox. The header's
+**Open in browser** action remains available when the embedded view cannot load.
+
+Dar does not proxy the page. `localhost` means the browser's machine when the
+browser loads it, and the agent's machine during the header check. For a remote
+agent, provide a browser-reachable URL such as a tailnet HTTPS address.
+Only HTTP and HTTPS URLs without usernames or passwords are accepted. Plain
+HTTP is limited to `localhost`, `127.0.0.1`, and `[::1]`. Up to five redirects
+are followed with the same URL rules, and the view shows the final URL.
+Chat, dashboard, and sandbox listener URLs are refused by the view host.
+
+Publishing the same final URL without its fragment updates the existing view
+and its framing policy; different URLs keep separate views. Live frameable
+previews auto-open the side panel above 760 px. Link cards do not auto-open.
+Reload, reconnect, and replay restore previews inline while result records
+exist. Older calls link to the newer version. Other chat surfaces retain the
+short text result and URL.
+
+Each preview view can frame only its approved page origin and cannot read
+artifacts, call tools, post chat messages, or update model context. View calls
+are audited. The framed page cannot read the chat DOM or send Dar view messages.
+Local dev servers on the chat hostname can share its cookies because cookies
+do not separate ports; this accepted local exception does not grant DOM or
+view-message access. Third-party sites may lose logged-in sessions when browsers
+block cross-site cookies.
+
 Tools from servers in `mcp.json` that declare an MCP App appear as a framed
 view under their tool call, labeled with the server name. The view receives
 the tool arguments before the full result, once its initialization finishes.
@@ -223,7 +271,7 @@ extensions:
       sandbox_port: 7879
       # Optional shared browser-visible origin, without a path.
       # sandbox_origin: https://agent-apps.example.net
-      # Keys are mcp.json server IDs, or dar for built-in artifact views.
+      # Keys are mcp.json server IDs, or dar for built-in artifact/preview views.
       sandbox_origins:
         tldraw: loopback
       # Servers whose apps require a fresh view for every call:
@@ -232,7 +280,7 @@ extensions:
 
 The tested tldraw app did not reliably execute a second result in the same
 view; use a fresh view per execution. Other servers reuse views by default.
-Both lists accept server IDs from `mcp.json` and `dar` for artifact views;
+Both lists accept server IDs from `mcp.json` and `dar` for artifact/preview views;
 Dar has no built-in vendor exceptions.
 
 The second HTTP listener serves the sandbox proxy and app documents, never

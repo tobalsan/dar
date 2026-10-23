@@ -180,3 +180,44 @@ fn host_publish_resolves_the_explicit_runner_names_only() {
         );
     }
 }
+
+#[test]
+fn web_preview_resolves_only_the_four_explicit_runner_names() {
+    // ALG-537 Testing Decisions approve read_result correlation; actual runner
+    // emission and browser behavior need their separate integration checks.
+    let root = tempfile::tempdir().unwrap();
+    let record = ResultRecord {
+        tool: "web_preview".into(),
+        pi_tool_name: Some("mcp__dar__web_preview".into()),
+        server: "dar".into(),
+        resource_uri: "ui://dar/web-preview".into(),
+        args: serde_json::json!({"url":"https://example.com/"}),
+        result: serde_json::json!({"structuredContent":{"finalUrl":"https://example.com/"}}),
+        created_at: 42,
+    };
+    let id = record.write(root.path()).unwrap();
+    for name in [
+        "web_preview",
+        "mcp__dar__web_preview",
+        "dar.web_preview",
+        "dar_web_preview",
+    ] {
+        let captured = read_result(root.path(), &id, name)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{name} must resolve"));
+        assert_eq!(
+            captured.result["structuredContent"]["finalUrl"],
+            "https://example.com/"
+        );
+    }
+    for name in [
+        "other.web_preview",
+        "other_web_preview",
+        "mcp__other__web_preview",
+    ] {
+        assert!(
+            read_result(root.path(), &id, name).unwrap().is_none(),
+            "{name}"
+        );
+    }
+}

@@ -3,7 +3,9 @@
   if (window.DarMcpApps) return;
   const views = new Map();
   const autoOpen = new Set();
-  const normalize = name => { if(['dar.artifact_publish','dar_artifact_publish'].includes(name))return 'artifact_publish';const dot=typeof name==='string'?name.indexOf('.'):-1;return dot>=0 && name.slice(dot+1).includes('__')?name.slice(dot+1):name; };
+  const normalize = name => { for(const tool of ['artifact_publish','web_preview'])if([`dar.${tool}`,`dar_${tool}`].includes(name))return tool;const dot=typeof name==='string'?name.indexOf('.'):-1;return dot>=0 && name.slice(dot+1).includes('__')?name.slice(dot+1):name; };
+  const isPreview = descriptor => descriptor.server==='dar' && descriptor.resourceUri==='ui://dar/web-preview';
+  const withoutFragment = value => {const url=new URL(value);url.hash='';return url.href;};
   let settings;
   const request = async (url, options = {}) => {
     const response = await fetch(url, { ...options, signal: options.signal || AbortSignal.timeout(32000) });
@@ -28,6 +30,7 @@
     method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})
   });
   const ICONS={
+    globe:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></svg>',
     inline:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>',
     download:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>',
     browser:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M10 14L21 3M10 3H3v18h18v-7"/></svg>',
@@ -48,6 +51,13 @@
   };
   const heading = (view,descriptor) => {
     if(view.server!=='dar')return;
+    if(isPreview(descriptor)) {
+      const host=new URL(descriptor.previewUrl).hostname,title=descriptor.previewTitle || host;
+      view.name.textContent=title;view.frame.title=title;view.previewUrl=descriptor.previewUrl;
+      view.icon.innerHTML=ICONS.globe;view.details.textContent=host;view.open.hidden=false;
+      if(view.card)view.card.replaceChildren(view.icon.cloneNode(true),document.createTextNode(`${title} Open in side panel`));
+      return;
+    }
     const title=descriptor.artifactTitle || descriptor.artifactFilename || 'Artifact';
     view.name.textContent=title;view.frame.title=title;
     const info=artifactInfo(descriptor);
@@ -183,7 +193,7 @@
     const section=document.createElement('section');section.className='chat-app';section.setAttribute('aria-label',`MCP App: ${descriptor.server}`);
     const header=document.createElement('header');const name=document.createElement('strong');name.textContent=`${descriptor.server} · MCP App`;
     const button=document.createElement('button');button.type='button';button.className='chat-app-expand';button.hidden=true;
-    const download=descriptor.server==='dar'?document.createElement('a'):null;
+    const download=descriptor.server==='dar' && !isPreview(descriptor)?document.createElement('a'):null;
     const open=descriptor.server==='dar'?document.createElement('button'):null;
     let icon,details;
     const actions=document.createElement('div');actions.className='chat-app-actions';
@@ -196,7 +206,7 @@
       const copy=document.createElement('div');copy.className='chat-app-file';copy.append(name,details);header.append(icon,copy,actions);
     } else header.append(name,actions);
     const status=document.createElement('p');status.setAttribute('role','status');status.textContent='Loading view…';
-    const frame=document.createElement('iframe');frame.title=`${descriptor.server} app`;frame.setAttribute('sandbox','allow-scripts allow-same-origin');frame.style.height='300px';
+    const frame=document.createElement('iframe');frame.title=`${descriptor.server} app`;frame.setAttribute('sandbox',`allow-scripts allow-same-origin${isPreview(descriptor)?' allow-forms':''}`);frame.style.height='300px';
     section.append(header,status,frame);anchor.append(section);Object.assign(view,{section,frame,button,status,name,download,open,icon,details,tool:descriptor.tool});heading(view,descriptor);label(view);
     // Send fresh dimensions whenever the expanded frame changes size (layout settle, window resize, divider drag).
     let last='';
@@ -209,6 +219,7 @@
     view.observer.observe(frame);
     button.onclick=()=>mode(view,view.mode==='inline'?'fullscreen':'inline');
     if(open)open.onclick=async()=>{
+      if(view.previewUrl){window.open(view.previewUrl,'_blank','noopener,noreferrer');return}
       const tab=window.open('about:blank');
       if(!tab){view.status.textContent='Allow pop-ups to open the file';return}
       tab.opener=null;view.status.textContent='';
@@ -229,7 +240,7 @@
     };
     try {
       const [config,data]=await Promise.all([configuration(),request(`/chat/${encodeURIComponent(app.slot)}/apps/${encodeURIComponent(descriptor.recordId)}`)]);
-      if(view.destroying)return;
+      if(view.destroying || isPreview(descriptor) && view.record!==descriptor.recordId)return view;
       if(config.sandboxPort==null)throw new Error('Sandbox listener unavailable');
       const origin=new URL(data.sandboxOrigin);
       if(!['http:','https:'].includes(origin.protocol) || origin.hostname===location.hostname)throw new Error('App and chat must use separate hostnames. Open local chat at 127.0.0.1.');
@@ -239,14 +250,14 @@
       if(url.origin!==origin.origin)throw new Error('Invalid sandbox assignment');
       frame.src=url.href;
       view.timer=setTimeout(()=>fail(view,new Error('App initialization timed out')),15000);
-    }catch(error){fail(view,error)}
+    }catch(error){if(!isPreview(descriptor) || view.record===descriptor.recordId)fail(view,error)}
     return view;
   };
   const sync = async app => {
     const config=await configuration().catch(()=>null);if(!config)return;
     const groups=new Map();
     for(const block of app.blocks) if(block.kind==='tool' && block.app) {
-      const d=block.app,key=d.server==='dar'?JSON.stringify([app.slot,d.server,d.resourceUri,d.artifactFilename,...(config.noReuse.includes(d.server)?[d.recordId]:[])]):`${app.slot}:${d.server}:${d.resourceUri}${config.noReuse.includes(d.server)?':'+d.recordId:''}`;
+      const d=block.app,key=d.server==='dar'?JSON.stringify([app.slot,d.server,d.resourceUri,isPreview(d)?withoutFragment(d.previewUrl):d.artifactFilename,...(config.noReuse.includes(d.server)?[d.recordId]:[])]):`${app.slot}:${d.server}:${d.resourceUri}${config.noReuse.includes(d.server)?':'+d.recordId:''}`;
       if(!groups.has(key))groups.set(key,[]);groups.get(key).push(d);
     }
     for(const view of views.values())if(view.slot!==app.slot || !groups.has(view.key))teardown(view);
@@ -268,7 +279,30 @@
       }
       if(view && latest.recordId!==view.record) {
         const record=latest.recordId;view.record=record;view.callId=latest.callId;view.tool=latest.tool;view.piToolName=latest.piToolName;heading(view,latest);
-        request(`/chat/${encodeURIComponent(app.slot)}/apps/${encodeURIComponent(record)}`).then(data=>{if(view.record===record && !view.destroying){view.data=data;view.dataRecord=record;if(view.ready){view.frame.hidden=false;view.status.textContent=''}deliver(view)}}).catch(error=>{if(view.record===record && !view.destroying)fail(view,error)});
+        if(isPreview(latest)) {
+          // A fresh window keeps late messages from the previous ticket out of this handshake.
+          const frame=view.frame.cloneNode(false);frame.removeAttribute('src');frame.hidden=true;
+          view.observer.unobserve(view.frame);view.frame.replaceWith(frame);view.frame=frame;view.observer.observe(frame);
+          view.ready=false;view.noReuse=config.noReuse.includes(latest.server);
+        }
+        request(`/chat/${encodeURIComponent(app.slot)}/apps/${encodeURIComponent(record)}`).then(data=>{
+          if(view.record!==record || view.destroying)return;
+          view.data=data;view.dataRecord=record;
+          if(isPreview(latest)) {
+            const origin=new URL(data.sandboxOrigin);
+            if(!['http:','https:'].includes(origin.protocol) || origin.hostname===location.hostname)throw new Error('App and chat must use separate hostnames. Open local chat at 127.0.0.1.');
+            if(view.origin && origin.origin!==view.origin)throw new Error('Invalid sandbox assignment');
+            view.origin=origin.origin;
+            const url=new URL(data.sandboxUrl);
+            if(url.origin!==view.origin)throw new Error('Invalid sandbox assignment');
+            Object.assign(view,{bootstrapped:false,initializing:false,ready:false,delivered:null,inputCallId:null});
+            view.status.textContent='Loading view…';view.frame.hidden=true;view.button.hidden=true;
+            clearTimeout(view.timer);view.timer=setTimeout(()=>fail(view,new Error('App initialization timed out')),15000);
+            view.frame.src=url.href;
+          } else {
+            if(view.ready){view.frame.hidden=false;view.status.textContent=''}deliver(view);
+          }
+        }).catch(error=>{if(view.record===record && !view.destroying)fail(view,error)});
       }
       for(const d of follows?descriptors.slice(0,-1):descriptors.slice(1)) {
         const target=anchorOf(d);
@@ -276,7 +310,7 @@
         const link=document.createElement('button');link.type='button';
         if(follows){
           link.className='chat-app-marker';link.dataset.appMarker='';
-          link.textContent=`${d.artifactTitle || d.artifactFilename || 'Artifact'} · newer version below`;
+          link.textContent=`${isPreview(d)?d.previewTitle || new URL(d.previewUrl).hostname:d.artifactTitle || d.artifactFilename || 'Artifact'} · newer version below`;
           link.onclick=()=>{
             if(view.mode==='fullscreen')attention(view);
             else view.section.scrollIntoView({block:'center'});
@@ -288,11 +322,11 @@
   };
   const event = (app,message) => {
     if(message.type==='reset'){autoOpen.clear();for(const view of views.values())teardown(view)}
-    if(message.type==='tool_output' && message.app?.server==='dar' && !message.historical)autoOpen.add(message.app.recordId);
+    if(message.type==='tool_output' && message.app?.server==='dar' && !message.historical && (!isPreview(message.app) || message.app.previewFrameable===true))autoOpen.add(message.app.recordId);
     if(message.type==='aborted' || message.type==='closed')for(const view of views.values())if(view.slot===app.slot)notify(view,'ui/notifications/tool-cancelled',{reason:message.error || 'Tool cancelled'});
     if(message.type==='tool_output' && message.done && !message.app) for(const view of views.values())if(view.slot===app.slot && view.inputCallId===message.id) notify(view,'ui/notifications/tool-cancelled',{reason:message.is_error?'Tool failed':'UI result unavailable'});
     if(message.type==='tool_call')for(const view of views.values())if(view.slot===app.slot && view.ready && !view.noReuse && (normalize(message.name)===view.tool || view.piToolName && message.name===view.piToolName)) {
-      try{const args=JSON.parse(message.args);if(view.server==='dar' && (args.filename || args.path?.split('/').pop())!==view.artifactFilename)continue;notify(view,'ui/notifications/tool-input',{arguments:args});view.inputCallId=message.id}catch{}
+      try{const args=JSON.parse(message.args);if(view.previewUrl?withoutFragment(args.url)!==withoutFragment(view.previewUrl):view.server==='dar' && (args.filename || args.path?.split('/').pop())!==view.artifactFilename)continue;notify(view,'ui/notifications/tool-input',{arguments:args});view.inputCallId=message.id}catch{}
     }
   };
   addEventListener('resize',()=>{if(Array.from(views.values()).some(view=>view.mode==='fullscreen'))layoutPanel()});

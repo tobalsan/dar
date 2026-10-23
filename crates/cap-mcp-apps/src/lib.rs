@@ -82,6 +82,7 @@ pub fn extract_marker(text: &str) -> (String, Option<String>) {
 pub fn normalize_tool_name(name: &str) -> &str {
     match name {
         "dar.artifact_publish" | "dar_artifact_publish" => "artifact_publish",
+        "dar.web_preview" | "dar_web_preview" => "web_preview",
         _ => match name.split_once('.') {
             Some((_, mapped)) if mapped.contains("__") => mapped,
             _ => name,
