@@ -122,17 +122,35 @@ async fn app_origin(state: &AppState, server: &str, chat: &str) -> Result<String
     let mut selected = None;
     for name in servers {
         let shared = !config.sandbox_origins.contains_key(&name) && config.sandbox_origin.is_some();
-        let assigned = if let Some(value) = config
+        let assigned = if config.sandbox_origins.get(&name).map(String::as_str) == Some("loopback")
+        {
+            if chat_host == "localhost" || chat_host.ends_with(".localhost") {
+                format!("http://127.0.0.1:{port}")
+            } else if chat_host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+            {
+                format!("http://localhost:{port}")
+            } else {
+                anyhow::bail!("loopback app origin requires local chat");
+            }
+        } else if let Some(value) = config
             .sandbox_origins
             .get(&name)
             .or(config.sandbox_origin.as_ref())
         {
+            anyhow::ensure!(
+                value != "loopback",
+                "loopback is valid only in sandbox_origins.<server>"
+            );
             value.clone()
         } else {
             anyhow::ensure!(
                 chat_host == "localhost"
                     || chat_host.ends_with(".localhost")
                     || chat_host
+                        .trim_matches(['[', ']'])
                         .parse::<std::net::IpAddr>()
                         .is_ok_and(|ip| ip.is_loopback()),
                 "remote access requires a browser-visible sandbox origin"
@@ -154,7 +172,7 @@ async fn app_origin(state: &AppState, server: &str, chat: &str) -> Result<String
         };
         let parsed = origin(&assigned)?;
         let scope = cookie_scope(&parsed)?.to_owned();
-        anyhow::ensure!(scope != chat_scope, "chat and app must use different cookie scopes; open local chat on 127.0.0.1 when an app uses localhost");
+        anyhow::ensure!(scope != chat_scope, "chat and app must use different cookie scopes. Set sandbox_origins.<server>: loopback to use the other loopback host");
         if let Some((other, other_shared, other_origin)) = scopes.get(&scope) {
             anyhow::ensure!(
                 shared && *other_shared && other_origin == &assigned,

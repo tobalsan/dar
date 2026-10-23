@@ -84,8 +84,8 @@ host cannot reach container loopback. Keep both container listeners on
 `0.0.0.0` and expose only the required host loopback ports.
 
 Apps default to separate `<server>.localhost` hostnames. For local tldraw,
-reserve `localhost` for its MCP server ID and keep chat on `127.0.0.1`.
-When `SANDBOX_PORT` differs from the container port, set each server's
+set `sandbox_origins.tldraw: loopback` and open chat on `localhost` or `127.0.0.1`.
+`loopback` uses the container port. When `SANDBOX_PORT` differs, set each server's
 browser-visible origin in `agent.yaml`, for example with host port 17879
 mapped to container port 7879:
 

@@ -166,7 +166,7 @@ extensions:
       # sandbox_origin: https://agent-apps.example.net
       # Per-server origins override sandbox_origin; keys match mcp.json.
       sandbox_origins:
-        tldraw: http://localhost:7879
+        tldraw: loopback
       # Servers whose apps require a fresh view for every call:
       no_reuse: [tldraw]
 ```
@@ -182,9 +182,9 @@ actual bound port. By default, local apps use
 `http://<server>.localhost:<sandbox_port>`; views from one server share
 origin and storage, while different servers use different hostnames.
 
-The example reserves `localhost` for the MCP server named `tldraw`, whose
-view needs a real loopback URL. Open chat at `http://127.0.0.1:7878/chat`,
-not `localhost:7878`. Ports do not isolate cookies, and sibling remote
+The example sets `loopback` for the MCP server named `tldraw`. Dar then
+uses `127.0.0.1` for its view when chat is on `localhost`, and `localhost`
+when chat is on `127.0.0.1`. See [MCP](mcp.md) for the reasons. Ports do not isolate cookies, and sibling remote
 hostnames can share cookies. Dar uses the Public Suffix List to reject
 overlapping cookie domains between chat and apps, and between servers in
 isolated mode. This also rejects parent-child hostname assignments. The

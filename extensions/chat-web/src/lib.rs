@@ -3086,6 +3086,41 @@ mod tests {
                 None,
             ),
             (
+                serde_json::json!({"sandbox_origins":{"draw":"loopback"}}),
+                "http://localhost:28180",
+                Some("http://127.0.0.1:28181"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"loopback"}}),
+                "http://127.0.0.1:28180",
+                Some("http://localhost:28181"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"loopback"}}),
+                "https://chat.example",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"loopback"}}),
+                "http://[::1]:28180",
+                Some("http://localhost:28181"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"loopback"}}),
+                "http://agent.localhost:28180",
+                Some("http://127.0.0.1:28181"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"loopback","canva":"loopback"}}),
+                "http://localhost:28180",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"loopback"}),
+                "http://127.0.0.1:28180",
+                None,
+            ),
+            (
                 serde_json::json!({"sandbox_origins":{"draw":"http://localhost:28181","canva":"http://localhost:28182"}}),
                 "http://127.0.0.1:28180",
                 None,

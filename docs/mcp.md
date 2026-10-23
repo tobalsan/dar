@@ -41,8 +41,8 @@ Runners reach these tools through the host bridge they already use, so `pi`, `co
 With chat-web enabled, the same `mcp.json` entries can provide interactive
 HTML views using the stable `io.modelcontextprotocol/ui` extension
 (2026-01-26, `text/html;profile=mcp-app`). Tools associate a view through
-`_meta.ui.resourceUri`; the deprecated `_meta["ui/resourceUri"]` is also read.
-Most servers need no extra setup; local origin overrides are described below.
+`_meta.ui.resourceUri`. Dar also reads the deprecated `_meta["ui/resourceUri"]`.
+Most servers need no extra setup. Origin overrides are described below.
 Remote servers use the existing OAuth
 login and credential refresh flow. Vendor access restrictions still apply:
 successful MCP Apps hosting does not grant access to a vendor's OAuth client
@@ -55,39 +55,97 @@ own server's resources. Missing visibility means `["model", "app"]`.
 View calls require no per-call approval; Dar logs their method, server,
 tool, and status, together with each view's enforced CSP.
 
-Views run through a sandbox proxy and real HTTP app document with a separate
-cookie scope from chat. By default, each server gets `<server>.localhost` on the
-sandbox port; views from the same server share an origin and storage.
-The backend enforces each server's assigned host for both proxy and content
-requests. The proxy and its app document form one untrusted server boundary.
-Different servers remain isolated unless the operator explicitly configures
-the global shared `sandbox_origin` override.
+### Why each view needs its own host
 
-Network and asset
-access follow the resource's declared CSP domains; no CSP declaration means
-no external network access. Declared CSP also permits blob scripts and images,
-while workers remain blocked. Camera, microphone, geolocation, and clipboard
-permissions are currently withheld; the host reports no device grants.
+A view is HTML and JavaScript from the MCP server vendor. Dar does not trust it.
+Dar reads the view with the MCP `resources/read` call. Then Dar serves it
+from the sandbox port, a second listener that never serves chat.
 
-For local tldraw, reserve `http://localhost:<sandbox_port>` for that server
-with `extensions.chat-web.apps.sandbox_origins.tldraw`, and open chat at
-`http://127.0.0.1:<chat_port>`. Leave other servers on their own hostnames.
-The override key is the server ID from `mcp.json`, not a vendor name built
-into Dar. Ports and sibling remote hostnames do not isolate cookies: Dar rejects
-overlapping cookie domains using the Public Suffix List, including overlap
-between chat and any app. The local `localhost`/`<server>.localhost` setup
-has been verified in Chromium; other browsers need separate validation.
-An invalid origin assignment leaves the text fallback visible. This local
-setup does not establish tldraw compatibility
-on a remote HTTPS domain.
+If the view shared the chat origin, it could read chat data and call the Dar
+API. A different origin stops this. A port alone does not isolate cookies.
+So the host name must also differ. Dar uses the Public Suffix List (PSL) to
+compare cookie scopes. It rejects an app origin with the same scope as chat.
+It also rejects overlap between servers, except for the global `sandbox_origin`.
+Claude uses the same design with `*.claudemcpcontent.com`.
+
+Dar checks the assigned host on both the proxy and the content routes. The
+proxy and its app document form one untrusted server boundary. Views from one
+server share an origin and storage. Different servers stay isolated.
+
+Network and asset access follow the resource's declared CSP domains. No CSP
+declaration means no external network access. Declared CSP also permits blob
+scripts and images. Workers stay blocked. Dar withholds camera, microphone,
+geolocation, and clipboard permissions. The host reports no device grants.
+
+### How Dar picks the host
+
+For local chat, each server gets `http://<server>.localhost:<sandbox_port>`.
+Local chat means chat on `localhost`, on a `*.localhost` name, or on a loopback IP.
+
+For remote chat, Dar cannot know the name that the browser sees. You must set
+`sandbox_origins.<server>` for each server, or one shared `sandbox_origin`.
+The key is the server ID from `mcp.json`. Dar has no built-in vendor names.
+An invalid assignment leaves the text fallback visible.
+
+The value `loopback` is valid only in `sandbox_origins.<server>`. Dar resolves
+it for each request from the chat host and the bound sandbox port:
+
+- Chat on `localhost` or a `*.localhost` name gives `http://127.0.0.1:<port>`.
+- Chat on a loopback IP gives `http://localhost:<port>`.
+- Any other chat host is an error.
+
+With Docker mapped ports, the host port can differ from the container port.
+`loopback` uses the bound port, so set explicit origins in that case.
+
+### Setups
+
+| Setup | Most apps (Excalidraw, Canva) | tldraw |
+| --- | --- | --- |
+| Chat on `localhost` | Default `<server>.localhost` | `tldraw: loopback` |
+| Chat on `127.0.0.1` | Default `<server>.localhost` | `tldraw: loopback` |
+| Tailnet, plain HTTP | `sandbox_origin: http://100.x.y.z:7879` | Untested |
+| HTTPS with Tailscale Serve | Domain with a different cookie scope | No license for the host |
+| Public HTTPS | Separate registrable domain | No license for the host |
+
+Tailnet plain HTTP: open chat on the MagicDNS name. Serve apps on the tailnet
+IP. Set `sandbox_bind` to that IP or to `0.0.0.0`. WireGuard encrypts the
+traffic. Plain HTTP is not a secure context, so some browser features are off.
+
+Tailscale Serve: `ts.net` is on the PSL. All hosts in one tailnet share the
+cookie scope `<tailnet>.ts.net`. Apps need a different cookie scope, for
+example your own domain. A
+browser blocks an HTTP frame in an HTTPS page.
+
+Public HTTPS: put apps on a separate registrable domain, for example
+`https://agent-apps.example.net` beside `https://agent.example.com`. Proxy
+both ports.
+
+### tldraw
+
+The tldraw MCP App ships a license key for `*.claudemcpcontent.com`,
+`*.web-sandbox.oaiusercontent.com`, and `vscode-webview://` only. On other
+hosts the tldraw SDK renders only in development mode. That mode needs plain
+`http:` on any host except `*.localhost`, or `https:` on a loopback host.
+Without a valid key on a production host, tldraw stops rendering after 5 seconds.
+
+For local use, set `sandbox_origins.tldraw: loopback` and `no_reuse: [tldraw]`.
+Chat can then run on `localhost` or on `127.0.0.1`.
+
+tldraw does not render on remote HTTPS without a tldraw license for that
+host. You can self-host the MIT tldraw MCP App and build it with your own
+hobby or commercial key. Do not patch or bypass the key. The license forbids it.
+Tailnet tldraw is untested.
+
+Excalidraw and other apps with no license check have no such limit.
+
 See [web chat](chat.md) for configuration and view controls.
 
 Dar uses separate MCP connections for the model bridge and the web Apps
 catalog. Servers that maintain client-local state may treat them as separate
 sessions. The catalog caches HTML for its connection lifetime. Tool results
-are retained in `data/mcp-apps/results/` for 30 days; missing records or
+are retained in `data/mcp-apps/results/` for 30 days. Missing records or
 unavailable resources leave the text fallback visible with a short error.
-The model sees a small result-record marker in tool text; web transcripts
+The model sees a small result-record marker in tool text. Web transcripts
 hide it. TUI, Telegram, and Discord continue using text.
 Pi uses exact aliases recorded by the bridge when all its tool names are
 unambiguous ASCII names that need no shortening. If any tool name is non-ASCII,
@@ -99,7 +157,7 @@ that expect one result per view can be listed in
 `extensions.chat-web.apps.no_reuse`. Set `no_reuse: [tldraw]` when that is
 the server ID: repeated-result testing showed that the tldraw app needs a
 fresh view per execution. Other servers reuse views
-by default; this is configuration, not a built-in vendor exception.
+by default. This is configuration, not a built-in vendor exception.
 OpenAI Apps SDK (`window.openai`),
 picture-in-picture, partial tool inputs, host theming, and app-provided tools
 are not supported. Edits made inside a view need not survive reload.
