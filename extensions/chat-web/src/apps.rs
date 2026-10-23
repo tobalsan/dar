@@ -258,14 +258,7 @@ pub(super) async fn resource(
         let prepared = PreparedView { session: session.clone(), id: id.clone(), record: record.clone(),
             chat_origin: chat, app_origin: app.clone(), html: resource["html"].as_str().context("view HTML required")?.to_owned(),
             csp, created_at: now_ms() };
-        let mut tickets = state.config.apps.tickets.lock().expect("view tickets poisoned");
-        tickets.retain(|_, view| now_ms().saturating_sub(view.created_at) < 60 * 60 * 1000);
-        if tickets.len() >= 512 {
-            if let Some(oldest) = tickets.iter().min_by_key(|(_, view)| view.created_at).map(|(key, _)| key.clone()) {
-                tickets.remove(&oldest);
-            }
-        }
-        tickets.insert(ticket, prepared);
+        remember_ticket(&state, ticket, prepared);
         Ok::<_, anyhow::Error>(json!({"html":resource["html"], "meta":meta,
             "sandboxOrigin":app,"sandboxUrl":sandbox_url.as_str(),"contentUrl":content_url.as_str(),
             "server":record.server,"resourceUri":record.resource_uri,"args":record.args,"result":record.result}))
@@ -335,6 +328,90 @@ pub(super) async fn download(
     outcome.unwrap_or_else(|error| (StatusCode::NOT_FOUND, error.to_string()).into_response())
 }
 
+pub(super) async fn open(
+    Path((session, id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let mut server = String::new();
+    let outcome = async {
+        let chat = chat_origin(&headers)?;
+        let record = record(&state, &session, &id).await?;
+        server = record.server.clone();
+        anyhow::ensure!(record.server == "dar", "not an artifact view");
+        let artifact = &record.result["structuredContent"];
+        anyhow::ensure!(
+            super::artifacts::open_media_type(
+                artifact["filename"].as_str().unwrap_or(""),
+                artifact["mediaType"].as_str()
+            )
+            .is_some(),
+            "unsupported artifact type"
+        );
+        let app = app_origin(&state, &record.server, &chat).await?;
+        let csp = policy(Some(&super::artifacts::resource_policy())).0;
+        let ticket = uuid::Uuid::new_v4().simple().to_string();
+        let prepared = PreparedView {
+            session: session.clone(),
+            id: id.clone(),
+            record,
+            chat_origin: chat,
+            app_origin: app.clone(),
+            html: String::new(),
+            csp,
+            created_at: now_ms(),
+        };
+        remember_ticket(&state, ticket.clone(), prepared);
+        let mut url = url::Url::parse(&format!("{app}/open/{id}"))?;
+        url.query_pairs_mut()
+            .append_pair("session", &session)
+            .append_pair("ticket", &ticket);
+        Ok::<_, anyhow::Error>(json!({"url":url.as_str()}))
+    }
+    .await;
+    tracing::info!(session=%session, server=%server, method="artifact/open",
+        status=if outcome.is_ok(){"ok"}else{"error"}, "MCP App call");
+    open_response(match outcome {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":error.to_string()})),
+        )
+            .into_response(),
+    })
+}
+
+fn remember_ticket(state: &AppState, ticket: String, prepared: PreparedView) {
+    let mut tickets = state
+        .config
+        .apps
+        .tickets
+        .lock()
+        .expect("view tickets poisoned");
+    tickets.retain(|_, view| now_ms().saturating_sub(view.created_at) < 60 * 60 * 1000);
+    if tickets.len() >= 512 {
+        if let Some(oldest) = tickets
+            .iter()
+            .min_by_key(|(_, view)| view.created_at)
+            .map(|(key, _)| key.clone())
+        {
+            tickets.remove(&oldest);
+        }
+    }
+    tickets.insert(ticket, prepared);
+}
+
+fn open_response(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 pub(super) async fn rpc(
     Path((session, id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
@@ -354,6 +431,11 @@ pub(super) async fn rpc(
         );
         let record = record(&state, &session, &id).await?;
         server = record.server.clone();
+        anyhow::ensure!(
+            record.server != "dar"
+                || !matches!(method.as_str(), "ui/message" | "ui/update-model-context"),
+            "artifact views cannot send messages or update model context"
+        );
         match method.as_str() {
             "ui/update-model-context" => {
                 anyhow::ensure!(
@@ -362,13 +444,7 @@ pub(super) async fn rpc(
                     "invalid model context"
                 );
                 let slot = state.session(&session).await?;
-                let view = if record.server == "dar" {
-                    let filename = record.result.pointer("/structuredContent/filename")
-                        .and_then(Value::as_str).context("artifact filename unavailable")?;
-                    let mut key = vec![session.as_str(), record.server.as_str(), record.resource_uri.as_str(), filename];
-                    if state.config.apps.no_reuse.contains(&record.server) { key.push(&id); }
-                    serde_json::to_string(&key)?
-                } else if state.config.apps.no_reuse.contains(&record.server) {
+                let view = if state.config.apps.no_reuse.contains(&record.server) {
                     format!("{}:{}:{id}",record.server,record.resource_uri)
                 } else { format!("{}:{}",record.server,record.resource_uri) };
                 slot.app_context
@@ -521,6 +597,12 @@ pub(super) fn sandbox_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/sandbox/{record}", get(proxy))
         .route("/content/{record}", get(content))
+        .route(
+            "/open/{record}",
+            get(open_content).layer(axum::middleware::map_response(
+                |response: Response| async move { open_response(response) },
+            )),
+        )
         .with_state(state)
 }
 
@@ -625,6 +707,45 @@ async fn content(
     )
 }
 
+async fn open_content(
+    Path(id): Path<String>,
+    Query(query): Query<ProxyQuery>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let outcome = async {
+        let view = prepared(&state, &id, &query, &headers).await?;
+        anyhow::ensure!(view.record.server == "dar", "not an artifact view");
+        let uri = view.record.result.pointer("/structuredContent/uri")
+            .and_then(Value::as_str).context("artifact URI unavailable")?;
+        let store = state.start.get().context("chat has not started")?.host.services
+            .get_named::<dar_extension_sdk::artifacts::ArtifactStore>("artifact-store")
+            .context("artifact store unavailable")?;
+        let (metadata, mut bytes) = super::artifacts::read(store, uri).await?;
+        let mut media_type = super::artifacts::open_media_type(&metadata.filename, metadata.media_type.as_deref())
+            .context("unsupported artifact type")?;
+        let csp = match media_type {
+            "text/html" | "text/markdown" => {
+                if media_type == "text/markdown" {
+                    bytes = super::artifacts::open_markdown(std::str::from_utf8(&bytes).context("artifact is not valid UTF-8")?)?.into_bytes();
+                    media_type = "text/html; charset=utf-8";
+                }
+                format!("{} sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; frame-ancestors 'none';", view.csp)
+            }
+            "application/pdf" => "default-src 'none'; frame-ancestors 'none'; sandbox".to_owned(),
+            "image/svg+xml" => "default-src 'none'; style-src 'unsafe-inline'; sandbox".to_owned(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp" => "default-src 'none'; img-src 'self'".to_owned(),
+            _ => "default-src 'none'".to_owned(),
+        };
+        let mut response = ([(header::CONTENT_TYPE, media_type.to_owned()), (header::CONTENT_SECURITY_POLICY, csp)], bytes).into_response();
+        if media_type == "application/pdf" {
+            response.headers_mut().insert(header::CONTENT_DISPOSITION, HeaderValue::from_static("inline"));
+        }
+        Ok::<_, anyhow::Error>(response)
+    }.await;
+    outcome.unwrap_or_else(|error| (StatusCode::NOT_FOUND, error.to_string()).into_response())
+}
+
 fn policy(declared: Option<&Value>) -> (String, Value) {
     let mut approved = json!({});
     for key in [
@@ -703,6 +824,9 @@ pub(super) fn capture_result(
                 descriptor["artifactFilename"] =
                     record.result["structuredContent"]["filename"].clone();
                 descriptor["artifactTitle"] = record.result["structuredContent"]["title"].clone();
+                descriptor["artifactMediaType"] =
+                    record.result["structuredContent"]["mediaType"].clone();
+                descriptor["artifactBytes"] = record.result["structuredContent"]["bytes"].clone();
             }
             event.app = Some(descriptor);
         }

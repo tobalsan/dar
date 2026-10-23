@@ -2,10 +2,11 @@
   'use strict';
   if (window.DarMcpApps) return;
   const views = new Map();
+  const autoOpen = new Set();
   const normalize = name => { if(['dar.artifact_publish','dar_artifact_publish'].includes(name))return 'artifact_publish';const dot=typeof name==='string'?name.indexOf('.'):-1;return dot>=0 && name.slice(dot+1).includes('__')?name.slice(dot+1):name; };
   let settings;
   const request = async (url, options = {}) => {
-    const response = await fetch(url, { ...options, signal: AbortSignal.timeout(32000) });
+    const response = await fetch(url, { ...options, signal: options.signal || AbortSignal.timeout(32000) });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || 'App unavailable');
     return body;
@@ -21,6 +22,7 @@
     view.inputCallId=view.callId;
     notify(view, 'ui/notifications/tool-result', view.data.result);
     view.delivered = view.record;
+    if(autoOpen.delete(view.record) && innerWidth>760) mode(view,'fullscreen');
   };
   const audit = (view, method, params) => request(`/chat/${encodeURIComponent(view.slot)}/apps/${encodeURIComponent(view.record)}/rpc`, {
     method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})
@@ -28,11 +30,30 @@
   const ICONS={
     inline:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>',
     download:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>',
+    browser:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M10 14L21 3M10 3H3v18h18v-7"/></svg>',
+    file:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H5v20h14V7zM14 2v5h5M8 12h8M8 16h8"/></svg>',
+    image:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="2"/><path d="m3 18 6-6 4 4 4-6 4 5"/></svg>',
+    code:'<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 6-6 6 6 6M16 6l6 6-6 6M14 3l-4 18"/></svg>',
     fullscreen:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>'};
+  const artifactInfo = descriptor => {
+    const mime=(descriptor.artifactMediaType || '').split(';')[0].trim().toLowerCase();
+    const extension=(descriptor.artifactFilename || '').split('.').pop().toLowerCase();
+    const types={'text/html':'HTML','text/markdown':'Markdown','application/pdf':'PDF','image/png':'PNG','image/jpeg':'JPEG','image/gif':'GIF','image/webp':'WebP','image/svg+xml':'SVG'};
+    const extensions={html:'HTML',htm:'HTML',md:'Markdown',markdown:'Markdown',pdf:'PDF',png:'PNG',jpg:'JPEG',jpeg:'JPEG',gif:'GIF',webp:'WebP',svg:'SVG'};
+    const text=mime.startsWith('text/') || ['application/json','application/javascript','application/xml','application/x-sh','application/toml','application/yaml','application/x-yaml'].includes(mime);
+    const type=types[mime] || extensions[extension] || (text || /^(txt|log|rs|py|js|cjs|mjs|ts|tsx|jsx|json|yaml|yml|toml|css|sh|bash|zsh|sql|go|java|c|h|cpp|hpp|cs|rb|php|swift|xml|csv)$/.test(extension)?'Text':'File');
+    const bytes=descriptor.artifactBytes;
+    const size=Number.isFinite(bytes)?(bytes<1024?`${bytes} B`:bytes<1048576?`${Number((bytes/1024).toFixed(1))} KB`:`${Number((bytes/1048576).toFixed(1))} MB`):'';
+    return {type,size,supported:mime?Boolean(types[mime] || text):type!=='File',icon:['PNG','JPEG','GIF','WebP','SVG'].includes(type)?'image':['HTML','Markdown','Text'].includes(type)?'code':'file'};
+  };
   const heading = (view,descriptor) => {
     if(view.server!=='dar')return;
     const title=descriptor.artifactTitle || descriptor.artifactFilename || 'Artifact';
     view.name.textContent=title;view.frame.title=title;
+    const info=artifactInfo(descriptor);
+    view.icon.innerHTML=ICONS[info.icon];view.details.textContent=[info.type,info.size].filter(Boolean).join(' · ');
+    view.open.hidden=!info.supported;
+    if(view.card) {view.card.replaceChildren(view.icon.cloneNode(true),document.createTextNode(`${title} Open in side panel`));}
     view.download.href=`/chat/${encodeURIComponent(view.slot)}/apps/${encodeURIComponent(descriptor.recordId)}/download`;
     view.download.title=`Download ${descriptor.artifactFilename || title}`;
   };
@@ -49,6 +70,10 @@
     root.style.setProperty('--app-top',`${rect.top}px`);
     root.style.setProperty('--app-height',`${rect.height}px`);
   };
+  const attention = view => {
+    view.section.classList.add('is-attention');view.frame.focus();
+    setTimeout(()=>view.section.classList.remove('is-attention'),1200);
+  };
   const mode = (view, wanted) => {
     if (!['inline','fullscreen'].includes(wanted) || !view.modes.includes(wanted)) return view.mode;
     if (wanted==='fullscreen') {
@@ -56,6 +81,16 @@
     }
     view.mode = wanted;
     view.section.classList.toggle('is-expanded', wanted==='fullscreen');
+    if(view.server==='dar') {
+      if(wanted==='fullscreen') {
+        if(!view.card) {
+          view.card=document.createElement('button');view.card.type='button';view.card.className='chat-app-card';
+          view.card.append(view.icon.cloneNode(true),document.createTextNode(`${view.name.textContent} Open in side panel`));
+          view.card.onclick=()=>attention(view);
+        }
+        view.section.before(view.card);
+      } else {view.card?.remove();view.card=null}
+    }
     const root=document.getElementById('chat-root');
     root?.classList.toggle('has-expanded-app',Array.from(views.values()).some(other=>other.mode==='fullscreen' && !other.destroying));
     if (wanted==='fullscreen') layoutPanel();
@@ -149,12 +184,20 @@
     const header=document.createElement('header');const name=document.createElement('strong');name.textContent=`${descriptor.server} · MCP App`;
     const button=document.createElement('button');button.type='button';button.className='chat-app-expand';button.hidden=true;
     const download=descriptor.server==='dar'?document.createElement('a'):null;
+    const open=descriptor.server==='dar'?document.createElement('button'):null;
+    let icon,details;
     const actions=document.createElement('div');actions.className='chat-app-actions';
     if(download){download.className='chat-app-download';download.download='';download.innerHTML=ICONS.download;download.title='Download';download.setAttribute('aria-label','Download');actions.append(download);}
-    actions.append(button);header.append(name,actions);
+    if(open){open.type='button';open.className='chat-app-open';open.innerHTML=ICONS.browser;open.title='Open in browser';open.setAttribute('aria-label','Open in browser');actions.append(open);}
+    actions.append(button);
+    if(descriptor.server==='dar') {
+      icon=document.createElement('span');icon.className='chat-app-type-icon';icon.setAttribute('aria-hidden','true');
+      details=document.createElement('small');
+      const copy=document.createElement('div');copy.className='chat-app-file';copy.append(name,details);header.append(icon,copy,actions);
+    } else header.append(name,actions);
     const status=document.createElement('p');status.setAttribute('role','status');status.textContent='Loading view…';
     const frame=document.createElement('iframe');frame.title=`${descriptor.server} app`;frame.setAttribute('sandbox','allow-scripts allow-same-origin');frame.style.height='300px';
-    section.append(header,status,frame);anchor.append(section);Object.assign(view,{section,frame,button,status,name,download,tool:descriptor.tool});heading(view,descriptor);label(view);
+    section.append(header,status,frame);anchor.append(section);Object.assign(view,{section,frame,button,status,name,download,open,icon,details,tool:descriptor.tool});heading(view,descriptor);label(view);
     // Send fresh dimensions whenever the expanded frame changes size (layout settle, window resize, divider drag).
     let last='';
     view.observer=new ResizeObserver(()=>{
@@ -165,6 +208,19 @@
     });
     view.observer.observe(frame);
     button.onclick=()=>mode(view,view.mode==='inline'?'fullscreen':'inline');
+    if(open)open.onclick=async()=>{
+      const tab=window.open('about:blank');
+      if(!tab){view.status.textContent='Allow pop-ups to open the file';return}
+      tab.opener=null;view.status.textContent='';
+      try {
+        const data=await request(`/chat/${encodeURIComponent(view.slot)}/apps/${encodeURIComponent(view.record)}/open`,{signal:AbortSignal.timeout(10000)});
+        const url=new URL(data.url);
+        if(url.origin!==view.origin)throw new Error('Invalid sandbox assignment');
+        tab.location.href=url.href;
+      } catch(error) {
+        tab.close();view.status.textContent=error.name==='TimeoutError'?'Opening the file timed out':`Unable to open file: ${error.message || error}`;
+      }
+    };
     const divider=document.createElement('div');divider.className='chat-app-resizer';divider.setAttribute('role','separator');divider.setAttribute('aria-label','Resize app panel');divider.setAttribute('aria-orientation','vertical');section.append(divider);
     divider.onpointerdown=event=>{
       divider.setPointerCapture(event.pointerId);
@@ -201,8 +257,10 @@
       let view=views.get(key);
       if(!view) {create(app,latest,anchor,key);view=views.get(key)}
       if(follows && view.section.parentElement!==anchor) {
+        view.card?.remove();
         anchor.querySelector('[data-app-marker]')?.remove();
         anchor.append(view.section);
+        if(view.mode==='fullscreen')mode(view,'fullscreen');
         // Moving an iframe reloads it, so run the app handshake again.
         Object.assign(view,{bootstrapped:false,initializing:false,ready:false,delivered:null,inputCallId:null});
         view.status.textContent='Loading view…';view.frame.hidden=true;view.button.hidden=true;
@@ -220,7 +278,7 @@
           link.className='chat-app-marker';link.dataset.appMarker='';
           link.textContent=`${d.artifactTitle || d.artifactFilename || 'Artifact'} · newer version below`;
           link.onclick=()=>{
-            if(view.mode==='fullscreen'){view.section.classList.add('is-attention');view.frame.focus();setTimeout(()=>view.section.classList.remove('is-attention'),1200)}
+            if(view.mode==='fullscreen')attention(view);
             else view.section.scrollIntoView({block:'center'});
           };
         } else {link.textContent=`View updated: ${d.server}`;link.onclick=()=>view.section.scrollIntoView({block:'center'})}
@@ -229,7 +287,8 @@
     }
   };
   const event = (app,message) => {
-    if(message.type==='reset')for(const view of views.values())teardown(view);
+    if(message.type==='reset'){autoOpen.clear();for(const view of views.values())teardown(view)}
+    if(message.type==='tool_output' && message.app?.server==='dar' && !message.historical)autoOpen.add(message.app.recordId);
     if(message.type==='aborted' || message.type==='closed')for(const view of views.values())if(view.slot===app.slot)notify(view,'ui/notifications/tool-cancelled',{reason:message.error || 'Tool cancelled'});
     if(message.type==='tool_output' && message.done && !message.app) for(const view of views.values())if(view.slot===app.slot && view.inputCallId===message.id) notify(view,'ui/notifications/tool-cancelled',{reason:message.is_error?'Tool failed':'UI result unavailable'});
     if(message.type==='tool_call')for(const view of views.values())if(view.slot===app.slot && view.ready && !view.noReuse && (normalize(message.name)===view.tool || view.piToolName && message.name===view.piToolName)) {

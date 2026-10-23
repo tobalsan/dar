@@ -2,13 +2,13 @@
 <html lang="en"><head><meta charset="utf-8"><title>Artifact viewer</title>
 <style>html,body{margin:0;font:14px/1.5 system-ui,sans-serif;color:#202124}main{padding:12px;overflow-wrap:anywhere}iframe{display:block;border:0;width:100%;height:100px}img{display:block;max-width:100%;height:auto}pre{white-space:pre-wrap;overflow-wrap:anywhere}table{border-collapse:collapse}th,td{border:1px solid #ccc;padding:6px 10px}#error{padding:12px;color:#a02020}</style>
 </head><body><p id="error" role="status"></p><main id="content"></main>
-<script>/*__MARKED__*/</script><script>/*__DOMPURIFY__*/</script>
+<script>/*__MARKED__*/</script><script>/*__DOMPURIFY__*/</script><script>/*__ARTIFACT_DOCUMENT__*/</script>
 <script>
 (() => {
   'use strict';
   const content=document.getElementById('content'),status=document.getElementById('error');
   const pending=new Map();
-  let next=0,generation=0,report;
+  let next=0,generation=0,report,reportKind,reportFallback;
   const send=message=>parent.postMessage(message,'*');
   const notify=(method,params)=>send({jsonrpc:'2.0',method,params});
   const request=(method,params)=>new Promise((resolve,reject)=>{
@@ -20,11 +20,17 @@
   const open=url=>{
     try{const parsed=new URL(url);if(['http:','https:'].includes(parsed.protocol))request('ui/open-link',{url:parsed.href}).catch(()=>{});}catch{}
   };
-  const fail=()=>{report=null;content.replaceChildren();status.textContent='Unable to load artifact. Text result remains above.';size();};
-  const reportScript=`<script>(()=>{const height=()=>parent.postMessage({type:'dar-artifact-height',height:document.documentElement.scrollHeight},'*');new ResizeObserver(height).observe(document.documentElement);addEventListener('load',height);document.addEventListener('click',event=>{const link=event.target.closest?.('a[href]');if(!link)return;const href=link.getAttribute('href');event.preventDefault();if(href.startsWith('#')){try{const id=decodeURIComponent(href.slice(1));const target=id?document.getElementById(id)||document.getElementsByName(id)[0]:document.documentElement;target?.scrollIntoView();}catch{}return;}try{const url=new URL(href,document.baseURI);if(['http:','https:'].includes(url.protocol))parent.postMessage({type:'dar-artifact-link',url:url.href},'*');}catch{}},true);})();<\/script>`;
+  const fail=()=>{report=null;reportKind=null;reportFallback=null;content.replaceChildren();status.textContent='Unable to load artifact. Text result remains above.';size();};
+  const card=(artifact,mime)=>{
+    report=null;reportKind=null;reportFallback=null;
+    const title=document.createElement('h2');title.textContent=artifact.filename||'Artifact';
+    const type=document.createElement('p');type.textContent=mime;
+    const bytes=document.createElement('p');bytes.textContent=`${artifact.bytes} bytes`;
+    content.replaceChildren(title,type,bytes);size();
+  };
   async function render(result){
     const current=++generation;
-    report=null;content.replaceChildren();status.textContent='Loading artifact…';
+    report=null;reportKind=null;reportFallback=null;content.replaceChildren();status.textContent='Loading artifact…';
     try{
       const artifact=result.structuredContent;
       if(typeof artifact?.uri!=='string')throw new Error('Missing artifact');
@@ -34,7 +40,7 @@
       if(!item)throw new Error('Missing resource');
       status.textContent='';
       const extension=(artifact.filename||'').split('.').pop().toLowerCase();
-      const types={html:'text/html',htm:'text/html',md:'text/markdown',markdown:'text/markdown',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',gif:'image/gif',webp:'image/webp',svg:'image/svg+xml'};
+      const types={html:'text/html',htm:'text/html',md:'text/markdown',markdown:'text/markdown',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',gif:'image/gif',webp:'image/webp',svg:'image/svg+xml',pdf:'application/pdf'};
       const code=/^(txt|log|rs|py|js|cjs|mjs|ts|tsx|jsx|json|yaml|yml|toml|css|sh|bash|zsh|sql|go|java|c|h|cpp|hpp|cs|rb|php|swift|xml)$/;
       const mime=(artifact.mediaType||types[extension]||(code.test(extension)?'text/plain':null)||item.mimeType||'application/octet-stream').split(';')[0].trim().toLowerCase();
       if(['image/png','image/jpeg','image/gif','image/webp','image/svg+xml'].includes(mime)){
@@ -44,18 +50,18 @@
         image.src=`data:${mime};base64,${data}`;content.replaceChildren(image);size();return;
       }
       const textType=mime.startsWith('text/')||['application/json','application/javascript','application/xml','application/x-sh','application/toml','application/yaml','application/x-yaml'].includes(mime);
-      if(!textType){
-        const title=document.createElement('h2');title.textContent=artifact.filename||'Artifact';
-        const type=document.createElement('p');type.textContent=mime||'application/octet-stream';
-        const bytes=document.createElement('p');bytes.textContent=`${artifact.bytes} bytes`;
-        content.replaceChildren(title,type,bytes);size();return;
-      }
-      const text=typeof item.text==='string'?item.text:new TextDecoder('utf-8',{fatal:true}).decode(Uint8Array.from(atob(item.blob),byte=>byte.charCodeAt(0)));
-      if(mime==='text/markdown'){content.innerHTML=DOMPurify.sanitize(marked.parse(text));size();return;}
-      if(mime!=='text/html'){const pre=document.createElement('pre');pre.textContent=text;content.replaceChildren(pre);size();return;}
+      const pdf=mime==='application/pdf';
+      if(!textType && !pdf){card(artifact,mime);return;}
+      const text=pdf?'':typeof item.text==='string'?item.text:new TextDecoder('utf-8',{fatal:true}).decode(Uint8Array.from(atob(item.blob),byte=>byte.charCodeAt(0)));
+      if(!pdf && mime!=='text/html' && mime!=='text/markdown'){const pre=document.createElement('pre');pre.textContent=text;content.replaceChildren(pre);size();return;}
       const frame=document.createElement('iframe');frame.title=artifact.title||artifact.filename||'HTML report';frame.setAttribute('sandbox','allow-scripts');
-      report=frame;content.replaceChildren(frame);frame.srcdoc=text+reportScript;
-      size();
+      report=frame;reportKind=pdf?'pdf':mime;reportFallback=()=>card(artifact,mime);
+      if(pdf){
+        const bytes=Uint8Array.from(atob(item.blob),byte=>byte.charCodeAt(0));
+        frame.addEventListener('load',()=>{if(report===frame)frame.contentWindow.postMessage({type:'dar-artifact-pdf',data:bytes.buffer},'*',[bytes.buffer]);},{once:true});
+      }
+      frame.srcdoc=mime==='text/markdown'?DarArtifactDocument.markdown(text):DarArtifactDocument.build(pdf?'pdf':'html',text);
+      content.replaceChildren(frame);size();
     }catch{if(current===generation)fail();}
   }
   // Only the host may deliver JSON-RPC. Report messages are handled separately.
@@ -75,8 +81,10 @@
     if(!report || event.source!==report.contentWindow)return;
     const message=event.data;
     if(!message || typeof message!=='object' || Array.isArray(message))return;
-    if(message.type==='dar-artifact-height' && Object.keys(message).length===2 && Number.isFinite(message.height) && message.height>=0){report.style.height=`${Math.max(40,Math.min(10000,message.height))}px`;size();}
-    else if(message.type==='dar-artifact-link' && Object.keys(message).length===2 && typeof message.url==='string')open(message.url);
+    const keys=Object.keys(message);
+    if(message.type==='dar-artifact-height' && keys.length===2 && keys.includes('type') && keys.includes('height') && Number.isFinite(message.height) && message.height>=0){report.style.height=`${Math.max(40,Math.min(10000,message.height))}px`;size();}
+    else if(message.type==='dar-artifact-link' && keys.length===2 && keys.includes('type') && keys.includes('url') && typeof message.url==='string')open(message.url);
+    else if(message.type==='dar-artifact-fallback' && keys.length===1 && keys[0]==='type' && reportKind==='pdf')reportFallback();
   });
   content.addEventListener('click',event=>{const link=event.target.closest?.('a[href]');if(!link)return;const href=link.getAttribute('href');if(href.startsWith('#'))return;event.preventDefault();open(link.href);});
   new ResizeObserver(size).observe(document.body);

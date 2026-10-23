@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "description": "Pinned offline artifact browser test assets",
+  "devDependencies": {
+    "pdfjs-dist": "5.4.624",
+    "pele": "1.9.0"
+  }
+}

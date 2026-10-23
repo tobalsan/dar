@@ -12,6 +12,78 @@ pub(super) struct ArtifactApp {
     pub store: Arc<ArtifactStore>,
 }
 
+pub(super) fn resource_policy() -> Value {
+    json!({
+        "resourceDomains":["https://cdn.jsdelivr.net","https://cdnjs.cloudflare.com","https://unpkg.com","https://fonts.googleapis.com","https://fonts.gstatic.com"],
+        "connectDomains":[],"frameDomains":[]
+    })
+}
+
+pub(super) fn open_media_type(filename: &str, declared: Option<&str>) -> Option<&'static str> {
+    let extension = filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let fallback = match extension.as_str() {
+        "html" | "htm" => "text/html",
+        "md" | "markdown" => "text/markdown",
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "txt" | "log" | "rs" | "py" | "js" | "cjs" | "mjs" | "ts" | "tsx" | "jsx" | "json"
+        | "yaml" | "yml" | "toml" | "css" | "sh" | "bash" | "zsh" | "sql" | "go" | "java" | "c"
+        | "h" | "cpp" | "hpp" | "cs" | "rb" | "php" | "swift" | "xml" | "csv" => "text/plain",
+        _ => "application/octet-stream",
+    };
+    let mime = declared
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback)
+        .split(';')
+        .next()?
+        .trim()
+        .to_ascii_lowercase();
+    match mime.as_str() {
+        "text/html" => Some("text/html"),
+        "text/markdown" => Some("text/markdown"),
+        "application/pdf" => Some("application/pdf"),
+        "image/png" => Some("image/png"),
+        "image/jpeg" => Some("image/jpeg"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        "image/svg+xml" => Some("image/svg+xml"),
+        value
+            if value.starts_with("text/")
+                || matches!(
+                    value,
+                    "application/json"
+                        | "application/javascript"
+                        | "application/xml"
+                        | "application/x-sh"
+                        | "application/toml"
+                        | "application/yaml"
+                        | "application/x-yaml"
+                ) =>
+        {
+            Some("text/plain; charset=utf-8")
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn open_markdown(text: &str) -> Result<String> {
+    let data = serde_json::to_string(text)?.replace('<', "\\u003c");
+    Ok(format!(
+        "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><body><script>{}\n{}\n{}\nconst page = DarArtifactDocument.markdown({data}); document.open(); document.write(page); document.close();</script></body></html>",
+        include_str!("vendor/marked.min.js"),
+        include_str!("vendor/purify.min.js"),
+        include_str!("artifact-document.js"),
+    ))
+}
+
 impl McpApps for ArtifactApp {
     fn list_tools(&self) -> BoxFuture<'_, Result<Value>> {
         Box::pin(async {
@@ -32,13 +104,12 @@ impl McpApps for ArtifactApp {
             );
             let html = include_str!("artifact-viewer.html")
                 .replace("/*__MARKED__*/", include_str!("vendor/marked.min.js"))
-                .replace("/*__DOMPURIFY__*/", include_str!("vendor/purify.min.js"));
-            Ok(
-                json!({"html":html,"meta":{"ui":{"prefersBorder":true,"csp":{
-                    "resourceDomains":["https://cdn.jsdelivr.net","https://cdnjs.cloudflare.com","https://unpkg.com","https://fonts.googleapis.com","https://fonts.gstatic.com"],
-                    "connectDomains":[],"frameDomains":[]
-                }}}}),
-            )
+                .replace("/*__DOMPURIFY__*/", include_str!("vendor/purify.min.js"))
+                .replace(
+                    "/*__ARTIFACT_DOCUMENT__*/",
+                    include_str!("artifact-document.js"),
+                );
+            Ok(json!({"html":html,"meta":{"ui":{"prefersBorder":true,"csp":resource_policy()}}}))
         })
     }
 

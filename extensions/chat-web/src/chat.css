@@ -885,12 +885,17 @@ body:has(.chat-web) #content {
 .chat-app>header { display:flex;align-items:center;justify-content:space-between;padding:8px 12px;gap:12px;border-bottom:1px solid var(--border,#555);font-size:13px; }
 .chat-app button { cursor:pointer; }
 .chat-app-actions { display:flex;align-items:center;gap:6px;margin-left:auto; }
-.chat-app-actions>.chat-app-expand, .chat-app-actions>.chat-app-download { display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:1px solid var(--border,#555);border-radius:6px;background:transparent;color:inherit;text-decoration:none; }
-.chat-app-actions>.chat-app-download:hover, .chat-app-actions>.chat-app-expand:hover { background:var(--hover,rgba(127,127,127,.12)); }
-.chat-app-actions>.chat-app-expand[hidden] { display:none; }
+.chat-app-actions>.chat-app-expand, .chat-app-actions>.chat-app-download, .chat-app-actions>.chat-app-open { display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:1px solid var(--border,#555);border-radius:6px;background:transparent;color:inherit;text-decoration:none; }
+.chat-app-actions>.chat-app-download:hover, .chat-app-actions>.chat-app-expand:hover, .chat-app-actions>.chat-app-open:hover { background:var(--hover,rgba(127,127,127,.12)); }
+.chat-app-actions>[hidden] { display:none; }
+.chat-app-file { display:flex;flex-direction:column;gap:3px;min-width:0; }
+.chat-app-file>strong { overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.chat-app-file>small { color:var(--muted,inherit);font-size:11px;opacity:.75; }
+.chat-app-type-icon { flex-shrink:0;display:inline-flex; }
 .chat-app>p { font-size:13px;padding:0 12px; }
 .chat-app-marker { display:block;padding:4px 0;border:0;background:transparent;color:var(--muted,inherit);opacity:.7;font:inherit;font-size:13px;text-align:left; }
 .chat-app-marker:hover { opacity:1;text-decoration:underline; }
+.chat-app-card { display:flex;align-items:center;gap:10px;width:100%;padding:12px;border:1px solid var(--border,#555);border-radius:8px;background:var(--bg,#fff);color:inherit;text-align:left;font:inherit;font-size:13px;cursor:pointer; }
 .chat-app.is-attention { outline:2px solid var(--accent,currentColor);outline-offset:-2px; }
 .chat-app>p:empty { display:none; }
 .chat-app>iframe { display:block;width:100%;border:0; background:white; }

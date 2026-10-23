@@ -57,7 +57,7 @@ const waitForHost = async () => {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
 };
-const browser = await chromium.launch({ headless: true });
+const browser = await chromium.launch({ headless: true, ...(process.env.APPS_CHROMIUM === '1' ? { channel: 'chromium' } : {}) });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 const failures = [];
 page.on('pageerror', error => failures.push(error.message));
@@ -66,7 +66,10 @@ try {
   await page.goto(`${origin}/`);
   if (artifacts) {
     const { artifactChecks } = await import('./artifact-checks.mjs');
-    await artifactChecks({ page, evidence, agent });
+    await artifactChecks({ page, evidence, agent, restartHost: async () => {
+      assert.ok(!externalOrigin, 'Artifact host reconnect check requires the harness-owned host');
+      await stopHost();host=startHost();await waitForHost();
+    } });
   } else {
   if (process.env.APPS_NEW_CHAT === '1') {
     await page.getByRole('combobox', { name: 'Message', exact: true }).fill('Keep this original conversation');

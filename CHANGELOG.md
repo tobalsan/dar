@@ -10,6 +10,7 @@ Breaking changes are marked **⚠ BREAKING**.
 ## [Unreleased]
 
 - Pi chats, workers, and scheduler jobs now load upstream MCP tools on demand through `tool_search`, keeping Dar host tools direct and reducing fixed context. The bridge summarizes available upstream servers for all backends.
+- Web chat artifact views now render PDFs and Markdown Mermaid diagrams, open supported files in a sandbox browser tab, and automatically expand live publishes on wide screens, with type/size headers and transcript cards. Artifact views can no longer post messages or update model context.
 - Web chat displays published artifacts as isolated, downloadable views across all four backends, with HTML, Markdown, images, text, filename-based updates that move the view to the latest publish, and replay; no MCP configuration is needed. The MCP server name `dar` is now reserved.
 - Web chat scrolls from anywhere in the main panel, including beside the message column. The MCP App expand control is now an icon button. An expanded app view now gets its true panel size again after a window resize.
 - MCP Apps accept `sandbox_origins.<server>: loopback`, which lets local tldraw work with chat on either `localhost` or `127.0.0.1`. `docs/mcp.md` now explains the host rules for each setup.
