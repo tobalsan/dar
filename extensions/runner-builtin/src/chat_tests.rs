@@ -608,6 +608,30 @@ async fn compact_replaces_history_and_resume_replays_from_compaction() {
 }
 
 #[tokio::test]
+async fn compact_instructions_extend_the_summary_prompt_and_compactor_is_a_prompt() {
+    let (url, bodies) = spawn_stub(vec![
+        text_reply("answer one", None),
+        text_reply("THE SUMMARY", None),
+        text_reply("answer two", None),
+    ])
+    .await;
+    let fx = fixture(&url);
+    let (mut session, mut rx) = open(params(&fx).build()).await;
+    run_turn(&mut session, &mut rx, "question one").await;
+
+    let events = run_turn(&mut session, &mut rx, "/compact keep the plan").await;
+    assert_eq!(finished(&events), (true, None));
+    let compact_request = roles_and_text(&request_messages(&bodies, 1));
+    let last = &compact_request.last().unwrap().1;
+    assert!(last.starts_with(COMPACT_PROMPT), "{last}");
+    assert!(last.ends_with("keep the plan"), "{last}");
+
+    run_turn(&mut session, &mut rx, "/compactor").await;
+    let normal = roles_and_text(&request_messages(&bodies, 2));
+    assert_eq!(normal.last().unwrap().1, "/compactor");
+}
+
+#[tokio::test]
 async fn compact_with_empty_history_is_a_noop() {
     let (url, bodies) = spawn_stub(vec![]).await;
     let fx = fixture(&url);

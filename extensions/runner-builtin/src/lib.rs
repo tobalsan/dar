@@ -288,8 +288,6 @@ impl ChatSession for BuiltinChatSession {
     }
 }
 
-const COMPACT_COMMAND: &str = "/compact";
-
 const COMPACT_PROMPT: &str = "Summarize the conversation so far so it can replace the full history. Be concise but keep the facts, decisions, open tasks, user preferences, and names needed to continue. Reply with the summary only.";
 
 /// The request messages: system prompt (not part of the persisted history)
@@ -336,9 +334,10 @@ async fn run_builtin_chat_turn(
     let client = reqwest::Client::new();
     let model = params.model.as_deref().unwrap_or("openai/gpt-4o-mini");
     let opencode_session = opencode_session(provider, &session_id);
-    if prompt.trim() == COMPACT_COMMAND {
+    if let Some(instructions) = cap_chat::parse_compact_command(&prompt) {
         return compact_chat_history(
             &params,
+            instructions,
             &tx,
             &state,
             &ProviderRequest {
@@ -456,6 +455,7 @@ async fn run_builtin_chat_turn(
 /// call's own prompt size describes the history that was just dropped).
 async fn compact_chat_history(
     params: &ChatSessionParams,
+    instructions: Option<&str>,
     tx: &tokio::sync::mpsc::Sender<ChatEvent>,
     state: &SharedChatState,
     base: &ProviderRequest<'_>,
@@ -471,7 +471,13 @@ async fn compact_chat_history(
     }
     let mut messages = chat_request_messages(params, state);
     messages.extend(lock_state(state).unanswered_tool_responses("interrupted"));
-    messages.push(serde_json::json!({"role": "user", "content": COMPACT_PROMPT}));
+    let compact_prompt = match instructions {
+        Some(instructions) => {
+            format!("{COMPACT_PROMPT}\n\nAdditional instructions: {instructions}")
+        }
+        None => COMPACT_PROMPT.to_owned(),
+    };
+    messages.push(serde_json::json!({"role": "user", "content": compact_prompt}));
     let request = ProviderRequest {
         messages: &messages,
         ..*base
