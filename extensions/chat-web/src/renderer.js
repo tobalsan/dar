@@ -150,6 +150,36 @@
 
   const sendEnabled = app => app.draft.trim() !== '' || app.pending.length > 0;
 
+  // Single source of truth for composer slash commands (menu + sendFlow).
+  const SLASH_COMMANDS = [
+    { name: '/new', description: 'Start a new chat' },
+    { name: '/compact', description: 'Summarize the conversation to free context' },
+    { name: '/stop', description: 'Stop the current response' },
+  ];
+  const slashMatches = draft => /^\/\S*$/.test(draft) ? SLASH_COMMANDS.filter(c => c.name.startsWith(draft.toLowerCase()) && c.name !== draft.toLowerCase()) : [];
+  const slashOpen = () => { let menu = $('chat-slash-menu'); return !!menu && !menu.hidden; };
+  const closeSlash = () => {
+    let menu = $('chat-slash-menu'), input = $('chat-input');
+    if (menu) { menu.hidden = true; menu.innerHTML = ''; }
+    if (input && input.setAttribute) { input.setAttribute('aria-expanded', 'false'); input.removeAttribute('aria-activedescendant'); }
+  };
+  const updateSlash = (app, index = 0) => {
+    let menu = $('chat-slash-menu'), input = $('chat-input');
+    if (!menu || !input) return;
+    let matches = app.slashDismissed === input.value ? [] : slashMatches(input.value);
+    if (!matches.length) { closeSlash(); return; }
+    app.slashIndex = (index + matches.length) % matches.length;
+    menu.innerHTML = matches.map((c, i) => `<div id="chat-slash-${i}" class="chat-slash-option" role="option" data-command="${c.name}" aria-selected="${i === app.slashIndex}"><span class="chat-slash-name">${c.name}</span><span class="chat-slash-desc">${c.description}</span></div>`).join('');
+    menu.hidden = false;
+    input.setAttribute('aria-expanded', 'true');
+    input.setAttribute('aria-activedescendant', `chat-slash-${app.slashIndex}`);
+  };
+  const completeSlash = (app, name) => {
+    let input = $('chat-input');
+    if (!input) return;
+    input.value = name + ' '; app.draft = input.value;
+    closeSlash(); autogrow(input); refreshBusy(app); input.focus && input.focus();
+  };
   const autogrow = el => { if (!el) return; el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, Math.round(0.4 * window.innerHeight)) + 'px'; };
 
 
@@ -251,6 +281,7 @@
     if (!input || !sendEnabled(app)) return;
     let slot = app.slot, message = input.value, files = app.pending.slice(), command_id = uuid();
     let command = message.trim();
+    closeSlash();
     window.__chatSeen?.mark([slot]);
     if (!files.length && command === '/stop') { fetch(`/chat/${app.slot}/abort`, { method: 'POST' }); app.draft=''; input.value=''; autogrow(input); refreshBusy(app); return; }
     if (!files.length && command === '/new') {
@@ -262,10 +293,11 @@
       }
       return;
     }
-    if (!files.length && command === '/compact') {
+    if (!files.length && (command === '/compact' || /^\/compact\s/.test(command))) {
+      let instructions = command.slice('/compact'.length).trim();
       app.draft = ''; input.value = ''; app.pending = []; renderChips(app); autogrow(input); refreshBusy(app);
       try {
-        await request(`/chat/${app.slot}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: uuid() }) });
+        await request(`/chat/${app.slot}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: uuid(), instructions: instructions || undefined }) });
       } catch (error) {
         restoreDraft(app, slot, input, message, files, error);
       }
@@ -316,11 +348,20 @@
   const bindDocument = app => {
     document.addEventListener('submit', e => { if (e.target.id === 'chat-composer') { e.preventDefault(); sendFlow(app); } });
     document.addEventListener('keydown', e => {
+      if (e.target.id === 'chat-input' && slashOpen() && !e.isComposing) {
+        let options = slashMatches(e.target.value);
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); updateSlash(app, (app.slashIndex || 0) + (e.key === 'ArrowDown' ? 1 : -1)); return; }
+        if (e.key === 'Escape') { e.preventDefault(); app.slashDismissed = e.target.value; closeSlash(); return; }
+        if ((e.key === 'Tab' && !e.shiftKey) || (e.key === 'Enter' && !e.shiftKey)) { e.preventDefault(); completeSlash(app, options[app.slashIndex || 0].name); return; }
+      }
       if (e.target.id === 'chat-input' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendFlow(app); return; }
       // Session rows are role=button: Enter/Space resumes, like a click.
       if (e.target.classList?.contains('chat-session') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); resumeSession(app, e.target.dataset.sessionId); }
     });
-    document.addEventListener('input', e => { if (e.target.id === 'chat-input') { app.draft = e.target.value; autogrow(e.target); refreshBusy(app); } });
+    document.addEventListener('input', e => { if (e.target.id === 'chat-input') { app.draft = e.target.value; autogrow(e.target); refreshBusy(app); updateSlash(app); } });
+    // mousedown keeps focus in the textarea; click picks the option.
+    document.addEventListener('mousedown', e => { if (e.target.closest && e.target.closest('#chat-slash-menu')) e.preventDefault(); });
+    document.addEventListener('click', e => { let option = e.target.closest && e.target.closest('.chat-slash-option'); if (option) completeSlash(app, option.dataset.command); });
     document.addEventListener('change', e => {
       if (e.target.id !== 'chat-attachments') return;
       addFiles(app, e.target.files);
