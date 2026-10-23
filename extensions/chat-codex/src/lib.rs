@@ -1544,7 +1544,7 @@ done
                 finishes.push((ok, error));
             }
         }
-        assert_eq!(finishes[0].0, false);
+        assert!(!finishes[0].0);
         assert_eq!(finishes[1], (true, None), "{finishes:?}");
         Box::new(session).close().await.unwrap();
     }
