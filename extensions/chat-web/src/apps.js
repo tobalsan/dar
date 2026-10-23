@@ -25,6 +25,22 @@
   const audit = (view, method, params) => request(`/chat/${encodeURIComponent(view.slot)}/apps/${encodeURIComponent(view.record)}/rpc`, {
     method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})
   });
+  const ICONS={
+    inline:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>',
+    fullscreen:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>'};
+  const label = view => {
+    const text=view.mode==='fullscreen'?'Close expanded view':'Expand view';
+    view.button.innerHTML=ICONS[view.mode];
+    view.button.title=text;
+    view.button.setAttribute('aria-label',`${text}: ${view.server}`);
+  };
+  const layoutPanel = () => {
+    const root=document.getElementById('chat-root');
+    if (!root) return;
+    const rect=root.getBoundingClientRect();
+    root.style.setProperty('--app-top',`${rect.top}px`);
+    root.style.setProperty('--app-height',`${rect.height}px`);
+  };
   const mode = (view, wanted) => {
     if (!['inline','fullscreen'].includes(wanted) || !view.modes.includes(wanted)) return view.mode;
     if (wanted==='fullscreen') {
@@ -34,13 +50,8 @@
     view.section.classList.toggle('is-expanded', wanted==='fullscreen');
     const root=document.getElementById('chat-root');
     root?.classList.toggle('has-expanded-app',Array.from(views.values()).some(other=>other.mode==='fullscreen' && !other.destroying));
-    if (root && wanted==='fullscreen') {
-      const rect=root.getBoundingClientRect();
-      root.style.setProperty('--app-top',`${rect.top}px`);
-      root.style.setProperty('--app-height',`${rect.height}px`);
-    }
-    view.button.textContent=wanted==='fullscreen'?'Close expanded view':'Expand view';
-    view.button.setAttribute('aria-label',`${view.button.textContent}: ${view.server}`);
+    if (wanted==='fullscreen') layoutPanel();
+    label(view);
     notify(view,'ui/notifications/host-context-changed',context(view));
     return view.mode;
   };
@@ -53,6 +64,7 @@
     if(view.destroying)return;
     view.destroying=true;
     clearTimeout(view.timer);
+    view.observer?.disconnect();
     const anchor=view.section.parentElement;
     if(anchor?.dataset.appAnchor!==undefined)anchor.dataset.appRetiring='';
     if(view.ready) {
@@ -127,16 +139,25 @@
     views.set(key,view);
     const section=document.createElement('section');section.className='chat-app';section.setAttribute('aria-label',`MCP App: ${descriptor.server}`);
     const header=document.createElement('header');const name=document.createElement('strong');name.textContent=`${descriptor.server} · MCP App`;
-    const button=document.createElement('button');button.type='button';button.textContent='Expand view';button.setAttribute('aria-label',`Expand view: ${descriptor.server}`);button.hidden=true;
+    const button=document.createElement('button');button.type='button';button.className='chat-app-expand';button.hidden=true;
     header.append(name,button);
     const status=document.createElement('p');status.setAttribute('role','status');status.textContent='Loading view…';
     const frame=document.createElement('iframe');frame.title=`${descriptor.server} app`;frame.setAttribute('sandbox','allow-scripts allow-same-origin');frame.style.height='300px';
-    section.append(header,status,frame);anchor.append(section);Object.assign(view,{section,frame,button,status,tool:descriptor.tool});
+    section.append(header,status,frame);anchor.append(section);Object.assign(view,{section,frame,button,status,tool:descriptor.tool});label(view);
+    // Send fresh dimensions whenever the expanded frame changes size (layout settle, window resize, divider drag).
+    let last='';
+    view.observer=new ResizeObserver(()=>{
+      if(view.mode!=='fullscreen')return;
+      const size=`${view.frame.clientWidth}x${view.frame.clientHeight}`;
+      if(size===last)return;
+      last=size;notify(view,'ui/notifications/host-context-changed',context(view));
+    });
+    view.observer.observe(frame);
     button.onclick=()=>mode(view,view.mode==='inline'?'fullscreen':'inline');
     const divider=document.createElement('div');divider.className='chat-app-resizer';divider.setAttribute('role','separator');divider.setAttribute('aria-label','Resize app panel');divider.setAttribute('aria-orientation','vertical');section.append(divider);
     divider.onpointerdown=event=>{
       divider.setPointerCapture(event.pointerId);
-      divider.onpointermove=event=>{const root=document.getElementById('chat-root');root?.style.setProperty('--app-panel-width',`${Math.max(320,Math.min(innerWidth-400,innerWidth-event.clientX))}px`);notify(view,'ui/notifications/host-context-changed',context(view))};
+      divider.onpointermove=event=>{const root=document.getElementById('chat-root');root?.style.setProperty('--app-panel-width',`${Math.max(320,Math.min(innerWidth-400,innerWidth-event.clientX))}px`)};
       divider.onpointerup=()=>{divider.onpointermove=null};
     };
     try {
@@ -185,6 +206,7 @@
       try{notify(view,'ui/notifications/tool-input',{arguments:JSON.parse(message.args)});view.inputCallId=message.id}catch{}
     }
   };
+  addEventListener('resize',()=>{if(Array.from(views.values()).some(view=>view.mode==='fullscreen'))layoutPanel()});
   addEventListener('pagehide',()=>{for(const view of views.values())if(view.ready)post(view,{jsonrpc:'2.0',id:'dar-teardown',method:'ui/resource-teardown',params:{reason:'Page closed'}})});
   window.DarMcpApps={sync,event};
 })();

@@ -319,9 +319,8 @@ body:has(.chat-web) #content {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  width: min(100%, 48rem);
-  align-self: center;
-  padding: 2rem 1rem 1rem;
+  /* scroll area spans the main panel; padding keeps the 48rem message column centered */
+  padding: 2rem max(1rem, calc(50% - 23rem)) 1rem;
   overflow-wrap: anywhere;
 }
 .chat-turn {
@@ -842,6 +841,8 @@ body:has(.chat-web) #content {
 .chat-app { border:1px solid var(--border,#555); border-radius:8px; margin:8px 0 20px; background:var(--bg,#fff); color:var(--fg,#222); overflow:hidden; }
 .chat-app>header { display:flex;align-items:center;justify-content:space-between;padding:8px 12px;gap:12px;border-bottom:1px solid var(--border,#555);font-size:13px; }
 .chat-app button { cursor:pointer; }
+.chat-app>header>.chat-app-expand { display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:1px solid var(--border,#555);border-radius:6px;background:transparent;color:inherit; }
+.chat-app>header>.chat-app-expand[hidden] { display:none; }
 .chat-app>p { font-size:13px;padding:0 12px; }
 .chat-app>p:empty { display:none; }
 .chat-app>iframe { display:block;width:100%;border:0; background:white; }
