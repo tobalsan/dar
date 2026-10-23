@@ -1523,6 +1523,7 @@ done
                 error: None
             }
         ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
         let methods = std::fs::read_to_string(temp.path().join("methods.log")).unwrap();
         assert!(!methods.lines().any(|m| m == "turn/interrupt"), "{methods}");
         Box::new(session).close().await.unwrap();
