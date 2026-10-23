@@ -363,9 +363,31 @@ async fn write_turn(
 ) -> Result<()> {
     write_value_to(
         stdin,
-        make_turn_start(request_id, thread_id, workspace, prompt, model, None),
+        turn_request(request_id, thread_id, workspace, prompt, model),
     )
     .await
+}
+
+/// `/compact` becomes the native `thread/compact/start` request, so it never
+/// reaches the model as a prompt. The app-server runs compaction as a normal
+/// turn (`turn/started` ... `turn/completed`), so the usual turn accounting
+/// settles it. The request has no instruction field: instructions are ignored.
+fn turn_request(
+    request_id: u64,
+    thread_id: &str,
+    workspace: &str,
+    prompt: &str,
+    model: Option<&str>,
+) -> Value {
+    if cap_chat::parse_compact_command(prompt).is_some() {
+        return serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "thread/compact/start",
+            "params": { "threadId": thread_id },
+        });
+    }
+    make_turn_start(request_id, thread_id, workspace, prompt, model, None)
 }
 
 async fn wait_for_response(
@@ -592,6 +614,10 @@ fn map_completed_item(item: Option<&Value>) -> Vec<ChatEvent> {
     };
     match item.get("type").and_then(Value::as_str).unwrap_or("") {
         "agentMessage" | "reasoning" => Vec::new(),
+        "contextCompaction" => vec![ChatEvent::Delta {
+            role: ChatRole::Assistant,
+            text: "Context compacted.".to_owned(),
+        }],
         "commandExecution"
         | "fileChange"
         | "mcpToolCall"
@@ -1248,6 +1274,102 @@ done
 
         ChatSession::close(Box::new(session)).await.unwrap();
         assert!(!is_alive(pid), "codex chat child still alive after close");
+    }
+
+    #[test]
+    fn compact_prompt_maps_to_native_compact_request() {
+        let compact = turn_request(7, "main", "/w", "/compact keep the plan", None);
+        assert_eq!(compact["method"], "thread/compact/start");
+        assert_eq!(compact["id"], 7);
+        assert_eq!(compact["params"], serde_json::json!({ "threadId": "main" }));
+        let other = turn_request(8, "main", "/w", "/compactor", None);
+        assert_eq!(other["method"], "turn/start");
+        assert_eq!(other["params"]["input"][0]["text"], "/compactor");
+    }
+
+    #[test]
+    fn context_compaction_item_maps_to_notice() {
+        let events = one(
+            r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"contextCompaction","id":"c1"},"threadId":"main","turnId":"t1"}}"#,
+        );
+        assert!(matches!(
+            events,
+            ChatEvent::Delta { role: ChatRole::Assistant, text } if text == "Context compacted."
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compact_stub_settles_once_and_never_sends_turn_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_script(
+            temp.path(),
+            r#"set -e
+while IFS= read -r line; do
+    id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/' | grep -E '^[0-9]+$' || true)
+    method=$(printf '%s' "$line" | grep -o '"method":"[^"]*"' | head -1 | sed 's/"method":"//;s/"//')
+    printf '%s\n' "$method" >> methods.log
+    case "$method" in
+        initialize)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+            ;;
+        thread/start)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"thread":{"id":"main"}}}\n' "$id"
+            ;;
+        thread/compact/start)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+            printf '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"main","turn":{"id":"c-1"}}}\n'
+            printf '{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"contextCompaction","id":"i1"},"threadId":"main","turnId":"c-1"}}\n'
+            printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"main","turn":{"id":"c-1","status":"completed"}}}\n'
+            ;;
+        turn/start)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+            printf '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"main","turn":{"id":"t-1"}}}\n'
+            printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"main","turn":{"id":"t-1","status":"failed"}}}\n'
+            ;;
+    esac
+done
+"#,
+        );
+        let sessions = temp.path().join("data").join("tui").join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let params =
+            ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions).build();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let mut session = CodexChatSession::spawn(&params, tx).await.unwrap();
+
+        session
+            .send_turn("/compact keep x".to_string())
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::Delta { role: ChatRole::Assistant, text } if text == "Context compacted."
+        ));
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::TurnFinished {
+                ok: true,
+                error: None
+            }
+        ));
+
+        session.send_turn("/compactor".to_string()).await.unwrap();
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::TurnFinished { ok: false, .. }
+        ));
+        assert!(rx.try_recv().is_err(), "each turn must settle exactly once");
+        let methods = std::fs::read_to_string(temp.path().join("methods.log")).unwrap();
+        assert!(
+            methods.lines().any(|m| m == "thread/compact/start"),
+            "{methods}"
+        );
+        assert_eq!(
+            methods.lines().filter(|m| *m == "turn/start").count(),
+            1,
+            "{methods}"
+        );
+        Box::new(session).close().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
