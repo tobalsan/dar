@@ -139,3 +139,44 @@ fn pi_sanitized_name_requires_a_recorded_exact_alias() {
             .is_none()
     );
 }
+
+#[test]
+fn host_publish_resolves_the_explicit_runner_names_only() {
+    // ALG-532 Testing Decisions approve read_result: catches correlation,
+    // while browser rendering and real runner emission need separate checks.
+    let root = tempfile::tempdir().unwrap();
+    let record = ResultRecord {
+        tool: "artifact_publish".into(),
+        pi_tool_name: Some("mcp__dar__artifact_publish".into()),
+        server: "dar".into(),
+        resource_uri: "ui://dar/artifact-viewer".into(),
+        args: serde_json::json!({"path":"report.html"}),
+        result: serde_json::json!({"structuredContent":{"filename":"report.html"}}),
+        created_at: 42,
+    };
+    let id = record.write(root.path()).unwrap();
+    for name in [
+        "artifact_publish",
+        "mcp__dar__artifact_publish",
+        "dar.artifact_publish",
+        "dar_artifact_publish",
+    ] {
+        let result = read_result(root.path(), &id, name).unwrap();
+        assert!(result.is_some(), "{name} must resolve its publish result");
+        assert_eq!(
+            result.unwrap().result["structuredContent"]["filename"],
+            "report.html"
+        );
+    }
+    for name in [
+        "other",
+        "dar.other",
+        "other_artifact_publish",
+        "other.artifact_publish",
+    ] {
+        assert!(
+            read_result(root.path(), &id, name).unwrap().is_none(),
+            "{name}"
+        );
+    }
+}

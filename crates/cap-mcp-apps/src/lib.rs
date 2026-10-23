@@ -78,11 +78,14 @@ pub fn extract_marker(text: &str) -> (String, Option<String>) {
     (clean.trim_end().to_owned(), id)
 }
 
-/// Codex adds the outer bridge's server name before the mapped tool name.
+/// Normalize explicit host aliases and Codex outer-bridge upstream names.
 pub fn normalize_tool_name(name: &str) -> &str {
-    match name.split_once('.') {
-        Some((_, mapped)) if mapped.contains("__") => mapped,
-        _ => name,
+    match name {
+        "dar.artifact_publish" | "dar_artifact_publish" => "artifact_publish",
+        _ => match name.split_once('.') {
+            Some((_, mapped)) if mapped.contains("__") => mapped,
+            _ => name,
+        },
     }
 }
 

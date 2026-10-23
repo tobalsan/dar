@@ -1,10 +1,11 @@
 //! Publishes shared tool registry and built-in artifact publisher.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use dar_artifacts::{ArtifactMetadataInput, ArtifactStore, ExportRoot};
+use dar_extension_sdk::mcp_apps::ResultRecord;
 use host_api::{Extension, RegisterCtx};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -40,6 +41,7 @@ impl Extension for ToolRegistryHostExtension {
                 Arc::new(ArtifactPublish {
                     store: Arc::clone(&store),
                     exports,
+                    root: ctx.paths.root().to_path_buf(),
                 }),
             )?;
             ctx.services
@@ -54,7 +56,7 @@ fn artifact_publish_spec(exports_path: &Path) -> ToolSpec {
     ToolSpec::new(
         "artifact_publish",
         format!(
-            "Publish a file up to 25 MiB into host-private immutable storage. Export folder: {}. Copy the file into this export folder, then pass its relative path.",
+            "Publish a file up to 25 MiB into host-private immutable storage. Export folder: {}. Copy the file into this export folder, then pass its relative path. Web chat shows the published file to the user; use it to show a report instead of running open. Call this only after the file write finishes. Never call it in parallel with the command that writes the file.",
             exports_path.display()
         ),
         json!({
@@ -65,7 +67,8 @@ fn artifact_publish_spec(exports_path: &Path) -> ToolSpec {
                 "path": { "type": "string", "minLength": 1 },
                 "filename": { "type": "string", "minLength": 1 },
                 "mediaType": { "type": "string", "minLength": 1 },
-                "caption": { "type": "string" }
+                "caption": { "type": "string" },
+                "title": { "type": "string" }
             }
         }),
     )
@@ -79,16 +82,19 @@ struct ArtifactPublishArgs {
     filename: Option<String>,
     media_type: Option<String>,
     caption: Option<String>,
+    title: Option<String>,
 }
 
 struct ArtifactPublish {
     store: Arc<ArtifactStore>,
     exports: ExportRoot,
+    root: PathBuf,
 }
 
 #[async_trait::async_trait]
 impl ToolExecutor for ArtifactPublish {
     async fn execute(&self, args: Value) -> Result<ToolOutcome> {
+        let input = args.clone();
         let args: ArtifactPublishArgs = match serde_json::from_value(args) {
             Ok(args) => args,
             Err(error) => {
@@ -125,6 +131,13 @@ impl ToolExecutor for ArtifactPublish {
                 ))
             }
         };
+        let structured = json!({
+            "uri": format!("dar-artifact://{}", metadata.id),
+            "filename": metadata.filename,
+            "mediaType": metadata.media_type,
+            "bytes": metadata.bytes,
+            "title": args.title,
+        });
         let sha256 = metadata.sha256_hex();
         let resource = ToolContent::ResourceLink {
             uri: format!("dar-artifact://{}", metadata.id),
@@ -134,12 +147,45 @@ impl ToolExecutor for ArtifactPublish {
             sha256,
             caption: metadata.caption,
         };
-        Ok(ToolOutcome {
+        let mut outcome = ToolOutcome {
             text: "artifact published".to_string(),
-            content: vec![resource],
+            content: vec![
+                ToolContent::Text {
+                    text: "artifact published".to_string(),
+                },
+                resource,
+            ],
             is_error: false,
             error: None,
-        })
+        };
+        let mut result = outcome.to_mcp_result();
+        result["structuredContent"] = structured;
+        let record = ResultRecord {
+            tool: "artifact_publish".into(),
+            pi_tool_name: Some("mcp__dar__artifact_publish".into()),
+            server: "dar".into(),
+            resource_uri: "ui://dar/artifact-viewer".into(),
+            args: input,
+            result,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        match record.write(&self.root) {
+            Ok(id) => {
+                outcome.text.push_str(&format!("\n[mcp-app-result:{id}]"));
+                outcome.content[0] = ToolContent::Text {
+                    text: outcome.text.clone(),
+                };
+            }
+            Err(_) => dar_extension_sdk::log::event(
+                "",
+                "artifact.capture-failed",
+                "Artifact view result capture failed; using text fallback",
+            ),
+        }
+        Ok(outcome)
     }
 }
 
@@ -202,7 +248,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_returns_only_resource_link() {
+    async fn publish_keeps_resource_link_alongside_app_marker() {
         let dir = tempfile::tempdir().unwrap();
         let exports_dir = dir.path().join("exports");
         fs::create_dir(&exports_dir).unwrap();
@@ -210,6 +256,7 @@ mod tests {
         let publish = ArtifactPublish {
             store: Arc::new(ArtifactStore::open(dir.path().join("vault"), 1024).unwrap()),
             exports: ExportRoot::open(exports_dir).unwrap(),
+            root: dir.path().to_path_buf(),
         };
         let outcome = publish
             .execute(json!({"path": "report.txt"}))
@@ -217,7 +264,7 @@ mod tests {
             .unwrap();
         assert!(!outcome.is_error);
         assert!(
-            matches!(outcome.content.as_slice(), [ToolContent::ResourceLink { uri, name, bytes: 5, .. }] if uri.starts_with("dar-artifact://") && name == "report.txt")
+            matches!(outcome.content.as_slice(), [ToolContent::Text { .. }, ToolContent::ResourceLink { uri, name, bytes: 5, .. }] if uri.starts_with("dar-artifact://") && name == "report.txt")
         );
     }
 }

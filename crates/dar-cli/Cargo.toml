@@ -38,6 +38,7 @@ scheduler = { package = "dar-scheduler", path = "../../extensions/scheduler", ve
 mcp = { package = "dar-mcp", path = "../../extensions/mcp", version = "0.6" }
 
 [dev-dependencies]
+cap-mcp-apps = { package = "dar-cap-mcp-apps", path = "../cap-mcp-apps", version = "0.6" }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 tool-registry-host = { package = "dar-tool-registry-host", path = "../../extensions/tool-registry-host", version = "0.6" }

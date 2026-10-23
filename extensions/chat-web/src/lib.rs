@@ -10,6 +10,7 @@ use std::{
 };
 
 mod apps;
+mod artifacts;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -617,6 +618,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/events", get(turn_events_stream))
         .route("/apps/config", get(apps::config))
         .route("/{session}/apps/{record}", get(apps::resource))
+        .route("/{session}/apps/{record}/download", get(apps::download))
         .route("/{session}/apps/{record}/rpc", post(apps::rpc))
         .route(
             "/sessions/{id}",
@@ -2739,6 +2741,377 @@ mod tests {
                 "{data}"
             );
         }
+    }
+
+    // Approved in ALG-532 Testing Decisions: public host HTTP/JSON-RPC seam.
+    // Catches built-in catalog availability and scoped artifact access; misses browser enforcement.
+    async fn artifact_http_state() -> (Arc<AppState>, String, String) {
+        use dar_extension_sdk::artifacts::{ArtifactMetadataInput, ArtifactStore, ExportRoot};
+        let root = test_root();
+        fs::create_dir_all(root.join("exports")).unwrap();
+        fs::write(
+            root.join("exports/report.html"),
+            "<h1>Quarterly report</h1>",
+        )
+        .unwrap();
+        let store = Arc::new(ArtifactStore::open(root.join("vault"), 1024).unwrap());
+        let metadata = store
+            .stage_from_export_root(
+                &ExportRoot::open(root.join("exports")).unwrap(),
+                "report.html",
+                ArtifactMetadataInput {
+                    filename: "report.html".into(),
+                    media_type: Some("text/html".into()),
+                    caption: None,
+                },
+            )
+            .unwrap();
+        let uri = format!("dar-artifact://{}", metadata.id);
+        let record = dar_extension_sdk::mcp_apps::ResultRecord {
+            tool: "artifact_publish".into(), pi_tool_name: Some("mcp__dar__artifact_publish".into()),
+            server: "dar".into(), resource_uri: "ui://dar/artifact-viewer".into(),
+            args: serde_json::json!({"path":"report.html"}),
+            result: serde_json::json!({"content":[{"type":"text","text":"artifact published"}], "structuredContent":{
+                "uri": uri, "filename":"report.html", "mediaType":"text/html", "bytes":25, "title":"Quarterly report"
+            }}), created_at: now_ms()/1000,
+        }.write(&root).unwrap();
+        let mut services = dar_extension_sdk::ServiceRegistry::default();
+        services
+            .register::<ArtifactStore>("artifact-store", store)
+            .unwrap();
+        let config = Config::default();
+        config.apps.bound_port.set(28181).unwrap();
+        let state = Arc::new(AppState {
+            config,
+            root,
+            start: std::sync::OnceLock::from(start_ctx(services)),
+            sessions: Mutex::new(HashMap::new()),
+            transition: Mutex::new(()),
+            slot_registry: Arc::default(),
+            meta: Mutex::new(HashMap::new()),
+        });
+        let session = state.session("test").await.unwrap();
+        session.publish(ChatEvent::ToolCall {
+            id: "artifact".into(),
+            name: "artifact_publish".into(),
+            args: "{}".into(),
+        });
+        session.publish(ChatEvent::ToolOutput {
+            id: "artifact".into(),
+            text: format!("artifact published [mcp-app-result:{record}]"),
+            is_error: false,
+            done: true,
+        });
+        (state, record, uri)
+    }
+
+    #[tokio::test]
+    async fn artifact_view_bootstraps_without_an_external_mcp_catalog() {
+        let (state, id, _) = artifact_http_state().await;
+        let response = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/test/apps/{id}"))
+                    .header("host", "127.0.0.1:28180")
+                    .header("referer", "http://127.0.0.1:28180/chat")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["server"], "dar");
+        assert_eq!(body["sandboxOrigin"], "http://dar.localhost:28181");
+        assert_eq!(
+            body["meta"]["ui"]["csp"]["resourceDomains"],
+            serde_json::json!([
+                "https://cdn.jsdelivr.net",
+                "https://cdnjs.cloudflare.com",
+                "https://unpkg.com",
+                "https://fonts.googleapis.com",
+                "https://fonts.gstatic.com"
+            ])
+        );
+        assert_eq!(
+            body["meta"]["ui"]["csp"]["connectDomains"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            body["meta"]["ui"]["csp"]["frameDomains"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            body["result"]["structuredContent"]["filename"],
+            "report.html"
+        );
+        assert!(body["html"].as_str().is_some_and(|html| !html.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn artifact_view_can_read_only_its_result_and_cannot_publish() {
+        let (state, id, uri) = artifact_http_state().await;
+        use dar_extension_sdk::artifacts::{ArtifactMetadataInput, ArtifactStore, ExportRoot};
+        let store = state
+            .start
+            .get()
+            .unwrap()
+            .host
+            .services
+            .get_named::<ArtifactStore>("artifact-store")
+            .unwrap();
+        fs::write(state.root.join("exports/private.txt"), "Other conversation").unwrap();
+        let other = store
+            .stage_from_export_root(
+                &ExportRoot::open(state.root.join("exports")).unwrap(),
+                "private.txt",
+                ArtifactMetadataInput {
+                    filename: "private.txt".into(),
+                    media_type: Some("text/plain".into()),
+                    caption: None,
+                },
+            )
+            .unwrap();
+        let other_uri = format!("dar-artifact://{}", other.id);
+        let app = router(state);
+        for (session, method, params, allowed) in [
+            (
+                "test",
+                "resources/read",
+                serde_json::json!({"uri":uri}),
+                true,
+            ),
+            (
+                "test",
+                "resources/read",
+                serde_json::json!({"uri":other_uri}),
+                false,
+            ),
+            (
+                "other",
+                "resources/read",
+                serde_json::json!({"uri":uri}),
+                false,
+            ),
+            (
+                "test",
+                "tools/call",
+                serde_json::json!({"name":"artifact_publish","arguments":{"path":"report.html"}}),
+                false,
+            ),
+        ] {
+            let response = app.clone().oneshot(axum::http::Request::builder()
+                .uri(format!("/{session}/apps/{id}/rpc")).method("POST").header("content-type","application/json")
+                .body(Body::from(serde_json::to_vec(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":method,"params":params})).unwrap())).unwrap()).await.unwrap();
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            if allowed {
+                assert_eq!(body["result"]["contents"][0]["uri"], uri);
+                assert_eq!(body["result"]["contents"][0]["mimeType"], "text/html");
+                assert_eq!(
+                    body["result"]["contents"][0]["text"],
+                    "<h1>Quarterly report</h1>"
+                );
+            } else {
+                assert!(body["error"].is_object(), "{body}");
+            }
+        }
+    }
+
+    // Approved ALG-532 built-in provider seam: standard MCP resources/read and catalog.
+    // Catches vault-to-wire byte representation; misses browser image decoding.
+    #[tokio::test]
+    async fn artifact_provider_serves_binary_and_lists_a_model_only_tool() {
+        use dar_extension_sdk::{
+            artifacts::{ArtifactMetadataInput, ArtifactStore, ExportRoot},
+            mcp_apps::McpApps,
+        };
+        let (state, _, _) = artifact_http_state().await;
+        let store = state
+            .start
+            .get()
+            .unwrap()
+            .host
+            .services
+            .get_named::<ArtifactStore>("artifact-store")
+            .unwrap();
+        fs::write(state.root.join("exports/chart.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        let metadata = store
+            .stage_from_export_root(
+                &ExportRoot::open(state.root.join("exports")).unwrap(),
+                "chart.png",
+                ArtifactMetadataInput {
+                    filename: "chart.png".into(),
+                    media_type: Some("image/png".into()),
+                    caption: None,
+                },
+            )
+            .unwrap();
+        let provider = artifacts::ArtifactApp { store };
+        let tools = provider.list_tools().await.unwrap();
+        assert_eq!(
+            tools,
+            serde_json::json!([{"name":"artifact_publish","server":"dar","resourceUri":"ui://dar/artifact-viewer","visibility":["model"]}])
+        );
+        let uri = format!("dar-artifact://{}", metadata.id);
+        let resource = provider.read_resource("dar", &uri).await.unwrap();
+        assert_eq!(
+            resource,
+            serde_json::json!({"contents":[{"uri":uri,"mimeType":"image/png","blob":"iVBORw0KGgo="}]})
+        );
+        assert!(provider
+            .call_tool("dar", "artifact_publish", serde_json::json!({}))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn artifact_download_is_verified_attachment_for_its_own_conversation() {
+        let (state, id, uri) = artifact_http_state().await;
+        let app = router(Arc::clone(&state));
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/test/apps/{id}/download"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/octet-stream"
+        );
+        assert_eq!(
+            response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        assert_eq!(
+            response.headers()[header::CONTENT_DISPOSITION],
+            "attachment; filename=\"report.html\"; filename*=UTF-8''report.html"
+        );
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "<h1>Quarterly report</h1>"
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/other/apps/{id}/download"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let artifact_id = uri.strip_prefix("dar-artifact://").unwrap();
+        fs::write(
+            state.root.join("vault").join(artifact_id).join("data"),
+            "<h1>Altered   report</h1>",
+        )
+        .unwrap();
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/test/apps/{id}/download"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn artifact_transcript_exposes_filename_and_title_for_replay() {
+        let (state, _, _) = artifact_http_state().await;
+        let response = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/test/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = response.into_body();
+        let mut events = Vec::new();
+        for _ in 0..2 {
+            let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+            let text = std::str::from_utf8(&frame).unwrap();
+            let data = text
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap();
+            events.push(serde_json::from_str::<serde_json::Value>(data).unwrap());
+        }
+        assert_eq!(events[1]["app"]["artifactFilename"], "report.html");
+        assert_eq!(events[1]["app"]["artifactTitle"], "Quarterly report");
+    }
+
+    #[tokio::test]
+    async fn artifact_context_keeps_different_files_and_replaces_the_same_filename() {
+        use dar_extension_sdk::mcp_apps::{read_result, ResultRecord};
+        let (state, first_id, _) = artifact_http_state().await;
+        let session = state.session("test").await.unwrap();
+        let prompts = Arc::new(std::sync::Mutex::new(vec![]));
+        *session.inner.lock().await = Some(Box::new(ContextSession {
+            prompts: prompts.clone(),
+            reject: Arc::new(AtomicBool::new(false)),
+        }));
+        let template = read_result(&state.root, &first_id, "artifact_publish")
+            .unwrap()
+            .unwrap();
+        let app = router(Arc::clone(&state));
+        for (filename, selection) in [
+            ("report.html", "outdated-report"),
+            ("notes.md", "notes-summary"),
+            ("report.html", "latest-report"),
+        ] {
+            let mut record: ResultRecord = template.clone();
+            record.result["structuredContent"]["filename"] = serde_json::json!(filename);
+            record.args = serde_json::json!({"path":filename});
+            let id = record.write(&state.root).unwrap();
+            session.publish(ChatEvent::ToolCall {
+                id: id.clone(),
+                name: "artifact_publish".into(),
+                args: record.args.to_string(),
+            });
+            session.publish(ChatEvent::ToolOutput {
+                id: id.clone(),
+                text: format!("artifact published [mcp-app-result:{id}]"),
+                is_error: false,
+                done: true,
+            });
+            let response = app.clone().oneshot(axum::http::Request::builder().method("POST")
+                .uri(format!("/test/apps/{id}/rpc")).header("content-type","application/json")
+                .body(Body::from(serde_json::to_vec(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"ui/update-model-context","params":{"structuredContent":{"selection":selection}}})).unwrap())).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/test/send")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"command_id":"artifact-context","message":"compare files"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let delivered = prompts.lock().unwrap();
+        assert!(delivered[0].contains("notes-summary"));
+        assert!(delivered[0].contains("latest-report"));
+        assert!(!delivered[0].contains("outdated-report"));
     }
 
     struct AppCatalog;

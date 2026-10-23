@@ -485,6 +485,9 @@ fn load(root: &Path) -> Result<Config> {
     )
     .with_context(|| format!("parsing {}", path.display()))?;
     for name in config.mcp_servers.keys() {
+        if name == "dar" {
+            bail!("MCP server name dar is reserved for the built-in Dar app");
+        }
         if name.is_empty() || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
             bail!("invalid MCP server name {name:?}: expected ^[A-Za-z0-9-]+$");
         }

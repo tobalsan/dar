@@ -613,6 +613,109 @@ mod tests {
         assert!(text.contains("[REDACTED]"));
     }
 
+    async fn artifact_registry(root: &Path, vault: &Path) -> Arc<dyn ToolRegistryHandle> {
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let mut ctx = host_api::RegisterCtx {
+            bus: Default::default(),
+            http: host_api::HttpRegistry::disabled(),
+            foreground: Default::default(),
+            services: Default::default(),
+            paths: host_api::HostPaths::new(root)
+                .unwrap()
+                .with_artifact_root(vault)
+                .unwrap(),
+            config: Default::default(),
+            shutdown: host_api::ShutdownToken::new(rx),
+        };
+        tool_registry_host::ToolRegistryHostExtension
+            .register(&mut ctx)
+            .await
+            .unwrap();
+        ctx.services
+            .get_named::<dyn ToolRegistryHandle>(TOOL_REGISTRY_SERVICE)
+            .unwrap()
+    }
+
+    // ALG-532 Testing Decisions approve the bridge tools/call and public record
+    // seam: catches model-facing transport and capture, misses browser rendering.
+    #[tokio::test]
+    async fn published_artifact_returns_resource_and_one_resolvable_app_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = tempfile::tempdir().unwrap();
+        let registry = artifact_registry(root.path(), vault.path()).await;
+        std::fs::write(
+            root.path().join("data/artifact-exports/report.html"),
+            "<h1>Report</h1>",
+        )
+        .unwrap();
+        let args = json!({"path":"report.html", "mediaType":"text/html", "title":"Weekly report"});
+        let out = roundtrip_with(
+            registry,
+            Redactor::default(),
+            &[json!({
+                "jsonrpc":"2.0", "id":21, "method":"tools/call",
+                "params":{"name":"artifact_publish", "arguments":args}
+            })],
+        )
+        .await;
+        let wire = &out[0]["result"];
+        assert_eq!(wire["isError"], false, "{wire}");
+        let (text, marker) =
+            cap_mcp_apps::extract_marker(wire["content"][0]["text"].as_str().unwrap());
+        assert_eq!(text, "artifact published");
+        let record = cap_mcp_apps::read_result(root.path(), &marker.unwrap(), "artifact_publish")
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.server, "dar");
+        assert_eq!(record.resource_uri, "ui://dar/artifact-viewer");
+        assert_eq!(record.args, args);
+        assert_eq!(
+            record.result["structuredContent"],
+            json!({
+                "uri":wire["content"][1]["uri"], "filename":"report.html", "mediaType":"text/html",
+                "bytes":15, "title":"Weekly report"
+            })
+        );
+        assert_eq!(wire["content"][1]["type"], "resource_link");
+        assert_eq!(wire["content"][1]["name"], "report.html");
+        assert_eq!(record.result["content"][1], wire["content"][1]);
+        assert_eq!(
+            record.result["content"][0],
+            json!({"type":"text", "text":"artifact published"})
+        );
+        assert!(wire.get("structuredContent").is_none());
+        assert!(!record.result.to_string().contains("mcp-app-result"));
+    }
+
+    #[tokio::test]
+    async fn artifact_capture_failure_retains_successful_publish_and_resource_link() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = tempfile::tempdir().unwrap();
+        let registry = artifact_registry(root.path(), vault.path()).await;
+        std::fs::write(root.path().join("data/artifact-exports/note.txt"), "hello").unwrap();
+        // A file at the result-directory path makes record persistence fail.
+        std::fs::write(root.path().join("data/mcp-apps"), "unavailable").unwrap();
+        let out = roundtrip_with(
+            registry,
+            Redactor::default(),
+            &[json!({
+                "jsonrpc":"2.0", "id":22, "method":"tools/call",
+                "params":{"name":"artifact_publish", "arguments":{"path":"note.txt"}}
+            })],
+        )
+        .await;
+        let wire = &out[0]["result"];
+        assert_eq!(wire["isError"], false, "{wire}");
+        assert_eq!(
+            wire["content"][0],
+            json!({"type":"text", "text":"artifact published"})
+        );
+        assert_eq!(wire["content"][1]["type"], "resource_link");
+        assert_eq!(wire["content"][1]["name"], "note.txt");
+        assert_eq!(wire["content"][1]["bytes"], 5);
+        assert!(!wire.to_string().contains("mcp-app-result"));
+    }
+
     #[tokio::test]
     async fn linear_upload_asset_url_survives_agent_facing_redaction() {
         use axum::{extract::State, routing::post, Json, Router};
@@ -716,7 +819,7 @@ mod tests {
         let published = registry
             .dispatch("artifact_publish", json!({"path": "report.txt"}))
             .await;
-        let artifact = match &published.content[0] {
+        let artifact = match &published.content[1] {
             tool_registry::ToolContent::ResourceLink { uri, .. } => uri,
             other => panic!("expected published artifact, got {other:?}"),
         };
