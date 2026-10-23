@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Tall view</title>
+<style>body{margin:0}p{margin:0;height:40px}</style>
+<h1>Tall view</h1>
+<p aria-label="Context height"></p><p aria-label="Context mode"></p><p aria-label="Document height"></p>
+<div id="lines"></div>
+<script>
+const policy = '';
+const protocolVersion = '2026-01-26';
+let next = 0;
+const pending = new Map();
+const set = (name, text) => { document.querySelector(`[aria-label="${name}"]`).textContent = String(text); };
+const show = context => {
+  set('Context height', context?.containerDimensions?.height ?? 'none');
+  set('Context mode', context?.displayMode ?? 'none');
+  set('Document height', document.documentElement.scrollHeight);
+  // Mirror tldraw: in fullscreen, size the document to the host height.
+  const height = context?.displayMode === 'fullscreen' ? context?.containerDimensions?.height : undefined;
+  document.documentElement.style.height = document.body.style.height = height ? `${height}px` : '';
+};
+const lines = document.getElementById('lines');
+for (let i = 1; i <= 60; i++) { const line = document.createElement('p'); line.textContent = i === 60 ? 'Last line' : `Line ${i}`; lines.append(line); }
+addEventListener('message', event => {
+  if (event.source !== parent) return;
+  const message = event.data;
+  if (pending.has(message.id)) { pending.get(message.id)(message.result); pending.delete(message.id); }
+  if (message.method === 'ui/notifications/host-context-changed') show(message.params);
+});
+const id = ++next;
+new Promise(resolve => pending.set(id, resolve)).then(response => {
+  show(response.hostContext);
+  parent.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} }, '*');
+  parent.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/size-changed', params: { height: 330 } }, '*');
+});
+parent.postMessage({ jsonrpc: '2.0', id, method: 'ui/initialize', params: { protocolVersion, appInfo: { name: 'Tall', version: '1' }, appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] } } }, '*');
+</script></html>

@@ -137,6 +137,79 @@ Session routes (all under `/chat`): `GET /sessions` lists sessions,
 `{"title"?, "archived"?}` renames/archives (empty title clears it), and
 `DELETE /sessions/{id}` deletes.
 
+### MCP App views
+
+Tools from servers in `mcp.json` that declare an MCP App appear as a framed
+view under their tool call, labeled with the server name. The view receives
+the tool arguments before the full result, once its initialization finishes.
+Inline height follows the view's size reports, within a host cap.
+**Expand** displays the app in a resizable panel alongside the chat; the
+composer remains usable. Close the panel to return inline. App-requested
+fullscreen is available unless the app explicitly lists display modes without
+fullscreen; omitting the list permits both inline and fullscreen views.
+
+A second call to the same server and resource updates the open view. The new
+tool row links to that view. Reload and saved-session replay restore the last
+input and result for each reused view; user edits inside the app are not
+persisted. Missing result records, a stopped server, or a missing HTML
+resource retain the tool's text fallback.
+
+```yaml
+extensions:
+  chat-web:
+    apps:
+      # Defaults to dashboard.bind.
+      sandbox_bind: 0.0.0.0
+      # Defaults to dashboard.port + 1; ephemeral when dashboard.port is 0.
+      sandbox_port: 7879
+      # Optional shared browser-visible origin, without a path.
+      # sandbox_origin: https://agent-apps.example.net
+      # Per-server origins override sandbox_origin; keys match mcp.json.
+      sandbox_origins:
+        tldraw: loopback
+      # Servers whose apps require a fresh view for every call:
+      no_reuse: [tldraw]
+```
+
+The tested tldraw app did not reliably execute a second result in the same
+view; use a fresh view per execution. Other servers reuse views by default.
+Both lists use server IDs from `mcp.json`; Dar has no built-in vendor exceptions.
+
+The second HTTP listener serves the sandbox proxy and app documents, never
+the chat. Dar assigns each server a browser-visible origin and checks that
+assignment on both routes. With an ephemeral sandbox port, it publishes the
+actual bound port. By default, local apps use
+`http://<server>.localhost:<sandbox_port>`; views from one server share
+origin and storage, while different servers use different hostnames.
+
+The example sets `loopback` for the MCP server named `tldraw`. Dar then
+uses `127.0.0.1` for its view when chat is on `localhost`, and `localhost`
+when chat is on `127.0.0.1`. See [MCP](mcp.md) for the reasons. Ports do not isolate cookies, and sibling remote
+hostnames can share cookies. Dar uses the Public Suffix List to reject
+overlapping cookie domains between chat and apps, and between servers in
+isolated mode. This also rejects parent-child hostname assignments. The
+local `localhost`/`<server>.localhost` arrangement is verified in Chromium;
+other browsers need separate validation. Invalid assignments show an error
+and retain text fallback.
+
+For TLS termination or remote access, proxy separate app cookie domains to the
+sandbox listener and configure their browser-visible URLs in
+`sandbox_origins`. An explicit global `sandbox_origin` is a shared-origin
+exception: servers without per-server overrides share its storage and
+cookies. App and chat cookie scopes must always remain separate, for example
+`https://agent-apps.example.net` beside `https://agent.example.com`.
+Local tldraw rendering does not guarantee rendering on a remote domain.
+When Docker's host `SANDBOX_PORT` differs from the container port, use
+browser-visible ports in these overrides; see [Docker sandbox](sandbox.md).
+
+An app can post a user message, update selection context for the next turn,
+call app-visible tools on its own server, read its server's resources, and
+open HTTP(S) links in a new tab. Context is added at the common submission
+point for pi, codex, opencode, and builtin, and cleared after the backend
+accepts that message. A failed submission keeps the context for retry.
+See [MCP servers](mcp.md#mcp-apps-in-web-chat) for visibility, audit, OAuth,
+and compatibility limits.
+
 When the agent is passive (no orchestration loop configured), the dashboard
 opens on the Chat tab by default; the composer sends with Enter (Shift+Enter
 inserts a newline), and while the chat tab is active the dashboard's periodic

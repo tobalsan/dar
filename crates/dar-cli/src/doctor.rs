@@ -103,6 +103,32 @@ pub async fn run(
 
     // 1b. System files: required entries present + containment.
     if let Some(cfg) = cfg.as_ref() {
+        if let Some(web) = cfg.extensions.get("chat-web") {
+            let origins = web["apps"]["sandbox_origin"].as_str().into_iter().chain(
+                web["apps"]["sandbox_origins"]
+                    .as_mapping()
+                    .into_iter()
+                    .flat_map(|origins| origins.values().filter_map(serde_yaml::Value::as_str)),
+            );
+            for origin in origins.filter_map(|origin| reqwest::Url::parse(origin).ok()) {
+                if web["enabled"].as_bool() != Some(false)
+                    && origin.host_str().is_some_and(|host| {
+                        host.trim_matches(['[', ']'])
+                            .parse::<std::net::IpAddr>()
+                            .ok()
+                            == Some(cfg.dashboard.bind)
+                    })
+                {
+                    if origin.scheme() == "http"
+                        && origin.port_or_known_default() == Some(cfg.dashboard.port)
+                    {
+                        eprintln!("doctor: warning: MCP Apps sandbox origin matches the dashboard; views require different origins (set extensions.chat-web.apps.sandbox_origin to a separate origin)");
+                    } else {
+                        eprintln!("doctor: warning: MCP Apps sandbox hostname matches the dashboard; views require separate hostnames because cookies cross ports");
+                    }
+                }
+            }
+        }
         match system_context::resolve(&paths.root, cfg.system_files.as_deref()) {
             Ok(ctx) => pass(&format!(
                 "system files resolve ({} file(s))",

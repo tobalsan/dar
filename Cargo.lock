@@ -647,6 +647,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dar-cap-mcp-apps"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "dar-cap-runner"
 version = "0.6.0"
 dependencies = [
@@ -726,13 +737,16 @@ dependencies = [
  "dar-orchestrator-api",
  "futures-util",
  "http-body-util",
+ "psl",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "tokio",
  "tokio-stream",
  "tower",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -846,6 +860,7 @@ dependencies = [
  "dar-artifacts",
  "dar-cap-chat",
  "dar-cap-deliver",
+ "dar-cap-mcp-apps",
  "dar-host-api",
  "dar-orchestrator-api",
  "dar-tool-registry",
@@ -901,6 +916,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.9",
+ "base64 0.22.1",
  "dar-cap-dashboard-tab",
  "dar-extension-sdk",
  "dar-host-api",
@@ -2639,6 +2655,21 @@ dependencies = [
  "tracing",
  "windows",
 ]
+
+[[package]]
+name = "psl"
+version = "2.1.244"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc3ac0c25b0c40554a755e56dfe268855c53f391bbb7922a1c1fe59b73b163a9"
+dependencies = [
+ "psl-types",
+]
+
+[[package]]
+name = "psl-types"
+version = "2.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "pulldown-cmark"

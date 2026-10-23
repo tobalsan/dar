@@ -9,6 +9,13 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Web chat scrolls from anywhere in the main panel, including beside the message column. The MCP App expand control is now an icon button. An expanded app view now gets its true panel size again after a window resize.
+- MCP Apps accept `sandbox_origins.<server>: loopback`, which lets local tldraw work with chat on either `localhost` or `127.0.0.1`. `docs/mcp.md` now explains the host rules for each setup.
+- MCP Apps now load real HTTP documents on separate per-server hostnames, with `sandbox_origins` overrides for local tldraw and mapped ports; Dar rejects overlapping chat and app cookie domains and restores the selected conversation after reload.
+- MCP Apps with declared CSP can load blob scripts and images while workers remain blocked; apps that omit display modes can expand alongside chat, while explicit mode lists remain enforced.
+- MCP Apps now negotiate Dar's supported protocol version when an app requests a different version.
+- Pi chat now opens MCP Apps from Dar bridge tool results, including tools with hyphens in their names.
+- Web chat hosts MCP Apps in isolated inline views, with a resizable fullscreen panel beside chat, replay, and app tool/context actions across all runners; Docker sandboxes publish a second origin.
 - Self-updates and rollback now preserve `.env` reloads and secret scrubbing for child processes while keeping shell-set values; Linear poll authentication outages warn once and log recovery.
 - Chat web: an optional top-level `notification_sound` in `agent.yaml` names an audio file in the agent folder. That agent then plays this sound instead of the default one.
 - Host: an agent now refuses to start when another process already listens on its HTTP port. Before, on macOS, an agent on `127.0.0.1:P` could start next to a process on `*:P`, and the two processes split the traffic.

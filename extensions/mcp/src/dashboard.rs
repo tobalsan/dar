@@ -160,6 +160,12 @@ fn render(state: &DashboardState) -> Result<String> {
             }
             Server::Http { .. } => ("http", "disconnected"),
         };
+        let rejection = crate::login::oauth_rejection(&state.root, name);
+        let status = if rejection.is_some() {
+            "OAuth rejected"
+        } else {
+            status
+        };
         let n = escape_html(name);
         let (pill, actions) = match status {
             "connected" => (
@@ -168,14 +174,15 @@ fn render(state: &DashboardState) -> Result<String> {
                     r##"<button onclick="mcpConnect('{n}')">Reconnect</button><button class="danger" hx-post="/mcp/disconnect?server={n}" hx-target="#content">Disconnect</button>"##
                 ),
             ),
-            "disconnected" => (
+            "disconnected" | "OAuth rejected" => (
                 "interrupted",
                 format!(r#"<button onclick="mcpConnect('{n}')">Connect</button>"#),
             ),
             _ => ("other", String::new()),
         };
         html.push_str(&format!(
-            r#"<tr><td class="mcp-name">{n}</td><td class="mcp-muted">{transport}</td><td><span class="pill {pill}">{status}</span></td><td><div class="mcp-actions">{actions}</div></td></tr>"#
+            r#"<tr><td class="mcp-name">{n}</td><td class="mcp-muted">{transport}</td><td><span class="pill {pill}">{status}</span>{}</td><td><div class="mcp-actions">{actions}</div></td></tr>"#
+            , rejection.map(|reason| format!("<p>{}</p>", escape_html(reason))).unwrap_or_default()
         ));
     }
     html.push_str("</tbody></table><p class=\"mcp-hint\">Runners pick up new logins the next time they start the MCP bridge.</p></section></main>");
@@ -193,7 +200,8 @@ struct ServerQuery {
 }
 #[derive(Deserialize)]
 struct CallbackQuery {
-    code: String,
+    code: Option<String>,
+    error: Option<String>,
     state: String,
     iss: Option<String>,
 }
@@ -298,7 +306,19 @@ async fn callback(
         )
             .into_response();
     };
-    match exchange_and_save(&mut pending.manager, &pending.store, &query.code, &query.state, query.iss.as_deref()).await {
+    if let Some(error) = query.error {
+        let reason = crate::login::authorization_rejected(&state.root, &pending.server, &error)
+            .unwrap_or("OAuth authorization failed; could not save the login diagnostic");
+        return (StatusCode::BAD_REQUEST, Html(escape_html(reason))).into_response();
+    }
+    let Some(code) = query.code else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Html("OAuth callback missing code".to_owned()),
+        )
+            .into_response();
+    };
+    match exchange_and_save(&mut pending.manager, &pending.store, &code, &query.state, query.iss.as_deref()).await {
         Ok(()) => Html(format!("Connected {}. You can close this tab.<script>if(window.opener)window.opener.postMessage('dar-mcp-connected',location.origin);window.close()</script>", escape_html(&pending.server))).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, Html(escape_html(&format!("Authorization failed: {error}")))).into_response(),
     }
@@ -420,7 +440,8 @@ mod tests {
         let response = callback(
             State(state),
             Query(CallbackQuery {
-                code: "x".into(),
+                code: Some("x".into()),
+                error: None,
                 state: "missing".into(),
                 iss: None,
             }),
@@ -556,7 +577,8 @@ mod tests {
         let response = callback(
             State(state.clone()),
             Query(CallbackQuery {
-                code: "c".into(),
+                code: Some("c".into()),
+                error: None,
                 state: "late".into(),
                 iss: None,
             }),

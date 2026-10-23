@@ -11,6 +11,7 @@ use std::sync::{Mutex, OnceLock};
 // scheduler's polling loop, a Telegram/IRC bridge) — the host skips such
 // extensions when booting a non-default `--workflow` process so the same
 // agent identity never opens that connection twice.
+pub use cap_mcp_apps as mcp_apps;
 pub use dar_artifacts as artifacts;
 
 pub use host_api::{

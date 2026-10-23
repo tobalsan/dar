@@ -9,6 +9,8 @@ use std::{
     sync::Arc,
 };
 
+mod apps;
+
 use anyhow::{Context, Result};
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
@@ -53,6 +55,7 @@ struct Config {
     /// links (build-time selection is by section presence). Mirrors the
     /// scheduler extension's `enabled` flag.
     enabled: Option<bool>,
+    apps: apps::AppsConfig,
 }
 
 #[derive(Default)]
@@ -96,7 +99,10 @@ impl Extension for ChatWebExtension {
             if let Some(parent) = transcript.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(transcript, "")?;
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(transcript)?;
             state.session("main").await?;
             let coordinator: Arc<dyn chat::ChatCoordinator> = state.clone();
             ctx.services.service::<dyn chat::ChatCoordinator>(
@@ -119,6 +125,9 @@ impl Extension for ChatWebExtension {
                     "/notify.mp3".into(),
                     "/notify.js".into(),
                     "/events".into(),
+                    "/apps/config".into(),
+                    "/{session}/apps/{record}".into(),
+                    "/{session}/apps/{record}/rpc".into(),
                     "/{session}/resume".into(),
                     "/{session}/stream".into(),
                     "/{session}/history".into(),
@@ -144,6 +153,9 @@ impl Extension for ChatWebExtension {
                 .start
                 .set(ctx)
                 .map_err(|_| anyhow::anyhow!("chat-web started twice"))?;
+            if let Err(error) = apps::start(Arc::clone(state)).await {
+                tracing::warn!(%error, "MCP Apps sandbox unavailable; keeping text fallback");
+            }
             let idle_minutes = state.config.idle_minutes.unwrap_or(DEFAULT_IDLE_MINUTES);
             if idle_minutes > 0 {
                 let state = Arc::clone(state);
@@ -209,7 +221,7 @@ impl DashboardTab for ChatTab {
     }
     fn render(&self) -> Result<String> {
         Ok(format!(
-            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"{}><aside class="chat-sidebar" aria-label="Conversations"><div class="chat-sidebar-head"><strong>Chats</strong><button type="button" id="chat-sidebar-toggle" data-sidebar-toggle class="chat-icon" aria-label="Toggle sidebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button></div><input id="chat-search" class="chat-search" type="search" placeholder="Search conversations" aria-label="Search conversations"><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><header class="chat-header"><button type="button" data-sidebar-toggle class="chat-icon chat-mobile-sidebar-toggle" aria-label="Open conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button><div>{}<span class="chat-title"><strong>{}</strong>{}</span><span id="chat-token-meter" class="chat-meter"></span></div><button type="button" class="chat-new" onclick="window.__chatWeb&amp;&amp;window.__chatWeb.newChat()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button></header><div class="chat-dropzone" id="chat-dropzone" hidden>Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite"></div><div class="chat-hero" id="chat-hero">{}<div class="chat-hero-line" id="chat-hero-line"></div></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips"></div><div class="chat-cap-hint" id="chat-cap-hint"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.4 11.1l-9.2 9.1a6 6 0 01-8.4-8.4L13 2.6a4 4 0 015.6 5.6l-9.2 9.2a2 2 0 01-2.8-2.8l8.5-8.5"/></svg></button><input type="file" id="chat-attachments" multiple hidden><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message {}" aria-label="Message"></textarea><button type="button" id="chat-abort" class="chat-icon" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon" aria-label="Send" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div><div id="chat-context-warning" class="chat-context-warning" hidden>Context is filling up — send /compact to summarize.</div></form></div></section><script>{}</script><script>{}</script><script>{}</script>"#,
+            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"{}><aside class="chat-sidebar" aria-label="Conversations"><div class="chat-sidebar-head"><strong>Chats</strong><button type="button" id="chat-sidebar-toggle" data-sidebar-toggle class="chat-icon" aria-label="Toggle sidebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button></div><input id="chat-search" class="chat-search" type="search" placeholder="Search conversations" aria-label="Search conversations"><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><header class="chat-header"><button type="button" data-sidebar-toggle class="chat-icon chat-mobile-sidebar-toggle" aria-label="Open conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button><div>{}<span class="chat-title"><strong>{}</strong>{}</span><span id="chat-token-meter" class="chat-meter"></span></div><button type="button" class="chat-new" onclick="window.__chatWeb&amp;&amp;window.__chatWeb.newChat()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button></header><div class="chat-dropzone" id="chat-dropzone" hidden>Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite"></div><div class="chat-hero" id="chat-hero">{}<div class="chat-hero-line" id="chat-hero-line"></div></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips"></div><div class="chat-cap-hint" id="chat-cap-hint"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.4 11.1l-9.2 9.1a6 6 0 01-8.4-8.4L13 2.6a4 4 0 015.6 5.6l-9.2 9.2a2 2 0 01-2.8-2.8l8.5-8.5"/></svg></button><input type="file" id="chat-attachments" multiple hidden><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message {}" aria-label="Message"></textarea><button type="button" id="chat-abort" class="chat-icon" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon" aria-label="Send" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div><div id="chat-context-warning" class="chat-context-warning" hidden>Context is filling up — send /compact to summarize.</div></form></div></section><script>{}</script><script>{}</script><script>{}</script><script>{}</script>"#,
             include_str!("chat.css"),
             escape_html_attr(&self.agent_name),
             avatar_icon_attr(self.agent_avatar.as_ref()),
@@ -227,6 +239,7 @@ impl DashboardTab for ChatTab {
             escape_html_attr(&self.agent_name),
             include_str!("vendor/marked.min.js"),
             include_str!("vendor/purify.min.js"),
+            include_str!("apps.js"),
             include_str!("renderer.js"),
         ))
     }
@@ -537,6 +550,7 @@ struct Session {
     abort_signal: watch::Sender<bool>,
     publish_lock: std::sync::Mutex<()>,
     command_ids: Mutex<HashSet<String>>,
+    app_context: std::sync::Mutex<HashMap<String, serde_json::Value>>,
     history: std::sync::Mutex<VecDeque<WireEvent>>,
     transcript: PathBuf,
     #[cfg(test)]
@@ -578,6 +592,8 @@ struct WireEvent {
     origin: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     historical: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app: Option<serde_json::Value>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Attachment {
@@ -599,6 +615,9 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/notify.mp3", get(notify_sound))
         .route("/notify.js", get(notify_script))
         .route("/events", get(turn_events_stream))
+        .route("/apps/config", get(apps::config))
+        .route("/{session}/apps/{record}", get(apps::resource))
+        .route("/{session}/apps/{record}/rpc", post(apps::rpc))
         .route(
             "/sessions/{id}",
             get(session_transcript)
@@ -823,7 +842,22 @@ async fn session_transcript(
         page.offset.unwrap_or(0),
         page.count.unwrap_or(100),
     ) {
-        Some(page) => Json(page).into_response(),
+        Some(mut page) => {
+            let mut events = VecDeque::new();
+            for value in &mut page.events {
+                if let Ok(mut event) = serde_json::from_value::<WireEvent>(value.clone()) {
+                    apps::capture_result(Some(&state.root), &mut event, &events);
+                    if let Some(text) = &event.text {
+                        value["text"] = serde_json::json!(text)
+                    }
+                    if let Some(app) = &event.app {
+                        value["app"] = app.clone()
+                    }
+                    events.push_back(event);
+                }
+            }
+            Json(page).into_response()
+        }
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -938,14 +972,15 @@ async fn resume_session(
                 .next_seq
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 + 1;
+            let mut history = session
+                .history
+                .lock()
+                .expect("chat-web history mutex poisoned");
+            apps::capture_result(Some(&state.root), &mut event, &history);
             if let Err(error) = append_transcript(&session.transcript, &event) {
                 return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
             }
-            session
-                .history
-                .lock()
-                .expect("chat-web history mutex poisoned")
-                .push_back(event.clone());
+            history.push_back(event.clone());
             let _ = session.tx.send(event);
         }
         offset = page.next_offset;
@@ -1010,6 +1045,7 @@ impl AppState {
             abort_signal,
             publish_lock: std::sync::Mutex::new(()),
             command_ids: Mutex::new(HashSet::new()),
+            app_context: std::sync::Mutex::new(HashMap::new()),
             history: std::sync::Mutex::new(history),
             transcript,
             #[cfg(test)]
@@ -1359,6 +1395,7 @@ impl AppState {
                 questions: None,
                 origin: None,
                 historical: false,
+                app: None,
             };
             append_transcript(&session.transcript, &event)?;
             session
@@ -1530,7 +1567,28 @@ impl Session {
         {
             anyhow::bail!("chat transcript storage is unavailable; start a new session");
         }
+        let context = self
+            .app_context
+            .lock()
+            .expect("app context poisoned")
+            .clone();
+        let prompt = if context.is_empty() {
+            prompt
+        } else {
+            format!(
+                "{prompt}\n\n<mcp-app-context>\n{}\n</mcp-app-context>",
+                serde_json::to_string(&context)?
+            )
+        };
         backend.send_turn(prompt).await?;
+        {
+            let mut pending = self.app_context.lock().expect("app context poisoned");
+            for (view, value) in context {
+                if pending.get(&view) == Some(&value) {
+                    pending.remove(&view);
+                }
+            }
+        }
         if let Err(error) = self.publish_user(display.clone(), attachments) {
             let _ = backend.abort().await;
             return Err(error.context("failed to persist accepted chat turn"));
@@ -1568,6 +1626,7 @@ impl Session {
             questions: None,
             origin: None,
             historical: false,
+            app: None,
         };
         append_transcript(&self.transcript, &event)?;
         self.history
@@ -1811,7 +1870,7 @@ impl Session {
             .next_seq
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        let event = WireEvent {
+        let mut event = WireEvent {
             seq,
             ts: now_ms(),
             kind: kind.to_owned(),
@@ -1828,11 +1887,13 @@ impl Session {
             questions,
             origin,
             historical: false,
+            app: None,
         };
         let mut history = self
             .history
             .lock()
             .expect("chat-web history mutex poisoned");
+        apps::capture_result(self.transcript.ancestors().nth(4), &mut event, &history);
         if let Err(error) = append_transcript(&self.transcript, &event) {
             drop(history);
             drop(_publish);
@@ -1945,6 +2006,7 @@ impl Session {
             questions: None,
             origin: None,
             historical: false,
+            app: None,
         };
         history.push_back(event.clone());
         let _ = self.tx.send(event);
@@ -1956,10 +2018,13 @@ fn load_transcript(path: &std::path::Path) -> Result<VecDeque<WireEvent>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(VecDeque::new()),
         Err(error) => return Err(error.into()),
     };
-    BufReader::new(file)
-        .lines()
-        .map(|line| Ok(serde_json::from_str(&line?)?))
-        .collect()
+    let mut events = VecDeque::new();
+    for line in BufReader::new(file).lines() {
+        let mut event = serde_json::from_str(&line?)?;
+        apps::capture_result(path.ancestors().nth(4), &mut event, &events);
+        events.push_back(event);
+    }
+    Ok(events)
 }
 
 fn append_transcript(path: &std::path::Path, event: &WireEvent) -> Result<()> {
@@ -2606,6 +2671,1049 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use tower::ServiceExt;
 
+    // Approved seam: issue Testing Decisions, result capture through chat SSE.
+    // Catches runner escaping and name association; misses iframe lifecycle.
+    #[tokio::test]
+    async fn app_markers_are_hidden_in_runner_output_and_bound_to_the_call() {
+        for output in [
+            "visible [mcp-app-result:0123456789abcdef0123456789abcdef]".to_owned(),
+            serde_json::to_string(&"visible [mcp-app-result:0123456789abcdef0123456789abcdef]")
+                .unwrap(),
+            serde_json::to_string(
+                &serde_json::to_string(
+                    &"visible [mcp-app-result:0123456789abcdef0123456789abcdef]",
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        ] {
+            let root = test_root();
+            let records = root.join("data/mcp-apps/results");
+            fs::create_dir_all(&records).unwrap();
+            fs::write(records.join("0123456789abcdef0123456789abcdef.json"), serde_json::to_vec(&serde_json::json!({
+                "tool":"draw__canvas", "server":"draw", "resource_uri":"ui://canvas", "args":{"shape":"box"},
+                "result":{"content":[{"type":"text","text":"visible"}]}, "created_at":now_ms()
+            })).unwrap()).unwrap();
+            let state = slot_state(root, HashMap::new());
+            let session = state.session("test").await.unwrap();
+            session.publish(ChatEvent::ToolCall {
+                id: "c".into(),
+                name: "dar.draw__canvas".into(),
+                args: "{}".into(),
+            });
+            session.publish(ChatEvent::ToolOutput {
+                id: "c".into(),
+                text: output,
+                is_error: false,
+                done: true,
+            });
+            let response = router(state)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/test/stream")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let mut body = response.into_body();
+            let mut data = String::new();
+            for _ in 0..2 {
+                data.push_str(
+                    std::str::from_utf8(&body.frame().await.unwrap().unwrap().into_data().unwrap())
+                        .unwrap(),
+                );
+            }
+            assert!(!data.contains("[mcp-app-result:"), "{data}");
+            assert!(
+                data.contains("recordId")
+                    && data.contains("ui://canvas")
+                    && data.contains("visible"),
+                "{data}"
+            );
+        }
+    }
+
+    struct AppCatalog;
+    impl dar_extension_sdk::mcp_apps::McpApps for AppCatalog {
+        fn list_tools(&self) -> dar_extension_sdk::BoxFuture<'_, Result<serde_json::Value>> {
+            Box::pin(async {
+                Ok(serde_json::json!([
+                    {"server":"draw"}, {"server":"canva"}, {"server":"UPPER"}, {"server":"OTHER"}
+                ]))
+            })
+        }
+        fn read_ui_resource<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+        ) -> dar_extension_sdk::BoxFuture<'a, Result<serde_json::Value>> {
+            Box::pin(async {
+                Ok(serde_json::json!({"html":"<!doctype html><p>Canvas ready</p>","meta":{}}))
+            })
+        }
+        fn call_tool<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+            _: serde_json::Value,
+        ) -> dar_extension_sdk::BoxFuture<'a, Result<serde_json::Value>> {
+            Box::pin(async { anyhow::bail!("not available") })
+        }
+        fn read_resource<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+        ) -> dar_extension_sdk::BoxFuture<'a, Result<serde_json::Value>> {
+            Box::pin(async { anyhow::bail!("not available") })
+        }
+    }
+    // Approved HTTP seam: ALG-530 comment d1fef21c-b9cc-4116-85c9-c00796ceda3e, section 5.
+    // Catches host/session/resource binding; misses browser enforcement of headers.
+    #[tokio::test]
+    async fn app_bootstrap_returns_html_and_full_result_only_to_owning_session() {
+        let root = test_root();
+        let records = root.join("data/mcp-apps/results");
+        fs::create_dir_all(&records).unwrap();
+        let id = "0123456789abcdef0123456789abcdef";
+        fs::write(records.join(format!("{id}.json")), serde_json::to_vec(&serde_json::json!({
+            "tool":"draw__canvas", "server":"draw", "resource_uri":"ui://canvas", "args":{"shape":"box"},
+            "result":{"content":[{"type":"text","text":"visible"}],"structuredContent":{"count":1},"_meta":{"secretViewData":17}}, "created_at":now_ms()
+        })).unwrap()).unwrap();
+        let mut services = dar_extension_sdk::ServiceRegistry::default();
+        services
+            .register::<dyn dar_extension_sdk::mcp_apps::McpApps>(
+                dar_extension_sdk::mcp_apps::MCP_APPS_SERVICE,
+                Arc::new(AppCatalog),
+            )
+            .unwrap();
+        let config = Config::default();
+        config.apps.bound_port.set(28181).unwrap();
+        let state = Arc::new(AppState {
+            config,
+            root,
+            start: std::sync::OnceLock::from(start_ctx(services)),
+            sessions: Mutex::new(HashMap::new()),
+            transition: Mutex::new(()),
+            slot_registry: Arc::default(),
+            meta: Mutex::new(HashMap::new()),
+        });
+        let session = state.session("test").await.unwrap();
+        session.publish(ChatEvent::ToolCall {
+            id: "c".into(),
+            name: "draw__canvas".into(),
+            args: "{}".into(),
+        });
+        session.publish(ChatEvent::ToolOutput {
+            id: "c".into(),
+            text: format!("visible [mcp-app-result:{id}]"),
+            is_error: false,
+            done: true,
+        });
+        let sandbox_app = apps::sandbox_router(Arc::clone(&state));
+        let app = router(state);
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/test/apps/{id}"))
+                    .header("host", "CHAT.localhost:28180")
+                    .header("referer", "http://chat.localhost:28180/chat")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["html"], "<!doctype html><p>Canvas ready</p>");
+        assert_eq!(body["result"]["_meta"]["secretViewData"], 17);
+        assert_eq!(body["sandboxOrigin"], "http://draw.localhost:28181");
+        let sandbox = url::Url::parse(body["sandboxUrl"].as_str().unwrap()).unwrap();
+        let content = url::Url::parse(body["contentUrl"].as_str().unwrap()).unwrap();
+        assert_eq!(sandbox.path(), format!("/sandbox/{id}"));
+        assert_eq!(content.path(), format!("/content/{id}"));
+        assert_eq!(sandbox.query(), content.query());
+        let content_path = format!("{}?{}", content.path(), content.query().unwrap());
+        let response = sandbox_app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&content_path)
+                    .header("host", "DRAW.localhost:28181")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert!(
+            csp.contains("connect-src 'none'; frame-src 'none';"),
+            "{csp}"
+        );
+        assert!(
+            csp.contains(
+                "frame-ancestors http://chat.localhost:28180 http://draw.localhost:28181;"
+            ),
+            "{csp}"
+        );
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "<!doctype html><p>Canvas ready</p>"
+        );
+        let proxy_path = format!("{}?{}", sandbox.path(), sandbox.query().unwrap());
+        let response = sandbox_app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&proxy_path)
+                    .header("host", "draw.localhost:28181")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert!(
+            csp.contains("frame-src http://draw.localhost:28181;"),
+            "{csp}"
+        );
+        assert!(csp.contains("worker-src 'none';"), "{csp}");
+        for path in [&content_path, &proxy_path] {
+            for host in [
+                "other.localhost:28181",
+                "127.0.0.1:28180",
+                "draw.localhost:28182",
+            ] {
+                let response = sandbox_app
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri(path)
+                            .header("host", host)
+                            .header("x-forwarded-host", "draw.localhost:28181")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{host}");
+            }
+            let response = sandbox_app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path.replace("session=test", "session=other"))
+                        .header("host", "draw.localhost:28181")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/other/apps/{id}"))
+                    .header("host", "chat.localhost:28180")
+                    .header("referer", "http://chat.localhost:28180/chat")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        fs::remove_file(records.join(format!("{id}.json"))).unwrap();
+        for path in [&content_path, &proxy_path] {
+            let response = sandbox_app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path)
+                        .header("host", "draw.localhost:28181")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    async fn apps_http_state(
+        config: Config,
+        catalog: Arc<dyn dar_extension_sdk::mcp_apps::McpApps>,
+    ) -> Arc<AppState> {
+        let root = test_root();
+        let records = root.join("data/mcp-apps/results");
+        fs::create_dir_all(&records).unwrap();
+        let mut services = dar_extension_sdk::ServiceRegistry::default();
+        services
+            .register::<dyn dar_extension_sdk::mcp_apps::McpApps>(
+                dar_extension_sdk::mcp_apps::MCP_APPS_SERVICE,
+                catalog,
+            )
+            .unwrap();
+        config.apps.bound_port.set(28181).unwrap();
+        let state = Arc::new(AppState {
+            config,
+            root,
+            start: std::sync::OnceLock::from(start_ctx(services)),
+            sessions: Mutex::new(HashMap::new()),
+            transition: Mutex::new(()),
+            slot_registry: Arc::default(),
+            meta: Mutex::new(HashMap::new()),
+        });
+        let session = state.session("test").await.unwrap();
+        for (server, id) in [
+            ("draw", "0123456789abcdef0123456789abcdef"),
+            ("canva", "abcdef0123456789abcdef0123456789"),
+            ("UPPER", "11111111111111111111111111111111"),
+            ("OTHER", "22222222222222222222222222222222"),
+        ] {
+            let tool = format!("{server}__canvas");
+            fs::write(records.join(format!("{id}.json")), serde_json::to_vec(&serde_json::json!({
+                "tool":tool, "server":server, "resource_uri":"ui://canvas", "args":{}, "result":{}, "created_at":now_ms()
+            })).unwrap()).unwrap();
+            session.publish(ChatEvent::ToolCall {
+                id: server.into(),
+                name: tool,
+                args: "{}".into(),
+            });
+            session.publish(ChatEvent::ToolOutput {
+                id: server.into(),
+                text: format!("ready [mcp-app-result:{id}]"),
+                is_error: false,
+                done: true,
+            });
+        }
+        state
+    }
+
+    // Approved HTTP seam, comment d1fef21c-b9cc-4116-85c9-c00796ceda3e section 5.
+    // Catches usable isolated defaults for supported server IDs; misses browser DNS resolution.
+    #[tokio::test]
+    async fn uppercase_app_servers_load_on_distinct_default_origins() {
+        let state = apps_http_state(Config::default(), Arc::new(AppCatalog)).await;
+        let app = router(Arc::clone(&state));
+        let sandbox = apps::sandbox_router(state);
+        let mut views = vec![];
+        for id in [
+            "11111111111111111111111111111111",
+            "22222222222222222222222222222222",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/test/apps/{id}"))
+                        .header("host", "127.0.0.1:28180")
+                        .header("referer", "http://127.0.0.1:28180/")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            views.push(body);
+        }
+        assert_ne!(views[0]["sandboxOrigin"], views[1]["sandboxOrigin"]);
+        for (view, other) in [(&views[0], &views[1]), (&views[1], &views[0])] {
+            let content = url::Url::parse(view["contentUrl"].as_str().unwrap()).unwrap();
+            let other = url::Url::parse(other["sandboxOrigin"].as_str().unwrap()).unwrap();
+            for (host, status) in [(&content, StatusCode::OK), (&other, StatusCode::NOT_FOUND)] {
+                let response = sandbox
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri(format!("{}?{}", content.path(), content.query().unwrap()))
+                            .header(
+                                "host",
+                                &host[url::Position::BeforeHost..url::Position::AfterPort],
+                            )
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), status);
+                if status == StatusCode::OK {
+                    assert_eq!(
+                        response.into_body().collect().await.unwrap().to_bytes(),
+                        "<!doctype html><p>Canvas ready</p>"
+                    );
+                }
+            }
+        }
+    }
+
+    // Approved public HTTP seam, comment d1fef21c-b9cc-4116-85c9-c00796ceda3e section 5.
+    // Catches configured host assignment and chat-origin validation; misses browser isolation.
+    #[tokio::test]
+    async fn app_origin_configuration_keeps_local_servers_separate_and_remote_sharing_explicit() {
+        let id = "0123456789abcdef0123456789abcdef";
+        for (apps, chat, expected) in [
+            (
+                serde_json::json!({}),
+                "http://127.0.0.1:28180",
+                Some("http://draw.localhost:28181"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"http://localhost:28181"}}),
+                "http://127.0.0.1:28180",
+                Some("http://localhost:28181"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"http://localhost:28181"}}),
+                "http://localhost:28180",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"loopback"}}),
+                "http://localhost:28180",
+                Some("http://127.0.0.1:28181"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"loopback"}}),
+                "http://127.0.0.1:28180",
+                Some("http://localhost:28181"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"loopback"}}),
+                "https://chat.example",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"loopback"}}),
+                "http://[::1]:28180",
+                Some("http://localhost:28181"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"loopback"}}),
+                "http://agent.localhost:28180",
+                Some("http://127.0.0.1:28181"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"loopback","canva":"loopback"}}),
+                "http://localhost:28180",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"loopback"}),
+                "http://127.0.0.1:28180",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"http://localhost:28181","canva":"http://localhost:28182"}}),
+                "http://127.0.0.1:28180",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"https://apps.example"}),
+                "https://chat.example",
+                Some("https://apps.example"),
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"https://apps.example","sandbox_origins":{"canva":"https://apps.example:8443"}}),
+                "https://chat.example",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"data:text/html,unsafe"}}),
+                "http://127.0.0.1:28180",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"https://fallback.example.edu","sandbox_origins":{"draw":"https://canvas.example.com","canva":"https://other.example.com"}}),
+                "https://chat.example.net",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"https://fallback.example.edu","sandbox_origins":{"draw":"https://canvas.example.com","canva":"https://other.example.org"}}),
+                "https://agent.example.com",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"https://fallback.example.edu","sandbox_origins":{"draw":"https://canvas.example.com","canva":"https://deep.canvas.example.com"}}),
+                "https://chat.example.net",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"https://apps.example.com"}),
+                "https://agent.example.com",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origin":"https://fallback.example.edu","sandbox_origins":{"draw":"https://canvas.example.net","canva":"https://other.example.org"}}),
+                "https://agent.example.com",
+                Some("https://canvas.example.net"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"http://alpha.localhost:28181","canva":"http://deep.alpha.localhost:28181"}}),
+                "http://127.0.0.1:28180",
+                None,
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"invalid-id":"http://invalid-id.localhost:28181"}}),
+                "http://127.0.0.1:28180",
+                Some("http://draw.localhost:28181"),
+            ),
+            (
+                serde_json::json!({"sandbox_origins":{"draw":"http://draw.localhost.:28181"}}),
+                "http://127.0.0.1:28180",
+                None,
+            ),
+        ] {
+            let config: Config = serde_json::from_value(serde_json::json!({"apps":apps})).unwrap();
+            let state = apps_http_state(config, Arc::new(AppCatalog)).await;
+            let host = url::Url::parse(chat).unwrap();
+            let response = router(state)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/test/apps/{id}"))
+                        .header(
+                            "host",
+                            &host[url::Position::BeforeHost..url::Position::AfterPort],
+                        )
+                        .header("referer", format!("{chat}/chat"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if let Some(expected) = expected {
+                assert_eq!(response.status(), StatusCode::OK, "{apps}");
+                let body: serde_json::Value = serde_json::from_slice(
+                    &response.into_body().collect().await.unwrap().to_bytes(),
+                )
+                .unwrap();
+                assert_eq!(body["sandboxOrigin"], expected);
+            } else {
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{apps}");
+            }
+        }
+        let state = apps_http_state(Config::default(), Arc::new(AppCatalog)).await;
+        for referer in [None, Some("http://attacker.example/chat")] {
+            let mut request = axum::http::Request::builder()
+                .uri(format!("/test/apps/{id}"))
+                .header("host", "127.0.0.1:28180")
+                .header("x-forwarded-host", "attacker.example");
+            if let Some(referer) = referer {
+                request = request.header("referer", referer);
+            }
+            let response = router(Arc::clone(&state))
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    struct ChangingAppCatalog(std::sync::atomic::AtomicUsize);
+    impl dar_extension_sdk::mcp_apps::McpApps for ChangingAppCatalog {
+        fn list_tools(&self) -> dar_extension_sdk::BoxFuture<'_, Result<serde_json::Value>> {
+            Box::pin(async { Ok(serde_json::json!([{"server":"draw"},{"server":"canva"}])) })
+        }
+        fn read_ui_resource<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+        ) -> dar_extension_sdk::BoxFuture<'a, Result<serde_json::Value>> {
+            let version = self.0.fetch_add(1, Ordering::SeqCst) + 1;
+            Box::pin(async move {
+                Ok(
+                    serde_json::json!({"html":format!("<p>Resource version {version}</p>"),
+                "meta":{"ui":{"csp":{"resourceDomains":[format!("https://version{version}.example")]}}}}),
+                )
+            })
+        }
+        fn call_tool<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+            _: serde_json::Value,
+        ) -> dar_extension_sdk::BoxFuture<'a, Result<serde_json::Value>> {
+            Box::pin(async { anyhow::bail!("not available") })
+        }
+        fn read_resource<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+        ) -> dar_extension_sdk::BoxFuture<'a, Result<serde_json::Value>> {
+            Box::pin(async { anyhow::bail!("not available") })
+        }
+    }
+
+    // Approved public HTTP seam, comment d1fef21c-b9cc-4116-85c9-c00796ceda3e section 5.
+    // Catches immutable resource/CSP tickets and cross-server record rejection; misses browser CSP.
+    #[tokio::test]
+    async fn app_tickets_bind_exact_resource_snapshot_and_server_record() {
+        let state = apps_http_state(
+            Config::default(),
+            Arc::new(ChangingAppCatalog(std::sync::atomic::AtomicUsize::new(0))),
+        )
+        .await;
+        let app = router(Arc::clone(&state));
+        let sandbox = apps::sandbox_router(state);
+        let mut tickets = vec![];
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/test/apps/0123456789abcdef0123456789abcdef")
+                        .header("host", "127.0.0.1:28180")
+                        .header("referer", "http://127.0.0.1:28180/")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            tickets.push(body);
+        }
+        for (ticket, text, domain) in [
+            (
+                &tickets[0],
+                "<p>Resource version 1</p>",
+                "https://version1.example",
+            ),
+            (
+                &tickets[1],
+                "<p>Resource version 2</p>",
+                "https://version2.example",
+            ),
+        ] {
+            let url = url::Url::parse(ticket["contentUrl"].as_str().unwrap()).unwrap();
+            let path = format!("{}?{}", url.path(), url.query().unwrap());
+            let response = sandbox
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(&path)
+                        .header("host", "draw.localhost:28181")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap();
+            assert!(csp.contains(domain), "{csp}");
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                text
+            );
+            for route in ["content", "sandbox"] {
+                let path = path.replace("/content/", &format!("/{route}/")).replace(
+                    "0123456789abcdef0123456789abcdef",
+                    "abcdef0123456789abcdef0123456789",
+                );
+                let response = sandbox
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri(path)
+                            .header("host", "canva.localhost:28181")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            }
+        }
+    }
+
+    struct ContextSession {
+        prompts: Arc<std::sync::Mutex<Vec<String>>>,
+        reject: Arc<AtomicBool>,
+    }
+    impl ChatSession for ContextSession {
+        fn send_turn(&mut self, prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
+            let rejected = self.reject.load(Ordering::SeqCst);
+            if !rejected {
+                self.prompts.lock().unwrap().push(prompt);
+            }
+            Box::pin(async move {
+                if rejected {
+                    anyhow::bail!("busy")
+                }
+                Ok(())
+            })
+        }
+        fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn close(self: Box<Self>) -> cap_chat::BoxFuture<'static, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+    // Approved seam: common chat submission from Testing Decisions / Chat glue.
+    // Catches latest context delivery, retries and ui/message; misses real runner prompting.
+    #[tokio::test]
+    async fn view_context_is_consumed_only_after_acceptance_by_both_message_paths() {
+        let root = test_root();
+        let records = root.join("data/mcp-apps/results");
+        fs::create_dir_all(&records).unwrap();
+        let id = "0123456789abcdef0123456789abcdef";
+        fs::write(records.join(format!("{id}.json")), serde_json::to_vec(&serde_json::json!({"tool":"draw__canvas","server":"draw","resource_uri":"ui://canvas","args":{},"result":{},"created_at":now_ms()})).unwrap()).unwrap();
+        let state = slot_state(root, HashMap::new());
+        let session = state.session("test").await.unwrap();
+        let prompts = Arc::new(std::sync::Mutex::new(vec![]));
+        let reject = Arc::new(AtomicBool::new(true));
+        *session.inner.lock().await = Some(Box::new(ContextSession {
+            prompts: prompts.clone(),
+            reject: reject.clone(),
+        }));
+        session.publish(ChatEvent::ToolCall {
+            id: "c".into(),
+            name: "draw__canvas".into(),
+            args: "{}".into(),
+        });
+        session.publish(ChatEvent::ToolOutput {
+            id: "c".into(),
+            text: format!("fallback [mcp-app-result:{id}]"),
+            is_error: false,
+            done: true,
+        });
+        let app = router(state);
+        let rpc = |method: &str, params: serde_json::Value| {
+            axum::http::Request::builder().method("POST").uri(format!("/test/apps/{id}/rpc")).header("content-type","application/json").body(Body::from(serde_json::to_vec(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":method,"params":params})).unwrap())).unwrap()
+        };
+        let response = app
+            .clone()
+            .oneshot(rpc(
+                "ui/update-model-context",
+                serde_json::json!({"structuredContent":{"selection":"box-7"}}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let send = |command: &str| {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/test/send")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"command_id":"{command}","message":"move it"}}"#
+                )))
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone().oneshot(send("failed")).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+        reject.store(false, Ordering::SeqCst);
+        assert_eq!(
+            app.clone().oneshot(send("retry")).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        assert!(prompts.lock().unwrap()[0].contains("box-7"));
+        assert_eq!(
+            app.clone().oneshot(send("next")).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        assert!(!prompts.lock().unwrap()[1].contains("box-7"));
+        app.clone()
+            .oneshot(rpc(
+                "ui/update-model-context",
+                serde_json::json!({"structuredContent":{"selection":"circle-3"}}),
+            ))
+            .await
+            .unwrap();
+        let response = app
+            .oneshot(rpc(
+                "ui/message",
+                serde_json::json!({"role":"user","content":{"type":"text","text":"color it"}}),
+            ))
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert!(body.get("result").is_some(), "{body}");
+        let prompts = prompts.lock().unwrap();
+        assert!(prompts[2].contains("circle-3") && prompts[2].contains("color it"));
+    }
+
+    struct HangingAppCatalog {
+        called: Arc<tokio::sync::Notify>,
+    }
+    impl dar_extension_sdk::mcp_apps::McpApps for HangingAppCatalog {
+        fn list_tools(&self) -> dar_extension_sdk::BoxFuture<'_, Result<serde_json::Value>> {
+            AppCatalog.list_tools()
+        }
+        fn read_ui_resource<'a>(
+            &'a self,
+            server: &'a str,
+            uri: &'a str,
+        ) -> dar_extension_sdk::BoxFuture<'a, Result<serde_json::Value>> {
+            AppCatalog.read_ui_resource(server, uri)
+        }
+        fn call_tool<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+            _: serde_json::Value,
+        ) -> dar_extension_sdk::BoxFuture<'a, Result<serde_json::Value>> {
+            Box::pin(async move {
+                self.called.notify_one();
+                std::future::pending().await
+            })
+        }
+        fn read_resource<'a>(
+            &'a self,
+            server: &'a str,
+            uri: &'a str,
+        ) -> dar_extension_sdk::BoxFuture<'a, Result<serde_json::Value>> {
+            AppCatalog.read_resource(server, uri)
+        }
+    }
+    // Approved seam: app tools/call and normal chat submission HTTP interfaces.
+    // Catches a stalled upstream blocking chat or waiting forever; misses browser timers.
+    #[tokio::test]
+    async fn hanging_app_call_times_out_while_normal_chat_still_accepts_turns() {
+        let root = test_root();
+        let records = root.join("data/mcp-apps/results");
+        fs::create_dir_all(&records).unwrap();
+        let id = "0123456789abcdef0123456789abcdef";
+        fs::write(records.join(format!("{id}.json")),serde_json::to_vec(&serde_json::json!({"tool":"draw__canvas","server":"draw","resource_uri":"ui://canvas","args":{},"result":{},"created_at":now_ms()})).unwrap()).unwrap();
+        let called = Arc::new(tokio::sync::Notify::new());
+        let mut services = dar_extension_sdk::ServiceRegistry::default();
+        services
+            .register::<dyn dar_extension_sdk::mcp_apps::McpApps>(
+                dar_extension_sdk::mcp_apps::MCP_APPS_SERVICE,
+                Arc::new(HangingAppCatalog {
+                    called: called.clone(),
+                }),
+            )
+            .unwrap();
+        let state = Arc::new(AppState {
+            config: Config::default(),
+            root,
+            start: std::sync::OnceLock::from(start_ctx(services)),
+            sessions: Mutex::new(HashMap::new()),
+            transition: Mutex::new(()),
+            slot_registry: Arc::default(),
+            meta: Mutex::new(HashMap::new()),
+        });
+        let session = state.session("test").await.unwrap();
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        *session.inner.lock().await = Some(Box::new(FakeSession {
+            aborted: Arc::new(AtomicBool::new(false)),
+            sends: sends.clone(),
+            abort_fails: false,
+        }));
+        session.publish(ChatEvent::ToolCall {
+            id: "c".into(),
+            name: "draw__canvas".into(),
+            args: "{}".into(),
+        });
+        session.publish(ChatEvent::ToolOutput {
+            id: "c".into(),
+            text: format!("fallback [mcp-app-result:{id}]"),
+            is_error: false,
+            done: true,
+        });
+        let app = router(state);
+        let app_request=axum::http::Request::builder().method("POST").uri(format!("/test/apps/{id}/rpc")).header("content-type","application/json").body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"refresh","arguments":{}}}"#)).unwrap();
+        let waiting = tokio::spawn(app.clone().oneshot(app_request));
+        tokio::time::timeout(std::time::Duration::from_secs(1), called.notified())
+            .await
+            .unwrap();
+        let send = axum::http::Request::builder()
+            .method("POST")
+            .uri("/test/send")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"command_id":"while-pending","message":"keep working"}"#,
+            ))
+            .unwrap();
+        let response =
+            tokio::time::timeout(std::time::Duration::from_millis(100), app.oneshot(send))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+            .await
+            .expect("view call did not time out")
+            .unwrap()
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("timed out"),
+            "{body}"
+        );
+    }
+
+    // Approved seam: each view's context through app RPC and public chat submission.
+    // Catches context lost between opted-out views; misses iframe identity in the browser.
+    #[tokio::test]
+    async fn independent_views_keep_each_selection_when_reuse_is_disabled() {
+        let root = test_root();
+        let records = root.join("data/mcp-apps/results");
+        fs::create_dir_all(&records).unwrap();
+        let mut config = Config::default();
+        config.apps.no_reuse = vec!["draw".into()];
+        let state = Arc::new(AppState {
+            config,
+            root,
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::new()),
+            transition: Mutex::new(()),
+            slot_registry: Arc::default(),
+            meta: Mutex::new(HashMap::new()),
+        });
+        let session = state.session("test").await.unwrap();
+        let prompts = Arc::new(std::sync::Mutex::new(vec![]));
+        *session.inner.lock().await = Some(Box::new(ContextSession {
+            prompts: prompts.clone(),
+            reject: Arc::new(AtomicBool::new(false)),
+        }));
+        let app = router(state.clone());
+        for (id, selection) in [
+            ("0123456789abcdef0123456789abcdef", "box-A"),
+            ("fedcba9876543210fedcba9876543210", "box-B"),
+        ] {
+            fs::write(records.join(format!("{id}.json")),serde_json::to_vec(&serde_json::json!({"tool":"draw__canvas","server":"draw","resource_uri":"ui://canvas","args":{},"result":{},"created_at":now_ms()})).unwrap()).unwrap();
+            session.publish(ChatEvent::ToolCall {
+                id: id.into(),
+                name: "draw__canvas".into(),
+                args: "{}".into(),
+            });
+            session.publish(ChatEvent::ToolOutput {
+                id: id.into(),
+                text: format!("fallback [mcp-app-result:{id}]"),
+                is_error: false,
+                done: true,
+            });
+            let request=axum::http::Request::builder().method("POST").uri(format!("/test/apps/{id}/rpc")).header("content-type","application/json").body(Body::from(serde_json::to_vec(&serde_json::json!({"jsonrpc":"2.0","id":1,"method":"ui/update-model-context","params":{"structuredContent":{"selection":selection}}})).unwrap())).unwrap();
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::OK
+            );
+        }
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/test/send")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"command_id":"two-selections","message":"compare the selections"}"#,
+            ))
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        let prompts = prompts.lock().unwrap();
+        assert!(
+            prompts[0].contains("box-A") && prompts[0].contains("box-B"),
+            "{}",
+            prompts[0]
+        );
+    }
+
+    // Approved seam: backend archive resume and SSE transcript replay.
+    // Catches old Pi/builtin marker leakage and lost views; misses browser rendering.
+    #[tokio::test]
+    async fn old_runner_archives_restore_views_without_exposing_markers() {
+        for backend in ["pi", "builtin"] {
+            let root = test_root();
+            let records = root.join("data/mcp-apps/results");
+            fs::create_dir_all(&records).unwrap();
+            let id = "0123456789abcdef0123456789abcdef";
+            fs::write(records.join(format!("{id}.json")),serde_json::to_vec(&serde_json::json!({"tool":"draw__canvas","server":"draw","resource_uri":"ui://canvas","args":{"shape":"box"},"result":{"content":[{"type":"text","text":"visible"}]},"created_at":now_ms()})).unwrap()).unwrap();
+            let dir = root.join("data/chat/sessions");
+            fs::create_dir_all(&dir).unwrap();
+            let marker = format!("visible [mcp-app-result:{id}]");
+            let (call, result) = if backend == "pi" {
+                (
+                    serde_json::json!({"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"c","name":"draw__canvas","arguments":{"shape":"box"}}]}}),
+                    serde_json::json!({"type":"message","message":{"role":"toolResult","toolCallId":"c","toolName":"draw__canvas","content":[{"type":"text","text":marker}],"isError":false}}),
+                )
+            } else {
+                (
+                    serde_json::json!({"type":"message","message":{"role":"assistant","content":"","tool_calls":[{"id":"c","type":"function","function":{"name":"draw__canvas","arguments":"{\"shape\":\"box\"}"}}]}}),
+                    serde_json::json!({"type":"message","message":{"role":"tool","tool_call_id":"c","content":serde_json::to_string(&marker).unwrap()}}),
+                )
+            };
+            fs::write(
+                dir.join("2026-01-01_old.jsonl"),
+                format!(
+                    "{}\n{call}\n{result}\n",
+                    serde_json::json!({"type":"session","id":"old","backend":backend})
+                ),
+            )
+            .unwrap();
+            let app = router(slot_state(root, HashMap::new()));
+            let resume = axum::http::Request::builder()
+                .method("POST")
+                .uri("/main/resume")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"id":"old"}"#))
+                .unwrap();
+            assert_eq!(
+                app.clone().oneshot(resume).await.unwrap().status(),
+                StatusCode::ACCEPTED
+            );
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri("/old/stream")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let mut body = response.into_body();
+            let mut transcript = String::new();
+            for _ in 0..2 {
+                transcript.push_str(
+                    std::str::from_utf8(&body.frame().await.unwrap().unwrap().into_data().unwrap())
+                        .unwrap(),
+                );
+            }
+            assert!(
+                !transcript.contains("[mcp-app-result:"),
+                "{backend}: {transcript}"
+            );
+            assert!(
+                transcript.contains("recordId") && transcript.contains("ui://canvas"),
+                "{backend}: {transcript}"
+            );
+        }
+    }
+
     struct FakeSession {
         aborted: Arc<AtomicBool>,
         sends: Arc<std::sync::atomic::AtomicUsize>,
@@ -2706,6 +3814,7 @@ mod tests {
             abort_signal: watch::channel(false).0,
             publish_lock: std::sync::Mutex::new(()),
             command_ids: Mutex::new(HashSet::new()),
+            app_context: std::sync::Mutex::new(HashMap::new()),
             history: std::sync::Mutex::new(VecDeque::new()),
             transcript: std::env::temp_dir()
                 .join(format!("chat-web-test-{}.jsonl", uuid::Uuid::new_v4())),
@@ -5501,6 +6610,7 @@ if(elements['chat-cap-hint'].textContent.includes('skipped'))process.exit(1);
                     questions: None,
                     origin: None,
                     historical: false,
+                    app: None,
                 },
             )
             .unwrap();

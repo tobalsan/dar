@@ -1,7 +1,8 @@
-//! User-configured MCP tool servers, attached only inside host bridge process.
+//! User-configured MCP servers for the runner bridge and the web Apps host.
 
 use std::{collections::BTreeMap, path::Path, process::Stdio, sync::Arc, time::Duration};
 
+mod apps;
 pub mod credentials;
 mod dashboard;
 pub mod login;
@@ -79,6 +80,9 @@ pub async fn doctor_statuses(root: &Path) -> Result<Vec<(String, DoctorStatus)>>
     let config = load(root)?;
     let secrets = Arc::new(BridgeSecrets::default());
     let futures = config.mcp_servers.into_iter().map(|(name, server)| async {
+        if let Some(reason) = login::oauth_rejection(root, &name) {
+            return (name, DoctorStatus::Unreachable(reason.to_owned()));
+        }
         let result = match server.resolve(&secrets) {
             Ok(server) => {
                 tokio::time::timeout(
@@ -127,7 +131,19 @@ enum Server {
     },
 }
 
-type Client = RunningService<RoleClient, ()>;
+type Client = RunningService<RoleClient, rmcp::model::ClientConfig>;
+
+fn client_config() -> rmcp::model::ClientConfig {
+    let mut info = rmcp::model::ClientConfig::default();
+    info.capabilities.extensions = Some(BTreeMap::from([(
+        "io.modelcontextprotocol/ui".into(),
+        serde_json::json!({"mimeTypes":["text/html;profile=mcp-app"]})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )]));
+    info
+}
 
 impl Server {
     fn resolve(self, secrets: &BridgeSecrets) -> Result<Self> {
@@ -161,6 +177,7 @@ impl Extension for McpExtension {
 
     fn register<'a>(&'a self, ctx: &'a mut RegisterCtx) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            dar_extension_sdk::mcp_apps::prune_results(ctx.paths.root())?;
             let config = load(ctx.paths.root())?;
             if config.mcp_servers.is_empty() {
                 return Ok(());
@@ -170,6 +187,14 @@ impl Extension for McpExtension {
                 .get::<McpBridgeMode>(MCP_BRIDGE_MODE_SERVICE)
                 .is_err()
             {
+                ctx.services
+                    .service::<dyn dar_extension_sdk::mcp_apps::McpApps>(
+                        dar_extension_sdk::mcp_apps::MCP_APPS_SERVICE,
+                        Arc::new(apps::Catalog::new(
+                            ctx.paths.root().to_path_buf(),
+                            config.clone(),
+                        )),
+                    )?;
                 let state = dashboard::DashboardState::new(ctx.paths.root().to_path_buf(), config);
                 DashboardTabs::shared(&mut ctx.services)?
                     .add(Arc::new(dashboard::McpTab::new(state.clone())))?;
@@ -219,6 +244,10 @@ impl Extension for McpExtension {
                 let (client, tools) = client;
                 let client = Arc::new(client);
                 for tool in tools {
+                    if !apps::visible(&tool, "model") {
+                        continue;
+                    }
+                    let resource_uri = apps::resource_uri(&tool);
                     let mapped = format!("{name}__{}", tool.name);
                     if !valid_tool_name(&mapped) {
                         tracing::warn!(server=%name, tool=%tool.name, "skipping invalid mapped MCP tool name");
@@ -235,8 +264,11 @@ impl Extension for McpExtension {
                         ToolSpec::new(mapped, tool.description.unwrap_or_default(), schema),
                         Arc::new(Proxy {
                             client: Arc::clone(&client),
+                            registry: Arc::downgrade(&registry),
                             server: name.clone(),
                             upstream: tool.name.to_string(),
+                            root: root.clone(),
+                            resource_uri,
                         }),
                     ) {
                         tracing::warn!(server=%name, tool=%tool.name, "skipping MCP tool: {error:#}");
@@ -277,7 +309,7 @@ async fn connect(
                         .current_dir(root)
                         .stderr(Stdio::null());
                 }))?;
-            Ok(().serve(transport).await?)
+            Ok(client_config().serve(transport).await?)
         }
         Server::Http { url, headers } => {
             let has_static_auth = headers
@@ -295,10 +327,9 @@ async fn connect(
             let config =
                 StreamableHttpClientTransportConfig::with_uri(url.clone()).custom_headers(headers);
             if has_static_auth {
-                return Ok(
-                    ().serve(StreamableHttpClientTransport::from_config(config))
-                        .await?,
-                );
+                return Ok(client_config()
+                    .serve(StreamableHttpClientTransport::from_config(config))
+                    .await?);
             }
             let store = credentials::FileCredentialStore::new(root, server_name)?
                 .with_secrets(Arc::clone(secrets));
@@ -308,7 +339,10 @@ async fn connect(
             if !manager.initialize_from_store().await? {
                 // No stored login: the server may be public or authenticate via
                 // a custom header. Only an auth rejection means "log in".
-                return match ().serve(StreamableHttpClientTransport::from_config(config)).await {
+                return match client_config()
+                    .serve(StreamableHttpClientTransport::from_config(config))
+                    .await
+                {
                     Ok(client) => Ok(client),
                     Err(error) => {
                         let error = anyhow::Error::from(error);
@@ -320,7 +354,7 @@ async fn connect(
                 };
             }
             let auth_client = rmcp::transport::AuthClient::new(reqwest::Client::new(), manager);
-            Ok(()
+            Ok(client_config()
                 .serve(StreamableHttpClientTransport::with_client(
                     auth_client,
                     config,
@@ -332,14 +366,35 @@ async fn connect(
 
 struct Proxy {
     client: Arc<Client>,
+    registry: std::sync::Weak<dyn ToolRegistryHandle>,
     server: String,
     upstream: String,
+    root: std::path::PathBuf,
+    resource_uri: Option<String>,
+}
+
+fn pi_tool_name(mapped: &str) -> Option<String> {
+    let raw = format!("mcp__dar__{mapped}");
+    if !raw.is_ascii() || raw.len() > 64 {
+        return None;
+    }
+    Some(
+        raw.chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect(),
+    )
 }
 
 #[async_trait::async_trait]
 impl ToolExecutor for Proxy {
     async fn execute(&self, args: Value) -> Result<ToolOutcome> {
-        let arguments = match args {
+        let arguments = match args.clone() {
             Value::Object(map) => Some(map),
             _ => bail!("tool arguments must be an object"),
         };
@@ -347,26 +402,63 @@ impl ToolExecutor for Proxy {
         if let Some(arguments) = arguments {
             params = params.with_arguments(arguments);
         }
-        let result =
-            match tokio::time::timeout(Duration::from_secs(120), self.client.call_tool(params))
-                .await
-            {
-                Ok(Ok(result)) => result,
-                // Most likely an expired OAuth session that could not refresh.
-                Ok(Err(error)) => {
-                    return Ok(ToolOutcome::error(format!(
-                        "MCP server {} call failed: {error:#}. If its login expired, run `dar mcp login {}`",
-                        self.server, self.server
-                    )))
+        let value = match tokio::time::timeout(
+            Duration::from_secs(120),
+            self.client.call_tool(params),
+        )
+        .await
+        {
+            Ok(Ok(result)) => serde_json::to_value(result)?,
+            // Most likely an expired OAuth session that could not refresh.
+            Ok(Err(error)) => {
+                serde_json::json!({"isError":true,"content":[{"type":"text","text":format!(
+                    "MCP server {} call failed: {error:#}. If its login expired, run `dar mcp login {}`", self.server, self.server
+                )}]})
+            }
+            Err(_) => {
+                serde_json::json!({"isError":true,"content":[{"type":"text","text":
+                    "upstream MCP tool call timed out after 120 seconds"
+                }]})
+            }
+        };
+        let mut text = result_text(&value);
+        if let Some(uri) = &self.resource_uri {
+            if text.trim().is_empty() {
+                text = format!(
+                    "MCP App {}/{} returned an interactive view",
+                    self.server, self.upstream
+                );
+            }
+            let tool = format!("{}__{}", self.server, self.upstream);
+            let pi_tool_name = self.registry.upgrade().and_then(|registry| {
+                let mut seen = std::collections::BTreeSet::new();
+                for spec in registry.list() {
+                    if !seen.insert(pi_tool_name(&spec.name)?) {
+                        return None;
+                    }
+                }
+                pi_tool_name(&tool)
+            });
+            let record = dar_extension_sdk::mcp_apps::ResultRecord {
+                tool,
+                pi_tool_name,
+                server: self.server.clone(),
+                resource_uri: uri.clone(),
+                args,
+                result: value.clone(),
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs(),
+            };
+            match record.write(&self.root) {
+                Ok(id) => {
+                    text.push_str(&format!("\n[mcp-app-result:{id}]"));
                 }
                 Err(_) => {
-                    return Ok(ToolOutcome::error(
-                        "upstream MCP tool call timed out after 120 seconds",
-                    ))
+                    tracing::warn!(server=%self.server, "MCP App result capture failed; using text fallback")
                 }
-            };
-        let value = serde_json::to_value(&result)?;
-        let text = result_text(&value);
+            }
+        }
         Ok(
             if value
                 .get("isError")
