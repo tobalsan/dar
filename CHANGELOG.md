@@ -18,7 +18,7 @@ Breaking changes are marked **⚠ BREAKING**.
 - Web chat hosts MCP Apps in isolated inline views, with a resizable fullscreen panel beside chat, replay, and app tool/context actions across all runners; Docker sandboxes publish a second origin.
 - Self-updates and rollback now preserve `.env` reloads and secret scrubbing for child processes while keeping shell-set values; Linear poll authentication outages warn once and log recovery.
 - Chat web: typing `/` in the message box shows a menu of the commands `/new`, `/compact`, and `/stop`. Use the arrow keys, Tab, or Enter to pick one.
-- Chat: with the pi backend, `/compact` now compacts the context. Before, pi sent `/compact` to the model as text. You can add instructions, for example `/compact keep the plan`.
+- Chat: `/compact` now compacts the context with the pi, codex, opencode, and builtin backends. Before, most of them sent `/compact` to the model as text. The codex backend ignores instructions. You can add instructions, for example `/compact keep the plan`.
 - Chat web: an optional top-level `notification_sound` in `agent.yaml` names an audio file in the agent folder. That agent then plays this sound instead of the default one.
 - Host: an agent now refuses to start when another process already listens on its HTTP port. Before, on macOS, an agent on `127.0.0.1:P` could start next to a process on `*:P`, and the two processes split the traffic.
 - Chat web: a conversation shows a dot when a turn finishes there while you look elsewhere. The dot persists across reloads.

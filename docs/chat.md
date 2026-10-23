@@ -111,7 +111,8 @@ previous one stays in the sidebar.
 while a turn is running. Files can also be pasted or dropped anywhere on the
 chat; pending images show as thumbnails. Messages sent while a turn is
 running are queued by the backend. Slash commands: `/stop` aborts the running
-turn, `/compact` compacts the session context, `/new` starts a fresh chat.
+turn, `/compact [instructions]` compacts the session context natively on every
+backend (codex ignores the instructions), `/new` starts a fresh chat.
 The header shows a token meter fed by backend-reported context usage; above
 70% of the context window a hint suggests `/compact`.
 
