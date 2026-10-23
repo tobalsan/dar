@@ -37,7 +37,11 @@ On an interactive terminal, `dar run` probes configured HTTP servers without sta
 
 Agents with configured MCP servers expose an **MCP** dashboard tab. It shows transport and local credential status without contacting or spawning servers. OAuth-capable HTTP servers can be connected, reconnected, or disconnected there. OAuth state expires after ten minutes. Running agents' runners use changed credentials on their next MCP bridge start.
 
-Runners reach these tools through the host bridge they already use, so `pi`, `codex`, `opencode`, and `builtin` need no extra setup. The `pi` runner needs `pi-mcp-adapter` installed on the host (it provides `--mcp-config`); without it pi exits with `Unknown option: --mcp-config`. MCP servers a runner already loads from its own config keep working alongside these.
+Runners reach these tools through the host bridge they already use, so `pi`, `codex`, `opencode`, and `builtin` need no extra setup. Since pi 1.0, Dar uses pi's native MCP support through `<cwd>/.pi/mcp.json`, merging only the `dar` entry and preserving user-defined servers.
+
+On pi, Dar host tools are declared directly. Upstream tools (`<server>__<tool>`) are deferred: pi's `tool_search` finds and loads them when needed, and they stay available for the rest of that session branch, including after resume. They are also callable from codemode scripts using `searchTools()`. This fixed policy applies to chat, issue workers, and scheduler jobs; no exposure configuration is needed. Other backends keep their existing bridge configuration.
+
+The bridge's initialization instructions summarize upstream server names and tool counts in one line, sorted by name and limited to 250 characters. Pi includes that summary in its `mcp_servers` prompt section. With host tools only, the instructions say `Dar host tools.`; pi still enables `tool_search` and lists the `dar` bridge.
 
 ## MCP Apps in web chat
 
