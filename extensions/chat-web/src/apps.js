@@ -27,12 +27,14 @@
   });
   const ICONS={
     inline:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>',
+    download:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>',
     fullscreen:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>'};
   const heading = (view,descriptor) => {
     if(view.server!=='dar')return;
     const title=descriptor.artifactTitle || descriptor.artifactFilename || 'Artifact';
     view.name.textContent=title;view.frame.title=title;
     view.download.href=`/chat/${encodeURIComponent(view.slot)}/apps/${encodeURIComponent(descriptor.recordId)}/download`;
+    view.download.title=`Download ${descriptor.artifactFilename || title}`;
   };
   const label = view => {
     const text=view.mode==='fullscreen'?'Close expanded view':'Expand view';
@@ -147,7 +149,9 @@
     const header=document.createElement('header');const name=document.createElement('strong');name.textContent=`${descriptor.server} · MCP App`;
     const button=document.createElement('button');button.type='button';button.className='chat-app-expand';button.hidden=true;
     const download=descriptor.server==='dar'?document.createElement('a'):null;
-    if(download){download.textContent='Download';download.download='';header.append(name,download,button);}else header.append(name,button);
+    const actions=document.createElement('div');actions.className='chat-app-actions';
+    if(download){download.className='chat-app-download';download.download='';download.innerHTML=ICONS.download;download.title='Download';download.setAttribute('aria-label','Download');actions.append(download);}
+    actions.append(button);header.append(name,actions);
     const status=document.createElement('p');status.setAttribute('role','status');status.textContent='Loading view…';
     const frame=document.createElement('iframe');frame.title=`${descriptor.server} app`;frame.setAttribute('sandbox','allow-scripts allow-same-origin');frame.style.height='300px';
     section.append(header,status,frame);anchor.append(section);Object.assign(view,{section,frame,button,status,name,download,tool:descriptor.tool});heading(view,descriptor);label(view);
