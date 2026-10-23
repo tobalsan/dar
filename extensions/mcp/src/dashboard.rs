@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -14,7 +14,13 @@ use axum::{
     Router,
 };
 use cap_dashboard_tab::{escape_html, DashboardTab};
-use rmcp::transport::{AuthorizationManager, CredentialStore};
+use rmcp::{
+    transport::{
+        streamable_http_client::StreamableHttpClientTransportConfig, AuthorizationManager,
+        CredentialStore, StreamableHttpClientTransport,
+    },
+    ServiceExt,
+};
 use serde::Deserialize;
 
 use crate::{
@@ -38,6 +44,50 @@ pub(crate) struct DashboardState {
     /// Serializes code exchange against Disconnect so a completing Connect
     /// popup can never re-create credentials that Disconnect just cleared.
     ops: Arc<tokio::sync::Mutex<()>>,
+    /// Last unauthenticated probe per server without stored login.
+    probes: Arc<Mutex<HashMap<String, ProbeEntry>>>,
+}
+
+/// Result of connecting to a server without any login.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProbeResult {
+    Public,
+    NeedsLogin,
+    Unreachable,
+}
+
+struct ProbeEntry {
+    result: Option<ProbeResult>,
+    checked_at: Instant,
+    in_flight: bool,
+}
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const PROBE_MAX_AGE: Duration = Duration::from_secs(300);
+
+async fn probe_server(url: String, headers: BTreeMap<String, String>) -> ProbeResult {
+    let attempt = async {
+        let headers = crate::expand_map(headers)?
+            .into_iter()
+            .map(|(name, value)| {
+                Ok((
+                    name.parse::<http::HeaderName>()?,
+                    value.parse::<http::HeaderValue>()?,
+                ))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        let config = StreamableHttpClientTransportConfig::with_uri(url).custom_headers(headers);
+        let client = crate::client_config()
+            .serve(StreamableHttpClientTransport::from_config(config))
+            .await?;
+        let _ = client.cancel().await;
+        Ok::<(), anyhow::Error>(())
+    };
+    match tokio::time::timeout(PROBE_TIMEOUT, attempt).await {
+        Ok(Ok(())) => ProbeResult::Public,
+        Ok(Err(error)) if crate::needs_login(&error) => ProbeResult::NeedsLogin,
+        _ => ProbeResult::Unreachable,
+    }
 }
 
 struct Pending {
@@ -56,7 +106,63 @@ impl DashboardState {
             pending: Arc::new(Mutex::new(HashMap::new())),
             generations: Arc::new(Mutex::new(HashMap::new())),
             ops: Arc::new(tokio::sync::Mutex::new(())),
+            probes: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Starts a probe for every server that needs one. Needs a tokio runtime.
+    pub(crate) fn start_probes(&self) {
+        for (name, server) in &self.config.mcp_servers {
+            let has_auth = matches!(server, Server::Http { headers, .. }
+                if headers.keys().any(|k| k.eq_ignore_ascii_case("authorization")));
+            if matches!(server, Server::Http { .. })
+                && !has_auth
+                && !credential_path(&self.root, name).exists()
+            {
+                self.probe_status(name);
+            }
+        }
+    }
+
+    /// Returns the cached probe result and starts a background refresh when
+    /// the entry is missing or stale. Never blocks on the network.
+    fn probe_status(&self, name: &str) -> Option<ProbeResult> {
+        let Some(Server::Http { url, headers }) = self.config.mcp_servers.get(name) else {
+            return None;
+        };
+        let mut probes = self.probes.lock().expect("MCP probe state poisoned");
+        let cached = probes.get(name);
+        let result = cached.and_then(|entry| entry.result);
+        let stale = cached
+            .is_none_or(|entry| !entry.in_flight && entry.checked_at.elapsed() >= PROBE_MAX_AGE);
+        if !stale {
+            return result;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return result;
+        };
+        probes.insert(
+            name.to_owned(),
+            ProbeEntry {
+                result,
+                checked_at: Instant::now(),
+                in_flight: true,
+            },
+        );
+        let (url, headers) = (url.clone(), headers.clone());
+        let (probes, name) = (Arc::clone(&self.probes), name.to_owned());
+        runtime.spawn(async move {
+            let result = probe_server(url, headers).await;
+            probes.lock().expect("MCP probe state poisoned").insert(
+                name,
+                ProbeEntry {
+                    result: Some(result),
+                    checked_at: Instant::now(),
+                    in_flight: false,
+                },
+            );
+        });
+        result
     }
 
     fn oauth_server(&self, name: &str) -> Result<&str> {
@@ -158,7 +264,15 @@ fn render(state: &DashboardState) -> Result<String> {
             Server::Http { .. } if credential_path(&state.root, name).exists() => {
                 ("http", "connected")
             }
-            Server::Http { .. } => ("http", "disconnected"),
+            Server::Http { .. } => (
+                "http",
+                match state.probe_status(name) {
+                    None => "checking",
+                    Some(ProbeResult::Public) => "public",
+                    Some(ProbeResult::NeedsLogin) => "disconnected",
+                    Some(ProbeResult::Unreachable) => "unreachable",
+                },
+            ),
         };
         let rejection = crate::login::oauth_rejection(&state.root, name);
         let status = if rejection.is_some() {
@@ -174,7 +288,7 @@ fn render(state: &DashboardState) -> Result<String> {
                     r##"<button onclick="mcpConnect('{n}')">Reconnect</button><button class="danger" hx-post="/mcp/disconnect?server={n}" hx-target="#content">Disconnect</button>"##
                 ),
             ),
-            "disconnected" | "OAuth rejected" => (
+            "disconnected" | "unreachable" | "OAuth rejected" => (
                 "interrupted",
                 format!(r#"<button onclick="mcpConnect('{n}')">Connect</button>"#),
             ),
@@ -426,8 +540,103 @@ mod tests {
             r#"header</td><td class="mcp-muted">http</td><td><span class="pill other">static"#
         ));
         assert!(html.contains(r#"connected</td><td class="mcp-muted">http</td><td><span class="pill completed">connected"#));
-        assert!(html.contains(r#"evil&lt;script</td><td class="mcp-muted">http</td><td><span class="pill interrupted">disconnected"#));
+        assert!(html.contains(r#"evil&lt;script</td><td class="mcp-muted">http</td><td><span class="pill other">checking"#));
         assert!(!html.contains("evil<script"));
+    }
+
+    fn probe_state(result: Option<ProbeResult>) -> String {
+        let root = tempfile::tempdir().unwrap();
+        let config: Config =
+            serde_json::from_value(serde_json::json!({"mcpServers":{"remote":{"url":"http://x"}}}))
+                .unwrap();
+        let state = DashboardState::new(root.path().to_path_buf(), config);
+        if result.is_some() {
+            state.probes.lock().unwrap().insert(
+                "remote".into(),
+                ProbeEntry {
+                    result,
+                    checked_at: Instant::now(),
+                    in_flight: false,
+                },
+            );
+        }
+        render(&state).unwrap()
+    }
+
+    #[test]
+    fn probe_result_selects_status_and_buttons() {
+        let public = probe_state(Some(ProbeResult::Public));
+        assert!(public.contains(">public</span>"));
+        assert!(!public.contains(">Connect</button>"));
+        let locked = probe_state(Some(ProbeResult::NeedsLogin));
+        assert!(locked.contains(">disconnected</span>"));
+        assert!(locked.contains(">Connect</button>"));
+        let down = probe_state(Some(ProbeResult::Unreachable));
+        assert!(down.contains(">unreachable</span>"));
+        assert!(down.contains(">Connect</button>"));
+        let unknown = probe_state(None);
+        assert!(unknown.contains(">checking</span>"));
+        assert!(!unknown.contains(">Connect</button>"));
+    }
+
+    #[tokio::test]
+    async fn probe_classifies_unauthorized_and_open_servers() {
+        use axum::routing::any;
+        async fn serve(status: StatusCode) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    Router::new().fallback(any(move || async move { status })),
+                )
+                .await
+                .unwrap();
+            });
+            format!("http://{addr}")
+        }
+        let locked = serve(StatusCode::UNAUTHORIZED).await;
+        assert_eq!(
+            probe_server(locked, BTreeMap::new()).await,
+            ProbeResult::NeedsLogin
+        );
+        let down = "http://127.0.0.1:1".to_owned();
+        assert_eq!(
+            probe_server(down, BTreeMap::new()).await,
+            ProbeResult::Unreachable
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_classifies_open_mcp_server_as_public() {
+        use axum::{routing::post, Json};
+        use serde_json::{json, Value};
+        async fn mcp(Json(req): Json<Value>) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            let Some(id) = req.get("id").cloned() else {
+                return StatusCode::ACCEPTED.into_response();
+            };
+            let result = match req["method"].as_str() {
+                Some("initialize") => json!({
+                    "protocolVersion": req["params"]["protocolVersion"],
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "open", "version": "0" }
+                }),
+                _ => json!({}),
+            };
+            Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
+        }
+        let app = Router::new().route(
+            "/mcp",
+            post(mcp).get(|| async { StatusCode::METHOD_NOT_ALLOWED }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        assert_eq!(
+            probe_server(format!("http://{addr}/mcp"), BTreeMap::new()).await,
+            ProbeResult::Public
+        );
     }
 
     #[tokio::test]

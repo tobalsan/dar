@@ -196,6 +196,7 @@ impl Extension for McpExtension {
                         )),
                     )?;
                 let state = dashboard::DashboardState::new(ctx.paths.root().to_path_buf(), config);
+                state.start_probes();
                 DashboardTabs::shared(&mut ctx.services)?
                     .add(Arc::new(dashboard::McpTab::new(state.clone())))?;
                 ctx.http.mount(host_api::HttpMount {
