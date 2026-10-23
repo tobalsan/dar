@@ -502,23 +502,13 @@ async fn handle_turn_accounting(
     };
     if value.get("method").is_none() && value.get("error").is_some() {
         let rejected = {
-            let mut queue = queue.lock().await;
-            let matches = value.get("id").and_then(Value::as_u64) == queue.active_request
-                && queue.active_request.is_some();
-            if matches {
-                queue.active_request = None;
-            }
-            matches
+            let queue = queue.lock().await;
+            queue.active_request.is_some()
+                && value.get("id").and_then(Value::as_u64) == queue.active_request
         };
         if rejected {
             let error = error_message(value.get("error").unwrap_or(&value));
-            tx.send(ChatEvent::TurnFinished {
-                ok: false,
-                error: Some(error),
-            })
-            .await?;
-            abort_queued_turns(queue, tx).await;
-            queue.lock().await.busy = false;
+            fail_active_turn(queue, tx, error).await?;
         }
         return Ok(());
     }
@@ -557,14 +547,7 @@ async fn handle_turn_accounting(
                     .await?;
                     send_next_queued_turn(stdin, queue, tx, main_thread_id).await;
                 } else {
-                    let error = normalize_turn_error(status);
-                    tx.send(ChatEvent::TurnFinished {
-                        ok: false,
-                        error: Some(error),
-                    })
-                    .await?;
-                    abort_queued_turns(queue, tx).await;
-                    queue.lock().await.busy = false;
+                    fail_active_turn(queue, tx, normalize_turn_error(status)).await?;
                 }
             }
         }
@@ -867,6 +850,32 @@ fn normalize_turn_error(status: Option<&str>) -> String {
         Some(status) => status.to_string(),
         None => "failed".to_string(),
     }
+}
+
+/// Finish the active turn as failed and drop the queued turns. All queue state
+/// changes happen under one lock, so a turn accepted while the finish events
+/// are delivered starts normally instead of waiting behind a stale `busy` flag.
+async fn fail_active_turn(
+    queue: &Arc<Mutex<TurnQueue>>,
+    tx: &Sender<ChatEvent>,
+    error: String,
+) -> Result<()> {
+    let dropped = {
+        let mut queue = queue.lock().await;
+        queue.active_request = None;
+        queue.pending_interrupt = None;
+        queue.busy = false;
+        let dropped = queue.pending.len();
+        queue.pending.clear();
+        dropped
+    };
+    tx.send(ChatEvent::TurnFinished {
+        ok: false,
+        error: Some(error),
+    })
+    .await?;
+    send_failed_finishes(tx, dropped, "aborted").await;
+    Ok(())
 }
 
 async fn abort_queued_turns(queue: &Arc<Mutex<TurnQueue>>, tx: &Sender<ChatEvent>) {
@@ -1454,6 +1463,88 @@ done
                 error: None
             }
         ));
+        Box::new(session).close().await.unwrap();
+    }
+
+    const REJECT_COMPACT_STUB: &str = r#"set -e
+while IFS= read -r line; do
+    id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/' | grep -E '^[0-9]+$' || true)
+    method=$(printf '%s' "$line" | grep -o '"method":"[^"]*"' | head -1 | sed 's/"method":"//;s/"//')
+    printf '%s\n' "$method" >> methods.log
+    case "$method" in
+        initialize)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+            ;;
+        thread/start)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"thread":{"id":"main"}}}\n' "$id"
+            ;;
+        thread/compact/start)
+            sleep 0.5
+            printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"nothing to compact"}}\n' "$id"
+            ;;
+        turn/start)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+            printf '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"main","turn":{"id":"t-1"}}}\n'
+            printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"main","turn":{"id":"t-1","status":"completed"}}}\n'
+            ;;
+    esac
+done
+"#;
+
+    async fn open_reject_stub(
+        temp: &Path,
+        capacity: usize,
+    ) -> (CodexChatSession, tokio::sync::mpsc::Receiver<ChatEvent>) {
+        let script = write_script(temp, REJECT_COMPACT_STUB);
+        let sessions = temp.join("data").join("tui").join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let params = ChatSessionParams::builder(script.to_str().unwrap(), temp, &sessions).build();
+        let (tx, rx) = tokio::sync::mpsc::channel(capacity);
+        (CodexChatSession::spawn(&params, tx).await.unwrap(), rx)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rejected_request_clears_a_pending_interrupt() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut session, mut rx) = open_reject_stub(temp.path(), 16).await;
+
+        session.send_turn("/compact".to_string()).await.unwrap();
+        session.abort().await.unwrap();
+        loop {
+            if let ChatEvent::TurnFinished { ok: false, .. } = next_event(&mut rx).await {
+                break;
+            }
+        }
+        session.send_turn("ping".to_string()).await.unwrap();
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::TurnFinished {
+                ok: true,
+                error: None
+            }
+        ));
+        let methods = std::fs::read_to_string(temp.path().join("methods.log")).unwrap();
+        assert!(!methods.lines().any(|m| m == "turn/interrupt"), "{methods}");
+        Box::new(session).close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn turn_accepted_while_rejection_is_delivered_still_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        // One slot: the pump blocks while it delivers the rejection events.
+        let (mut session, mut rx) = open_reject_stub(temp.path(), 1).await;
+
+        session.send_turn("/compact".to_string()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        session.send_turn("ping".to_string()).await.unwrap();
+        let mut finishes = Vec::new();
+        while finishes.len() < 2 {
+            if let ChatEvent::TurnFinished { ok, error } = next_event(&mut rx).await {
+                finishes.push((ok, error));
+            }
+        }
+        assert_eq!(finishes[0].0, false);
+        assert_eq!(finishes[1], (true, None), "{finishes:?}");
         Box::new(session).close().await.unwrap();
     }
 
