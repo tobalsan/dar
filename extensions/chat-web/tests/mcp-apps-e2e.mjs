@@ -12,6 +12,7 @@ const chromium = playwright.chromium || playwright.default.chromium;
 const here = path.dirname(fileURLToPath(import.meta.url));
 const evidence = path.resolve(process.env.APPS_EVIDENCE_DIR || 'validation/apps-e2e');
 const externalOrigin = process.env.APPS_CHAT_ORIGIN;
+const artifacts = process.env.APPS_ARTIFACTS === '1';
 const agent = path.resolve(process.env.APPS_AGENT_DIR || path.join(evidence, `agent-${process.pid}`));
 await fs.mkdir(agent, { recursive: true });
 await fs.mkdir(evidence, { recursive: true });
@@ -26,18 +27,18 @@ async function freePort() {
 const port = await freePort();
 const origin = externalOrigin || `http://127.0.0.1:${port}`;
 if (!externalOrigin) {
-await fs.writeFile(path.join(agent, 'agent.yaml'), `id: apps-acceptance\nname: Apps acceptance\nrunner:\n  use: fake\nforeground: logs\ndashboard:\n  bind: 127.0.0.1\n  port: ${port}\nextensions:\n  chat-web:\n    backend: pi\n    command: ${path.join(here, 'fixtures/apps-pi.cjs')}\n    idle_minutes: 0\n    apps:\n      sandbox_port: 0\n`);
+await fs.writeFile(path.join(agent, 'agent.yaml'), `id: apps-acceptance\nname: Apps acceptance\nrunner:\n  use: fake\nforeground: logs\ndashboard:\n  bind: 127.0.0.1\n  port: ${port}\nextensions:\n  chat-web:\n    backend: pi\n    command: ${path.join(here, artifacts ? 'fixtures/artifacts-pi.cjs' : 'fixtures/apps-pi.cjs')}\n    idle_minutes: 0\n    apps:\n      sandbox_port: 0\n`);
 const fixtureEnv = process.env.APPS_SDK_HTML ? { DAR_APPS_TEST_HTML: path.resolve(process.env.APPS_SDK_HTML) } : {};
 if (process.env.APPS_POLICY) fixtureEnv.DAR_APPS_TEST_POLICY = process.env.APPS_POLICY;
 if (process.env.APPS_PROTOCOL_VERSION) fixtureEnv.DAR_APPS_TEST_PROTOCOL_VERSION = process.env.APPS_PROTOCOL_VERSION;
-await fs.writeFile(path.join(agent, 'mcp.json'), JSON.stringify({ mcpServers: {
+if (!artifacts) await fs.writeFile(path.join(agent, 'mcp.json'), JSON.stringify({ mcpServers: {
   canvas: { command: process.execPath, args: [path.join(here, 'fixtures/apps-server.cjs')], env: fixtureEnv },
   other: { command: process.execPath, args: [path.join(here, 'fixtures/apps-server.cjs')], env: fixtureEnv }
 } }));
 }
 let logs = '';
 const startHost = () => {
-  const child = spawn(binary, ['run', '--dir', agent], { env: { ...process.env, DAR_APPS_TEST_BINARY: binary }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(binary, ['run', '--dir', agent], { env: { ...process.env, DAR_APPS_TEST_BINARY: binary, ...(artifacts ? { DAR_ARTIFACT_ROOT: path.join(evidence, 'vault') } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.on('data', chunk => { logs += chunk; });
   child.stderr.on('data', chunk => { logs += chunk; });
   return child;
@@ -63,20 +64,24 @@ page.on('pageerror', error => failures.push(error.message));
 try {
   await waitForHost();
   await page.goto(`${origin}/`);
+  if (artifacts) {
+    const { artifactChecks } = await import('./artifact-checks.mjs');
+    await artifactChecks({ page, evidence, agent });
+  } else {
   if (process.env.APPS_NEW_CHAT === '1') {
-    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Keep this original conversation');
+    await page.getByRole('combobox', { name: 'Message', exact: true }).fill('Keep this original conversation');
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await page.getByRole('log').getByText('Done.', { exact: true }).waitFor();
     await Promise.all([page.waitForResponse(response => response.url().endsWith('/new')), page.getByRole('button', { name: 'New chat', exact: true }).click()]);
   }
-  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('draw first');
+  await page.getByRole('combobox', { name: 'Message', exact: true }).fill('draw first');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   if (process.env.APPS_EXPECT_FAILURE) {
     const region = page.getByRole('region', { name: 'MCP App: canvas', exact: true });
     await region.getByRole('status').filter({ hasText: process.env.APPS_EXPECT_FAILURE }).waitFor({ timeout: 18000 });
     await page.getByText('canvas__draw', { exact: true }).click();
     await page.getByRole('log').getByText('Drawing: first', { exact: false }).waitFor();
-    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Chat progresses after app failure');
+    await page.getByRole('combobox', { name: 'Message', exact: true }).fill('Chat progresses after app failure');
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await page.getByRole('log').getByText('Chat progresses after app failure', { exact: true }).waitFor();
     assert.ok(!(await page.getByRole('log').innerText()).includes('[mcp-app-result:'));
@@ -139,17 +144,17 @@ try {
     await drawing.getByRole('button', { name: 'Expand drawing', exact: true }).click();
     await page.getByRole('button', { name: 'Close expanded view: canvas', exact: true }).waitFor();
     const panel = await page.getByRole('region', { name: 'MCP App: canvas', exact: true }).boundingBox();
-    const composer = await page.getByRole('textbox', { name: 'Message', exact: true }).boundingBox();
+    const composer = await page.getByRole('combobox', { name: 'Message', exact: true }).boundingBox();
     assert.ok(panel && composer && composer.x + composer.width <= panel.x + 1, 'Expanded view must sit beside the chat input');
     await page.screenshot({ path: path.join(evidence, '02-fullscreen.png'), fullPage: true });
-    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('chat remains usable');
+    await page.getByRole('combobox', { name: 'Message', exact: true }).fill('chat remains usable');
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await page.getByRole('log').getByText('chat remains usable', { exact: true }).waitFor();
     await page.getByRole('button', { name: 'Close expanded view: canvas', exact: true }).click();
     await page.getByRole('button', { name: 'Expand view: canvas', exact: true }).waitFor();
     console.log('PASS app-requested fullscreen sits beside usable chat; close returns inline');
   }
-  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('draw second');
+  await page.getByRole('combobox', { name: 'Message', exact: true }).fill('draw second');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   if (process.env.APPS_PI_ALIAS || process.env.APPS_HOLD_RESULT) {
     await drawing.getByRole('heading', { name: 'Drawing input: second', exact: true }).waitFor({ timeout: 750 });
@@ -184,7 +189,7 @@ try {
   await restored.getByRole('status').filter({ hasText: 'Model-only call blocked' }).waitFor();
   console.log('PASS own app-only tool works; cross-server and model-only calls are blocked');
   if (process.env.APPS_ORIGIN_SECURITY === '1') {
-    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('draw other');
+    await page.getByRole('combobox', { name: 'Message', exact: true }).fill('draw other');
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     let other;
     const deadline = Date.now() + 5000;
@@ -253,10 +258,10 @@ try {
       await route.fulfill({ response });
       if (resources === 2) secondSeen();
     });
-    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('draw first');
+    await page.getByRole('combobox', { name: 'Message', exact: true }).fill('draw first');
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await firstHeld;
-    await page.getByRole('textbox', { name: 'Message', exact: true }).fill('draw second');
+    await page.getByRole('combobox', { name: 'Message', exact: true }).fill('draw second');
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await secondReturned;
     releaseFirst();
@@ -290,6 +295,7 @@ try {
     console.log('PASS host restart preserves transcript and restores latest app result');
   }
   }
+  }
   assert.deepEqual(failures, [], 'Browser must have no uncaught JavaScript errors');
 } finally {
   await fs.writeFile(path.join(evidence, 'host.log'), logs);
@@ -297,7 +303,7 @@ try {
   await browser.close();
   await stopHost();
 }
-if (!process.env.APPS_EXPECT_FAILURE) {
+if (!process.env.APPS_EXPECT_FAILURE && !artifacts) {
 const audit = await fs.readFile(path.join(agent, 'logs/agent.log'), 'utf8');
 assert.ok(audit.includes('MCP App CSP') && audit.includes('connect-src'));
 assert.ok(audit.includes('method=tools/call') && audit.includes('status="error"'));

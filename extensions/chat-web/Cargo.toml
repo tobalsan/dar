@@ -14,6 +14,7 @@ name = "chat_web"
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["multipart"] }
+base64 = "0.22"
 cap-dashboard-tab = { package = "dar-cap-dashboard-tab", path = "../../crates/cap-dashboard-tab", version = "0.6" }
 cap-chat = { package = "dar-cap-chat", path = "../../crates/cap-chat", version = "0.6" }
 dar-extension-sdk = { path = "../../crates/extension-sdk", version = "0.6" }

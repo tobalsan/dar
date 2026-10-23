@@ -658,3 +658,43 @@ async fn apps_catalog_reads_blob_html_and_rejects_invalid_encoding() {
         .await
         .is_err());
 }
+
+// ALG-532 Testing Decisions approve MCP configuration rejection at its public
+// interface: catches the diagnostic, while browser origin enforcement is separate.
+#[tokio::test]
+async fn dar_server_name_is_reserved_for_the_builtin_app() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("mcp.json"),
+        json!({"mcpServers":{"dar":{"command":"missing-reserved-server"}}}).to_string(),
+    )
+    .unwrap();
+    let error = mcp::doctor_statuses(root.path())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("dar") && error.contains("reserved"),
+        "{error}"
+    );
+
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let mut ctx = RegisterCtx {
+        bus: EventBus::new(),
+        http: HttpRegistry::disabled(),
+        foreground: ForegroundRegistry::default(),
+        services: ServiceRegistry::default(),
+        paths: HostPaths::new(root.path()).unwrap(),
+        config: ConfigStore::default(),
+        shutdown: ShutdownToken::new(rx),
+    };
+    let error = mcp::McpExtension
+        .register(&mut ctx)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("dar") && error.contains("reserved"),
+        "{error}"
+    );
+}

@@ -140,6 +140,27 @@ Session routes (all under `/chat`): `GET /sessions` lists sessions,
 
 ### MCP App views
 
+`artifact_publish` shows published files directly under the tool call with all
+four backends: pi, codex, opencode, and builtin. No `mcp.json` is needed.
+Publish a report instead of running `open`; an optional `title` labels its
+frame, otherwise the filename is used. HTML renders with styles and scripts,
+Markdown as sanitized formatted text, images (including SVG) as images, and
+text/code as preformatted text. Other formats show a file card.
+
+The frame's **Download** button saves the exact original vault bytes. Publishing
+the same filename in the same conversation updates its existing view; a different
+filename gets a separate view. The later tool call links to the updated view.
+Reload and saved-session replay restore views while their result records exist
+(30 days). A missing or unreadable file leaves the text fallback and a short error.
+
+HTML reports run in an additional opaque-origin frame. Scripts, styles, and fonts
+can load from jsDelivr, cdnjs, unpkg, and Google Fonts; fetch, XHR, and WebSocket
+connections are blocked, including to those CDNs. This is not a complete guarantee
+against data leaks. Reports can follow internal anchors and open HTTP(S) links
+in a new tab. They cannot use the viewer's tool bridge. Only single files are
+supported: relative assets, Markdown Mermaid, editing, and version selection
+are not included. Slack and WhatsApp still upload files; other surfaces keep text.
+
 Tools from servers in `mcp.json` that declare an MCP App appear as a framed
 view under their tool call, labeled with the server name. The view receives
 the tool arguments before the full result, once its initialization finishes.
@@ -165,7 +186,7 @@ extensions:
       sandbox_port: 7879
       # Optional shared browser-visible origin, without a path.
       # sandbox_origin: https://agent-apps.example.net
-      # Per-server origins override sandbox_origin; keys match mcp.json.
+      # Keys are mcp.json server IDs, or dar for built-in artifact views.
       sandbox_origins:
         tldraw: loopback
       # Servers whose apps require a fresh view for every call:
@@ -174,7 +195,8 @@ extensions:
 
 The tested tldraw app did not reliably execute a second result in the same
 view; use a fresh view per execution. Other servers reuse views by default.
-Both lists use server IDs from `mcp.json`; Dar has no built-in vendor exceptions.
+Both lists accept server IDs from `mcp.json` and `dar` for artifact views;
+Dar has no built-in vendor exceptions.
 
 The second HTTP listener serves the sandbox proxy and app documents, never
 the chat. Dar assigns each server a browser-visible origin and checks that

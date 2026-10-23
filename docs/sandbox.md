@@ -79,6 +79,8 @@ container has no TTY for the TUI.
 MCP Apps use a second origin, published on host loopback at the configured
 `extensions.chat-web.apps.sandbox_port` (7879 by default). Override its host
 port with `SANDBOX_PORT` in `.env`; the container port remains fixed.
+Built-in artifact views use this same listener and need no extra port or
+`mcp.json` file.
 A loopback `extensions.chat-web.apps.sandbox_bind` is refused because the
 host cannot reach container loopback. Keep both container listeners on
 `0.0.0.0` and expose only the required host loopback ports.
@@ -95,12 +97,14 @@ extensions:
     apps:
       sandbox_port: 7879
       sandbox_origins:
+        dar: http://dar.localhost:17879
         tldraw: http://localhost:17879
         excalidraw: http://excalidraw.localhost:17879
         canva: http://canva.localhost:17879
 ```
 
-Keys must match `mcp.json`; configure every server whose browser-visible
+Keys match `mcp.json` server IDs, plus `dar` for built-in artifact views;
+configure every server whose browser-visible
 port differs. Dar uses the Public Suffix List to reject overlapping cookie
 domains: different ports or sibling remote hostnames are insufficient.
 Parent-child server hostnames are also rejected. The local

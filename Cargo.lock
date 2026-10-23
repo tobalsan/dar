@@ -730,6 +730,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
+ "base64 0.22.1",
  "dar-cap-chat",
  "dar-cap-dashboard-tab",
  "dar-extension-sdk",
@@ -791,6 +792,7 @@ dependencies = [
  "axum 0.8.9",
  "clap",
  "dar-agent-env",
+ "dar-cap-mcp-apps",
  "dar-cap-runner",
  "dar-host",
  "dar-host-api",
@@ -1193,6 +1195,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "dar-artifacts",
+ "dar-extension-sdk",
  "dar-host-api",
  "dar-tool-registry",
  "serde",

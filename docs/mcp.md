@@ -14,6 +14,9 @@ Dar can expose tools from user-configured MCP servers through its host bridge. A
 
 Entries support stdio (`command`, optional `args` and `env`) or streamable HTTP (`url`, optional `headers`). `$env:NAME` values resolve from bridge environment. Server names may contain only ASCII letters, digits, and `-` (`^[A-Za-z0-9-]+$`). Underscores are rejected so `<server>__<tool>` names remain unambiguous.
 
+The server name `dar` is reserved for Dar's built-in tools and artifact viewer.
+An `mcp.json` entry with that name is rejected at startup and by `dar doctor`.
+
 Upstream tool names become `<server>__<tool>`. Names outside MCP-compatible `[A-Za-z0-9_-]{1,64}` after prefixing are skipped. Unreachable servers are warned about and do not stop bridge.
 
 Tools are proxied only; MCP resources, prompts, and sampling are not. Tool calls time out after 120 seconds; server discovery after 15 seconds. Stdio server stderr is discarded so it cannot leak secrets into logs.
@@ -37,6 +40,23 @@ Agents with configured MCP servers expose an **MCP** dashboard tab. It shows tra
 Runners reach these tools through the host bridge they already use, so `pi`, `codex`, `opencode`, and `builtin` need no extra setup. The `pi` runner needs `pi-mcp-adapter` installed on the host (it provides `--mcp-config`); without it pi exits with `Unknown option: --mcp-config`. MCP servers a runner already loads from its own config keep working alongside these.
 
 ## MCP Apps in web chat
+
+Dar's built-in `dar` app displays `artifact_publish` results even without
+`mcp.json`. Its `ui://dar/artifact-viewer` page uses the same sandbox listener,
+origin isolation, view reuse, replay, and audit log as upstream apps. It can
+read only the artifact referenced by its own session result and cannot call
+tools. Downloads require that same session record and are always attachments
+with `application/octet-stream` and `nosniff` on the chat origin.
+
+HTML reports run inside a further opaque-origin frame, separated from the
+viewer bridge. Resource domains are limited to `https://cdn.jsdelivr.net`,
+`https://cdnjs.cloudflare.com`, `https://unpkg.com`,
+`https://fonts.googleapis.com`, and `https://fonts.gstatic.com`; connection
+domains are empty. Fetch, XHR, and WebSocket calls are blocked even to those
+hosts. Allowed asset requests and external HTTP(S) links remain possible;
+this does not promise complete protection against data leaks. Markdown is
+sanitized; SVG is displayed as an image, never inserted as live markup.
+See [artifact views](chat.md#mcp-app-views) for supported formats and limits.
 
 With chat-web enabled, the same `mcp.json` entries can provide interactive
 HTML views using the stable `io.modelcontextprotocol/ui` extension
@@ -84,8 +104,13 @@ Local chat means chat on `localhost`, on a `*.localhost` name, or on a loopback 
 
 For remote chat, Dar cannot know the name that the browser sees. You must set
 `sandbox_origins.<server>` for each server, or one shared `sandbox_origin`.
-The key is the server ID from `mcp.json`. Dar has no built-in vendor names.
+The key is the server ID from `mcp.json`, or `dar` for built-in artifact views.
+Dar has no built-in vendor names.
 An invalid assignment leaves the text fallback visible.
+Existing remote setups with only per-server overrides must also add
+`sandbox_origins.dar`, even when opening an upstream app: origin isolation
+checks include the built-in server. A shared `sandbox_origin` covers `dar`
+when it has no individual override.
 
 The value `loopback` is valid only in `sandbox_origins.<server>`. Dar resolves
 it for each request from the chat host and the bound sandbox port:

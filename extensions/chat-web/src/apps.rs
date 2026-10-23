@@ -95,14 +95,19 @@ async fn app_origin(state: &AppState, server: &str, chat: &str) -> Result<String
         .get()
         .context("sandbox listener unavailable")?;
     let config = &state.config.apps;
-    let tools = tokio::time::timeout(CALL_TIMEOUT, catalog(state)?.list_tools())
-        .await
-        .context("view catalog timed out")??;
+    let tools = if let Some(catalog) = external_catalog(state)? {
+        tokio::time::timeout(CALL_TIMEOUT, catalog.list_tools())
+            .await
+            .context("view catalog timed out")??
+    } else {
+        json!([])
+    };
     let mut servers = config
         .sandbox_origins
         .keys()
         .cloned()
         .collect::<HashSet<_>>();
+    servers.insert("dar".to_owned());
     servers.insert(server.to_owned());
     servers.extend(
         tools
@@ -187,15 +192,30 @@ async fn app_origin(state: &AppState, server: &str, chat: &str) -> Result<String
     selected.context("sandbox origin unavailable")
 }
 
-fn catalog(state: &AppState) -> Result<Arc<dyn McpApps>> {
-    state
+fn external_catalog(state: &AppState) -> Result<Option<Arc<dyn McpApps>>> {
+    Ok(state
         .start
         .get()
         .context("chat has not started")?
         .host
         .services
         .get_named::<dyn McpApps>(MCP_APPS_SERVICE)
-        .context("MCP Apps catalog unavailable")
+        .ok())
+}
+
+fn catalog(state: &AppState, server: &str) -> Result<Arc<dyn McpApps>> {
+    if server == "dar" {
+        let store = state
+            .start
+            .get()
+            .context("chat has not started")?
+            .host
+            .services
+            .get_named::<dar_extension_sdk::artifacts::ArtifactStore>("artifact-store")
+            .context("artifact store unavailable")?;
+        return Ok(Arc::new(super::artifacts::ArtifactApp { store }));
+    }
+    external_catalog(state)?.context("MCP Apps catalog unavailable")
 }
 
 async fn record(state: &AppState, session: &str, id: &str) -> Result<ResultRecord> {
@@ -222,7 +242,7 @@ pub(super) async fn resource(
         let chat = chat_origin(&headers)?;
         let record = record(&state, &session, &id).await?;
         let app = app_origin(&state, &record.server, &chat).await?;
-        let catalog = catalog(&state)?;
+        let catalog = catalog(&state, &record.server)?;
         let resource = tokio::time::timeout(CALL_TIMEOUT,
             catalog.read_ui_resource(&record.server, &record.resource_uri)).await
             .context("view loading timed out")??;
@@ -260,6 +280,61 @@ pub(super) async fn resource(
     }
 }
 
+pub(super) async fn download(
+    Path((session, id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    let outcome = async {
+        let record = record(&state, &session, &id).await?;
+        anyhow::ensure!(record.server == "dar", "not an artifact view");
+        let uri = record
+            .result
+            .pointer("/structuredContent/uri")
+            .and_then(Value::as_str)
+            .context("artifact URI unavailable")?;
+        let store = state
+            .start
+            .get()
+            .context("chat has not started")?
+            .host
+            .services
+            .get_named::<dar_extension_sdk::artifacts::ArtifactStore>("artifact-store")
+            .context("artifact store unavailable")?;
+        let (metadata, bytes) = super::artifacts::read(store, uri).await?;
+        let fallback: String = metadata
+            .filename
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ' ') {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let encoded: String =
+            url::form_urlencoded::byte_serialize(metadata.filename.as_bytes()).collect();
+        let disposition = format!(
+            "attachment; filename=\"{fallback}\"; filename*=UTF-8''{}",
+            encoded.replace('+', "%20")
+        );
+        Ok::<_, anyhow::Error>(
+            (
+                [
+                    (header::CONTENT_DISPOSITION, disposition),
+                    (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+                    (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_owned()),
+                    (header::CACHE_CONTROL, "no-store".to_owned()),
+                ],
+                bytes,
+            )
+                .into_response(),
+        )
+    }
+    .await;
+    outcome.unwrap_or_else(|error| (StatusCode::NOT_FOUND, error.to_string()).into_response())
+}
+
 pub(super) async fn rpc(
     Path((session, id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
@@ -287,7 +362,13 @@ pub(super) async fn rpc(
                     "invalid model context"
                 );
                 let slot = state.session(&session).await?;
-                let view = if state.config.apps.no_reuse.contains(&record.server) {
+                let view = if record.server == "dar" {
+                    let filename = record.result.pointer("/structuredContent/filename")
+                        .and_then(Value::as_str).context("artifact filename unavailable")?;
+                    let mut key = vec![session.as_str(), record.server.as_str(), record.resource_uri.as_str(), filename];
+                    if state.config.apps.no_reuse.contains(&record.server) { key.push(&id); }
+                    serde_json::to_string(&key)?
+                } else if state.config.apps.no_reuse.contains(&record.server) {
                     format!("{}:{}:{id}",record.server,record.resource_uri)
                 } else { format!("{}:{}",record.server,record.resource_uri) };
                 slot.app_context
@@ -345,11 +426,14 @@ pub(super) async fn rpc(
                     .cloned()
                     .unwrap_or_else(|| json!({}));
                 anyhow::ensure!(args.is_object(), "tool arguments must be an object");
-                catalog(&state)?.call_tool(&record.server, tool, args).await
+                catalog(&state, &record.server)?.call_tool(&record.server, tool, args).await
             }
             "resources/read" => {
                 let uri = params["uri"].as_str().context("resource URI required")?;
-                catalog(&state)?.read_resource(&record.server, uri).await
+                if record.server == "dar" {
+                    anyhow::ensure!(record.result.pointer("/structuredContent/uri").and_then(Value::as_str) == Some(uri), "artifact is not part of this view result");
+                }
+                catalog(&state, &record.server)?.read_resource(&record.server, uri).await
             }
             "notifications/message" => {
                 let level = params["level"].as_str().context("log level required")?;
@@ -614,9 +698,13 @@ pub(super) fn capture_result(
         if let Ok(Some(record)) =
             mcp_apps::read_result(root, &id, call.name.as_deref().unwrap_or(""))
         {
-            event.app = Some(
-                json!({"recordId":id,"tool":record.tool,"piToolName":record.pi_tool_name,"server":record.server,"resourceUri":record.resource_uri,"args":record.args,"callId":event.id}),
-            );
+            let mut descriptor = json!({"recordId":id,"tool":record.tool,"piToolName":record.pi_tool_name,"server":record.server,"resourceUri":record.resource_uri,"args":record.args,"callId":event.id});
+            if record.server == "dar" {
+                descriptor["artifactFilename"] =
+                    record.result["structuredContent"]["filename"].clone();
+                descriptor["artifactTitle"] = record.result["structuredContent"]["title"].clone();
+            }
+            event.app = Some(descriptor);
         }
     }
 }
