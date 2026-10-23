@@ -194,18 +194,37 @@
       if(!groups.has(key))groups.set(key,[]);groups.get(key).push(d);
     }
     for(const view of views.values())if(view.slot!==app.slot || !groups.has(view.key))teardown(view);
+    const anchorOf=d=>document.querySelector(`[data-app-anchor="${CSS.escape(d.recordId)}"]`);
     for(const [key,descriptors] of groups) {
-      const first=descriptors[0],latest=descriptors.at(-1),anchor=document.querySelector(`[data-app-anchor="${CSS.escape(first.recordId)}"]`);
+      const latest=descriptors.at(-1),follows=latest.server==='dar',anchor=anchorOf(follows?latest:descriptors[0]);
       if(!anchor)continue;
       let view=views.get(key);
       if(!view) {create(app,latest,anchor,key);view=views.get(key)}
+      if(follows && view.section.parentElement!==anchor) {
+        anchor.querySelector('[data-app-marker]')?.remove();
+        anchor.append(view.section);
+        // Moving an iframe reloads it, so run the app handshake again.
+        Object.assign(view,{bootstrapped:false,initializing:false,ready:false,delivered:null,inputCallId:null});
+        view.status.textContent='Loading view…';view.frame.hidden=true;view.button.hidden=true;
+        clearTimeout(view.timer);view.timer=setTimeout(()=>fail(view,new Error('App initialization timed out')),15000);
+      }
       if(view && latest.recordId!==view.record) {
         const record=latest.recordId;view.record=record;view.callId=latest.callId;view.tool=latest.tool;view.piToolName=latest.piToolName;heading(view,latest);
         request(`/chat/${encodeURIComponent(app.slot)}/apps/${encodeURIComponent(record)}`).then(data=>{if(view.record===record && !view.destroying){view.data=data;view.dataRecord=record;if(view.ready){view.frame.hidden=false;view.status.textContent=''}deliver(view)}}).catch(error=>{if(view.record===record && !view.destroying)fail(view,error)});
       }
-      for(const d of descriptors.slice(1)) {
-        const target=document.querySelector(`[data-app-anchor="${CSS.escape(d.recordId)}"]`);
-        if(target && !target.firstChild) {const link=document.createElement('button');link.type='button';link.textContent=`View updated: ${d.server}`;link.onclick=()=>view.section.scrollIntoView({block:'center'});target.append(link)}
+      for(const d of follows?descriptors.slice(0,-1):descriptors.slice(1)) {
+        const target=anchorOf(d);
+        if(!target || target.firstChild) continue;
+        const link=document.createElement('button');link.type='button';
+        if(follows){
+          link.className='chat-app-marker';link.dataset.appMarker='';
+          link.textContent=`${d.artifactTitle || d.artifactFilename || 'Artifact'} · newer version below`;
+          link.onclick=()=>{
+            if(view.mode==='fullscreen'){view.section.classList.add('is-attention');view.frame.focus();setTimeout(()=>view.section.classList.remove('is-attention'),1200)}
+            else view.section.scrollIntoView({block:'center'});
+          };
+        } else {link.textContent=`View updated: ${d.server}`;link.onclick=()=>view.section.scrollIntoView({block:'center'})}
+        target.append(link);
       }
     }
   };

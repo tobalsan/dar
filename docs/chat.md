@@ -149,7 +149,7 @@ text/code as preformatted text. Other formats show a file card.
 
 The frame's **Download** button saves the exact original vault bytes. Publishing
 the same filename in the same conversation updates its existing view; a different
-filename gets a separate view. The later tool call links to the updated view.
+filename gets a separate view. The view moves to the latest tool call and reloads there. Each older call shows a quiet "newer version below" line. Click it to scroll to the view, or to highlight the view in the side panel.
 Reload and saved-session replay restore views while their result records exist
 (30 days). A missing or unreadable file leaves the text fallback and a short error.
 

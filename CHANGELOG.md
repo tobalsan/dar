@@ -9,7 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
-- Web chat displays published artifacts as isolated, downloadable views across all four backends, with HTML, Markdown, images, text, filename-based updates, and replay; no MCP configuration is needed. The MCP server name `dar` is now reserved.
+- Web chat displays published artifacts as isolated, downloadable views across all four backends, with HTML, Markdown, images, text, filename-based updates that move the view to the latest publish, and replay; no MCP configuration is needed. The MCP server name `dar` is now reserved.
 - Web chat scrolls from anywhere in the main panel, including beside the message column. The MCP App expand control is now an icon button. An expanded app view now gets its true panel size again after a window resize.
 - MCP Apps accept `sandbox_origins.<server>: loopback`, which lets local tldraw work with chat on either `localhost` or `127.0.0.1`. `docs/mcp.md` now explains the host rules for each setup.
 - MCP Apps now load real HTTP documents on separate per-server hostnames, with `sandbox_origins` overrides for local tldraw and mapped ports; Dar rejects overlapping chat and app cookie domains and restores the selected conversation after reload.

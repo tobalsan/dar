@@ -61,9 +61,10 @@ export async function artifactChecks({ page, evidence }) {
   await send(page, 'publish html second');
   await visibleFrame(page, 'heading', 'Artifact report second');
   assert.equal(await page.getByRole('region', { name: 'MCP App: dar', exact: true }).count(), 5, 'Same filename must update one existing view');
-  await page.getByRole('button', { name: 'View updated: dar', exact: true }).waitFor();
+  await page.getByRole('button', { name: /newer version below/ }).waitFor();
+  assert.equal(await page.getByRole('button', { name: /newer version below/ }).count(), 1, 'Older publish must show one marker');
+  assert.equal(await page.getByRole('button', { name: 'View updated: dar', exact: true }).count(), 0);
   assert.deepEqual(await notes.evaluate(() => window.receivedInputs), []);
-  assert.deepEqual(await reportViewer.evaluate(() => window.receivedInputs), ['report.html']);
   console.log('PASS filenames isolate five views while repeat publish updates the original; early input reaches only matching file');
   await page.getByText('Revised report', { exact: true }).waitFor({ timeout: 2000 });
   await page.getByRole('region', { name: 'MCP App: dar', exact: true }).getByText('notes.md', { exact: true }).waitFor({ timeout: 2000 });

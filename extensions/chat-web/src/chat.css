@@ -889,6 +889,9 @@ body:has(.chat-web) #content {
 .chat-app-actions>.chat-app-download:hover, .chat-app-actions>.chat-app-expand:hover { background:var(--hover,rgba(127,127,127,.12)); }
 .chat-app-actions>.chat-app-expand[hidden] { display:none; }
 .chat-app>p { font-size:13px;padding:0 12px; }
+.chat-app-marker { display:block;padding:4px 0;border:0;background:transparent;color:var(--muted,inherit);opacity:.7;font:inherit;font-size:13px;text-align:left; }
+.chat-app-marker:hover { opacity:1;text-decoration:underline; }
+.chat-app.is-attention { outline:2px solid var(--accent,currentColor);outline-offset:-2px; }
 .chat-app>p:empty { display:none; }
 .chat-app>iframe { display:block;width:100%;border:0; background:white; }
 .chat-web { --app-panel-width:45vw; }
