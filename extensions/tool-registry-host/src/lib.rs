@@ -14,6 +14,8 @@ use tool_registry::{
     TOOL_REGISTRY_SERVICE,
 };
 
+mod web_preview;
+
 pub const ARTIFACT_STORE_SERVICE: &str = "artifact-store";
 /// Cross-surface ceiling. Slack accepts at most 25 MiB.
 const MAX_ARTIFACT_BYTES: u64 = 25 * 1024 * 1024;
@@ -41,6 +43,12 @@ impl Extension for ToolRegistryHostExtension {
                 Arc::new(ArtifactPublish {
                     store: Arc::clone(&store),
                     exports,
+                    root: ctx.paths.root().to_path_buf(),
+                }),
+            )?;
+            registry.register_tool(
+                web_preview::spec(),
+                Arc::new(web_preview::WebPreview {
                     root: ctx.paths.root().to_path_buf(),
                 }),
             )?;

@@ -1198,6 +1198,7 @@ dependencies = [
  "dar-extension-sdk",
  "dar-host-api",
  "dar-tool-registry",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

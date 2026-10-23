@@ -2816,6 +2816,403 @@ mod tests {
         (state, record, uri)
     }
 
+    // ALG-537 Testing Decisions approve router HTTP/JSON-RPC and transcript seams.
+    // Catches per-record policy and permissions; misses browser enforcement.
+    async fn preview_http_state(
+        url: &str,
+        frameable: bool,
+        config: Config,
+    ) -> (Arc<AppState>, String) {
+        let root = test_root();
+        let store = Arc::new(
+            dar_extension_sdk::artifacts::ArtifactStore::open(root.join("vault"), 1024).unwrap(),
+        );
+        let record = dar_extension_sdk::mcp_apps::ResultRecord {
+            tool: "web_preview".into(),
+            pi_tool_name: Some("mcp__dar__web_preview".into()),
+            server: "dar".into(),
+            resource_uri: "ui://dar/web-preview".into(),
+            args: serde_json::json!({"url":"https://redirect.example.org/start","title":"Preview example"}),
+            result: serde_json::json!({"structuredContent":{
+                "url":"https://redirect.example.org/start","finalUrl":url,"title":"Preview example","frameable":frameable,
+                "reason":if frameable {serde_json::Value::Null} else {serde_json::json!("unreachable")},
+                "status":if frameable {serde_json::json!(200)} else {serde_json::Value::Null}
+            }}),
+            created_at: now_ms() / 1000,
+        }
+        .write(&root)
+        .unwrap();
+        let mut services = dar_extension_sdk::ServiceRegistry::default();
+        services.register("artifact-store", store).unwrap();
+        config.apps.bound_port.set(28181).unwrap();
+        let start = start_ctx(services);
+        start.host.set_http_addr("127.0.0.1:28180".parse().unwrap());
+        let state = Arc::new(AppState {
+            config,
+            root,
+            start: std::sync::OnceLock::from(start),
+            sessions: Mutex::new(HashMap::new()),
+            transition: Mutex::new(()),
+            slot_registry: Arc::default(),
+            meta: Mutex::new(HashMap::new()),
+        });
+        let session = state.session("test").await.unwrap();
+        session.publish(ChatEvent::ToolCall {
+            id: "preview".into(),
+            name: "web_preview".into(),
+            args: serde_json::json!({"url":"https://redirect.example.org/start"}).to_string(),
+        });
+        session.publish(ChatEvent::ToolOutput {
+            id: "preview".into(),
+            text: format!("web preview shown: {url} [mcp-app-result:{record}]"),
+            is_error: false,
+            done: true,
+        });
+        (state, record)
+    }
+
+    #[tokio::test]
+    async fn web_preview_content_allows_only_its_loopback_page_origin() {
+        let (state, id) = preview_http_state(
+            "http://127.0.0.1:5173/demo?theme=dark#section",
+            true,
+            Config::default(),
+        )
+        .await;
+        let response = router(Arc::clone(&state))
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/test/apps/{id}"))
+                    .header("host", "127.0.0.1:28180")
+                    .header("referer", "http://127.0.0.1:28180/chat")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(
+            body["meta"]["ui"]["csp"]["frameDomains"],
+            serde_json::json!(["http://127.0.0.1:5173"])
+        );
+        assert_eq!(
+            body["meta"]["ui"]["csp"]["resourceDomains"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            body["meta"]["ui"]["csp"]["connectDomains"],
+            serde_json::json!([])
+        );
+        let url = url::Url::parse(body["contentUrl"].as_str().unwrap()).unwrap();
+        let response = apps::sandbox_router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("{}?{}", url.path(), url.query().unwrap()))
+                    .header("host", "dar.localhost:28181")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            csp.split(';')
+                .map(str::trim)
+                .find(|directive| directive.starts_with("frame-src ")),
+            Some("frame-src http://127.0.0.1:5173")
+        );
+    }
+
+    #[tokio::test]
+    async fn web_preview_transcript_describes_the_page_without_artifact_fields() {
+        let (state, _) = preview_http_state(
+            "http://127.0.0.1:5173/demo#section",
+            true,
+            Config::default(),
+        )
+        .await;
+        let response = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/test/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = response.into_body();
+        body.frame().await.unwrap().unwrap();
+        let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        let event: serde_json::Value = serde_json::from_str(
+            std::str::from_utf8(&frame)
+                .unwrap()
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap(),
+        )
+        .unwrap();
+        let descriptor = &event["app"];
+        assert_eq!(
+            descriptor["previewUrl"],
+            "http://127.0.0.1:5173/demo#section"
+        );
+        assert_eq!(descriptor["previewTitle"], "Preview example");
+        assert_eq!(descriptor["previewFrameable"], true);
+        for key in [
+            "artifactFilename",
+            "artifactTitle",
+            "artifactMediaType",
+            "artifactBytes",
+        ] {
+            assert!(
+                descriptor.get(key).is_none(),
+                "unexpected {key}: {descriptor}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn web_preview_refuses_chat_and_every_sandbox_listener() {
+        for url in [
+            "http://127.0.0.1:28180/chat",
+            "http://localhost:28180/dashboard",
+            "http://127.0.0.1:28181/sandbox/example",
+            "http://localhost:28181/content/example",
+            "http://[::1]:28181/",
+            "https://draw.localhost:28181/",
+            "https://localhost.:28181/",
+            "https://draw.example.net/",
+        ] {
+            let mut config = Config::default();
+            config
+                .apps
+                .sandbox_origins
+                .insert("draw".into(), "https://draw.example.net".into());
+            let (state, id) = preview_http_state(url, true, config).await;
+            let response = router(state)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/test/apps/{id}"))
+                        .header("host", "127.0.0.1:28180")
+                        .header("referer", "http://127.0.0.1:28180/chat")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn web_preview_cannot_gain_artifact_access_from_extra_result_fields() {
+        use dar_extension_sdk::artifacts::{ArtifactMetadataInput, ArtifactStore, ExportRoot};
+        let (state, original_id) =
+            preview_http_state("http://localhost:5173/", true, Config::default()).await;
+        fs::create_dir_all(state.root.join("exports")).unwrap();
+        fs::write(state.root.join("exports/private.txt"), "Private report").unwrap();
+        let store = state
+            .start
+            .get()
+            .unwrap()
+            .host
+            .services
+            .get_named::<ArtifactStore>("artifact-store")
+            .unwrap();
+        let metadata = store
+            .stage_from_export_root(
+                &ExportRoot::open(state.root.join("exports")).unwrap(),
+                "private.txt",
+                ArtifactMetadataInput {
+                    filename: "private.txt".into(),
+                    media_type: Some("text/plain".into()),
+                    caption: None,
+                },
+            )
+            .unwrap();
+        let uri = format!("dar-artifact://{}", metadata.id);
+        let mut record =
+            dar_extension_sdk::mcp_apps::read_result(&state.root, &original_id, "web_preview")
+                .unwrap()
+                .unwrap();
+        record.result["structuredContent"]["uri"] = serde_json::json!(uri);
+        record.result["structuredContent"]["filename"] = serde_json::json!("private.txt");
+        record.result["structuredContent"]["mediaType"] = serde_json::json!("text/plain");
+        let id = record.write(&state.root).unwrap();
+        let session = state.session("test").await.unwrap();
+        session.publish(ChatEvent::ToolCall {
+            id: "preview-extra".into(),
+            name: "web_preview".into(),
+            args: "{}".into(),
+        });
+        session.publish(ChatEvent::ToolOutput {
+            id: "preview-extra".into(),
+            text: format!("web preview [mcp-app-result:{id}]"),
+            is_error: false,
+            done: true,
+        });
+        let app = router(Arc::clone(&state));
+        for (method, params) in [
+            ("resources/read", serde_json::json!({"uri":uri})),
+            (
+                "tools/call",
+                serde_json::json!({"name":"artifact_publish","arguments":{"path":"private.txt"}}),
+            ),
+            (
+                "ui/message",
+                serde_json::json!({"role":"user","content":[{"type":"text","text":"From a preview"}]}),
+            ),
+            (
+                "ui/update-model-context",
+                serde_json::json!({"structuredContent":{"preview":true}}),
+            ),
+        ] {
+            let response = app.clone().oneshot(axum::http::Request::builder()
+                .uri(format!("/test/apps/{id}/rpc")).method("POST").header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}).to_string())).unwrap()).await.unwrap();
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert!(body["error"].is_object(), "{method}: {body}");
+        }
+        for action in ["download", "open"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/test/apps/{id}/{action}"))
+                        .header("host", "127.0.0.1:28180")
+                        .header("referer", "http://127.0.0.1:28180/chat")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{action}");
+        }
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/test/apps/{id}"))
+                    .header("host", "127.0.0.1:28180")
+                    .header("referer", "http://127.0.0.1:28180/chat")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let url = url::Url::parse(body["contentUrl"].as_str().unwrap()).unwrap();
+        let response = apps::sandbox_router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/open/{id}?{}", url.query().unwrap()))
+                    .header("host", "dar.localhost:28181")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn web_preview_link_card_has_no_frame_origin() {
+        let (state, id) =
+            preview_http_state("https://docs.example.org/page", false, Config::default()).await;
+        let response = router(Arc::clone(&state))
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/test/apps/{id}"))
+                    .header("host", "127.0.0.1:28180")
+                    .header("referer", "http://127.0.0.1:28180/chat")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(
+            body["meta"]["ui"]["csp"]["frameDomains"],
+            serde_json::json!([])
+        );
+        let url = url::Url::parse(body["contentUrl"].as_str().unwrap()).unwrap();
+        let response = apps::sandbox_router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("{}?{}", url.path(), url.query().unwrap()))
+                    .header("host", "dar.localhost:28181")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert_eq!(
+            csp.split(';')
+                .map(str::trim)
+                .find(|directive| directive.starts_with("frame-src ")),
+            Some("frame-src 'none'")
+        );
+    }
+
+    #[tokio::test]
+    async fn web_preview_policy_uses_only_validated_final_url_origins() {
+        for (url, expected_origin) in [
+            ("http://localhost:5173/page", Some("http://localhost:5173")),
+            ("http://[::1]:5173/page", Some("http://[::1]:5173")),
+            (
+                "https://docs.example.org/page?theme=dark#details",
+                Some("https://docs.example.org"),
+            ),
+            ("ftp://files.example.org/page", None),
+            ("http://docs.example.org/page", None),
+            ("https://reader:example@docs.example.org/page", None),
+            ("https://reader@docs.example.org/page", None),
+        ] {
+            let (state, id) = preview_http_state(url, true, Config::default()).await;
+            let response = router(state)
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/test/apps/{id}"))
+                        .header("host", "127.0.0.1:28180")
+                        .header("referer", "http://127.0.0.1:28180/chat")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if let Some(origin) = expected_origin {
+                assert_eq!(response.status(), StatusCode::OK);
+                let body: serde_json::Value = serde_json::from_slice(
+                    &response.into_body().collect().await.unwrap().to_bytes(),
+                )
+                .unwrap();
+                assert_eq!(
+                    body["meta"]["ui"]["csp"]["frameDomains"],
+                    serde_json::json!([origin])
+                );
+            } else {
+                assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn artifact_view_bootstraps_without_an_external_mcp_catalog() {
         let (state, id, _) = artifact_http_state().await;
@@ -2965,7 +3362,10 @@ mod tests {
         let tools = provider.list_tools().await.unwrap();
         assert_eq!(
             tools,
-            serde_json::json!([{"name":"artifact_publish","server":"dar","resourceUri":"ui://dar/artifact-viewer","visibility":["model"]}])
+            serde_json::json!([
+                {"name":"artifact_publish","server":"dar","resourceUri":"ui://dar/artifact-viewer","visibility":["model"]},
+                {"name":"web_preview","server":"dar","resourceUri":"ui://dar/web-preview","visibility":["model"]}
+            ])
         );
         let uri = format!("dar-artifact://{}", metadata.id);
         let resource = provider.read_resource("dar", &uri).await.unwrap();

@@ -1,4 +1,4 @@
-//! Built-in, model-only artifact viewer and verified vault resources.
+//! Built-in, model-only artifact and web preview views, with verified vault resources.
 use anyhow::{Context, Result};
 use base64::Engine;
 use dar_extension_sdk::{
@@ -88,7 +88,9 @@ impl McpApps for ArtifactApp {
     fn list_tools(&self) -> BoxFuture<'_, Result<Value>> {
         Box::pin(async {
             Ok(json!([{"name":"artifact_publish", "server":"dar",
-                "resourceUri":"ui://dar/artifact-viewer", "visibility":["model"]}]))
+                "resourceUri":"ui://dar/artifact-viewer", "visibility":["model"]},
+                {"name":"web_preview", "server":"dar",
+                "resourceUri":"ui://dar/web-preview", "visibility":["model"]}]))
         })
     }
 
@@ -98,18 +100,26 @@ impl McpApps for ArtifactApp {
         uri: &'a str,
     ) -> BoxFuture<'a, Result<Value>> {
         Box::pin(async move {
-            anyhow::ensure!(
-                server == "dar" && uri == "ui://dar/artifact-viewer",
-                "unknown artifact viewer"
-            );
-            let html = include_str!("artifact-viewer.html")
-                .replace("/*__MARKED__*/", include_str!("vendor/marked.min.js"))
-                .replace("/*__DOMPURIFY__*/", include_str!("vendor/purify.min.js"))
-                .replace(
-                    "/*__ARTIFACT_DOCUMENT__*/",
-                    include_str!("artifact-document.js"),
-                );
-            Ok(json!({"html":html,"meta":{"ui":{"prefersBorder":true,"csp":resource_policy()}}}))
+            anyhow::ensure!(server == "dar", "unknown built-in view server");
+            let (html, csp) = if uri == "ui://dar/web-preview" {
+                (
+                    include_str!("web-preview.html").to_owned(),
+                    json!({
+                        "resourceDomains":[], "connectDomains":[], "frameDomains":[]
+                    }),
+                )
+            } else {
+                anyhow::ensure!(uri == "ui://dar/artifact-viewer", "unknown built-in view");
+                let html = include_str!("artifact-viewer.html")
+                    .replace("/*__MARKED__*/", include_str!("vendor/marked.min.js"))
+                    .replace("/*__DOMPURIFY__*/", include_str!("vendor/purify.min.js"))
+                    .replace(
+                        "/*__ARTIFACT_DOCUMENT__*/",
+                        include_str!("artifact-document.js"),
+                    );
+                (html, resource_policy())
+            };
+            Ok(json!({"html":html,"meta":{"ui":{"prefersBorder":true,"csp":csp}}}))
         })
     }
 

@@ -248,7 +248,15 @@ pub(super) async fn resource(
             .context("view loading timed out")??;
         let mut meta = resource["meta"].clone();
         meta["ui"]["permissions"] = json!({});
-        let (csp,approved) = policy(meta.pointer("/ui/csp"));
+        let (mut csp,mut approved) = policy(meta.pointer("/ui/csp"));
+        if record.server == "dar" && record.resource_uri == "ui://dar/web-preview" {
+            let preview = preview_url(&record, &state, &chat, &app)?;
+            if record.result["structuredContent"]["frameable"] == true {
+                let frame_origin = preview.origin().ascii_serialization();
+                csp = csp.replace("frame-src 'none';", &format!("frame-src {frame_origin};"));
+                approved["frameDomains"] = json!([frame_origin]);
+            }
+        }
         meta["ui"]["csp"] = approved;
         let ticket = uuid::Uuid::new_v4().simple().to_string();
         let mut sandbox_url = url::Url::parse(&format!("{app}/sandbox/{id}"))?;
@@ -273,13 +281,68 @@ pub(super) async fn resource(
     }
 }
 
+fn preview_url(record: &ResultRecord, state: &AppState, chat: &str, app: &str) -> Result<url::Url> {
+    let url = url::Url::parse(
+        record.result["structuredContent"]["finalUrl"]
+            .as_str()
+            .context("preview URL required")?,
+    )?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && (url.scheme() == "https"
+                || matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))),
+        "invalid preview URL"
+    );
+    let preview_origin = url.origin().ascii_serialization();
+    anyhow::ensure!(
+        preview_origin != chat
+            && preview_origin != app
+            && !state
+                .config
+                .apps
+                .sandbox_origins
+                .values()
+                .chain(state.config.apps.sandbox_origin.iter())
+                .any(|origin| origin == &preview_origin),
+        "cannot preview Dar chat or sandbox origins"
+    );
+    let loopback = url.host_str().is_some_and(|host| {
+        let host = host.trim_end_matches('.');
+        host == "localhost"
+            || host.ends_with(".localhost")
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    if loopback {
+        let port = url.port_or_known_default();
+        let dashboard_port = state
+            .start
+            .get()
+            .and_then(|start| start.host.http_addr())
+            .map(|addr| addr.port());
+        anyhow::ensure!(
+            port != dashboard_port && port != state.config.apps.bound_port.get().copied(),
+            "cannot preview Dar dashboard or sandbox listeners"
+        );
+    }
+    Ok(url)
+}
+
 pub(super) async fn download(
     Path((session, id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> Response {
     let outcome = async {
         let record = record(&state, &session, &id).await?;
-        anyhow::ensure!(record.server == "dar", "not an artifact view");
+        anyhow::ensure!(
+            record.server == "dar" && record.resource_uri != "ui://dar/web-preview",
+            "not an artifact view"
+        );
         let uri = record
             .result
             .pointer("/structuredContent/uri")
@@ -338,7 +401,10 @@ pub(super) async fn open(
         let chat = chat_origin(&headers)?;
         let record = record(&state, &session, &id).await?;
         server = record.server.clone();
-        anyhow::ensure!(record.server == "dar", "not an artifact view");
+        anyhow::ensure!(
+            record.server == "dar" && record.resource_uri != "ui://dar/web-preview",
+            "not an artifact view"
+        );
         let artifact = &record.result["structuredContent"];
         anyhow::ensure!(
             super::artifacts::open_media_type(
@@ -507,6 +573,7 @@ pub(super) async fn rpc(
             "resources/read" => {
                 let uri = params["uri"].as_str().context("resource URI required")?;
                 if record.server == "dar" {
+                    anyhow::ensure!(record.resource_uri != "ui://dar/web-preview", "web previews cannot read resources");
                     anyhow::ensure!(record.result.pointer("/structuredContent/uri").and_then(Value::as_str) == Some(uri), "artifact is not part of this view result");
                 }
                 catalog(&state, &record.server)?.read_resource(&record.server, uri).await
@@ -715,7 +782,10 @@ async fn open_content(
 ) -> Response {
     let outcome = async {
         let view = prepared(&state, &id, &query, &headers).await?;
-        anyhow::ensure!(view.record.server == "dar", "not an artifact view");
+        anyhow::ensure!(
+            view.record.server == "dar" && view.record.resource_uri != "ui://dar/web-preview",
+            "not an artifact view"
+        );
         let uri = view.record.result.pointer("/structuredContent/uri")
             .and_then(Value::as_str).context("artifact URI unavailable")?;
         let store = state.start.get().context("chat has not started")?.host.services
@@ -820,7 +890,12 @@ pub(super) fn capture_result(
             mcp_apps::read_result(root, &id, call.name.as_deref().unwrap_or(""))
         {
             let mut descriptor = json!({"recordId":id,"tool":record.tool,"piToolName":record.pi_tool_name,"server":record.server,"resourceUri":record.resource_uri,"args":record.args,"callId":event.id});
-            if record.server == "dar" {
+            if record.server == "dar" && record.resource_uri == "ui://dar/web-preview" {
+                descriptor["previewUrl"] = record.result["structuredContent"]["finalUrl"].clone();
+                descriptor["previewTitle"] = record.result["structuredContent"]["title"].clone();
+                descriptor["previewFrameable"] =
+                    record.result["structuredContent"]["frameable"].clone();
+            } else if record.server == "dar" {
                 descriptor["artifactFilename"] =
                     record.result["structuredContent"]["filename"].clone();
                 descriptor["artifactTitle"] = record.result["structuredContent"]["title"].clone();
