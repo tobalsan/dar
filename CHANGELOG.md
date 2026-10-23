@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Web chat now searches titles and messages with a keyboard-accessible search palette, shows the open chat title in the header, and displays context usage in a ring beside the composer.
 - Web chat can show local dev servers and HTTPS pages with `web_preview`, including live side panels, reload, same-URL updates, and link cards when headers refuse framing or the agent cannot reach the page.
 - Pi chats, workers, and scheduler jobs now load upstream MCP tools on demand through `tool_search`, keeping Dar host tools direct and reducing fixed context. The bridge summarizes available upstream servers for all backends.
 - Web chat artifact views now render PDFs and Markdown Mermaid diagrams, open supported files in a sandbox browser tab, and automatically expand live publishes on wide screens, with type/size headers and transcript cards. Artifact views can no longer post messages or update model context.

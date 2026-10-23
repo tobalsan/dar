@@ -113,8 +113,11 @@ chat; pending images show as thumbnails. Messages sent while a turn is
 running are queued by the backend. Slash commands: `/stop` aborts the running
 turn, `/compact [instructions]` compacts the session context natively on every
 backend (codex ignores the instructions), `/new` starts a fresh chat.
-The header shows a token meter fed by backend-reported context usage; above
-70% of the context window a hint suggests `/compact`.
+The header shows the open conversation's title, or **New chat** until it has
+one. A context ring beside the composer shows backend-reported usage: hover,
+focus, or tap it for token counts and the percentage. It turns amber at 70%
+and red at 90%; from 70% a hint suggests `/compact`. Backends without a known
+context window show an empty ring with the token count only.
 
 **Transcript.** Assistant replies render as GitHub-flavored Markdown (tables,
 code blocks, lists, blockquotes; raw HTML is escaped and output sanitized,
@@ -123,7 +126,14 @@ showing a one-line argument summary. Messages carry timestamps; a stopped turn
 is marked **Interrupted**.
 
 **Sidebar.** Lists saved sessions grouped by recency (Today, Yesterday,
-Earlier this week/month, then by month) with relative times and a search box.
+Earlier this week/month, then by month) with relative times. The search icon
+beside the sidebar toggle, or **Cmd+K** (**Ctrl+K** on Windows and Linux),
+opens a search palette while the Chat tab is visible. Search finds all your
+words in any order across titles and user or assistant messages, including
+archived conversations. Up to 50 results show title matches first, then
+content matches with snippets, newest first in each group. Use the arrow
+keys and Enter, or click a result, to open it; Escape or a click outside closes
+the palette without changing your draft.
 Clicking a session resumes it live: its history is replayed and the next
 message continues that backend session. Hover a row to rename, archive, or
 delete it (delete is permanent and removes the backend session file).

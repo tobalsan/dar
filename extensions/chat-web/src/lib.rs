@@ -222,7 +222,7 @@ impl DashboardTab for ChatTab {
     }
     fn render(&self) -> Result<String> {
         Ok(format!(
-            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"{}><aside class="chat-sidebar" aria-label="Conversations"><div class="chat-sidebar-head"><strong>Chats</strong><button type="button" id="chat-sidebar-toggle" data-sidebar-toggle class="chat-icon" aria-label="Toggle sidebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button></div><input id="chat-search" class="chat-search" type="search" placeholder="Search conversations" aria-label="Search conversations"><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><header class="chat-header"><button type="button" data-sidebar-toggle class="chat-icon chat-mobile-sidebar-toggle" aria-label="Open conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button><div>{}<span class="chat-title"><strong>{}</strong>{}</span><span id="chat-token-meter" class="chat-meter"></span></div><button type="button" class="chat-new" onclick="window.__chatWeb&amp;&amp;window.__chatWeb.newChat()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button></header><div class="chat-dropzone" id="chat-dropzone" hidden>Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite"></div><div class="chat-hero" id="chat-hero">{}<div class="chat-hero-line" id="chat-hero-line"></div></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips"></div><div class="chat-cap-hint" id="chat-cap-hint"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.4 11.1l-9.2 9.1a6 6 0 01-8.4-8.4L13 2.6a4 4 0 015.6 5.6l-9.2 9.2a2 2 0 01-2.8-2.8l8.5-8.5"/></svg></button><input type="file" id="chat-attachments" multiple hidden><div id="chat-slash-menu" class="chat-slash-menu" role="listbox" aria-label="Commands" hidden></div><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message {}" aria-label="Message" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="chat-slash-menu"></textarea><button type="button" id="chat-abort" class="chat-icon" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon" aria-label="Send" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div><div id="chat-context-warning" class="chat-context-warning" hidden>Context is filling up — send /compact to summarize.</div></form></div></section><script>{}</script><script>{}</script><script>{}</script><script>{}</script>"#,
+            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"{}><aside class="chat-sidebar" aria-label="Conversations"><div class="chat-sidebar-head"><strong>Chats</strong><div class="chat-sidebar-controls"><button type="button" id="chat-search-open" class="chat-icon" aria-label="Search conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></button><button type="button" id="chat-sidebar-toggle" data-sidebar-toggle class="chat-icon" aria-label="Toggle sidebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button></div></div><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><header class="chat-header"><button type="button" data-sidebar-toggle class="chat-icon chat-mobile-sidebar-toggle" aria-label="Open conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button><div>{}<span class="chat-title"><strong>{}</strong>{}</span><span id="chat-session-title" class="chat-session-title" aria-label="Current conversation" data-untitled="true">New chat</span></div><button type="button" class="chat-new" onclick="window.__chatWeb&amp;&amp;window.__chatWeb.newChat()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button></header><div class="chat-dropzone" id="chat-dropzone" hidden>Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite"></div><div class="chat-hero" id="chat-hero">{}<div class="chat-hero-line" id="chat-hero-line"></div></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips"></div><div class="chat-cap-hint" id="chat-cap-hint"></div><div class="chat-compose-line"><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.4 11.1l-9.2 9.1a6 6 0 01-8.4-8.4L13 2.6a4 4 0 015.6 5.6l-9.2 9.2a2 2 0 01-2.8-2.8l8.5-8.5"/></svg></button><input type="file" id="chat-attachments" multiple hidden><div id="chat-slash-menu" class="chat-slash-menu" role="listbox" aria-label="Commands" hidden></div><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message {}" aria-label="Message" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="chat-slash-menu"></textarea><button type="button" id="chat-abort" class="chat-icon" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon" aria-label="Send" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div><div class="chat-context"><button type="button" id="chat-context-ring" class="chat-context-ring" aria-describedby="chat-context-tooltip" hidden><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke-width="2.5" aria-hidden="true"><circle class="chat-context-track" cx="12" cy="12" r="9"/><circle class="chat-context-fill" cx="12" cy="12" r="9" pathLength="100"/></svg></button><div id="chat-context-tooltip" class="chat-context-tooltip" role="tooltip" hidden></div></div></div><div id="chat-context-warning" class="chat-context-warning" hidden>Context is filling up — send /compact to summarize.</div></form></div><div id="chat-search-palette" class="chat-search-palette" role="dialog" aria-modal="true" aria-label="Search conversations" hidden><div class="chat-search-surface"><input type="search" id="chat-search-input" aria-label="Search titles and messages" placeholder="Search titles and message text of your chats" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="chat-search-results" autocomplete="off"><div id="chat-search-results" role="listbox" aria-label="Search results"></div><div id="chat-search-status" role="status" aria-live="polite"></div></div></div></section><script>{}</script><script>{}</script><script>{}</script><script>{}</script>"#,
             include_str!("chat.css"),
             escape_html_attr(&self.agent_name),
             avatar_icon_attr(self.agent_avatar.as_ref()),
@@ -669,6 +669,8 @@ struct SessionListEntry {
     title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     snippet: Option<String>,
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
+    match_kind: Option<chat::archive::SessionMatchKind>,
     start_time: Option<String>,
     modified_ms: u64,
     archived: bool,
@@ -775,21 +777,47 @@ async fn session_index(
     let meta = state.meta.lock().await.clone();
     tokio::task::spawn_blocking(move || {
         let query = query.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
-        let mut hits: HashMap<_, _> = query
-            .map(|q| chat::archive::search_sessions(&dir, q))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|hit| (hit.session_id, hit.snippet))
-            .collect();
-        let candidates = if query.is_some() {
-            chat::archive::list_all(&dir)
+        let candidates: Vec<_> = if let Some(query) = query {
+            let mut paths: Vec<_> = fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "jsonl")
+                })
+                .collect();
+            paths.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+            let mut seen = HashSet::new();
+            paths
+                .into_iter()
+                .filter_map(|path| {
+                    let (session, messages) = chat::archive::read_session_for_search(&path)?;
+                    if !valid_backend_id(&session.id) || !seen.insert(session.id.clone()) {
+                        return None;
+                    }
+                    let label = meta
+                        .get(&session.id)
+                        .and_then(|item| item.title.as_deref())
+                        .filter(|title| !title.trim().is_empty())
+                        .unwrap_or(&session.label);
+                    let matched = chat::archive::match_session(label, &messages, query)?;
+                    Some((session, path, Some(matched)))
+                })
+                .collect()
         } else {
             chat::archive::list(&dir)
+                .into_iter()
+                .filter_map(|session| {
+                    let path = chat::archive::session_file_by_id(&dir, &session.id)?;
+                    Some((session, path, None))
+                })
+                .collect()
         };
         let mut sessions: Vec<_> = candidates
             .into_iter()
-            .filter_map(|session| {
-                let path = chat::archive::session_file_by_id(&dir, &session.id)?;
+            .filter_map(|(session, path, matched)| {
                 let modified_ms = path
                     .metadata()
                     .ok()?
@@ -801,12 +829,8 @@ async fn session_index(
                 let item_meta = meta.get(&session.id).cloned().unwrap_or_default();
                 let title = item_meta.title.filter(|title| !title.trim().is_empty());
                 let label = title.clone().unwrap_or(session.label);
-                let snippet = hits.remove(&session.id);
-                if query.is_some_and(|q| !label.to_lowercase().contains(&q.to_lowercase()))
-                    && snippet.is_none()
-                {
-                    return None;
-                }
+                let snippet = matched.as_ref().and_then(|matched| matched.snippet.clone());
+                let match_kind = matched.map(|matched| matched.kind);
                 Some(SessionListEntry {
                     connected: live.get(&session.id).is_some_and(|l| l.0),
                     busy: live.get(&session.id).is_some_and(|l| l.1),
@@ -818,13 +842,22 @@ async fn session_index(
                     id: session.id,
                     title,
                     snippet,
+                    match_kind,
                     start_time: session.start_time,
                     modified_ms,
                     archived: item_meta.archived.unwrap_or(false),
                 })
             })
             .collect();
-        sessions.sort_by_key(|session| std::cmp::Reverse(session.modified_ms));
+        sessions.sort_by_key(|session| {
+            (
+                session.match_kind != Some(chat::archive::SessionMatchKind::Title),
+                std::cmp::Reverse(session.modified_ms),
+            )
+        });
+        if query.is_some() {
+            sessions.truncate(chat::archive::LIST_LIMIT);
+        }
         Json(sessions)
     })
     .await
@@ -6959,6 +6992,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn palette_query_caps_results_after_title_then_newest_ordering() {
+        let state = slot_state(test_root(), HashMap::new());
+        for number in 0..60 {
+            let id = format!("item-{number:02}");
+            write_fake_archive(&state.root, &id);
+            let path = state.root.join(format!(
+                "data/chat/sessions/2026-01-01T00-00-00Z_{id}.jsonl"
+            ));
+            writeln!(
+                OpenOptions::new().append(true).open(&path).unwrap(),
+                "{}",
+                serde_json::json!({"message":{"role":"assistant","content":"common search"}})
+            )
+            .unwrap();
+            fs::File::open(&path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(number + 1))
+                .unwrap();
+            if number < 2 {
+                state.meta.lock().await.insert(
+                    id,
+                    SessionMeta {
+                        title: Some("Common Search project".into()),
+                        archived: Some(true),
+                    },
+                );
+            }
+        }
+        let result = queried_sessions(Arc::clone(&state), "/sessions?q=SEARCH%20common").await;
+        let rows = result.as_array().unwrap();
+        assert_eq!(rows.len(), 50);
+        assert_eq!(rows[0]["id"], "item-01");
+        assert_eq!(rows[1]["id"], "item-00");
+        assert_eq!(rows[0]["match"], "title");
+        assert_eq!(rows[1]["match"], "title");
+        assert_eq!(rows[0]["archived"], true);
+        assert_eq!(rows[2]["id"], "item-59");
+        assert_eq!(rows[3]["id"], "item-58");
+        assert_eq!(rows[49]["id"], "item-12");
+        assert_eq!(rows[2]["match"], "content");
+        assert_eq!(rows[2]["snippet"], "common search");
+        let plain = queried_sessions(state, "/sessions?q=%20%09").await;
+        assert!(plain
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row.get("match").is_none()));
+    }
+
+    #[tokio::test]
+    async fn palette_query_matches_words_across_messages_but_ignores_tools_and_thinking() {
+        let state = slot_state(test_root(), HashMap::new());
+        write_fake_archive(&state.root, "mixed");
+        let path = state
+            .root
+            .join("data/chat/sessions/2026-01-01T00-00-00Z_mixed.jsonl");
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"message":{"role":"user","content":"PgBouncer request"}})
+        )
+        .unwrap();
+        writeln!(file, "not json").unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"message":{"role":"assistant","content":[
+                {"type":"thinking","text":"thinking-secret"},
+                {"type":"toolCall","text":"tool-call-secret"},
+                {"type":"text","text":"Transaction pooling answer"}
+            ]}})
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"message":{"role":"toolResult","content":"tool-output-secret"}})
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"message":{"role":"system","content":"system-secret"}})
+        )
+        .unwrap();
+        writeln!(file, "{{unfinished").unwrap();
+        let result = queried_sessions(Arc::clone(&state), "/sessions?q=POOLING%20pgbouncer").await;
+        assert_eq!(result.as_array().unwrap().len(), 1);
+        assert_eq!(result[0]["id"], "mixed");
+        assert_eq!(result[0]["match"], "content");
+        assert_eq!(result[0]["snippet"], "PgBouncer request");
+        for word in [
+            "thinking-secret",
+            "tool-call-secret",
+            "tool-output-secret",
+            "system-secret",
+            "missing",
+        ] {
+            assert_eq!(
+                queried_sessions(Arc::clone(&state), &format!("/sessions?q={word}")).await,
+                serde_json::json!([])
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn sidebar_query_finds_decoded_content_and_omits_nonmatches() {
         let state = slot_state(test_root(), HashMap::new());
         write_fake_archive(&state.root, "body-only");
@@ -7043,17 +7183,19 @@ mod tests {
         }
         let result = queried_sessions(Arc::clone(&state), "/sessions?q=OrChId").await;
         assert_eq!(result.as_array().unwrap().len(), 2);
-        assert_eq!(result[0]["id"], "00-body");
-        assert_eq!(result[0]["label"], "Renamed body");
-        assert_eq!(result[0]["snippet"], "hidden orchid");
-        assert_eq!(result[0]["archived"], true);
-        assert_eq!(result[0]["connected"], true);
-        assert_eq!(result[0]["busy"], true);
-        assert_eq!(result[0]["slots"], serde_json::json!(["client-slot"]));
-        assert_eq!(result[1]["id"], "01-title");
-        assert_eq!(result[1]["title"], "Orchid planning");
-        assert!(result[1].get("snippet").is_none());
-        assert_eq!(result[1]["archived"], false);
+        assert_eq!(result[0]["id"], "01-title");
+        assert_eq!(result[0]["title"], "Orchid planning");
+        assert_eq!(result[0]["match"], "title");
+        assert!(result[0].get("snippet").is_none());
+        assert_eq!(result[0]["archived"], false);
+        assert_eq!(result[1]["id"], "00-body");
+        assert_eq!(result[1]["label"], "Renamed body");
+        assert_eq!(result[1]["match"], "content");
+        assert_eq!(result[1]["snippet"], "hidden orchid");
+        assert_eq!(result[1]["archived"], true);
+        assert_eq!(result[1]["connected"], true);
+        assert_eq!(result[1]["busy"], true);
+        assert_eq!(result[1]["slots"], serde_json::json!(["client-slot"]));
     }
 
     async fn wait_resolved(slot: &Session) -> String {
@@ -7745,7 +7887,7 @@ mod tests {
     #[test]
     fn browser_renderer_handles_the_representative_event_sequence() {
         let renderer = format!("{}/src/renderer.js", env!("CARGO_MANIFEST_DIR"));
-        let script = r#"const r=require(process.argv[1]);let b=[];for(const e of [{type:'thinking',text:'plan '},{type:'thinking',text:'it'},{type:'delta',text:'* **answer**\n```txt\n**code**\n```'},{type:'tool_call',id:'x',name:'shell',args:'{}'},{type:'tool_output',id:'x',text:'partial'},{type:'tool_output',id:'x',text:'failed',is_error:true,done:true},{type:'error',error:'warning'},{type:'aborted',error:'aborted'},{type:'user',text:'run `x --y` now'}])b=r.reduce(b,e);let h=r.html(b);if(b.length!==6||b[0].text!=='plan it'||(h.match(/data-tool-id=/g)||[]).length!==1||!h.includes('failed')||!h.includes('is-error is-done')||!h.includes('<ul><li><strong>answer</strong></li></ul>')||!h.includes('<pre><code data-language="txt">**code**\n</code></pre>')||!h.includes('warning')||!h.includes('Interrupted')||!h.includes('<code>x --y</code>')||r.usageText({tokens_used:12,context_window:100})!=='12 / 100 tokens'||r.usageText({tokens_used:12})!=='12 tokens')process.exit(1);"#;
+        let script = r#"const r=require(process.argv[1]);let b=[];for(const e of [{type:'thinking',text:'plan '},{type:'thinking',text:'it'},{type:'delta',text:'* **answer**\n```txt\n**code**\n```'},{type:'tool_call',id:'x',name:'shell',args:'{}'},{type:'tool_output',id:'x',text:'partial'},{type:'tool_output',id:'x',text:'failed',is_error:true,done:true},{type:'error',error:'warning'},{type:'aborted',error:'aborted'},{type:'user',text:'run `x --y` now'}])b=r.reduce(b,e);let h=r.html(b);if(b.length!==6||b[0].text!=='plan it'||(h.match(/data-tool-id=/g)||[]).length!==1||!h.includes('failed')||!h.includes('is-error is-done')||!h.includes('<ul><li><strong>answer</strong></li></ul>')||!h.includes('<pre><code data-language="txt">**code**\n</code></pre>')||!h.includes('warning')||!h.includes('Interrupted')||!h.includes('<code>x --y</code>')||r.usageText({tokens_used:12,context_window:100})!=='12 / 100 tokens · 12%'||r.usageText({tokens_used:12})!=='12 tokens')process.exit(1);"#;
         let status = std::process::Command::new("node")
             .args(["-e", script, &renderer])
             .status()
