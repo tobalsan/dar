@@ -7,6 +7,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # dar-cli tests run `cargo build --release` on generated agent crates. The
+  # release profile (thin LTO, one codegen unit) made each of those builds take
+  # about 8 minutes. CI needs a working binary, not a fast one, so it builds
+  # release with dev-like settings. Agent binaries built outside CI do not change.
+  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "256"
+  CARGO_PROFILE_RELEASE_OPT_LEVEL: "0"
 
 jobs:
   workspace:

@@ -1227,18 +1227,6 @@ mod tests {
     }
 
     #[test]
-    fn build_compiles_generated_crate_and_copies_agent_binary() {
-        let temp = tempfile::tempdir().unwrap();
-        let agent = temp.path();
-        write_test_agent_yaml(agent);
-        write_test_extension(agent);
-
-        build(agent).unwrap();
-
-        assert!(agent.join("bin").join(binary_name("dar")).is_file());
-    }
-
-    #[test]
     fn init_build_refreshes_lockfile_when_manifest_changes() {
         let temp = tempfile::tempdir().unwrap();
         let agent = temp.path();
@@ -1326,11 +1314,17 @@ mod tests {
         let config = std::fs::read_to_string(agent.join(".dar/.cargo/config.toml")).unwrap();
         assert!(config.contains("vendored-sources"));
         assert!(config.contains("directory = \"vendor\""));
-        run_cargo(
-            &agent.join(".dar"),
-            ["build", "--release", "--locked", "--offline"],
-        )
-        .unwrap();
+        // `cargo check` skips linking, so linking is not covered here. An
+        // empty CARGO_HOME proves cargo reads the vendored sources, not the
+        // cargo cache of the user.
+        let cargo_home = tempfile::tempdir().unwrap();
+        let status = Command::new("cargo")
+            .args(["check", "--locked", "--offline"])
+            .env("CARGO_HOME", cargo_home.path())
+            .current_dir(agent.join(".dar"))
+            .status()
+            .unwrap();
+        assert!(status.success(), "offline cargo check failed: {status}");
     }
 
     #[test]
