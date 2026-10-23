@@ -79,6 +79,9 @@ struct TurnQueue {
     pending: VecDeque<Turn>,
     in_flight: HashSet<(String, String)>,
     pending_interrupt: Option<u64>,
+    /// JSON-RPC id of the `turn/start` or `thread/compact/start` request whose
+    /// response has not arrived yet. A JSON-RPC error for it settles the turn.
+    active_request: Option<u64>,
 }
 
 struct Turn {
@@ -223,6 +226,7 @@ impl CodexChatSession {
                 return Ok(());
             }
             queue.busy = true;
+            queue.active_request = Some(turn.request_id);
         }
         if let Err(error) = write_turn(
             &self.stdin,
@@ -496,6 +500,28 @@ async fn handle_turn_accounting(
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return Ok(());
     };
+    if value.get("method").is_none() && value.get("error").is_some() {
+        let rejected = {
+            let mut queue = queue.lock().await;
+            let matches = value.get("id").and_then(Value::as_u64) == queue.active_request
+                && queue.active_request.is_some();
+            if matches {
+                queue.active_request = None;
+            }
+            matches
+        };
+        if rejected {
+            let error = error_message(value.get("error").unwrap_or(&value));
+            tx.send(ChatEvent::TurnFinished {
+                ok: false,
+                error: Some(error),
+            })
+            .await?;
+            abort_queued_turns(queue, tx).await;
+            queue.lock().await.busy = false;
+        }
+        return Ok(());
+    }
     match value.get("method").and_then(Value::as_str) {
         Some("turn/started") => {
             if let Some(key) = turn_key(&value) {
@@ -895,6 +921,7 @@ async fn send_next_queued_turn(
         }
     };
     if let Some(turn) = next {
+        queue.lock().await.active_request = Some(turn.request_id);
         if write_turn(
             stdin,
             turn.request_id,
@@ -1369,6 +1396,64 @@ done
             1,
             "{methods}"
         );
+        Box::new(session).close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rejected_compact_request_finishes_turn_and_frees_queue() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_script(
+            temp.path(),
+            r#"set -e
+while IFS= read -r line; do
+    id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/' | grep -E '^[0-9]+$' || true)
+    method=$(printf '%s' "$line" | grep -o '"method":"[^"]*"' | head -1 | sed 's/"method":"//;s/"//')
+    case "$method" in
+        initialize)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+            ;;
+        thread/start)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"thread":{"id":"main"}}}\n' "$id"
+            ;;
+        thread/compact/start)
+            printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"nothing to compact"}}\n' "$id"
+            ;;
+        turn/start)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+            printf '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"main","turn":{"id":"t-1"}}}\n'
+            printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"main","turn":{"id":"t-1","status":"completed"}}}\n'
+            ;;
+    esac
+done
+"#,
+        );
+        let sessions = temp.path().join("data").join("tui").join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let params =
+            ChatSessionParams::builder(script.to_str().unwrap(), temp.path(), &sessions).build();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let mut session = CodexChatSession::spawn(&params, tx).await.unwrap();
+
+        session.send_turn("/compact".to_string()).await.unwrap();
+        let mut finishes = Vec::new();
+        while finishes.is_empty() {
+            if let ChatEvent::TurnFinished { ok, error } = next_event(&mut rx).await {
+                finishes.push((ok, error));
+            }
+        }
+        assert_eq!(
+            finishes,
+            vec![(false, Some("nothing to compact".to_string()))]
+        );
+
+        session.send_turn("ping".to_string()).await.unwrap();
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::TurnFinished {
+                ok: true,
+                error: None
+            }
+        ));
         Box::new(session).close().await.unwrap();
     }
 
