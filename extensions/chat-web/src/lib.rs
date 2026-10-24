@@ -7383,6 +7383,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_replays_context_usage_from_pi_archive() {
+        let root = test_root();
+        let dir = root.join("data/chat/sessions");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!("2026-01-01T00-00-00Z_{ARCHIVE_ID}.jsonl")),
+            format!("{{\"type\":\"session\",\"id\":\"{ARCHIVE_ID}\"}}\n{{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"model\":\"claude-opus-5-5\",\"usage\":{{\"input\":4,\"output\":465,\"cacheRead\":0,\"cacheWrite\":28651}},\"content\":[{{\"type\":\"text\",\"text\":\"hi\"}}]}}}}\n"),
+        )
+        .unwrap();
+        let state = slot_state(root, HashMap::new());
+        let app = router(Arc::clone(&state));
+        let body = Body::from(format!("{{\"id\":\"{ARCHIVE_ID}\"}}"));
+        let slot = slot_of(app.oneshot(post("/main/resume", body)).await.unwrap()).await;
+        assert_eq!(slot, ARCHIVE_ID);
+        let opened = state.session(ARCHIVE_ID).await.unwrap();
+        let history = opened.history.lock().unwrap();
+        let usage = history.iter().find(|e| e.kind == "context_usage").unwrap();
+        assert_eq!(usage.tokens_used, Some(29120));
+        assert_eq!(usage.context_window, Some(200_000));
+        assert!(usage.historical);
+    }
+
+    #[tokio::test]
     async fn resume_does_not_touch_busy_slot_and_is_idempotent() {
         let root = test_root();
         write_archive(&root);

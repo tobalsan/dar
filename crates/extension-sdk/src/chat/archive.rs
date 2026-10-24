@@ -567,8 +567,11 @@ fn normalize_events(value: Value) -> Vec<Value> {
         }
         return vec![event];
     }
+    let usage = (role == "assistant")
+        .then(|| context_usage_event(message, &timestamp))
+        .flatten();
     let Some(content) = message.get("content") else {
-        return vec![];
+        return usage.into_iter().collect();
     };
     if let Some(text) = content.as_str() {
         let mut events = match role {
@@ -584,10 +587,11 @@ fn normalize_events(value: Value) -> Vec<Value> {
                     .insert("timestamp".into(), timestamp.clone());
             }
         }
+        events.extend(usage);
         return events;
     }
     let Some(parts) = content.as_array() else {
-        return vec![];
+        return usage.into_iter().collect();
     };
     let mut events = Vec::new();
     for part in parts {
@@ -612,7 +616,39 @@ fn normalize_events(value: Value) -> Vec<Value> {
             }
         }
     }
+    events.extend(usage);
     events
+}
+
+/// A `context_usage` event from a pi assistant message's `usage` block, using
+/// the same formula as the live chat-pi mapping. `None` for errored messages,
+/// a missing block, or zero tokens.
+fn context_usage_event(message: &Value, timestamp: &Option<Value>) -> Option<Value> {
+    if message
+        .get("errorMessage")
+        .and_then(Value::as_str)
+        .is_some_and(|error| !error.is_empty())
+    {
+        return None;
+    }
+    let usage = message.get("usage")?;
+    let field = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let tokens_used = field("input") + field("cacheRead") + field("cacheWrite") + field("output");
+    if tokens_used == 0 {
+        return None;
+    }
+    let mut event = serde_json::json!({"type":"context_usage","tokens_used":tokens_used});
+    if let Some(window) = message
+        .get("model")
+        .and_then(Value::as_str)
+        .and_then(super::context_window::context_window_for_model)
+    {
+        event["context_window"] = window.into();
+    }
+    if let Some(timestamp) = timestamp {
+        event["timestamp"] = timestamp.clone();
+    }
+    Some(event)
 }
 
 /// Events for an OpenAI chat-completions `tool` message (a tool result) or an
@@ -1950,6 +1986,70 @@ not json
         assert_eq!(events[2]["text"], "a.txt\n");
         assert_eq!(events[2]["is_error"], true);
         assert_eq!(events[2]["timestamp"], 5);
+    }
+
+    fn usage_events(line: &str) -> Vec<Value> {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "2024-06-15T12:30:00Z_u.jsonl",
+            &format!("{{\"type\":\"session\",\"id\":\"u\"}}\n{line}\n"),
+        );
+        read_events(temp.path(), "u", 0, READ_MAX).unwrap().events
+    }
+
+    #[test]
+    fn assistant_usage_yields_context_usage_after_message_events() {
+        let events = usage_events(
+            r#"{"type":"message","message":{"role":"assistant","model":"claude-opus-5-5","usage":{"input":4,"output":465,"cacheRead":0,"cacheWrite":28651},"content":[{"type":"text","text":"hi"}],"timestamp":7}}"#,
+        );
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["type"], "delta");
+        assert_eq!(events[1]["type"], "context_usage");
+        assert_eq!(events[1]["tokens_used"], 29120);
+        assert_eq!(events[1]["context_window"], 200_000);
+        assert_eq!(events[1]["timestamp"], 7);
+    }
+
+    #[test]
+    fn unknown_model_usage_has_no_window() {
+        let events = usage_events(
+            r#"{"type":"message","message":{"role":"assistant","model":"mystery","usage":{"input":10,"output":5},"content":"hi"}}"#,
+        );
+        assert_eq!(events[1]["tokens_used"], 15);
+        assert!(events[1].get("context_window").is_none());
+    }
+
+    #[test]
+    fn zero_usage_error_and_user_messages_yield_no_usage_event() {
+        for line in [
+            r#"{"type":"message","message":{"role":"assistant","model":"claude-opus-5-5","usage":{"input":0,"output":0},"content":"hi"}}"#,
+            r#"{"type":"message","message":{"role":"assistant","model":"claude-opus-5-5","errorMessage":"boom","usage":{"input":9,"output":1},"content":"hi"}}"#,
+            r#"{"type":"message","message":{"role":"user","usage":{"input":9,"output":1},"content":"hi"}}"#,
+        ] {
+            let events = usage_events(line);
+            assert!(
+                events.iter().all(|e| e["type"] != "context_usage"),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_events_pages_count_usage_events() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "2024-06-15T12:30:00Z_p.jsonl",
+            "{\"type\":\"session\",\"id\":\"p\"}\n{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input\":3},\"content\":\"a\"}}\n{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"b\"}}\n",
+        );
+        let first = read_events(temp.path(), "p", 0, 1).unwrap();
+        assert_eq!(first.next_offset, Some(1));
+        let second = read_events(temp.path(), "p", 1, 1).unwrap();
+        assert_eq!(second.events[0]["type"], "context_usage");
+        assert_eq!(second.next_offset, Some(2));
+        let third = read_events(temp.path(), "p", 2, 1).unwrap();
+        assert_eq!(third.events[0]["type"], "user");
     }
 
     const BUILTIN_TRANSCRIPT: &str = concat!(

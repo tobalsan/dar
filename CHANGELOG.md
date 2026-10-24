@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- The web chat context ring now shows for resumed chats after a page reload or agent restart.
 - Added an opt-in `reflect` option in `agent.yaml` (`reflect: true`). It adds a self-improvement section to the system context, so the agent saves lessons to skills and `memory.md`. It reaches issue runs, chat, TUI, and scheduler jobs.
 
 - Dashboard MCP tab: a public HTTP MCP server now shows as "public" and has no Connect button. The tab no longer offers an OAuth login that fails for these servers.

@@ -28,6 +28,8 @@ pub mod deliver {
 
 pub mod chat {
     pub mod archive;
+    pub mod context_window;
+    pub use context_window::context_window_for_model;
     use std::path::Path;
 
     use host_api::StartCtx;
