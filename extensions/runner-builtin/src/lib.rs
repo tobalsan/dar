@@ -547,6 +547,7 @@ async fn spawn_builtin(p: SpawnParams<'_>) -> Result<RunnerHandle> {
     let (kill_tx, mut kill_rx) = oneshot::channel();
     let run = BuiltinRun {
         prompt: p.prompt.clone(),
+        system_prompt: p.system_prompt.clone(),
         model: p.model.clone(),
         provider: p.provider.clone(),
         max_tool_calls: p.max_tool_calls,
@@ -586,6 +587,7 @@ async fn spawn_builtin(p: SpawnParams<'_>) -> Result<RunnerHandle> {
 
 struct BuiltinRun {
     prompt: String,
+    system_prompt: Option<String>,
     model: Option<String>,
     provider: Option<String>,
     max_tool_calls: Option<u32>,
@@ -607,7 +609,11 @@ async fn run_openai_compatible(
     let (base_url, api_key) = provider_endpoint(&p.agent_root, provider)?;
     let model = p.model.as_deref().unwrap_or("openai/gpt-4o-mini");
     let client = reqwest::Client::new();
-    let mut messages = vec![serde_json::json!({"role": "user", "content": p.prompt})];
+    let mut messages = Vec::new();
+    if let Some(system) = p.system_prompt.filter(|system| !system.is_empty()) {
+        messages.push(serde_json::json!({"role": "system", "content": system}));
+    }
+    messages.push(serde_json::json!({"role": "user", "content": p.prompt}));
     let mut bridge = match p.host_tool_bridge {
         Some(bridge) => Some(McpBridgeClient::spawn(bridge).await?),
         None => None,

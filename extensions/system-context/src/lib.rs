@@ -44,6 +44,7 @@ impl Extension for SystemContextExtension {
 
     fn start<'a>(&'a self, ctx: StartCtx) -> host_api::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            extension_sdk::environment::initialize();
             let root = ctx.paths.root();
             let context = resolver::resolve_for(root);
             ctx.host

@@ -127,6 +127,84 @@ fn fixture(url: &str) -> Fixture {
     }
 }
 
+struct RunEvents;
+
+impl cap_runner::RunnerEventSink for RunEvents {
+    fn push(&self, _line: String) {}
+}
+
+impl cap_runner::RunnerEventStore for RunEvents {
+    fn insert_event(
+        &self,
+        _run_id: Option<&str>,
+        _issue_identifier: &str,
+        _kind: &'static str,
+        _payload: &str,
+        _ts: chrono::DateTime<chrono::Utc>,
+    ) {
+    }
+}
+
+#[tokio::test]
+async fn builtin_runner_preserves_system_identity_and_user_payload_on_wire() {
+    use cap_runner::{ExitKind, Runner, SpawnParams};
+
+    const IDENTITY: &str = "You are Iris.\n\n[ENVIRONMENT]\ninterface: scheduler\nhost: example.local\nos_user: example\n[END ENVIRONMENT]";
+    let (url, requests) = spawn_stub(vec![
+        text_reply("done", None),
+        text_reply("done", None),
+        text_reply("done", None),
+    ])
+    .await;
+    let fx = fixture(&url);
+    let workspaces = fx.root.join("workspaces");
+    let workspace = workspaces.join("job-1");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    for system_prompt in [Some(IDENTITY.to_string()), None, Some(String::new())] {
+        let params = SpawnParams::builder(
+            "",
+            "builtin",
+            &workspace,
+            &workspaces,
+            &fx.root,
+            "Execute the scheduled job.".into(),
+            "job-1".into(),
+            "run-1".into(),
+            10_000,
+            Arc::new(RunEvents),
+            Arc::new(RunEvents),
+            Arc::new(Mutex::new(chrono::Utc::now())),
+        )
+        .provider(Some("stub".into()))
+        .model(Some("m".into()))
+        .system_prompt(system_prompt)
+        .build();
+        let handle = crate::BuiltinRunner.spawn(params).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), handle.wait())
+                .await
+                .unwrap(),
+            ExitKind::Normal
+        );
+    }
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests[0]["messages"],
+        json!([
+            {"role": "system", "content": IDENTITY},
+            {"role": "user", "content": "Execute the scheduled job."},
+        ])
+    );
+    for request in &requests[1..] {
+        assert_eq!(
+            request["messages"],
+            json!([{"role": "user", "content": "Execute the scheduled job."}])
+        );
+    }
+}
+
 fn params(fx: &Fixture) -> cap_chat::ChatSessionParamsBuilder {
     ChatSessionParams::builder("", &fx.root, &fx.sessions)
         .provider(Some("stub".to_string()))

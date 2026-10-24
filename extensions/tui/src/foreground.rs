@@ -508,10 +508,11 @@ async fn open_session(
     // `system.context` as system_prompt, host tool bridge, agent root cwd) as
     // every out-of-tree chat surface. The TUI-only bits — its configured
     // backend command and session resume — are layered on top.
-    let params = dar_extension_sdk::chat::agent_session_params(ctx, &session_dir)
-        .command(config.command.as_deref().unwrap_or(""))
-        .resume_session_id(resume_session_id)
-        .build();
+    let params =
+        dar_extension_sdk::chat::agent_session_params_with_interface(ctx, &session_dir, "tui")
+            .command(config.command.as_deref().unwrap_or(""))
+            .resume_session_id(resume_session_id)
+            .build();
     backend.open(params, tx).await
 }
 

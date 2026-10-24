@@ -866,6 +866,7 @@ dependencies = [
  "dar-host-api",
  "dar-orchestrator-api",
  "dar-tool-registry",
+ "nix 0.29.0",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1136,6 +1137,7 @@ dependencies = [
  "dar-cap-deliver",
  "dar-cap-runner",
  "dar-dashboard",
+ "dar-extension-sdk",
  "dar-host-api",
  "dar-runner-core",
  "dar-system-context",
@@ -1158,6 +1160,7 @@ name = "dar-system-context"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "dar-extension-sdk",
  "dar-host-api",
  "dar-system-files",
  "serde",

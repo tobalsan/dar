@@ -532,6 +532,7 @@ struct StreamPause {
     proceed: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
 }
 struct Session {
+    slot: String,
     inner: Mutex<Option<Box<dyn ChatSession>>>,
     /// Serializes backend event publication with turn acceptance so an eager
     /// backend cannot publish output before its accepted user event.
@@ -1065,6 +1066,7 @@ impl AppState {
         let history = load_transcript(&transcript)?;
         let next_seq = history.back().map(|event| event.seq).unwrap_or(0);
         let session = Arc::new(Session {
+            slot: id.to_owned(),
             inner: Mutex::new(None),
             acceptance_lock: Mutex::new(()),
             tx,
@@ -1122,7 +1124,12 @@ impl AppState {
         } else {
             resolved
         };
-        let params = chat::agent_session_params(start, &session_dir)
+        let interface = if session.slot == "main" {
+            "chat"
+        } else {
+            "web chat"
+        };
+        let params = chat::agent_session_params_with_interface(start, &session_dir, interface)
             .command(self.config.command.as_deref().unwrap_or(""))
             .resume_session_id(resume_session_id)
             .build();
@@ -5041,6 +5048,7 @@ mod tests {
         let (tx, _) = broadcast::channel(8);
         let (events, _) = broadcast::channel(8);
         Arc::new(Session {
+            slot: "test".into(),
             inner: Mutex::new(Some(inner)),
             acceptance_lock: Mutex::new(()),
             tx,
@@ -5300,6 +5308,151 @@ mod tests {
             config: host_api::ConfigStore::from_values(values),
             shutdown: host_api::ShutdownToken::new(shutdown),
         }
+    }
+
+    struct EnvironmentBackend {
+        prompts: mpsc::UnboundedSender<Option<String>>,
+        turns: mpsc::UnboundedSender<String>,
+    }
+
+    struct EnvironmentSession(mpsc::UnboundedSender<String>);
+
+    impl ChatSession for EnvironmentSession {
+        fn send_turn(&mut self, prompt: String) -> chat::BoxFuture<'_, Result<()>> {
+            self.0.send(prompt).unwrap();
+            Box::pin(async { Ok(()) })
+        }
+        fn abort(&mut self) -> chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn close(self: Box<Self>) -> chat::BoxFuture<'static, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    impl ChatBackend for EnvironmentBackend {
+        fn open<'a>(
+            &'a self,
+            params: chat::ChatSessionParams,
+            _events: mpsc::Sender<ChatEvent>,
+        ) -> chat::BoxFuture<'a, Result<Box<dyn ChatSession>>> {
+            self.prompts.send(params.system_prompt).unwrap();
+            let turns = self.turns.clone();
+            Box::pin(async move { Ok(Box::new(EnvironmentSession(turns)) as Box<dyn ChatSession>) })
+        }
+    }
+
+    // ALG-546: Thinh approved extension lifecycle + public routes/coordinator
+    // and ChatBackend observations; catches surface labels, misses wire encoding.
+    #[tokio::test]
+    async fn chat_sessions_receive_environment_only_in_their_local_system_context() {
+        let root = test_root();
+        fs::create_dir_all(&root).unwrap();
+        let mut register = register_ctx(
+            root.clone(),
+            serde_json::json!({"backend":"capture","idle_minutes":0}),
+        );
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        register.shutdown = host_api::ShutdownToken::new(shutdown_rx);
+        let (prompts, mut captured) = mpsc::unbounded_channel();
+        let (turns, mut user_turns) = mpsc::unbounded_channel();
+        register
+            .services
+            .register::<dyn ChatBackend>("capture", Arc::new(EnvironmentBackend { prompts, turns }))
+            .unwrap();
+        register
+            .bus
+            .register_retained(
+                chat::SYSTEM_CONTEXT_TOPIC,
+                chat::SystemContext {
+                    text: "Agent identity".into(),
+                    files: vec![chat::SystemContextFile {
+                        path: "AGENTS.md".into(),
+                    }],
+                    reflect: false,
+                },
+            )
+            .unwrap();
+        let extension = ChatWebExtension::default();
+        extension.register(&mut register).await.unwrap();
+        let start = StartCtx {
+            shutdown: register.shutdown.clone(),
+            paths: register.paths.clone(),
+            config: register.config.clone(),
+            host: register.into_start_services().unwrap(),
+        };
+        extension.start(start.clone()).await.unwrap();
+        let app = start.host.router.as_ref().clone();
+        let response = app
+            .clone()
+            .oneshot(post(
+                "/chat/browser-only/send",
+                Body::from(r#"{"command_id":"one","message":"Hello"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let prompt = captured.try_recv().unwrap().unwrap();
+        assert!(
+            prompt.contains("[ENVIRONMENT]\ninterface: web chat\n"),
+            "{prompt}"
+        );
+        assert_eq!(user_turns.try_recv().unwrap(), "Hello");
+        let coordinator = start
+            .host
+            .services
+            .get_named::<dyn chat::ChatCoordinator>(chat::CHAT_COORDINATOR_SERVICE)
+            .unwrap();
+        coordinator
+            .send_turn("Shared hello".into(), "Shared hello".into())
+            .await
+            .unwrap();
+        let prompt = captured.try_recv().unwrap().unwrap();
+        assert!(
+            prompt.contains("[ENVIRONMENT]\ninterface: chat\n"),
+            "{prompt}"
+        );
+        assert_eq!(user_turns.try_recv().unwrap(), "Shared hello");
+        let response = app
+            .clone()
+            .oneshot(post(
+                "/chat/browser-only/compact",
+                Body::from(r#"{"command_id":"two","instructions":"retain conclusions"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            user_turns.try_recv().unwrap(),
+            "/compact retain conclusions"
+        );
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/chat/browser-only/history")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let history = std::str::from_utf8(&bytes).unwrap();
+        assert!(history.contains(r#""text":"Hello""#));
+        assert!(history.contains(r#""text":"/compact retain conclusions""#));
+        assert!(!history.contains("[ENVIRONMENT]"));
+        assert_eq!(
+            start
+                .host
+                .bus
+                .read_retained::<chat::SystemContext>(chat::SYSTEM_CONTEXT_TOPIC)
+                .unwrap()
+                .text,
+            "Agent identity"
+        );
+        extension.stop().await.unwrap();
+        drop(shutdown);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

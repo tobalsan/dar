@@ -15,6 +15,7 @@ name = "scheduler"
 factory = "scheduler::extension"
 
 [dependencies]
+extension-sdk = { package = "dar-extension-sdk", path = "../../crates/extension-sdk", version = "0.6" }
 anyhow = "1"
 axum = "0.8"
 host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.6" }

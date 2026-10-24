@@ -18,6 +18,7 @@ cap-deliver = { package = "dar-cap-deliver", path = "../cap-deliver", version = 
 dar-artifacts = { path = "../artifacts", version = "0.6" }
 host-api = { package = "dar-host-api", path = "../host-api", version = "0.6" }
 orchestrator-api = { package = "dar-orchestrator-api", path = "../orchestrator-api", version = "0.6" }
+nix = { version = "0.29", features = ["hostname", "user"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

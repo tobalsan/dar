@@ -724,7 +724,13 @@ impl Orchestrator {
     /// rendered `WORKFLOW.md` prompt at the `SpawnParams` composition point —
     /// never inside `PromptRenderer` — preserving `WORKFLOW.md` as the runner
     /// loop only and system files as separate cross-surface identity.
-    pub fn with_system_context(mut self, system_context: SystemContext) -> Self {
+    pub fn with_system_context(mut self, mut system_context: SystemContext) -> Self {
+        if !system_context.is_empty() {
+            system_context.text = extension_sdk::environment::append_to_identity(
+                &system_context.text,
+                "orchestrator",
+            );
+        }
         self.system_context = system_context;
         self
     }
