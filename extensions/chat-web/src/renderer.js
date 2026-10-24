@@ -493,12 +493,15 @@
       if (e.target.closest('#chat-root')) addFiles(app, e.dataTransfer.files);
     });
     const contextTip = (e, visible) => { if (e.target.closest?.('#chat-context-ring') && !$('chat-context-ring')?.hidden) $('chat-context-tooltip').hidden = !visible; };
-    document.addEventListener('mouseover', e => contextTip(e, true));
-    document.addEventListener('mouseout', e => { if (!e.target.contains?.(e.relatedTarget)) contextTip(e, false); });
-    document.addEventListener('focusin', e => contextTip(e, true));
-    document.addEventListener('focusout', e => contextTip(e, false));
+    const showInfoTip = (tip, visible) => { if (visible) { let r = $('chat-info-button').getBoundingClientRect(); tip.style.left = `${r.left}px`; tip.style.top = `${r.bottom + 6}px`; } tip.hidden = !visible; };
+    const infoTip = (e, visible) => { if (e.target.closest?.('#chat-info-button')) showInfoTip($('chat-info-tooltip'), visible); };
+    document.addEventListener('mouseover', e => { contextTip(e, true); infoTip(e, true); });
+    document.addEventListener('mouseout', e => { if (!e.target.contains?.(e.relatedTarget)) { contextTip(e, false); infoTip(e, false); } });
+    document.addEventListener('focusin', e => { contextTip(e, true); infoTip(e, true); });
+    document.addEventListener('focusout', e => { contextTip(e, false); infoTip(e, false); });
     document.addEventListener('focusin', e => { if (app.searchOpen && $('chat-root') && !$('chat-search-palette')?.contains(e.target)) $('chat-search-input')?.focus(); });
     document.addEventListener('click', e => {
+      if (e.target.closest('#chat-info-button')) { let tip = $('chat-info-tooltip'); showInfoTip(tip, tip.hidden); return; }
       if (e.target.closest('#chat-context-ring')) { $('chat-context-tooltip').hidden = false; return; }
       let result = e.target.closest('[data-search-index]');
       if (result && app.searchOpen) { openSearchResult(app, Number(result.dataset.searchIndex)); return; }
