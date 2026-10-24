@@ -269,13 +269,19 @@ async fn boot_inner(
             host.set_http_addr(addr);
         }
         Some(tokio::spawn(async move {
-            axum::serve(listener, http_router.as_ref().clone().into_make_service())
-                .with_graceful_shutdown(async move {
-                    let mut shutdown = http_shutdown;
-                    shutdown.cancelled().await;
-                })
-                .await
-                .context("host HTTP server")
+            axum::serve(
+                listener,
+                http_router
+                    .as_ref()
+                    .clone()
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                let mut shutdown = http_shutdown;
+                shutdown.cancelled().await;
+            })
+            .await
+            .context("host HTTP server")
         }))
     } else {
         None

@@ -4517,6 +4517,33 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
+        // `dar dash` rewrites Host to the agent loopback port and forwards the
+        // browser-visible host. Only a loopback peer may supply that header.
+        let config: Config = serde_json::from_value(
+            serde_json::json!({"apps":{"sandbox_origin":"https://apps.example.net"}}),
+        )
+        .unwrap();
+        let state = apps_http_state(config, Arc::new(AppCatalog)).await;
+        for (peer, expected) in [
+            (Some("127.0.0.1:50000"), StatusCode::OK),
+            (Some("100.64.0.7:50000"), StatusCode::NOT_FOUND),
+            (None, StatusCode::NOT_FOUND),
+        ] {
+            let mut request = axum::http::Request::builder()
+                .uri(format!("/test/apps/{id}"))
+                .header("host", "127.0.0.1:28180")
+                .header("x-forwarded-host", "dash.example.com")
+                .header("referer", "https://dash.example.com/agent/28180/chat")
+                .body(Body::empty())
+                .unwrap();
+            if let Some(peer) = peer {
+                request.extensions_mut().insert(axum::extract::ConnectInfo(
+                    peer.parse::<std::net::SocketAddr>().unwrap(),
+                ));
+            }
+            let response = router(Arc::clone(&state)).oneshot(request).await.unwrap();
+            assert_eq!(response.status(), expected, "{peer:?}");
+        }
     }
 
     struct ChangingAppCatalog(std::sync::atomic::AtomicUsize);

@@ -1,9 +1,10 @@
 //! MCP Apps host: the only module that handles untrusted view resources and calls.
 use super::*;
+use axum::extract::ConnectInfo;
 use dar_extension_sdk::mcp_apps::{self, McpApps, ResultRecord, MCP_APPS_SERVICE};
 use serde_json::{json, Value};
 use sha2::Digest;
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
 #[cfg(not(test))]
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -56,7 +57,7 @@ fn cookie_scope(origin: &url::Url) -> Result<&str> {
     })
 }
 
-fn chat_origin(headers: &HeaderMap) -> Result<String> {
+fn chat_origin(headers: &HeaderMap, extensions: &axum::http::Extensions) -> Result<String> {
     let referer = url::Url::parse(
         headers
             .get(header::REFERER)
@@ -65,16 +66,26 @@ fn chat_origin(headers: &HeaderMap) -> Result<String> {
     )?;
     let chat = referer.origin().ascii_serialization();
     let parsed = origin(&chat)?;
+    // A loopback reverse proxy such as `dar dash` rewrites Host and passes the
+    // browser-visible host in x-forwarded-host. Trust it only from loopback.
+    let proxied = extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|ConnectInfo(peer)| peer.ip().is_loopback());
     anyhow::ensure!(
-        matches_host(headers, &parsed),
+        matches_host(headers, &parsed)
+            || (proxied && matches_header(headers, "x-forwarded-host", &parsed)),
         "chat Host and Referer disagree"
     );
     Ok(chat)
 }
 
 fn matches_host(headers: &HeaderMap, assigned: &url::Url) -> bool {
+    matches_header(headers, header::HOST.as_str(), assigned)
+}
+
+fn matches_header(headers: &HeaderMap, name: &str, assigned: &url::Url) -> bool {
     headers
-        .get(header::HOST)
+        .get(name)
         .and_then(|value| value.to_str().ok())
         .and_then(|host| url::Url::parse(&format!("{}://{host}", assigned.scheme())).ok())
         .is_some_and(|host| {
@@ -237,9 +248,10 @@ pub(super) async fn resource(
     Path((session, id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
 ) -> Response {
     let outcome = async {
-        let chat = chat_origin(&headers)?;
+        let chat = chat_origin(&headers, &extensions)?;
         let record = record(&state, &session, &id).await?;
         let app = app_origin(&state, &record.server, &chat).await?;
         let catalog = catalog(&state, &record.server)?;
@@ -395,10 +407,11 @@ pub(super) async fn open(
     Path((session, id)): Path<(String, String)>,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
 ) -> Response {
     let mut server = String::new();
     let outcome = async {
-        let chat = chat_origin(&headers)?;
+        let chat = chat_origin(&headers, &extensions)?;
         let record = record(&state, &session, &id).await?;
         server = record.server.clone();
         anyhow::ensure!(
