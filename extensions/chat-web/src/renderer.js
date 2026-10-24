@@ -142,6 +142,8 @@
         ring.setAttribute('aria-label', usageText(event));
         ring.style.setProperty('--usage-fill', percent);
         ring.style.color = percent >= 90 ? 'var(--bad)' : percent >= 70 ? 'var(--warn)' : 'var(--muted)';
+        let label = ring.querySelector?.('.chat-context-pct');
+        if (label) label.textContent = event.context_window ? `${Math.round(percent)}%` : '';
       }
     }
     if (tooltip) { tooltip.textContent = event ? usageText(event) : ''; tooltip.hidden = true; }
@@ -575,6 +577,8 @@
     for (const img of document.querySelectorAll?.('img[data-avatar-src]') || []) img.src = /^https?:/.test(img.dataset.avatarSrc) ? img.dataset.avatarSrc : PREFIX + img.dataset.avatarSrc;
     setIcons();
     showChatTitle(app);
+    alignChatTitle();
+    if (typeof ResizeObserver !== 'undefined') { app.titleObserver?.disconnect(); app.titleObserver = new ResizeObserver(alignChatTitle); app.titleObserver.observe(document.querySelector('#chat-root .chat-main')); }
     showContext(app.contextUsage);
     if ($('chat-search-palette')?.hidden) { app.searchOpen = false; ++app.searchSequence; clearTimeout(app.searchTimer); }
     $('chat-root').classList?.toggle('sidebar-collapsed', typeof localStorage !== 'undefined' && localStorage.getItem('dar-chat-sidebar') === 'collapsed');
@@ -656,6 +660,16 @@
     title.textContent = label || 'New chat';
     title.dataset.untitled = label ? 'false' : 'true';
     title.setAttribute('title', title.textContent);
+  };
+  // Line the header chat title up with the left edge of the message column (the
+  // transcript pads it to max(1rem, 50% - 23rem)), but keep clear of the agent name.
+  const alignChatTitle = () => {
+    let title = $('chat-session-title'), main = document.querySelector?.('#chat-root .chat-main'), agent = document.querySelector?.('#chat-root .chat-title');
+    if (!title || !main?.getBoundingClientRect || !agent?.getBoundingClientRect) return;
+    let rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16, box = main.getBoundingClientRect();
+    let column = box.left + Math.max(rem, box.width / 2 - 23 * rem);
+    let gap = parseFloat(getComputedStyle(title.parentElement).columnGap) || 0;
+    title.style.marginLeft = `${Math.max(0.75 * rem, column - agent.getBoundingClientRect().right - gap)}px`;
   };
   const storeChatLabel = (app, slot, label) => {
     app.slotLabels ||= {};
