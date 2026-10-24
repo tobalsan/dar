@@ -14,6 +14,8 @@ use std::sync::{Mutex, OnceLock};
 pub use cap_mcp_apps as mcp_apps;
 pub use dar_artifacts as artifacts;
 
+pub mod environment;
+
 pub use host_api::{
     AgentEnv, BoxFuture, BridgeSecrets, ConfigStore, EnvReloadConsumer, EnvReloadConsumers,
     EventBus, Extension, HostPaths, McpBridgeMode, RegisterCtx, ServiceRegistry, ShutdownToken,
@@ -160,8 +162,9 @@ pub mod chat {
     /// * **model / provider** — from the retained [`RunSnapshot`] when available,
     ///   otherwise directly from `agent.yaml` for passive agents;
     /// * **system_prompt** — the retained [`SystemContext`] assembly
-    ///   ([`SYSTEM_CONTEXT_TOPIC`]) followed by [`NO_REPLY_INSTRUCTION`]; an
-    ///   absent topic or empty assembly yields `None` (backend default prompt);
+    ///   ([`SYSTEM_CONTEXT_TOPIC`]) followed by the `chat` environment block and
+    ///   [`NO_REPLY_INSTRUCTION`]; an absent topic or empty assembly yields
+    ///   `None` (backend default prompt);
     /// * **max_tool_calls** — `runner.max_tool_calls` from `agent.yaml`;
     /// * **context_window** — `runner.context_window` from `agent.yaml`;
     /// * **agent_loop** — `agent_loop:` from `agent.yaml` (loop-guard limits);
@@ -174,6 +177,17 @@ pub mod chat {
     /// command (none of the stock ones do) can override via the returned
     /// builder before `.build()`.
     pub fn agent_session_params(ctx: &StartCtx, session_dir: &Path) -> ChatSessionParamsBuilder {
+        agent_session_params_with_interface(ctx, session_dir, "chat")
+    }
+
+    /// Build agent chat params with a surface-specific environment label, such
+    /// as `telegram`. Empty identity keeps the backend's default system prompt.
+    /// The returned builder supports the same overrides as [`agent_session_params`].
+    pub fn agent_session_params_with_interface(
+        ctx: &StartCtx,
+        session_dir: &Path,
+        interface: &str,
+    ) -> ChatSessionParamsBuilder {
         let profile = agent_profile(ctx).and_then(|profile| profile.runner);
         let model = profile.as_ref().and_then(|runner| runner.model.clone());
         let provider = profile.and_then(|runner| runner.provider);
@@ -186,7 +200,10 @@ pub mod chat {
             .map(|sc| sc.text);
         // No identity -> `None`: some backends (pi `--system-prompt`) would
         // otherwise replace their whole default prompt with this one line.
-        let system_prompt = identity.map(|text| format!("{text}\n\n{NO_REPLY_INSTRUCTION}"));
+        let system_prompt = identity.map(|text| {
+            let text = crate::environment::append_to_identity(&text, interface);
+            format!("{text}\n\n{NO_REPLY_INSTRUCTION}")
+        });
         ChatSessionParams::builder("", ctx.paths.root(), session_dir)
             .agent_loop(agent_loop_config(ctx))
             .max_tool_calls(max_tool_calls(ctx))

@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Agent sessions and runs now receive their interface, host, and effective OS user alongside their identity, so replies can describe the actual environment.
 - The web chat context ring now shows for resumed chats after a page reload or agent restart.
 - Added an opt-in `reflect` option in `agent.yaml` (`reflect: true`). It adds a self-improvement section to the system context, so the agent saves lessons to skills and `memory.md`. It reaches issue runs, chat, TUI, and scheduler jobs.
 

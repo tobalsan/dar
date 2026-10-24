@@ -363,7 +363,8 @@ fn build_scheduler_config(
 
 fn read_system_context(root: &std::path::Path) -> Option<String> {
     let ctx = system_context::resolve_for(root);
-    (!ctx.is_empty()).then_some(ctx.text)
+    (!ctx.is_empty())
+        .then(|| extension_sdk::environment::append_to_identity(&ctx.text, "scheduler"))
 }
 
 /// Read `runner.use` / `runner.command` / `runner.max_run_timeout_ms` from

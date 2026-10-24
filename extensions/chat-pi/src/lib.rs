@@ -1045,8 +1045,8 @@ mod tests {
     /// retained `system.context` to pi as `--system-prompt`. This is the exact
     /// path IRC/Telegram now use, and the request-shape difference that left
     /// IRC replying `(no response)` before this fix.
-    #[test]
-    fn sdk_chat_surface_delivers_system_prompt_to_pi() {
+    #[tokio::test]
+    async fn sdk_chat_surface_delivers_system_prompt_to_pi() {
         let temp = tempfile::tempdir().unwrap();
         let context = orchestrator_api::SystemContext {
             text: "<system-file path=\"AGENTS.md\">be the agent</system-file>".to_string(),
@@ -1055,24 +1055,38 @@ mod tests {
             }],
             reflect: false,
         };
-        let ctx = start_ctx_with_system_context(temp.path(), Some(context.clone()));
+        let ctx = start_ctx_with_system_context(temp.path(), Some(context));
         let session_dir = temp.path().join("sessions");
-
-        let params = dar_extension_sdk::chat::agent_session_params(&ctx, &session_dir).build();
-        let args = pi_args(&params);
-
-        let idx = args
-            .iter()
-            .position(|a| a == "--system-prompt")
-            .expect("non-TUI surface must pass --system-prompt via the shared SDK helper");
-        assert_eq!(
-            args[idx + 1],
-            OsString::from(format!(
-                "{}\n\n{}",
-                context.text,
-                cap_chat::NO_REPLY_INSTRUCTION
-            ))
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let script = write_stub(
+            temp.path(),
+            &format!(
+                "while [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = --system-prompt ]; then\n    shift\n    printf '%s' \"$1\" > system-prompt.txt\n  fi\n  shift\ndone\n{ECHO_STUB}"
+            ),
         );
+        let params = dar_extension_sdk::chat::agent_session_params(&ctx, &session_dir)
+            .command(script.to_str().unwrap())
+            .build();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut session = PiChatBackend.open(params, tx).await.unwrap();
+        session.send_turn("ping".into()).await.unwrap();
+        loop {
+            if let ChatEvent::TurnFinished { ok, error } = next_event(&mut rx).await {
+                assert!(ok, "{error:?}");
+                break;
+            }
+        }
+        session.close().await.unwrap();
+
+        let system_prompt = std::fs::read_to_string(temp.path().join("system-prompt.txt")).unwrap();
+        assert!(system_prompt.starts_with(
+            "<system-file path=\"AGENTS.md\">be the agent</system-file>\n\n[ENVIRONMENT]\ninterface: chat\nhost: "
+        ));
+        assert!(system_prompt.contains("\nos_user: "));
+        assert!(system_prompt.ends_with(&format!(
+            "[END ENVIRONMENT]\n\n{}",
+            cap_chat::NO_REPLY_INSTRUCTION
+        )));
     }
 
     /// Skills-only context (no files, reflect off) keeps legacy behavior: no
