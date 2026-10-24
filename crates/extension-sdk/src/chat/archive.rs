@@ -282,6 +282,165 @@ pub fn search_sessions(sessions_dir: &Path, query: &str) -> Vec<SearchHit> {
     hits
 }
 
+/// Whether all search words occur in the shown title or need message text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionMatchKind {
+    Title,
+    Content,
+}
+
+/// A session-level search result; only content matches carry a snippet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionMatch {
+    pub kind: SessionMatchKind,
+    pub snippet: Option<String>,
+}
+
+/// Match every whitespace-separated word, in any order, across the shown
+/// label and user/assistant messages using the archive's case folding.
+pub fn match_session(label: &str, messages: &[Message], query: &str) -> Option<SessionMatch> {
+    let words: Vec<String> = query
+        .split_whitespace()
+        .map(|word| lower_aligned_chars(word).into_iter().collect())
+        .collect();
+    if words.is_empty() {
+        return None;
+    }
+    let label: String = lower_aligned_chars(label).into_iter().collect();
+    if words.iter().all(|word| label.contains(word)) {
+        return Some(SessionMatch {
+            kind: SessionMatchKind::Title,
+            snippet: None,
+        });
+    }
+    let messages: Vec<_> = messages
+        .iter()
+        .filter(|message| matches!(message.role.as_str(), "user" | "assistant"))
+        .collect();
+    let texts: Vec<_> = messages
+        .iter()
+        .map(|message| {
+            lower_aligned_chars(&message.text)
+                .into_iter()
+                .collect::<String>()
+        })
+        .collect();
+    if !words
+        .iter()
+        .all(|word| label.contains(word) || texts.iter().any(|text| text.contains(word)))
+    {
+        return None;
+    }
+    let mut best = None;
+    let mut most_words = 0;
+    for (message, text) in messages.iter().zip(&texts) {
+        let count = words
+            .iter()
+            .filter(|word| text.contains(word.as_str()))
+            .count();
+        if count > most_words {
+            most_words = count;
+            let first_word = words
+                .iter()
+                .filter_map(|word| text.find(word).map(|offset| (offset, word)))
+                .min_by_key(|(offset, _)| *offset)?
+                .1;
+            best = Some((message, first_word));
+        }
+    }
+    let snippet = best.and_then(|(message, word)| snippet_for_limit(&message.text, word, 160));
+    Some(SessionMatch {
+        kind: SessionMatchKind::Content,
+        snippet,
+    })
+}
+
+/// Read the listing label and complete conversation text in one file pass for
+/// session-level search. Malformed message lines are skipped; malformed headers
+/// and sessions without renderable messages are omitted, as in [`list`].
+pub fn read_session_for_search(path: &Path) -> Option<(SessionInfo, Vec<Message>)> {
+    let mut lines = BufReader::new(fs::File::open(path).ok()?).lines();
+    let header: Value = loop {
+        let line = lines.next()?.ok()?;
+        if !line.trim().is_empty() {
+            break serde_json::from_str(&line).ok()?;
+        }
+    };
+    let id = header.get("id")?.as_str()?.to_string();
+    if id.is_empty() {
+        return None;
+    }
+    let mut messages = Vec::new();
+    let mut first_user = None;
+    for line in lines {
+        let Ok(line) = line else { continue };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let message = value.get("message").unwrap_or(&value);
+        let Some(role @ ("user" | "assistant")) = message.get("role").and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if role == "user" && first_user.is_none() {
+            first_user = message_role_text(&value).map(|(_, text)| text);
+        }
+        let Some(content) = message.get("content") else {
+            continue;
+        };
+        let text = content.as_str().map(str::to_string).unwrap_or_else(|| {
+            content
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|part| {
+                    part.as_str().or_else(|| {
+                        (part.get("type").and_then(Value::as_str) == Some("text"))
+                            .then(|| part.get("text").and_then(Value::as_str))
+                            .flatten()
+                    })
+                })
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
+        if !text.is_empty() {
+            messages.push(Message {
+                index: messages.len(),
+                role: role.to_string(),
+                text,
+            });
+        }
+    }
+    if messages.is_empty() {
+        return None;
+    }
+    let stem = path.file_stem()?.to_str()?;
+    let label = first_user
+        .as_deref()
+        .or_else(|| {
+            header
+                .get("label")
+                .or_else(|| header.get("title"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+        })
+        .unwrap_or(stem)
+        .chars()
+        .take(LABEL_MAX)
+        .collect();
+    Some((
+        SessionInfo {
+            id,
+            start_time: stem.split_once('_').map(|(time, _)| time.to_string()),
+            label,
+        },
+        messages,
+    ))
+}
+
 /// Read a ranged slice of a session's user+assistant messages, starting at
 /// `start` (zero-based message index) and returning at most `count` messages —
 /// but never more than [`READ_MAX`], the hard cap. A `count` above the cap is
@@ -669,17 +828,20 @@ fn content_text(content: &Value) -> String {
 /// case-folding that changes byte length (e.g. Turkish `İ`) can't desync a byte
 /// offset against the original text.
 fn snippet_for(text: &str, needle: &str) -> Option<String> {
+    snippet_for_limit(text, needle, SNIPPET_MAX)
+}
+
+fn snippet_for_limit(text: &str, needle: &str, max: usize) -> Option<String> {
     let chars: Vec<char> = text.chars().collect();
     let needle_chars: Vec<char> = needle.chars().collect();
     let match_char = find_chars_ci(&chars, &needle_chars)?;
-    if chars.len() <= SNIPPET_MAX {
+    if chars.len() <= max {
         return Some(text.to_string());
     }
     // Reserve room for the leading/trailing ellipsis markers inside the cap so
-    // the *final returned* snippet — markers included — never exceeds
-    // SNIPPET_MAX chars. Worst case both markers are present, so the body
-    // window is SNIPPET_MAX minus two marker chars.
-    let window = SNIPPET_MAX.saturating_sub(2);
+    // the final snippet, markers included, stays within the requested cap.
+    // Reserve two chars for the case where both markers are present.
+    let window = max.saturating_sub(2);
     let pad = window.saturating_sub(needle_chars.len()) / 2;
     let start = match_char.saturating_sub(pad);
     let end = (start + window).min(chars.len());
@@ -692,7 +854,7 @@ fn snippet_for(text: &str, needle: &str) -> Option<String> {
     if end < chars.len() {
         snippet.push('…');
     }
-    debug_assert!(snippet.chars().count() <= SNIPPET_MAX);
+    debug_assert!(snippet.chars().count() <= max);
     Some(snippet)
 }
 
@@ -1143,6 +1305,116 @@ mod tests {
         assert_eq!(hits[0].session_id, "sess-a");
         assert_eq!(hits[0].message_index, 1);
         assert!(hits[0].snippet.contains("gadget"));
+    }
+
+    #[test]
+    fn session_matcher_finds_words_in_any_order_across_messages() {
+        let messages = vec![
+            Message {
+                index: 0,
+                role: "user".into(),
+                text: "How does PgBouncer work?".into(),
+            },
+            Message {
+                index: 1,
+                role: "assistant".into(),
+                text: "Use transaction pooling.".into(),
+            },
+        ];
+        let hit = match_session("Database", &messages, " POOLING\tpgbouncer ").unwrap();
+        assert_eq!(hit.kind, SessionMatchKind::Content);
+        assert_eq!(hit.snippet.as_deref(), Some("How does PgBouncer work?"));
+        assert!(match_session("Database", &messages, "pooling missing").is_none());
+        assert!(match_session("Database", &messages, " \t ").is_none());
+    }
+
+    #[test]
+    fn session_matcher_prefers_the_shown_title_and_can_mix_title_with_content() {
+        let messages = vec![Message {
+            index: 0,
+            role: "assistant".into(),
+            text: "pooling details".into(),
+        }];
+        assert_eq!(
+            match_session("PgBouncer POOLING", &messages, "pooling pgbouncer"),
+            Some(SessionMatch {
+                kind: SessionMatchKind::Title,
+                snippet: None,
+            })
+        );
+        assert_eq!(
+            match_session("PgBouncer", &messages, "pooling pgbouncer"),
+            Some(SessionMatch {
+                kind: SessionMatchKind::Content,
+                snippet: Some("pooling details".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn session_matcher_snippet_uses_most_words_and_the_first_hit() {
+        let messages = vec![
+            Message {
+                index: 0,
+                role: "user".into(),
+                text: "needle".into(),
+            },
+            Message {
+                index: 1,
+                role: "assistant".into(),
+                text: format!("{}EARLY middle needle{}", "界".repeat(200), "z".repeat(200)),
+            },
+        ];
+        let hit = match_session("Other", &messages, "needle early").unwrap();
+        let snippet = hit.snippet.unwrap();
+        assert!(snippet.starts_with('…'));
+        assert!(snippet.ends_with('…'));
+        assert!(snippet.contains("EARLY middle needle"));
+        assert!(snippet.chars().count() <= 160);
+        let early_offset = snippet
+            .chars()
+            .position(|character| character == 'E')
+            .unwrap();
+        assert_eq!(early_offset, 77);
+    }
+
+    #[test]
+    fn session_matcher_ignores_non_conversation_roles_and_preserves_archive_folding() {
+        let messages = vec![
+            Message {
+                index: 0,
+                role: "tool".into(),
+                text: "tool-secret".into(),
+            },
+            Message {
+                index: 1,
+                role: "system".into(),
+                text: "system-secret".into(),
+            },
+            Message {
+                index: 2,
+                role: "thinking".into(),
+                text: "thinking-secret".into(),
+            },
+            Message {
+                index: 3,
+                role: "assistant".into(),
+                text: "İ CAFÉ".into(),
+            },
+        ];
+        for query in ["tool-secret", "system-secret", "thinking-secret", "i"] {
+            assert!(
+                match_session("Other", &messages, query).is_none(),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            match_session("Other", &messages, "café İ")
+                .unwrap()
+                .snippet
+                .as_deref(),
+            Some("İ CAFÉ")
+        );
     }
 
     #[test]
