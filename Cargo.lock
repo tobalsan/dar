@@ -859,6 +859,7 @@ name = "dar-extension-sdk"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "dar-artifacts",
  "dar-cap-chat",
  "dar-cap-deliver",

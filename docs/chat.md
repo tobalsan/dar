@@ -70,16 +70,21 @@ extensions:
 ```
 
 Idle conversations: after `idle_minutes` with no running turn, chat-web closes
-that conversation's backend process. Transcript and identity are kept; the next
-message transparently reopens the same saved conversation. Conversations whose
-backend never reported a session identity (e.g. codex) are never closed.
+that conversation's backend process. Transcript and backend identity are kept;
+the next message transparently resumes the same saved conversation, including
+after a host restart. Conversations whose backend never reported a session
+identity (e.g. codex) are never closed by idle cleanup and start fresh after a
+host restart.
 
 Backend resolution matches the TUI: `backend` if set, else `runner.use` when
-that id has a registered chat backend, else `pi`. The web chat and the TUI
-share one live session: each process boot starts fresh while prior backend
-sessions remain available to resume. Web replay lives at
-`data/chat/sessions/main.jsonl`; backend sessions stay under
-`data/chat/sessions/`, with titles/archive state in `data/chat/sessions-meta.json`.
+that id has a registered chat backend, else `pi`. An open web chat resumes its
+backend session on the first message after a host restart: slot-to-backend
+bindings are saved in `data/chat/slots.json`. Slots without a known backend id,
+or whose backend session file was deleted, start fresh. The shared `main` slot
+still starts fresh at each process boot; the TUI resumes the newest backend
+session by mtime. Web replay lives at `data/chat/sessions/<slot>.jsonl`; backend
+sessions stay under `data/chat/sessions/`, with titles/archive state in
+`data/chat/sessions-meta.json`.
 Turns stream into every open browser tab, and reconnects replay missed events
 (SSE with `Last-Event-ID`). Attachments are uploaded via
 multipart `POST /chat/{session}/upload` (max 8 files, 8 MiB body) and stored

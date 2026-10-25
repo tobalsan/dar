@@ -136,6 +136,10 @@ success only after observing a changed boot identity and healthy endpoint; it
 times out after 60 seconds otherwise. Build flags such as `--vendor` and
 `--offline` are supported only with offline `--dir` rebuilds.
 
+The agent can also call `self_update` from a chat session, including web chat
+and the TUI. The chat tool bridge carries the workflow identity and live host
+address; "Self-update accepted" means the host accepted the rebuild/restart.
+
 A host running a pre-DAR-27 binary needs one manual bootstrap: run the offline
 `--dir` rebuild, then restart that agent once. Later updates can use live
 name-based rebuilds.
