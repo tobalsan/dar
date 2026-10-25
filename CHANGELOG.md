@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Fixed `self_update` from chat sessions and web chats losing backend context after a host restart; known web session bindings now persist in `data/chat/slots.json`.
 - The web chat header now shows an info icon after the agent name. Hover, focus, or tap it to see the runner, provider, model, and thinking level from `agent.yaml`.
 - Agent sessions and runs now receive their interface, host, and effective OS user alongside their identity, so replies can describe the actual environment.
 - The web chat context ring now shows for resumed chats after a page reload or agent restart.

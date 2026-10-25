@@ -198,6 +198,12 @@ missing `RunSnapshot` leaves model/provider unset. The retained bus contract
 `system-context` extension and re-exported from `dar_extension_sdk::chat`, so a
 surface never needs to depend on a `publish = false` in-tree crate to read it.
 
+The host tool bridge built by `agent_session_params*` includes
+`--workflow <workflow-root>` and, when the live HTTP address is known,
+`--host-addr <address>`.
+Unspecified bind addresses (`0.0.0.0` and `::`) become loopback dial addresses.
+This gives chat tools such as `self_update` the identity of the running host.
+
 #### Silent turns and agent senders
 
 Stock chat backends filter `NO_REPLY` and apply the loop guard before events

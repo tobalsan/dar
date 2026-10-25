@@ -2,7 +2,7 @@
 //! `extensions.chat-web` section it mounts neither routes nor dashboard tab.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::PathBuf,
@@ -88,6 +88,7 @@ impl Extension for ChatWebExtension {
                 sessions: Mutex::new(HashMap::new()),
                 transition: Mutex::new(()),
                 slot_registry: Arc::default(),
+                bindings: Arc::new(std::sync::Mutex::new(load_slot_bindings(ctx.paths.root())?)),
                 meta: Mutex::new(load_meta(
                     &ctx.paths.root().join("data/chat/sessions-meta.json"),
                 )),
@@ -564,6 +565,7 @@ struct AppState {
     start: std::sync::OnceLock<StartCtx>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     meta: Mutex<HashMap<String, SessionMeta>>,
+    bindings: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
     transition: Mutex<()>,
     /// Weak handles to every slot, so concurrent slots can exclude each other's archive ids.
     slot_registry: Arc<SlotRegistry>,
@@ -798,6 +800,38 @@ fn write_meta(path: &std::path::Path, meta: &HashMap<String, SessionMeta>) -> Re
     Ok(())
 }
 
+fn load_slot_bindings(root: &std::path::Path) -> Result<BTreeMap<String, String>> {
+    let bytes = match fs::read(root.join("data/chat/slots.json")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut bindings: BTreeMap<String, String> = serde_json::from_slice(&bytes)?;
+    let original_len = bindings.len();
+    let mut seen = HashSet::new();
+    let dir = root.join("data/chat/sessions");
+    // Sorted slot ids make the first owner deterministic across boots.
+    bindings.retain(|slot, id| {
+        slot != "main"
+            && valid_backend_id(id)
+            && chat::archive::session_file_by_id(&dir, id).is_some()
+            && seen.insert(id.clone())
+    });
+    if bindings.len() != original_len {
+        write_slot_bindings(root, &bindings)?;
+    }
+    Ok(bindings)
+}
+
+fn write_slot_bindings(root: &std::path::Path, bindings: &BTreeMap<String, String>) -> Result<()> {
+    let path = root.join("data/chat/slots.json");
+    fs::create_dir_all(path.parent().expect("slot bindings have parent"))?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(bindings)?)?;
+    fs::rename(tmp, path)?;
+    Ok(())
+}
+
 async fn session_index(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SessionQuery>,
@@ -997,6 +1031,16 @@ async fn delete_session(
     if let Err(error) = fs::remove_file(path) {
         return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
     }
+    {
+        let mut bindings = state
+            .bindings
+            .lock()
+            .expect("chat-web bindings mutex poisoned");
+        bindings.retain(|_, backend_id| backend_id != &id);
+        if let Err(error) = write_slot_bindings(&state.root, &bindings) {
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+    }
     let mut meta = state.meta.lock().await;
     meta.remove(&id);
     if let Err(error) = write_meta(&state.root.join("data/chat/sessions-meta.json"), &meta) {
@@ -1070,10 +1114,21 @@ async fn resume_session(
         }
         offset = page.next_offset;
     }
-    *session
-        .resolved_live_id
-        .lock()
-        .expect("chat-web identity mutex poisoned") = Some(body.id.clone());
+    {
+        let mut resolved = session
+            .resolved_live_id
+            .lock()
+            .expect("chat-web identity mutex poisoned");
+        let mut bindings = state
+            .bindings
+            .lock()
+            .expect("chat-web bindings mutex poisoned");
+        bindings.insert(body.id.clone(), body.id.clone());
+        if let Err(error) = write_slot_bindings(&state.root, &bindings) {
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+        *resolved = Some(body.id.clone());
+    }
     session
         .suppress_resume
         .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1113,6 +1168,15 @@ impl AppState {
         let transcript = self.transcript_path(id);
         let history = load_transcript(&transcript)?;
         let next_seq = history.back().map(|event| event.seq).unwrap_or(0);
+        let resolved_live_id = if id == "main" {
+            None
+        } else {
+            self.bindings
+                .lock()
+                .expect("chat-web bindings mutex poisoned")
+                .get(id)
+                .cloned()
+        };
         let session = Arc::new(Session {
             slot: id.to_owned(),
             inner: Mutex::new(None),
@@ -1126,7 +1190,7 @@ impl AppState {
             transcript_failed: std::sync::atomic::AtomicBool::new(false),
             suppress_resume: std::sync::atomic::AtomicBool::new(false),
             title_started: std::sync::atomic::AtomicBool::new(false),
-            resolved_live_id: std::sync::Mutex::new(None),
+            resolved_live_id: std::sync::Mutex::new(resolved_live_id),
             last_active_ms: std::sync::atomic::AtomicU64::new(now_ms()),
             abort_signal,
             publish_lock: std::sync::Mutex::new(()),
@@ -1190,6 +1254,8 @@ impl AppState {
         let sink = Arc::clone(&session);
         let identity_sink = Arc::clone(&session);
         let identity_registry = Arc::clone(&self.slot_registry);
+        let bindings = Arc::clone(&self.bindings);
+        let root = self.root.clone();
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 if let ChatEvent::SessionIdentity { id } = &event {
@@ -1210,6 +1276,14 @@ impl AppState {
                                 id = %id,
                                 "chat backend reported a session id already bound to another chat-web slot"
                             );
+                        }
+                        if identity_sink.slot != "main" {
+                            let mut bindings =
+                                bindings.lock().expect("chat-web bindings mutex poisoned");
+                            bindings.insert(identity_sink.slot.clone(), id.clone());
+                            if let Err(error) = write_slot_bindings(&root, &bindings) {
+                                tracing::warn!("chat slot binding write failed: {error:#}");
+                            }
                         }
                         *resolved = Some(id.clone());
                     }
@@ -1299,7 +1373,14 @@ impl AppState {
                 return Some((id, slot));
             }
         }
-        None
+        let id = self
+            .bindings
+            .lock()
+            .expect("chat-web bindings mutex poisoned")
+            .iter()
+            .find(|(_, backend)| backend.as_str() == archive_id)
+            .map(|(slot, _)| slot.clone())?;
+        self.session(&id).await.ok().map(|slot| (id, slot))
     }
 
     async fn finish_turn(
@@ -1446,10 +1527,20 @@ impl AppState {
         session
             .suppress_resume
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        *session
-            .resolved_live_id
-            .lock()
-            .expect("chat-web identity mutex poisoned") = None;
+        {
+            let mut resolved = session
+                .resolved_live_id
+                .lock()
+                .expect("chat-web identity mutex poisoned");
+            let mut bindings = self
+                .bindings
+                .lock()
+                .expect("chat-web bindings mutex poisoned");
+            if bindings.remove(id).is_some() {
+                write_slot_bindings(&self.root, &bindings)?;
+            }
+            *resolved = None;
+        }
         let _ = session.abort_signal.send(false);
         {
             let _publish = session
@@ -2887,6 +2978,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let session = state.session("test").await.unwrap();
@@ -2942,6 +3034,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let session = state.session("test").await.unwrap();
@@ -4089,6 +4182,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let session = state.session("test").await.unwrap();
@@ -4269,6 +4363,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let session = state.session("test").await.unwrap();
@@ -4843,6 +4938,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let session = state.session("test").await.unwrap();
@@ -4917,6 +5013,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let session = state.session("test").await.unwrap();
@@ -5196,6 +5293,7 @@ mod tests {
             sessions: Mutex::new(sessions),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let extension = ChatWebExtension::default();
@@ -5582,6 +5680,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
 
@@ -5645,6 +5744,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
 
@@ -5682,6 +5782,7 @@ mod tests {
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let mut events = s.events.subscribe();
@@ -5783,6 +5884,7 @@ mod tests {
             sessions: Mutex::new(HashMap::from([("main".into(), session)])),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let transition = state.transition.lock().await;
@@ -5826,6 +5928,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         };
         let session = state.session("main").await.unwrap();
@@ -5917,6 +6020,7 @@ mod tests {
             sessions: Mutex::new(slots.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         }
     }
@@ -6177,6 +6281,7 @@ mod tests {
             sessions: Mutex::new(HashMap::from([("main".into(), Arc::clone(&s))])),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         };
         let mut events = s.events.subscribe();
@@ -6206,6 +6311,7 @@ mod tests {
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
 
@@ -6256,6 +6362,7 @@ mod tests {
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let body = "--x\r\nContent-Disposition: form-data; name=\"command_id\"\r\n\r\nupload-1\r\n--x\r\nContent-Disposition: form-data; name=\"message\"\r\n\r\ninspect this\r\n--x\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"note.txt\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--x--\r\n";
@@ -6293,6 +6400,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let invalid = "--x\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"bad.exe\"\r\nContent-Type: application/octet-stream\r\n\r\nbad\r\n--x--\r\n";
@@ -6489,6 +6597,7 @@ mod tests {
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let mut events = s.tx.subscribe();
@@ -6538,6 +6647,7 @@ mod tests {
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let mut events = s.tx.subscribe();
@@ -6572,6 +6682,7 @@ mod tests {
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let mut events = s.tx.subscribe();
@@ -6600,6 +6711,7 @@ mod tests {
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let mut events = s.tx.subscribe();
@@ -6645,6 +6757,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let app = router(Arc::clone(&state));
@@ -6811,6 +6924,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let session = state.session("test").await.unwrap();
@@ -6883,6 +6997,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let session = state.session("resume").await.unwrap();
@@ -6898,6 +7013,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let mut headers = HeaderMap::new();
@@ -6930,6 +7046,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         state
@@ -6959,6 +7076,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let get = |uri: &str| {
@@ -6985,6 +7103,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let session = state.session("lag").await.unwrap();
@@ -7155,6 +7274,7 @@ mod tests {
             sessions: Mutex::new(sessions),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         })
     }
@@ -7184,6 +7304,237 @@ mod tests {
     }
 
     type EventSenders = Arc<std::sync::Mutex<Vec<mpsc::Sender<ChatEvent>>>>;
+
+    struct RestartBackend {
+        identity: Option<String>,
+        opened: mpsc::UnboundedSender<Option<String>>,
+    }
+
+    impl ChatBackend for RestartBackend {
+        fn open<'a>(
+            &'a self,
+            params: chat::ChatSessionParams,
+            tx: mpsc::Sender<ChatEvent>,
+        ) -> chat::BoxFuture<'a, Result<Box<dyn ChatSession>>> {
+            self.opened.send(params.resume_session_id).unwrap();
+            let identity = self.identity.clone();
+            Box::pin(async move {
+                if let Some(id) = identity {
+                    tx.send(ChatEvent::SessionIdentity { id }).await?;
+                }
+                Ok(Box::new(CloseFlagSession(Arc::new(AtomicBool::new(false))))
+                    as Box<dyn ChatSession>)
+            })
+        }
+    }
+
+    async fn restart_app(
+        root: &std::path::Path,
+        identity: Option<&str>,
+    ) -> (
+        ChatWebExtension,
+        Router,
+        mpsc::UnboundedReceiver<Option<String>>,
+    ) {
+        let mut register = register_ctx(
+            root.to_owned(),
+            serde_json::json!({"backend":"restart","idle_minutes":0}),
+        );
+        let (opened, captured) = mpsc::unbounded_channel();
+        let backend: Arc<dyn ChatBackend> = Arc::new(RestartBackend {
+            identity: identity.map(str::to_owned),
+            opened,
+        });
+        register
+            .services
+            .register::<dyn ChatBackend>("restart", Arc::clone(&backend))
+            .unwrap();
+        let extension = ChatWebExtension::default();
+        extension.register(&mut register).await.unwrap();
+        let mut start = StartCtx {
+            shutdown: register.shutdown.clone(),
+            paths: register.paths.clone(),
+            config: register.config.clone(),
+            host: register.into_start_services().unwrap(),
+        };
+        let app = start.host.router.as_ref().clone();
+        // Keep only external adapters in the stored context so dropping this
+        // fixture destroys the prior AppState instead of retaining itself
+        // through the mounted router or ChatCoordinator service.
+        start.host.router = Arc::new(Router::new());
+        start.host.services = dar_extension_sdk::ServiceRegistry::default();
+        start
+            .host
+            .services
+            .register::<dyn ChatBackend>("restart", backend)
+            .unwrap();
+        extension.start(start).await.unwrap();
+        (extension, app, captured)
+    }
+
+    async fn restart_send(app: &Router, slot: &str) {
+        let response = app
+            .clone()
+            .oneshot(post(
+                &format!("/chat/{slot}/send"),
+                Body::from(r#"{"command_id":"turn","message":"hello"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    // ALG-550: Thinh explicitly approved SDK, public chat HTTP/backend, and
+    // real host/browser seams in Linear on 2026-10-25. This catches durable
+    // resume parameters; the separate E2E covers actual bridge/restart behavior.
+    #[tokio::test]
+    async fn web_slot_resumes_backend_after_app_restart() {
+        let root = test_root();
+        write_fake_archive(&root, "restart-id");
+        {
+            let (extension, app, mut opened) = restart_app(&root, Some("restart-id")).await;
+            restart_send(&app, "browser-slot").await;
+            assert_eq!(opened.recv().await, Some(None));
+            // Identity binding happens asynchronously; observe it through listing.
+            let mut bound = false;
+            for _ in 0..200 {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri("/chat/sessions")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                let rows: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                if rows[0]["slots"] == serde_json::json!(["browser-slot"]) {
+                    bound = true;
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(bound, "backend identity was not listed");
+            extension.stop().await.unwrap();
+        }
+        let (extension, app, mut opened) = restart_app(&root, None).await;
+        restart_send(&app, "browser-slot").await;
+        assert_eq!(opened.recv().await, Some(Some("restart-id".into())));
+        extension.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicitly_resumed_archive_survives_app_restart() {
+        let root = test_root();
+        write_fake_archive(&root, "resumed-id");
+        {
+            let (extension, app, _) = restart_app(&root, None).await;
+            let response = app
+                .oneshot(post(
+                    "/chat/unused/resume",
+                    Body::from(r#"{"id":"resumed-id"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(slot_of(response).await, "resumed-id");
+            extension.stop().await.unwrap();
+        }
+        let (extension, app, mut opened) = restart_app(&root, None).await;
+        restart_send(&app, "resumed-id").await;
+        assert_eq!(opened.recv().await, Some(Some("resumed-id".into())));
+        extension.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_discards_missing_duplicate_and_main_bindings() {
+        let root = test_root();
+        write_fake_archive(&root, "shared-id");
+        fs::write(
+            root.join("data/chat/slots.json"),
+            r#"{"a":"shared-id","b":"shared-id","gone":"missing-id","main":"shared-id"}"#,
+        )
+        .unwrap();
+        let (extension, app, mut opened) = restart_app(&root, None).await;
+        for (slot, expected) in [
+            ("a", Some("shared-id".to_owned())),
+            ("b", None),
+            ("gone", None),
+            ("main", None),
+        ] {
+            restart_send(&app, slot).await;
+            assert_eq!(opened.recv().await, Some(expected), "slot {slot}");
+        }
+        extension.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn deleting_backend_clears_binding_even_before_slot_is_loaded() {
+        let root = test_root();
+        write_fake_archive(&root, "deleted-id");
+        {
+            let (extension, app, _) = restart_app(&root, None).await;
+            assert_eq!(
+                slot_of(
+                    app.oneshot(post(
+                        "/chat/unused/resume",
+                        Body::from(r#"{"id":"deleted-id"}"#)
+                    ))
+                    .await
+                    .unwrap()
+                )
+                .await,
+                "deleted-id"
+            );
+            extension.stop().await.unwrap();
+        }
+        {
+            let (extension, app, _) = restart_app(&root, None).await;
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("DELETE")
+                        .uri("/chat/sessions/deleted-id")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            extension.stop().await.unwrap();
+        }
+        // Recreating the same backend id must not resurrect a deleted binding.
+        write_fake_archive(&root, "deleted-id");
+        let (extension, app, mut opened) = restart_app(&root, None).await;
+        restart_send(&app, "deleted-id").await;
+        assert_eq!(opened.recv().await, Some(None));
+        extension.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resume_after_restart_reuses_the_persisted_web_slot() {
+        let root = test_root();
+        write_fake_archive(&root, "bound-id");
+        fs::write(
+            root.join("data/chat/slots.json"),
+            r#"{"browser-slot":"bound-id"}"#,
+        )
+        .unwrap();
+        let (extension, app, mut opened) = restart_app(&root, None).await;
+        let response = app
+            .clone()
+            .oneshot(post(
+                "/chat/unused/resume",
+                Body::from(r#"{"id":"bound-id"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(slot_of(response).await, "browser-slot");
+        restart_send(&app, "browser-slot").await;
+        assert_eq!(opened.recv().await, Some(Some("bound-id".into())));
+        extension.stop().await.unwrap();
+    }
 
     struct ScriptedBackend {
         identities: std::sync::Mutex<VecDeque<Option<String>>>,
@@ -7233,6 +7584,7 @@ mod tests {
             meta: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
         });
         (state, txs)
     }
@@ -7789,6 +8141,7 @@ mod tests {
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let request = || {
@@ -7830,6 +8183,7 @@ mod tests {
             sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
 
@@ -7945,6 +8299,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let get = || async {
@@ -8001,6 +8356,7 @@ mod tests {
             sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
+            bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
         let app = router(state);
@@ -8063,6 +8419,7 @@ mod tests {
                 meta: Mutex::new(HashMap::new()),
                 transition: Mutex::new(()),
                 slot_registry: Arc::default(),
+                bindings: Arc::default(),
             };
             state
                 .finish_turn(web, 0, "hello".into(), "reply".into())

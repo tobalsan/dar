@@ -62,6 +62,10 @@ the changed dashboard boot identity and `/health`; `dar self rebuild <agent>`
 does this automatically. Name lookup requires dashboard presence and
 `--workflow` disambiguates multiple live workflows.
 
+The `self_update` tool also works from chat sessions: their host tool bridge
+carries the workflow identity and the live HTTP address, so the request reaches
+the running host and returns "Self-update accepted" before rebuild/restart.
+
 ## Fleet view (`dar dash`)
 
 `dar dash` shows every live agent on the host. At start, it looks for an app

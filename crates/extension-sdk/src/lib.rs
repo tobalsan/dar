@@ -211,9 +211,11 @@ pub mod chat {
             .model(model)
             .provider(provider)
             .system_prompt(system_prompt)
-            .host_tool_bridge(crate::tools::host_tool_bridge(
+            .host_tool_bridge(crate::tools::host_tool_bridge_with_identity(
                 &ctx.host.services,
                 ctx.paths.root(),
+                ctx.paths.workflow_root(),
+                ctx.host.http_addr(),
             ))
     }
 
@@ -258,6 +260,85 @@ pub mod chat {
                 paths,
                 config: register.config.clone(),
                 host: register.into_start_services().unwrap(),
+            }
+        }
+
+        #[test]
+        fn chat_bridge_carries_workflow_and_live_host_identity() {
+            use tool_registry::{
+                ToolExecutor, ToolOutcome, ToolRegistry, ToolRegistryHandle, ToolSpec,
+            };
+
+            struct Tool;
+            #[async_trait::async_trait]
+            impl ToolExecutor for Tool {
+                async fn execute(&self, _: serde_json::Value) -> anyhow::Result<ToolOutcome> {
+                    Ok(ToolOutcome::ok("ok"))
+                }
+            }
+
+            let root = tempfile::tempdir().unwrap();
+            let workflow = tempfile::tempdir().unwrap();
+            let mut ctx = start_ctx(root.path());
+            ctx.paths = ctx.paths.with_workflow_root(workflow.path()).unwrap();
+            let registry = ToolRegistry::new();
+            registry
+                .register_tool(
+                    ToolSpec::new("test", "test", serde_json::json!({"type":"object"})),
+                    Arc::new(Tool),
+                )
+                .unwrap();
+            let services = ctx.host.services.clone();
+            ctx.host
+                .services
+                .register::<dyn ToolRegistryHandle>(
+                    tool_registry::TOOL_REGISTRY_SERVICE,
+                    Arc::new(registry),
+                )
+                .unwrap();
+            let bridge = agent_session_params(&ctx, root.path())
+                .build()
+                .host_tool_bridge
+                .unwrap();
+            assert_eq!(
+                bridge.args,
+                vec![
+                    "__mcp-bridge",
+                    "--dir",
+                    ctx.paths.root().to_str().unwrap(),
+                    "--workflow",
+                    ctx.paths.workflow_root().to_str().unwrap(),
+                ]
+            );
+            ctx.host.set_http_addr("127.0.0.1:7878".parse().unwrap());
+            let bridge = agent_session_params_with_interface(&ctx, root.path(), "web chat")
+                .build()
+                .host_tool_bridge
+                .unwrap();
+            assert_eq!(
+                bridge.args,
+                vec![
+                    "__mcp-bridge",
+                    "--dir",
+                    ctx.paths.root().to_str().unwrap(),
+                    "--workflow",
+                    ctx.paths.workflow_root().to_str().unwrap(),
+                    "--host-addr",
+                    "127.0.0.1:7878",
+                ]
+            );
+            for (bind, dial) in [
+                ("0.0.0.0:7878", "127.0.0.1:7878"),
+                ("[::]:7878", "[::1]:7878"),
+            ] {
+                let mut wildcard = start_ctx(root.path());
+                wildcard.host.services = services.clone();
+                wildcard.host.set_http_addr(bind.parse().unwrap());
+                let bridge = agent_session_params(&wildcard, root.path())
+                    .build()
+                    .host_tool_bridge
+                    .unwrap();
+                assert_eq!(&bridge.args[5..], ["--host-addr", dial]);
             }
         }
 
@@ -342,5 +423,31 @@ pub mod tools {
                 agent_root.display().to_string(),
             ],
         })
+    }
+
+    /// Include the live host identity, matching `runner_core::host_tool_bridge_with_identity`.
+    pub fn host_tool_bridge_with_identity(
+        services: &ServiceRegistry,
+        agent_root: &Path,
+        workflow_root: &Path,
+        host_addr: Option<std::net::SocketAddr>,
+    ) -> Option<HostToolBridge> {
+        let mut bridge = host_tool_bridge(services, agent_root)?;
+        bridge
+            .args
+            .extend(["--workflow".into(), workflow_root.display().to_string()]);
+        if let Some(addr) = host_addr {
+            let addr = match addr {
+                std::net::SocketAddr::V4(addr) if addr.ip().is_unspecified() => {
+                    std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, addr.port()))
+                }
+                std::net::SocketAddr::V6(addr) if addr.ip().is_unspecified() => {
+                    std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, addr.port()))
+                }
+                addr => addr,
+            };
+            bridge.args.extend(["--host-addr".into(), addr.to_string()]);
+        }
+        Some(bridge)
     }
 }
