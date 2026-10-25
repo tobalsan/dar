@@ -66,6 +66,18 @@ A successful live self-rebuild restarts the host and reloads the current
 offline `dar self rebuild --dir ...` only swaps the binary, so a running host
 keeps its existing context until manually restarted.
 
+## Symlinked skills (`symlink_skills`)
+
+```yaml
+symlink_skills: true
+```
+
+Off by default. Dar lists each `skills/<name>/SKILL.md` in the system context.
+By default, Dar skips a skill when a symlink points outside the agent folder.
+When on, Dar lists these skills the same as real folders. The `skills/`
+folder itself must stay inside the agent folder. In a sandbox, mount the
+symlink target too, or the agent cannot read the skill.
+
 ## Self-improvement (`reflect`)
 
 ```yaml

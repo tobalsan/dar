@@ -23,6 +23,9 @@ struct SystemFilesConfig {
     system_files: Option<Vec<SystemFileEntry>>,
     #[serde(default)]
     reflect: Option<ReflectConfig>,
+    /// Load `skills/<name>` symlinks whose target is outside the agent root.
+    #[serde(default)]
+    symlink_skills: bool,
 }
 
 fn load_config(root: &Path) -> SystemFilesConfig {
@@ -49,7 +52,7 @@ fn load_config(root: &Path) -> SystemFilesConfig {
 /// context (boot continues — preflight is the gate that rejects bad config).
 pub fn resolve_for(root: &Path) -> SystemContext {
     let cfg = load_config(root);
-    match resolve(root, cfg.system_files.as_deref()) {
+    match resolve_with(root, cfg.system_files.as_deref(), cfg.symlink_skills) {
         Ok(mut ctx) => {
             if cfg.reflect.is_some_and(|r| r.is_enabled()) {
                 append_reflect_section(&mut ctx.text);
@@ -80,13 +83,21 @@ pub fn resolve(
     root: &Path,
     entries: Option<&[SystemFileEntry]>,
 ) -> Result<SystemContext, ResolveError> {
+    resolve_with(root, entries, false)
+}
+
+fn resolve_with(
+    root: &Path,
+    entries: Option<&[SystemFileEntry]>,
+    symlink_skills: bool,
+) -> Result<SystemContext, ResolveError> {
     let resolved = system_files::resolve(root, entries)?;
     for warning in &resolved.warnings {
         tracing::warn!("system file: {warning}");
     }
 
     let mut payload: SystemContext = resolved.into();
-    append_workspace_skills(root, &mut payload.text);
+    append_workspace_skills(root, symlink_skills, &mut payload.text);
     Ok(payload)
 }
 
@@ -98,8 +109,8 @@ struct SkillFrontmatter {
     disable_model_invocation: bool,
 }
 
-fn append_workspace_skills(root: &Path, text: &mut String) {
-    let skills = discover_workspace_skills(root);
+fn append_workspace_skills(root: &Path, symlink_skills: bool, text: &mut String) {
+    let skills = discover_workspace_skills(root, symlink_skills);
     if skills.is_empty() {
         return;
     }
@@ -136,7 +147,7 @@ struct WorkspaceSkill {
     path: PathBuf,
 }
 
-fn discover_workspace_skills(root: &Path) -> Vec<WorkspaceSkill> {
+fn discover_workspace_skills(root: &Path, symlink_skills: bool) -> Vec<WorkspaceSkill> {
     let skills_dir = root.join("skills");
     if host_api::assert_contained(root, &skills_dir).is_err() {
         tracing::warn!(
@@ -155,7 +166,7 @@ fn discover_workspace_skills(root: &Path) -> Vec<WorkspaceSkill> {
         if !skill_md.is_file() {
             continue;
         }
-        if host_api::assert_contained(root, &skill_md).is_err() {
+        if !symlink_skills && host_api::assert_contained(root, &skill_md).is_err() {
             tracing::warn!("skill file escapes agent root: {}", skill_md.display());
             continue;
         }
@@ -312,6 +323,66 @@ mod tests {
 
         assert!(!ctx.text.contains("escaped-file"), "{}", ctx.text);
         assert!(!ctx.text.contains("<available_skills>"), "{}", ctx.text);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_skills_flag_loads_skill_symlinks_escaping_agent_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        write(
+            outside.path(),
+            "shared/SKILL.md",
+            "---\nname: shared-dir\ndescription: Shared skill\n---\nBody",
+        );
+        write(dir.path(), "agent.yaml", "symlink_skills: true\n");
+        fs::create_dir_all(dir.path().join("skills")).unwrap();
+        symlink(
+            outside.path().join("shared"),
+            dir.path().join("skills/shared"),
+        )
+        .unwrap();
+
+        let ctx = resolve_for(dir.path());
+
+        assert!(ctx.text.contains("shared-dir"), "{}", ctx.text);
+        assert!(
+            ctx.text.contains(
+                &dir.path()
+                    .join("skills/shared/SKILL.md")
+                    .display()
+                    .to_string()
+            ),
+            "{}",
+            ctx.text
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_symlinks_escaping_agent_root_stay_hidden_without_flag() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        write(
+            outside.path(),
+            "shared/SKILL.md",
+            "---\nname: shared-dir\ndescription: Shared skill\n---\nBody",
+        );
+        write(dir.path(), "agent.yaml", "symlink_skills: false\n");
+        fs::create_dir_all(dir.path().join("skills")).unwrap();
+        symlink(
+            outside.path().join("shared"),
+            dir.path().join("skills/shared"),
+        )
+        .unwrap();
+
+        let ctx = resolve_for(dir.path());
+
+        assert!(!ctx.text.contains("shared-dir"), "{}", ctx.text);
     }
 
     #[test]
