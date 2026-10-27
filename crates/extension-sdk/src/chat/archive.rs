@@ -531,6 +531,8 @@ fn normalize_events(value: Value) -> Vec<Value> {
                     | "aborted"
                     | "closed"
                     | "context_usage"
+                    | "compaction_started"
+                    | "compaction_finished"
                     | "reset"
             )
         })
@@ -538,6 +540,15 @@ fn normalize_events(value: Value) -> Vec<Value> {
         return vec![value];
     }
     if value.get("type").and_then(Value::as_str) == Some("compaction") {
+        if let Some(summary) = value
+            .get("summary")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
+            return vec![
+                serde_json::json!({"type":"compaction_finished","ok":true,"summary":summary}),
+            ];
+        }
         return vec![serde_json::json!({"type":"notice","text":"Context compacted."})];
     }
     let timestamp = value.get("timestamp").cloned().or_else(|| {
@@ -2084,7 +2095,7 @@ not json
                 "tool_call",
                 "tool_output",
                 "delta",
-                "notice",
+                "compaction_finished",
                 "user"
             ]
         );
@@ -2093,6 +2104,32 @@ not json
         assert_eq!(page.events[2]["args"], "{\"q\":1}");
         assert_eq!(page.events[3]["id"], "c1");
         assert_eq!(page.events[3]["text"], "found");
+        assert_eq!(page.events[5]["ok"], true);
+        assert_eq!(page.events[5]["summary"], "sum");
+    }
+
+    #[test]
+    fn read_events_preserves_compaction_wire_history() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "2024-06-15T12:30:00Z_b1.jsonl",
+            concat!(
+                "{\"type\":\"session\",\"id\":\"b1\"}\n",
+                "{\"type\":\"compaction_started\",\"command\":\"/compact keep the plan\"}\n",
+                "{\"type\":\"compaction_finished\",\"ok\":true,\"summary\":\"THE PLAN\"}\n",
+                "{\"type\":\"compaction\"}\n"
+            ),
+        );
+        let page = read_events(temp.path(), "b1", 0, READ_MAX).unwrap();
+        assert_eq!(
+            page.events,
+            vec![
+                serde_json::json!({"type":"compaction_started","command":"/compact keep the plan"}),
+                serde_json::json!({"type":"compaction_finished","ok":true,"summary":"THE PLAN"}),
+                serde_json::json!({"type":"notice","text":"Context compacted."}),
+            ]
+        );
     }
 
     #[test]

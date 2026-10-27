@@ -431,6 +431,7 @@ impl ChatState {
                 self.push_notice("— started a fresh session —".to_string());
             }
             ChatEvent::Delta { role, text } => self.append_delta(role, &text),
+            ChatEvent::Compacted { .. } => self.push_notice("Context compacted.".to_string()),
             ChatEvent::ToolCall { id, name, args } => self.blocks.push(ChatBlock::Tool {
                 id,
                 name,
@@ -782,6 +783,18 @@ mod tests {
         assert_eq!(entries, PREAMBLE_ISSUE_CAP);
         assert!(!preamble.contains("ISSUE-21.md"));
         assert!(preamble.contains("- ... and 5 more"));
+    }
+
+    #[test]
+    fn compacted_event_renders_a_plain_notice() {
+        let mut chat = ChatState::default();
+        chat.apply_event(ChatEvent::Compacted {
+            summary: Some("Keep the plan".to_string()),
+        });
+        assert_eq!(
+            chat.blocks,
+            vec![ChatBlock::Notice("Context compacted.".to_string())]
+        );
     }
 
     #[test]

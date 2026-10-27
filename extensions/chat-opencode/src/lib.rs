@@ -343,12 +343,7 @@ impl OpenCodeChatSession {
                     }
                     let finished = match result {
                         Ok(()) => {
-                            let _ = tx
-                                .send(ChatEvent::Delta {
-                                    role: ChatRole::Assistant,
-                                    text: "Context compacted.".to_owned(),
-                                })
-                                .await;
+                            let _ = tx.send(ChatEvent::Compacted { summary: None }).await;
                             ChatEvent::TurnFinished {
                                 ok: true,
                                 error: None,
@@ -1654,7 +1649,7 @@ PY"#;
             .unwrap();
         assert!(matches!(
             next_event(&mut rx).await,
-            ChatEvent::Delta { role: ChatRole::Assistant, text } if text == "Context compacted."
+            ChatEvent::Compacted { summary: None }
         ));
         assert!(matches!(
             next_event(&mut rx).await,
@@ -1791,10 +1786,7 @@ PY"#;
         session.send_turn("/compact".to_string()).await.unwrap();
         assert!(matches!(
             next_event(&mut rx).await,
-            ChatEvent::Delta {
-                role: ChatRole::Assistant,
-                ..
-            }
+            ChatEvent::Compacted { summary: None }
         ));
         assert!(matches!(
             next_event(&mut rx).await,
@@ -1808,10 +1800,7 @@ PY"#;
         session.send_turn("/compact".to_string()).await.unwrap();
         assert!(matches!(
             next_event(&mut rx).await,
-            ChatEvent::Delta {
-                role: ChatRole::Assistant,
-                ..
-            }
+            ChatEvent::Compacted { summary: None }
         ));
         assert!(matches!(
             next_event(&mut rx).await,
@@ -1875,10 +1864,7 @@ PY"#;
         ));
         assert!(matches!(
             next_event(&mut rx).await,
-            ChatEvent::Delta {
-                role: ChatRole::Assistant,
-                ..
-            }
+            ChatEvent::Compacted { summary: None }
         ));
         assert!(matches!(
             next_event(&mut rx).await,
@@ -1901,10 +1887,7 @@ PY"#;
         let started = std::time::Instant::now();
         assert!(matches!(
             next_event(&mut rx).await,
-            ChatEvent::Delta {
-                role: ChatRole::Assistant,
-                ..
-            }
+            ChatEvent::Compacted { summary: None }
         ));
         assert!(matches!(
             next_event(&mut rx).await,

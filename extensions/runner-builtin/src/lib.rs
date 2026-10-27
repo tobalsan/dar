@@ -489,9 +489,8 @@ async fn compact_chat_history(
     }
     lock_state(state).compact(summary);
     let _ = tx
-        .send(ChatEvent::Delta {
-            role: ChatRole::Assistant,
-            text: "Context compacted.".to_string(),
+        .send(ChatEvent::Compacted {
+            summary: Some(summary.to_owned()),
         })
         .await;
     send_context_usage(

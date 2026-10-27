@@ -3,8 +3,41 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(process.argv[2], 'utf8');
+const { reduce, html } = require(process.argv[2]);
 
-function browser() {
+const running = reduce([], { type: 'compaction_started', command: '/compact keep the plan' });
+assert.equal(running.length, 1);
+assert.equal(running[0].kind, 'compaction');
+assert.match(html(running), /Compacting context\.\.\./);
+assert.match(html(running), /\/compact keep the plan/);
+assert.doesNotMatch(html(running), /chat-user|>You</);
+
+const completed = reduce(running, { type: 'compaction_finished', ok: true, summary: '**Keep the plan**\n- Verify reload' });
+assert.equal(completed.length, 1);
+assert.equal(completed[0].state, 'done');
+assert.match(html(completed), /Context compacted\./);
+assert.match(html(completed), /<details[^>]*><summary>Compaction summary<\/summary>/);
+assert.match(html(completed), /<strong>Keep the plan<\/strong>/);
+assert.doesNotMatch(html(completed), /Compacting context|<details[^>]*\bopen\b/);
+const resumed = reduce([], { type: 'compaction_finished', ok: true, summary: 'Earlier context' });
+assert.match(html(resumed), /Compaction summary/);
+assert.doesNotMatch(html(resumed), /<code>\/compact|Context compacted/);
+
+const failure = reduce(reduce([], { type: 'compaction_started', command: '/compact' }), { type: 'compaction_finished', ok: false, error: 'provider unavailable <retry>' });
+assert.equal(failure.length, 1);
+assert.match(html(failure), /provider unavailable &lt;retry&gt;/);
+assert.doesNotMatch(html(failure), /turn failed|Context compacted|Compaction summary/);
+for (const event of [{ type: 'compaction_finished', ok: false, error: 'aborted' }, { type: 'aborted', error: 'aborted' }, { type: 'closed', error: 'connection lost' }]) {
+  const stopped = reduce(reduce([], { type: 'compaction_started', command: '/compact' }), event);
+  assert.equal(stopped.length, 1, 'terminal state stays in the command row');
+  assert.doesNotMatch(html(stopped), /Compacting context|chat-turn/);
+  assert.match(html(stopped), event.type === 'closed' ? /connection lost/ : /Interrupted/);
+}
+const stoppedRow = reduce(reduce([], { type: 'compaction_started', command: '/compact' }), { type: 'compaction_finished', ok: false, error: 'aborted' });
+assert.equal(reduce(stoppedRow, { type: 'aborted', error: 'aborted' }).length, 1, 'the terminal wire event does not add another interrupted block');
+assert.equal(reduce(reduce([], { type: 'compaction_started', command: '/compact' }), { type: 'finished' })[0].state, 'done');
+
+function browser(respond) {
   const handlers = {}, calls = [];
   const attrs = {};
   const element = id => {
@@ -26,13 +59,16 @@ function browser() {
     window: { innerHeight: 1000, addEventListener() {} },
     queueMicrotask, crypto: { randomUUID: () => 'command' }, EventSource: function () { this.close = () => {}; },
     setTimeout, clearTimeout, setInterval() {},
-    fetch: async (url, options) => { calls.push({ url, options }); return { ok: true, status: 202, json: async () => (url.endsWith('/new') ? { slot: 'fresh' } : {}), text: async () => '{}' }; },
+    fetch: async (url, options) => { calls.push({ url, options }); if (respond) return respond(url, options); return { ok: true, status: 202, json: async () => (url.endsWith('/new') ? { slot: 'fresh' } : {}), text: async () => '{}' }; },
   };
   vm.runInContext(source, vm.createContext(sandbox));
   const input = elements['chat-input'];
   const fire = (type, extra = {}) => { const e = { target: input, preventDefault() { e.prevented = true; }, ...extra }; for (const fn of handlers[type] || []) fn(e); return e; };
   return {
     calls, attrs, menu: elements['chat-slash-menu'], input, app: () => sandbox.window.__chatWeb,
+    event: event => sandbox.window.renderChatEvent(event),
+    transcript: () => elements['chat-transcript'].innerHTML,
+    abort: elements['chat-abort'],
     type(value) { input.value = value; fire('input'); },
     key(key, extra = {}) { return fire('keydown', { key, ...extra }); },
     clickOption(name) { fire('click', { target: { closest: s => s === '.chat-slash-option' ? { dataset: { command: name } } : null } }); },
@@ -102,6 +138,58 @@ const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(
   await settle();
   assert.equal(p.calls[0].url, '/chat/main/compact');
   assert.equal(JSON.parse(p.calls[0].options.body).instructions, 'keep the plan');
+
+  p = browser();
+  p.type('/compact'); p.key('Enter');
+  p.type('/compact again'); p.key('Enter');
+  await settle();
+  assert.equal(p.calls.length, 1, 'double Enter sends no second request before SSE or the POST settles');
+  assert.equal(p.input.value, '/compact again', 'refused command remains in the composer');
+  assert.match(p.transcript(), /compaction running/);
+  assert.equal(p.abort.hidden, false, 'Stop is available immediately');
+  p.type('next message'); p.key('Enter');
+  await settle();
+  assert.equal(p.calls.length, 1, 'a refused command does not unlock plain messages');
+  p.event({ type: 'compaction_started', command: '/compact' });
+  p.event({ type: 'compaction_finished', ok: true, summary: 'Kept context' });
+  p.event({ type: 'finished' });
+  p.type('next message'); p.key('Enter');
+  await settle();
+  assert.equal(p.calls[1].url, '/chat/main/send', 'terminal event unlocks the next message');
+
+  let rejectCompact;
+  p = browser(() => new Promise((_, reject) => { rejectCompact = reject; }));
+  p.type('/compact'); p.key('Enter');
+  p.event({ type: 'compaction_started', command: '/compact' });
+  rejectCompact(new Error('connection lost'));
+  await settle();
+  p.type('next message'); p.key('Enter');
+  await settle();
+  assert.equal(p.calls.length, 1, 'a failed POST response cannot unlock a compaction already confirmed by SSE');
+
+  p = browser(async () => ({ ok: false, status: 409, text: async () => JSON.stringify({ error: 'wait for the current response to finish' }) }));
+  p.type('/compact'); p.key('Enter');
+  await settle();
+  assert.equal(p.input.value, '/compact', 'server rejection restores the command');
+  p.type('next message'); p.key('Enter');
+  await settle();
+  assert.equal(p.calls[1].url, '/chat/main/send', 'a rejected command without a running row releases the composer');
+
+  p = browser(() => new Promise(() => {}));
+  p.type('/compact'); p.key('Enter');
+  p.event({ type: 'compaction_started', command: '/compact' });
+  p.type('/stop'); p.key('Enter');
+  assert.equal(p.calls[1].url, '/chat/main/abort', 'Stop remains usable while the POST hangs');
+  p.event({ type: 'compaction_finished', ok: false, error: 'aborted' });
+  p.event({ type: 'aborted', error: 'aborted' });
+  p.type('continue'); p.key('Enter');
+  assert.equal(p.calls[2].url, '/chat/main/send', 'a terminal event releases the composer even when the original POST hangs');
+
+  p = browser();
+  p.event({ type: 'compaction_started', command: '/compact', historical: true });
+  p.event({ type: 'reset' });
+  p.type('fresh'); p.key('Enter');
+  assert.equal(p.calls[0].url, '/chat/main/send', 'reset clears the pending command');
 
   p = browser();
   p.type('/');
