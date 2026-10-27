@@ -29,8 +29,23 @@
   // pages without repeatedly copying its complete archive.
   const reduceInto = (blocks, event) => {
     let next = blocks, text = event.text || '';
+    if (['finished', 'aborted', 'closed'].includes(event.type)) {
+      let index = next.findLastIndex(block => block.kind === 'compaction' && block.pending);
+      if (index >= 0) {
+        if (next[index].state === 'running') reduceInto(next, { type: 'compaction_finished', ok: event.type === 'finished', error: event.error || (event.type === 'closed' ? 'chat session closed' : 'aborted') });
+        next[index].pending = false;
+        return index;
+      }
+    }
     switch (event.type) {
       case 'user': next.push({ kind: 'user', text, attachments: event.attachments || [], ts: event.ts || event.timestamp }); return next.length - 1;
+      case 'compaction_started': next.push({ kind: 'compaction', command: event.command || '/compact', state: 'running', pending: true, ts: event.ts || event.timestamp }); return next.length - 1;
+      case 'compaction_finished': {
+        let index = next.findLastIndex(block => block.kind === 'compaction' && block.state === 'running');
+        if (index < 0) { next.push({ kind: 'compaction', ts: event.ts || event.timestamp }); index = next.length - 1; }
+        Object.assign(next[index], { state: event.ok ? 'done' : event.error === 'aborted' ? 'interrupted' : 'error', summary: event.ok ? event.summary : null, error: event.error });
+        return index;
+      }
       case 'started': return -1;
       // A reset (new chat or resume) starts from an empty transcript: the hero
       // shows for a new chat, and a resume replays history right after.
@@ -84,6 +99,13 @@
   const stamp = block => block.ts ? `<time class="chat-time" datetime="${esc(new Date(block.ts).toISOString())}">${esc(timeLabel(block.ts))}</time>` : '';
 
   const html = (blocks, qsel = {}, readOnly = false) => blocks.map((block, i) => {
+    if (block.kind === 'compaction') {
+      let running = block.state === 'running';
+      let label = running ? 'Compacting context...' : block.state === 'done' ? 'Context compacted.' : block.state === 'interrupted' ? 'Interrupted' : block.error || 'Compaction failed';
+      let row = block.command ? `<div class="chat-compact-status${block.state === 'error' ? ' is-error' : ''}" role="status"><code>${esc(block.command)}</code>${running ? '<span class="chat-compact-spinner" aria-hidden="true"></span>' : ''}<span>${esc(label)}</span>${stamp(block)}</div>` : '';
+      let summary = block.summary ? `<details class="chat-compact-summary" data-bi="${i}"><summary>Compaction summary</summary><div class="chat-body">${markdown(block.summary)}</div></details>` : '';
+      return `<div class="chat-compaction">${row}${summary}</div>`;
+    }
     if (block.kind === 'tool') {
       let state = block.is_error ? 'bad' : block.done ? 'done' : 'live';
       let label = block.is_error ? 'error' : block.done ? 'done' : 'running';
@@ -226,9 +248,9 @@
   const pasteName = name => /^image\.\w+$/i.test(name) ? name.replace(/^image/i, `pasted-${Date.now()}-${++pasteSeq}`) : name;
 
   const refreshBusy = app => {
-    let busy = app.turns > 0, abort = $('chat-abort'), send = $('chat-send');
+    let busy = app.turns > 0 || app.compactionPending, abort = $('chat-abort'), send = $('chat-send');
     if (abort) { abort.disabled = !busy; abort.hidden = !busy; }
-    if (send) send.disabled = !sendEnabled(app);
+    if (send) send.disabled = app.compactionPending || !sendEnabled(app);
   };
 
   // Whimsy pool for the pending placeholder; a fresh word is drawn per turn.
@@ -240,7 +262,7 @@
   const paint = app => {
     let transcript = $('chat-transcript'); if (!transcript) return;
     let stick = app.stick;
-    let empty = !app.blocks.some(b => b.kind === 'user' || b.kind === 'assistant');
+    let empty = !app.blocks.some(b => b.kind === 'user' || b.kind === 'assistant' || b.kind === 'compaction');
     let root = $('chat-root');
     if (empty && root?.classList && !root.classList.contains('is-empty')) pickHeroLine();
     root?.classList?.toggle('is-empty', empty);
@@ -278,10 +300,11 @@
   const render = (app, event) => {
     window.DarMcpApps?.event(app,event);
     if (event.type === 'context_usage') { app.contextUsage = event; showContext(event); return; }
-    if (event.type === 'reset') { app.turns=0; app.qsel={}; app.qsent={}; app.contextUsage = null; showContext(null); }
+    if (event.type === 'reset') { app.turns=0; app.compactionPending=false; app.qsel={}; app.qsent={}; app.contextUsage = null; showContext(null); }
+    if (event.type === 'compaction_started') { app.compactionPending = true; if (!event.historical) app.turns++; }
     if (!event.historical && event.type === 'started' && event.origin === 'autonomous') { app.turns++; refreshBusy(app); return; }
     if (!event.historical && event.type === 'user') { app.turns++; app.workingWord = WORKING_WORDS[Math.floor(Math.random() * WORKING_WORDS.length)]; }
-    if (!event.historical && (event.type === 'finished' || event.type === 'aborted' || event.type === 'closed')) app.turns = Math.max(0, app.turns - 1);
+    if (event.type === 'finished' || event.type === 'aborted' || event.type === 'closed') { app.compactionPending = false; if (!event.historical) app.turns = Math.max(0, app.turns - 1); }
     app.blocks = reduce(app.blocks, event);
     schedulePaint(app);
   };
@@ -301,6 +324,7 @@
     closeSlash();
     window.__chatSeen?.mark([slot]);
     if (!files.length && command === '/stop') { fetch(`/chat/${app.slot}/abort`, { method: 'POST' }); app.draft=''; input.value=''; autogrow(input); refreshBusy(app); return; }
+    if (app.compactionPending) { restoreDraft(app, slot, input, message, files, new Error('compaction running')); return; }
     if (!files.length && command === '/new') {
       app.draft = ''; input.value = ''; app.pending = []; renderChips(app); autogrow(input); refreshBusy(app);
       try {
@@ -312,10 +336,12 @@
     }
     if (!files.length && (command === '/compact' || /^\/compact\s/.test(command))) {
       let instructions = command.slice('/compact'.length).trim();
+      app.compactionPending = true;
       app.draft = ''; input.value = ''; app.pending = []; renderChips(app); autogrow(input); refreshBusy(app);
       try {
         await request(`/chat/${app.slot}/compact`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command_id: uuid(), instructions: instructions || undefined }) });
       } catch (error) {
+        if (app.slot === slot) app.compactionPending = app.blocks.some(block => block.kind === 'compaction' && block.pending);
         restoreDraft(app, slot, input, message, files, error);
       }
       return;
@@ -704,7 +730,7 @@
   if (!window.__chatWeb) {
     let slot = 'main';
     try { slot = sessionStorage.getItem(SLOT_KEY) || slot; } catch {}
-    let app = { slot, blocks: [], draft: '', pending: [], turns: 0, stick: true, es: null, paintScheduled: false, qsel: {}, qsent: {}, editingSession: null, sidebarSequence: 0, searchSequence: 0, dragDepth: 0 };
+    let app = { slot, blocks: [], draft: '', pending: [], turns: 0, compactionPending: false, stick: true, es: null, paintScheduled: false, qsel: {}, qsent: {}, editingSession: null, sidebarSequence: 0, searchSequence: 0, dragDepth: 0 };
     try { app.slotLabels = JSON.parse(sessionStorage.getItem(SLOT_KEY + ':labels')) || {}; } catch { app.slotLabels = {}; }
     window.__chatWeb = app;
     window.renderChatEvent = event => render(app, event);

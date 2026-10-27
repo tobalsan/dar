@@ -166,10 +166,12 @@ impl TurnQueue {
                     origin: TurnOrigin::Submitted,
                 }];
                 if failure.is_none() {
-                    events.push(ChatEvent::Delta {
-                        role: ChatRole::Assistant,
-                        text: "Context compacted.".to_owned(),
+                    events.push(ChatEvent::Compacted {
+                        summary: value["data"]["summary"].as_str().map(str::to_owned),
                     });
+                    if let Mapped::Emit(usage @ ChatEvent::ContextUsage { .. }) = mapped {
+                        events.push(usage);
+                    }
                 }
                 events.push(ChatEvent::TurnFinished {
                     ok: failure.is_none(),
@@ -516,6 +518,18 @@ fn map_stdout_line(line: &str, context_window: Option<u64>) -> Mapped {
                 .filter(|id| !id.is_empty())
             {
                 Some(id) => Mapped::Emit(ChatEvent::SessionIdentity { id: id.to_string() }),
+                None => Mapped::Ignore,
+            }
+        }
+        Some("response")
+            if value["command"].as_str() == Some("compact")
+                && value["success"].as_bool() == Some(true) =>
+        {
+            match value["data"]["estimatedTokensAfter"].as_u64() {
+                Some(tokens_used) => Mapped::Emit(ChatEvent::ContextUsage {
+                    tokens_used,
+                    context_window,
+                }),
                 None => Mapped::Ignore,
             }
         }
@@ -875,12 +889,16 @@ mod tests {
             in_flight: Some(Prompt::new(prompt_command("t1", "/compact"))),
             ..TurnQueue::default()
         };
-        let ok = r#"{"type":"response","id":"t1","command":"compact","success":true,"data":{}}"#;
+        let ok = r#"{"type":"response","id":"t1","command":"compact","success":true,"data":{"summary":"Keep the plan"}}"#;
         let value: Value = serde_json::from_str(ok).unwrap();
         let events = queue.observe(&value, map_stdout_line(ok, None));
         assert!(matches!(
             events.first(),
             Some(ChatEvent::TurnStarted { .. })
+        ));
+        assert!(matches!(
+            &events[1],
+            ChatEvent::Compacted { summary: Some(summary) } if summary == "Keep the plan"
         ));
         assert!(matches!(
             events.last(),
@@ -895,6 +913,43 @@ mod tests {
         assert!(matches!(
             events.last(),
             Some(ChatEvent::TurnFinished { ok: false, error: Some(e) }) if e == "Nothing to compact"
+        ));
+        assert_eq!(events.len(), 2);
+
+        queue.in_flight = Some(Prompt::new(prompt_command("t3", "/compact")));
+        let missing =
+            r#"{"type":"response","id":"t3","command":"compact","success":true,"data":{}}"#;
+        let value: Value = serde_json::from_str(missing).unwrap();
+        let events = queue.observe(&value, map_stdout_line(missing, Some(200_000)));
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ChatEvent::TurnStarted { .. },
+                ChatEvent::Compacted { summary: None },
+                ChatEvent::TurnFinished { ok: true, .. }
+            ]
+        ));
+    }
+
+    #[test]
+    fn compact_response_reports_post_compaction_usage() {
+        let mut queue = TurnQueue {
+            in_flight: Some(Prompt::new(prompt_command("t1", "/compact"))),
+            ..TurnQueue::default()
+        };
+        let line = r#"{"type":"response","id":"t1","command":"compact","success":true,"data":{"summary":"Keep the plan","estimatedTokensAfter":120}}"#;
+        let value: Value = serde_json::from_str(line).unwrap();
+        let events = queue.observe(&value, map_stdout_line(line, Some(200_000)));
+        assert!(matches!(
+            &events[2],
+            ChatEvent::ContextUsage {
+                tokens_used: 120,
+                context_window: Some(200_000)
+            }
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(ChatEvent::TurnFinished { ok: true, .. })
         ));
     }
 

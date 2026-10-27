@@ -362,6 +362,9 @@ pub enum ChatEvent {
         tokens_used: u64,
         context_window: Option<u64>,
     },
+    /// Context compaction completed; the retained summary is optional when the
+    /// backend does not expose it. Emitted before the run's `TurnFinished`.
+    Compacted { summary: Option<String> },
     /// Exactly one per run, including autonomous runs. Aborted runs use
     /// ok=false, error=Some("aborted").
     TurnFinished { ok: bool, error: Option<String> },

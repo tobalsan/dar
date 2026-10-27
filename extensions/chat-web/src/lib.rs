@@ -592,6 +592,8 @@ struct Session {
     generation: std::sync::atomic::AtomicU64,
     next_seq: std::sync::atomic::AtomicU64,
     active_turns: std::sync::atomic::AtomicUsize,
+    compaction_pending: std::sync::atomic::AtomicBool,
+    compaction_reported: std::sync::atomic::AtomicBool,
     abort_requested: std::sync::atomic::AtomicBool,
     transcript_failed: std::sync::atomic::AtomicBool,
     suppress_resume: std::sync::atomic::AtomicBool,
@@ -620,6 +622,12 @@ struct WireEvent {
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1186,6 +1194,8 @@ impl AppState {
             generation: std::sync::atomic::AtomicU64::new(0),
             next_seq: std::sync::atomic::AtomicU64::new(next_seq),
             active_turns: std::sync::atomic::AtomicUsize::new(0),
+            compaction_pending: std::sync::atomic::AtomicBool::new(false),
+            compaction_reported: std::sync::atomic::AtomicBool::new(false),
             abort_requested: std::sync::atomic::AtomicBool::new(false),
             transcript_failed: std::sync::atomic::AtomicBool::new(false),
             suppress_resume: std::sync::atomic::AtomicBool::new(false),
@@ -1519,6 +1529,12 @@ impl AppState {
             .active_turns
             .store(0, std::sync::atomic::Ordering::SeqCst);
         session
+            .compaction_pending
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        session
+            .compaction_reported
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        session
             .abort_requested
             .store(false, std::sync::atomic::Ordering::SeqCst);
         session
@@ -1564,6 +1580,9 @@ impl AppState {
                 seq,
                 ts: now_ms(),
                 kind: "reset".into(),
+                command: None,
+                ok: None,
+                summary: None,
                 text: None,
                 id: None,
                 name: None,
@@ -1744,6 +1763,17 @@ impl Session {
     ) -> Result<()> {
         let _acceptance = self.acceptance_lock.lock().await;
         if self
+            .compaction_pending
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            anyhow::bail!("compaction running");
+        }
+        if cap_chat::parse_compact_command(&display).is_some()
+            && self.active_turns.load(std::sync::atomic::Ordering::SeqCst) > 0
+        {
+            anyhow::bail!("wait for the current response to finish");
+        }
+        if self
             .transcript_failed
             .load(std::sync::atomic::Ordering::SeqCst)
         {
@@ -1775,7 +1805,14 @@ impl Session {
             let _ = backend.abort().await;
             return Err(error.context("failed to persist accepted chat turn"));
         }
-        let _ = self.events.send(ChatEvent::User { text: display });
+        if cap_chat::parse_compact_command(&display).is_some() {
+            self.compaction_reported
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            self.compaction_pending
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            let _ = self.events.send(ChatEvent::User { text: display });
+        }
         self.active_turns
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.touch();
@@ -1783,33 +1820,31 @@ impl Session {
     }
 
     fn publish_user(&self, text: String, attachments: Vec<Attachment>) -> Result<()> {
+        let compact = cap_chat::parse_compact_command(&text).is_some();
+        self.publish_wire(WireEvent {
+            kind: if compact {
+                "compaction_started"
+            } else {
+                "user"
+            }
+            .into(),
+            text: (!compact).then(|| text.clone()),
+            command: compact.then_some(text),
+            attachments,
+            ..WireEvent::default()
+        })
+    }
+
+    fn publish_wire(&self, mut event: WireEvent) -> Result<()> {
         let _publish = self
             .publish_lock
             .lock()
             .expect("chat-web publish mutex poisoned");
-        let seq = self
+        event.seq = self
             .next_seq
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        let event = WireEvent {
-            seq,
-            ts: now_ms(),
-            kind: "user".into(),
-            text: Some(text),
-            id: None,
-            name: None,
-            args: None,
-            is_error: None,
-            done: None,
-            error: None,
-            tokens_used: None,
-            context_window: None,
-            attachments,
-            questions: None,
-            origin: None,
-            historical: false,
-            app: None,
-        };
+        event.ts = now_ms();
         append_transcript(&self.transcript, &event)?;
         self.history
             .lock()
@@ -1825,7 +1860,54 @@ impl Session {
         self.publish(event)
     }
 
+    fn publish_compaction_result(
+        &self,
+        ok: bool,
+        summary: Option<String>,
+        error: Option<String>,
+    ) -> bool {
+        if let Err(error) = self.publish_wire(WireEvent {
+            kind: "compaction_finished".into(),
+            ok: Some(ok),
+            summary,
+            error,
+            ..WireEvent::default()
+        }) {
+            self.fail_transcript(error);
+            return false;
+        }
+        self.compaction_reported
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+
     fn publish(&self, event: ChatEvent) -> bool {
+        if self
+            .compaction_pending
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            let result = match &event {
+                ChatEvent::Error(_) => return true,
+                ChatEvent::TurnFinished { ok, error } => Some((*ok, error.clone())),
+                ChatEvent::SessionClosed { error } => Some((
+                    false,
+                    Some(error.clone().unwrap_or_else(|| "aborted".into())),
+                )),
+                _ => None,
+            };
+            if let Some((ok, error)) = result {
+                if !self
+                    .compaction_reported
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    && !self.publish_compaction_result(ok, None, error)
+                {
+                    return false;
+                }
+            }
+        }
+        if let ChatEvent::Compacted { summary } = event {
+            return self.publish_compaction_result(true, summary, None);
+        }
         let (
             kind,
             text,
@@ -1840,7 +1922,8 @@ impl Session {
             questions,
             origin,
         ) = match event {
-            ChatEvent::User { .. }
+            ChatEvent::Compacted { .. }
+            | ChatEvent::User { .. }
             | ChatEvent::SessionReset
             | ChatEvent::SessionIdentity { .. } => return true,
             ChatEvent::TurnStarted { origin } => {
@@ -2056,6 +2139,9 @@ impl Session {
             seq,
             ts: now_ms(),
             kind: kind.to_owned(),
+            command: None,
+            ok: None,
+            summary: None,
             text,
             id,
             name,
@@ -2083,6 +2169,8 @@ impl Session {
             return false;
         }
         if terminal {
+            self.compaction_pending
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             let turns = self
                 .active_turns
                 .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -2137,6 +2225,8 @@ impl Session {
         let turns = self
             .active_turns
             .swap(0, std::sync::atomic::Ordering::SeqCst);
+        self.compaction_pending
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         self.abort_requested
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let _ = self.abort_signal.send(false);
@@ -2175,6 +2265,9 @@ impl Session {
             seq,
             ts: now_ms(),
             kind: kind.to_owned(),
+            command: None,
+            ok: None,
+            summary: None,
             text: None,
             id: None,
             name: None,
@@ -2423,9 +2516,10 @@ async fn submit(
             };
             match accepted {
                 Ok(()) => {
-                    if !s
-                        .title_started
-                        .swap(true, std::sync::atomic::Ordering::SeqCst)
+                    if cap_chat::parse_compact_command(&message).is_none()
+                        && !s
+                            .title_started
+                            .swap(true, std::sync::atomic::Ordering::SeqCst)
                     {
                         let watcher = Arc::clone(&state);
                         let watched_session = Arc::clone(&s);
@@ -5228,6 +5322,8 @@ mod tests {
             generation: std::sync::atomic::AtomicU64::new(0),
             next_seq: std::sync::atomic::AtomicU64::new(0),
             active_turns: std::sync::atomic::AtomicUsize::new(0),
+            compaction_pending: std::sync::atomic::AtomicBool::new(false),
+            compaction_reported: std::sync::atomic::AtomicBool::new(false),
             abort_requested: std::sync::atomic::AtomicBool::new(false),
             transcript_failed: std::sync::atomic::AtomicBool::new(false),
             suppress_resume: std::sync::atomic::AtomicBool::new(false),
@@ -5488,12 +5584,24 @@ mod tests {
         turns: mpsc::UnboundedSender<String>,
     }
 
-    struct EnvironmentSession(mpsc::UnboundedSender<String>);
+    struct EnvironmentSession {
+        turns: mpsc::UnboundedSender<String>,
+        events: mpsc::Sender<ChatEvent>,
+    }
 
     impl ChatSession for EnvironmentSession {
         fn send_turn(&mut self, prompt: String) -> chat::BoxFuture<'_, Result<()>> {
-            self.0.send(prompt).unwrap();
-            Box::pin(async { Ok(()) })
+            self.turns.send(prompt).unwrap();
+            let events = self.events.clone();
+            Box::pin(async move {
+                events
+                    .send(ChatEvent::TurnFinished {
+                        ok: true,
+                        error: None,
+                    })
+                    .await?;
+                Ok(())
+            })
         }
         fn abort(&mut self) -> chat::BoxFuture<'_, Result<()>> {
             Box::pin(async { Ok(()) })
@@ -5507,11 +5615,13 @@ mod tests {
         fn open<'a>(
             &'a self,
             params: chat::ChatSessionParams,
-            _events: mpsc::Sender<ChatEvent>,
+            events: mpsc::Sender<ChatEvent>,
         ) -> chat::BoxFuture<'a, Result<Box<dyn ChatSession>>> {
             self.prompts.send(params.system_prompt).unwrap();
             let turns = self.turns.clone();
-            Box::pin(async move { Ok(Box::new(EnvironmentSession(turns)) as Box<dyn ChatSession>) })
+            Box::pin(async move {
+                Ok(Box::new(EnvironmentSession { turns, events }) as Box<dyn ChatSession>)
+            })
         }
     }
 
@@ -5571,6 +5681,7 @@ mod tests {
             "{prompt}"
         );
         assert_eq!(user_turns.try_recv().unwrap(), "Hello");
+        settle().await;
         let coordinator = start
             .host
             .services
@@ -5612,7 +5723,7 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let history = std::str::from_utf8(&bytes).unwrap();
         assert!(history.contains(r#""text":"Hello""#));
-        assert!(history.contains(r#""text":"/compact retain conclusions""#));
+        assert!(history.contains(r#""command":"/compact retain conclusions""#));
         assert!(!history.contains("[ENVIRONMENT]"));
         assert_eq!(
             start
@@ -6296,25 +6407,76 @@ mod tests {
         assert!(events.try_recv().is_err());
     }
 
-    #[tokio::test]
-    async fn compact_posts_a_command_and_usage_is_persisted_for_sse() {
+    struct CompactionBackend {
+        events: EventSenders,
+        sends: Arc<std::sync::atomic::AtomicUsize>,
+        hang_abort: bool,
+    }
+
+    impl ChatBackend for CompactionBackend {
+        fn open<'a>(
+            &'a self,
+            _params: cap_chat::ChatSessionParams,
+            events: mpsc::Sender<ChatEvent>,
+        ) -> cap_chat::BoxFuture<'a, Result<Box<dyn ChatSession>>> {
+            self.events.lock().unwrap().push(events);
+            let session: Box<dyn ChatSession> = if self.hang_abort {
+                Box::new(HangingAbortSession)
+            } else {
+                Box::new(FakeSession {
+                    aborted: Arc::new(AtomicBool::new(false)),
+                    sends: Arc::clone(&self.sends),
+                    abort_fails: false,
+                })
+            };
+            Box::pin(async move { Ok(session) })
+        }
+    }
+
+    fn compaction_fixture(
+        hang_abort: bool,
+    ) -> (
+        Arc<AppState>,
+        EventSenders,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
         let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let s = session(Box::new(FakeSession {
-            aborted: Arc::new(AtomicBool::new(false)),
-            sends: Arc::clone(&sends),
-            abort_fails: false,
-        }));
+        let events = Arc::new(std::sync::Mutex::new(vec![]));
+        let mut services = dar_extension_sdk::ServiceRegistry::default();
+        services
+            .register::<dyn ChatBackend>(
+                "fake",
+                Arc::new(CompactionBackend {
+                    events: Arc::clone(&events),
+                    sends: Arc::clone(&sends),
+                    hang_abort,
+                }),
+            )
+            .unwrap();
         let state = Arc::new(AppState {
-            config: Config::default(),
+            config: Config {
+                backend: Some("fake".into()),
+                ..Config::default()
+            },
             root: test_root(),
-            start: std::sync::OnceLock::new(),
-            sessions: Mutex::new(HashMap::from([("test".into(), Arc::clone(&s))])),
+            start: std::sync::OnceLock::from(start_ctx(services)),
+            sessions: Mutex::new(HashMap::new()),
             transition: Mutex::new(()),
             slot_registry: Arc::default(),
             bindings: Arc::default(),
             meta: Mutex::new(HashMap::new()),
         });
+        (state, events, sends)
+    }
 
+    async fn emit_backend_event(events: &EventSenders, event: ChatEvent) {
+        let sender = events.lock().unwrap()[0].clone();
+        sender.send(event).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn compact_posts_a_command_and_usage_is_persisted_for_sse() {
+        let (state, backend_events, sends) = compaction_fixture(false);
         assert_eq!(
             router(Arc::clone(&state))
                 .oneshot(
@@ -6331,19 +6493,424 @@ mod tests {
             StatusCode::ACCEPTED
         );
         assert_eq!(sends.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            load_transcript(&s.transcript).unwrap()[0].text.as_deref(),
-            Some("/compact")
-        );
+        let response = router(Arc::clone(&state))
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/test/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = response.into_body();
+        let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        let frame = std::str::from_utf8(&frame).unwrap();
+        let data = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let event: serde_json::Value = serde_json::from_str(data).unwrap();
+        assert_eq!(event["type"], "compaction_started");
+        assert_eq!(event["command"], "/compact");
 
-        s.publish(ChatEvent::ContextUsage {
-            tokens_used: 12_345,
-            context_window: Some(200_000),
+        emit_backend_event(
+            &backend_events,
+            ChatEvent::ContextUsage {
+                tokens_used: 12_345,
+                context_window: Some(200_000),
+            },
+        )
+        .await;
+        let _ = replay_compaction_events(router(Arc::clone(&state)), 2).await;
+        let events = replay_compaction_events(router(state), 2).await;
+        assert_eq!(events[1]["type"], "context_usage");
+        assert_eq!(events[1]["tokens_used"], 12_345);
+        assert_eq!(events[1]["context_window"], 200_000);
+        assert_eq!(events[1]["historical"], true);
+    }
+
+    #[tokio::test]
+    async fn compact_through_send_refuses_all_submissions_until_terminal_event() {
+        let (state, backend_events, sends) = compaction_fixture(false);
+        let app = router(state);
+        let request = || {
+            post(
+                "/test/send",
+                Body::from(r#"{"command_id":"compact-1","message":"/compact keep the plan"}"#),
+            )
+        };
+        assert_eq!(
+            app.clone().oneshot(request()).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        for body in [
+            r#"{"command_id":"compact-2","message":"/compact"}"#,
+            r#"{"command_id":"plain","message":"hello"}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(post("/test/send", Body::from(body)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(error["error"], "compaction running");
+        }
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+        emit_backend_event(
+            &backend_events,
+            ChatEvent::TurnFinished {
+                ok: true,
+                error: None,
+            },
+        )
+        .await;
+        let _ = replay_compaction_events(app.clone(), 3).await;
+        assert_eq!(
+            app.clone().oneshot(request()).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            app.oneshot(post(
+                "/test/send",
+                Body::from(r#"{"command_id":"plain","message":"hello"}"#)
+            ))
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn compact_waits_for_the_current_response_to_finish() {
+        let (state, backend_events, sends) = compaction_fixture(false);
+        let app = router(state);
+        assert_eq!(
+            app.clone()
+                .oneshot(post(
+                    "/test/send",
+                    Body::from(r#"{"command_id":"one","message":"hello"}"#)
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        let compact = || post("/test/compact", Body::from(r#"{"command_id":"two"}"#));
+        let response = app.clone().oneshot(compact()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(error["error"], "wait for the current response to finish");
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+        emit_backend_event(
+            &backend_events,
+            ChatEvent::TurnFinished {
+                ok: true,
+                error: None,
+            },
+        )
+        .await;
+        let _ = replay_compaction_events(app.clone(), 2).await;
+        assert_eq!(
+            app.oneshot(compact()).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+    }
+
+    async fn replay_compaction_events(app: Router, count: usize) -> Vec<serde_json::Value> {
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/test/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = response.into_body();
+        let mut events = vec![];
+        for _ in 0..count {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(1), body.frame())
+                .await
+                .expect("expected persisted event")
+                .unwrap()
+                .unwrap()
+                .into_data()
+                .unwrap();
+            let frame = std::str::from_utf8(&frame).unwrap();
+            let data = frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap();
+            events.push(serde_json::from_str(data).unwrap());
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn compact_summary_is_replayed_after_success_without_an_assistant_bubble() {
+        let (state, backend_events, _) = compaction_fixture(false);
+        let app = router(state);
+        assert_eq!(
+            app.clone()
+                .oneshot(post(
+                    "/test/compact",
+                    Body::from(r#"{"command_id":"one","instructions":"keep the plan"}"#)
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        emit_backend_event(
+            &backend_events,
+            ChatEvent::Compacted {
+                summary: Some("## Plan\nKeep the approved migration.".into()),
+            },
+        )
+        .await;
+        emit_backend_event(
+            &backend_events,
+            ChatEvent::TurnFinished {
+                ok: true,
+                error: None,
+            },
+        )
+        .await;
+        let _ = replay_compaction_events(app.clone(), 3).await;
+        let events = replay_compaction_events(app, 3).await;
+        assert_eq!(events[2]["type"], "finished");
+        assert_eq!(events[0]["command"], "/compact keep the plan");
+        assert_eq!(events[1]["type"], "compaction_finished");
+        assert_eq!(events[1]["ok"], true);
+        assert_eq!(
+            events[1]["summary"],
+            "## Plan\nKeep the approved migration."
+        );
+        assert_eq!(events[1]["historical"], true);
+    }
+
+    #[tokio::test]
+    async fn compact_failure_is_replayed_in_the_command_row() {
+        let (state, backend_events, _) = compaction_fixture(false);
+        let app = router(state);
+        assert_eq!(
+            app.clone()
+                .oneshot(post("/test/compact", Body::from(r#"{"command_id":"one"}"#)))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        emit_backend_event(
+            &backend_events,
+            ChatEvent::Error("provider unavailable".into()),
+        )
+        .await;
+        emit_backend_event(
+            &backend_events,
+            ChatEvent::TurnFinished {
+                ok: false,
+                error: Some("provider unavailable".into()),
+            },
+        )
+        .await;
+        let events = replay_compaction_events(app, 3).await;
+        assert_eq!(events[1]["type"], "compaction_finished");
+        assert_eq!(events[1]["ok"], false);
+        assert_eq!(events[1]["error"], "provider unavailable");
+        assert_eq!(events[2]["type"], "aborted");
+    }
+
+    #[tokio::test]
+    async fn compact_terminal_events_settle_rows_without_backend_summary_events() {
+        for (terminal, ok, error, kind) in [
+            (
+                ChatEvent::TurnFinished {
+                    ok: true,
+                    error: None,
+                },
+                true,
+                None,
+                "finished",
+            ),
+            (
+                ChatEvent::SessionClosed { error: None },
+                false,
+                Some("aborted"),
+                "closed",
+            ),
+        ] {
+            let (state, backend_events, _) = compaction_fixture(false);
+            let app = router(state);
+            assert_eq!(
+                app.clone()
+                    .oneshot(post("/test/compact", Body::from(r#"{"command_id":"one"}"#)))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::ACCEPTED
+            );
+            emit_backend_event(&backend_events, terminal).await;
+            let events = replay_compaction_events(app, 2).await;
+            assert_eq!(events[1]["type"], "compaction_finished", "terminal: {kind}");
+            assert_eq!(events[1]["ok"], ok);
+            assert_eq!(events[1].get("error").and_then(|v| v.as_str()), error);
+            assert!(events[1].get("summary").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_first_does_not_become_the_title_generation_prompt() {
+        let root = test_root();
+        write_fake_archive(&root, "live");
+        let (prompts, _opened) = mpsc::unbounded_channel();
+        let (turns, mut received) = mpsc::unbounded_channel();
+        let mut services = dar_extension_sdk::ServiceRegistry::default();
+        services
+            .register::<dyn ChatBackend>("capture", Arc::new(EnvironmentBackend { prompts, turns }))
+            .unwrap();
+        let state = Arc::new(AppState {
+            config: Config {
+                backend: Some("capture".into()),
+                ..Config::default()
+            },
+            root,
+            start: std::sync::OnceLock::from(start_ctx(services)),
+            sessions: Mutex::new(HashMap::new()),
+            transition: Mutex::new(()),
+            slot_registry: Arc::default(),
+            bindings: Arc::new(std::sync::Mutex::new(BTreeMap::from([(
+                "test".into(),
+                "live".into(),
+            )]))),
+            meta: Mutex::new(HashMap::new()),
         });
-        let usage = load_transcript(&s.transcript).unwrap().pop_back().unwrap();
-        assert_eq!(usage.kind, "context_usage");
-        assert_eq!(usage.tokens_used, Some(12_345));
-        assert_eq!(usage.context_window, Some(200_000));
+        let app = router(state);
+        assert_eq!(
+            app.clone()
+                .oneshot(post("/test/compact", Body::from(r#"{"command_id":"one"}"#)))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(received.recv().await.unwrap(), "/compact");
+        settle().await;
+        assert_eq!(
+            app.oneshot(post(
+                "/test/send",
+                Body::from(r#"{"command_id":"two","message":"Plan migration"}"#)
+            ))
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(received.recv().await.unwrap(), "Plan migration");
+        let title = tokio::time::timeout(std::time::Duration::from_secs(1), received.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(title.contains("User: Plan migration"), "{title}");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_compacting_session_resets_the_submission_guard() {
+        let (state, _) = scripted_state(vec![Some("id-a".into()), None]);
+        write_fake_archive(&state.root, "id-a");
+        let app = router(state);
+        assert_eq!(
+            app.clone()
+                .oneshot(post("/test/compact", Body::from(r#"{"command_id":"one"}"#)))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        settle().await;
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri("/sessions/id-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            app.oneshot(post(
+                "/test/send",
+                Body::from(r#"{"command_id":"two","message":"new conversation"}"#)
+            ))
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::ACCEPTED
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_stop_settles_the_row_even_when_backend_abort_hangs() {
+        let (state, _, _) = compaction_fixture(true);
+        let app = router(state);
+        assert_eq!(
+            app.clone()
+                .oneshot(post("/test/compact", Body::from(r#"{"command_id":"one"}"#)))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            app.clone().oneshot(post("/test/abort", Body::empty())),
+        )
+        .await
+        .expect("Stop must not wait for backend abort")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let events = replay_compaction_events(app, 3).await;
+        assert_eq!(events[1]["type"], "compaction_finished");
+        assert_eq!(events[1]["ok"], false);
+        assert_eq!(events[1]["error"], "aborted");
+        assert_eq!(events[2]["type"], "aborted");
+    }
+
+    #[tokio::test]
+    async fn resumed_pi_compaction_summary_is_replayed_without_a_command() {
+        let (state, _, _) = compaction_fixture(false);
+        let dir = state.root.join("data/chat/sessions");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("2026-01-01T00-00-00Z_test.jsonl"),
+            concat!(
+                "{\"type\":\"session\",\"id\":\"test\",\"backend\":\"pi\"}\n",
+                "{\"type\":\"compaction\",\"summary\":\"Keep the approved migration plan.\"}\n"
+            ),
+        )
+        .unwrap();
+        let app = router(state);
+        assert_eq!(
+            app.clone()
+                .oneshot(post("/test/resume", Body::from(r#"{"id":"test"}"#)))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        let events = replay_compaction_events(app, 1).await;
+        assert_eq!(events[0]["type"], "compaction_finished");
+        assert_eq!(events[0]["summary"], "Keep the approved migration plan.");
+        assert!(events[0].get("command").is_none());
     }
 
     #[tokio::test]
@@ -7211,7 +7778,6 @@ mod tests {
         let abort_pos = html.find("id=\"chat-abort\"").unwrap();
         let abort_tag_end = abort_pos + html[abort_pos..].find('>').unwrap();
         assert!(html[abort_pos..abort_tag_end].contains("hidden"));
-        assert!(!html.contains("chat-compact"));
         assert!(!html.contains(">Compact<"));
         assert!(html.contains("@media (max-width: 760px)"));
         assert!(html.contains("overflow-wrap: anywhere"));
@@ -8631,6 +9197,9 @@ if(elements['chat-cap-hint'].textContent.includes('skipped'))process.exit(1);
                     seq,
                     ts: now_ms(),
                     kind: "delta".into(),
+                    command: None,
+                    ok: None,
+                    summary: None,
                     text: Some(seq.to_string()),
                     id: None,
                     name: None,

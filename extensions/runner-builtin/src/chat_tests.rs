@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cap_chat::{ChatBackend, ChatEvent, ChatRole, ChatSession, ChatSessionParams};
+use cap_chat::{ChatBackend, ChatEvent, ChatSession, ChatSessionParams};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -642,7 +642,7 @@ async fn compact_replaces_history_and_resume_replays_from_compaction() {
     assert_eq!(finished(&events), (true, None));
     assert!(matches!(
         &events[0],
-        ChatEvent::Delta { role: ChatRole::Assistant, text } if text == "Context compacted."
+        ChatEvent::Compacted { summary: Some(summary) } if summary == "THE SUMMARY"
     ));
     assert!(events.iter().any(|e| matches!(
         e,

@@ -623,10 +623,7 @@ fn map_completed_item(item: Option<&Value>) -> Vec<ChatEvent> {
     };
     match item.get("type").and_then(Value::as_str).unwrap_or("") {
         "agentMessage" | "reasoning" => Vec::new(),
-        "contextCompaction" => vec![ChatEvent::Delta {
-            role: ChatRole::Assistant,
-            text: "Context compacted.".to_owned(),
-        }],
+        "contextCompaction" => vec![ChatEvent::Compacted { summary: None }],
         "commandExecution"
         | "fileChange"
         | "mcpToolCall"
@@ -1324,14 +1321,11 @@ done
     }
 
     #[test]
-    fn context_compaction_item_maps_to_notice() {
+    fn context_compaction_item_reports_completion() {
         let events = one(
             r#"{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"contextCompaction","id":"c1"},"threadId":"main","turnId":"t1"}}"#,
         );
-        assert!(matches!(
-            events,
-            ChatEvent::Delta { role: ChatRole::Assistant, text } if text == "Context compacted."
-        ));
+        assert!(matches!(events, ChatEvent::Compacted { summary: None }));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1379,7 +1373,7 @@ done
             .unwrap();
         assert!(matches!(
             next_event(&mut rx).await,
-            ChatEvent::Delta { role: ChatRole::Assistant, text } if text == "Context compacted."
+            ChatEvent::Compacted { summary: None }
         ));
         assert!(matches!(
             next_event(&mut rx).await,
