@@ -269,7 +269,11 @@ pub async fn fire_runner(
         recorder
             .as_ref()
             .map(|recorder| recorder.id().to_owned())
-            .unwrap_or_else(|| format!("scheduler-{job_id}-{}", Utc::now().timestamp_millis())),
+            .unwrap_or_else(|| {
+                static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                format!("scheduler-{job_id}-{}-{seq}", Utc::now().timestamp_millis())
+            }),
         max_run_timeout_ms,
         events,
         store,

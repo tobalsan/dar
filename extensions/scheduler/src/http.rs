@@ -123,6 +123,8 @@ struct CreateBody {
     payload: Option<PayloadBody>,
     #[serde(rename = "timeoutMs")]
     timeout_ms: Option<u64>,
+    #[serde(rename = "maxConcurrent")]
+    max_concurrent: Option<u32>,
     deliver: Option<Vec<DeliverTarget>>,
 }
 
@@ -134,7 +136,20 @@ struct UpdateBody {
     payload: Option<PayloadBody>,
     #[serde(rename = "timeoutMs")]
     timeout_ms: Option<Option<u64>>,
+    #[serde(
+        default,
+        rename = "maxConcurrent",
+        deserialize_with = "present_max_concurrent"
+    )]
+    max_concurrent: Option<Option<u32>>,
     deliver: Option<Vec<DeliverTarget>>,
+}
+
+fn present_max_concurrent<'de, D>(deserializer: D) -> Result<Option<Option<u32>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<u32>::deserialize(deserializer).map(Some)
 }
 
 // ---- handlers -------------------------------------------------------------
@@ -179,6 +194,7 @@ async fn create_job(
             schedule,
             payload,
             timeout_ms: body.timeout_ms,
+            max_concurrent: body.max_concurrent,
             deliver: body.deliver.unwrap_or_default(),
         };
         if let Err(msg) = job.validate(Utc::now().timestamp_millis()) {
@@ -236,6 +252,9 @@ async fn update_job(
         if let Some(timeout_ms) = body.timeout_ms {
             job.timeout_ms = timeout_ms;
         }
+        if let Some(max_concurrent) = body.max_concurrent {
+            job.max_concurrent = max_concurrent;
+        }
         if let Some(deliver) = body.deliver {
             job.deliver = deliver;
         }
@@ -277,11 +296,11 @@ async fn delete_job(State(api): State<ApiState>, Path(id): Path<String>) -> Resp
 /// - `ok` result       → `200` with the run result + output path
 /// - `skipped` result  → `202` with the run result
 /// - `error`/`inactive` result → `500` with the run result
-/// - already running   → `409`
+/// - concurrency cap reached → `409`
 /// - unknown job        → `404`
 ///
 /// The schedule's next fire is preserved across the manual run, except when a
-/// scheduled fire was overlap-skipped during it (see [`run_job_now`]).
+/// timer loop advanced it during the run (see [`run_job_now`]).
 #[derive(Default, Deserialize)]
 struct RunNowQuery {
     #[serde(default)]
@@ -305,7 +324,11 @@ async fn run_now_route(
             json!({"error": "job is disabled"}),
         );
     }
-    if api.state.runtime(&id).running_since_ms.is_some() {
+    if api
+        .state
+        .runtime(&id)
+        .at_capacity(job.max_concurrent.unwrap_or(1))
+    {
         return json_ok(
             StatusCode::CONFLICT,
             json!({"error": "job is already running"}),
@@ -990,7 +1013,9 @@ fn validate_payload(body: Option<PayloadBody>) -> Result<Payload, String> {
 /// Merge a job's config with its in-memory runtime state into a JSON object.
 fn job_with_runtime(api: &ApiState, job: &ScheduleJob, now_ms: i64) -> Value {
     let rt = api.state.runtime(&job.id);
-    let running_for_ms = rt.running_since_ms.map(|since| (now_ms - since).max(0));
+    let running_for_ms = rt
+        .oldest_active_start()
+        .map(|since| (now_ms - since).max(0));
     let mut value = serde_json::to_value(job).unwrap_or_else(|_| json!({}));
     if let Value::Object(map) = &mut value {
         map.insert("nextRunAtMs".to_string(), json!(rt.next_run_at_ms));
@@ -1004,6 +1029,7 @@ fn job_with_runtime(api: &ApiState, job: &ScheduleJob, now_ms: i64) -> Value {
         map.insert("lastRunKind".to_string(), json!(rt.last_run_kind));
         map.insert("lastDelivery".to_string(), json!(rt.last_delivery));
         map.insert("runningForMs".to_string(), json!(running_for_ms));
+        map.insert("runningCount".to_string(), json!(rt.running_count()));
     }
     value
 }
@@ -1114,6 +1140,7 @@ mod tests {
                 quiet_output: None,
             }),
             timeout_ms: None,
+            max_concurrent: None,
             deliver: None,
         })
     }
@@ -1163,6 +1190,7 @@ mod tests {
                 quiet_output: None,
             }),
             timeout_ms: None,
+            max_concurrent: None,
             deliver: None,
         });
         let resp = create_job(State(api), Ok(body)).await;
@@ -1178,6 +1206,78 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let v = body_json(resp).await;
         assert!(v["error"].as_str().unwrap().contains("message is required"));
+    }
+
+    #[tokio::test]
+    async fn max_concurrent_http_round_trip_and_null_clear() {
+        let (api, _dir) = api();
+        let body = serde_json::from_value(json!({
+            "schedule": { "cron": "0 8 * * *", "tz": "UTC" },
+            "payload": { "message": "hi" },
+            "maxConcurrent": 2
+        }))
+        .unwrap();
+        let response = create_job(State(api.clone()), Ok(Json(body))).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created = body_json(response).await;
+        assert_eq!(created["maxConcurrent"], 2);
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let patch = serde_json::from_value(json!({ "maxConcurrent": 3 })).unwrap();
+        let response = update_job(State(api.clone()), Path(id.clone()), Ok(Json(patch))).await;
+        assert_eq!(body_json(response).await["maxConcurrent"], 3);
+        let patch = serde_json::from_value(json!({ "name": "kept" })).unwrap();
+        let response = update_job(State(api.clone()), Path(id.clone()), Ok(Json(patch))).await;
+        assert_eq!(body_json(response).await["maxConcurrent"], 3);
+
+        let patch = serde_json::from_value(json!({ "maxConcurrent": null })).unwrap();
+        let response = update_job(State(api.clone()), Path(id), Ok(Json(patch))).await;
+        assert!(body_json(response).await["maxConcurrent"].is_null());
+        assert!(body_json(list_jobs(State(api)).await).await["jobs"][0]["maxConcurrent"].is_null());
+    }
+
+    #[tokio::test]
+    async fn max_concurrent_zero_is_rejected_on_create_and_update() {
+        let (api, dir) = api();
+        let body = serde_json::from_value(json!({
+            "schedule": { "cron": "0 8 * * *", "tz": "UTC" },
+            "payload": { "message": "hi" },
+            "maxConcurrent": 0
+        }))
+        .unwrap();
+        let response = create_job(State(api.clone()), Ok(Json(body))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(body_json(response).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("maxConcurrent"));
+        assert!(api.state.jobs().is_empty());
+
+        let id = create_one(&api).await;
+        let body = serde_json::from_value(json!({ "maxConcurrent": 0 })).unwrap();
+        let response = update_job(State(api.clone()), Path(id), Ok(Json(body))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(body_json(response).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("maxConcurrent"));
+        assert_eq!(api.state.jobs()[0].max_concurrent, None);
+        assert_eq!(
+            crate::store::load_jobs(dir.path(), |_| {})[0].max_concurrent,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn list_reports_running_count_and_oldest_age() {
+        let (api, _dir) = api();
+        let id = create_one(&api).await;
+        let now = Utc::now().timestamp_millis();
+        api.state.try_claim_running(&id, now - 4_000, 2).unwrap();
+        api.state.try_claim_running(&id, now - 1_000, 2).unwrap();
+        let response = body_json(list_jobs(State(api)).await).await;
+        assert_eq!(response["jobs"][0]["runningCount"], 2);
+        assert!(response["jobs"][0]["runningForMs"].as_i64().unwrap() >= 4_000);
     }
 
     #[tokio::test]
@@ -1226,6 +1326,7 @@ mod tests {
             schedule: None,
             payload: None,
             timeout_ms: Some(Some(5000)),
+            max_concurrent: None,
             deliver: None,
         });
         let resp = update_job(State(api.clone()), Path(id.clone()), Ok(body)).await;
@@ -1254,6 +1355,7 @@ mod tests {
             schedule: None,
             payload: None,
             timeout_ms: Some(Some(0)),
+            max_concurrent: None,
             deliver: None,
         });
         let resp = update_job(State(api.clone()), Path(id), Ok(body)).await;
@@ -1270,6 +1372,7 @@ mod tests {
             schedule: None,
             payload: None,
             timeout_ms: None,
+            max_concurrent: None,
             deliver: None,
         });
         let resp = update_job(State(api), Path("nope".to_string()), Ok(body)).await;
@@ -1298,6 +1401,7 @@ mod tests {
             }),
             payload: None,
             timeout_ms: None,
+            max_concurrent: None,
             deliver: None,
         });
         let resp = update_job(State(api), Path(id), Ok(body)).await;
@@ -1349,6 +1453,7 @@ mod tests {
                 quiet_output: false,
             },
             timeout_ms: None,
+            max_concurrent: None,
             deliver: Vec::new(),
         }];
         let id = generate_job_id(&existing);
@@ -1420,12 +1525,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn synchronous_run_now_accepts_below_cap_and_conflicts_at_cap() {
+        let (api, _dir) = api_with_runner(false);
+        let id = create_one(&api).await;
+        let body = serde_json::from_value(json!({ "maxConcurrent": 2 })).unwrap();
+        update_job(State(api.clone()), Path(id.clone()), Ok(Json(body))).await;
+        api.state
+            .try_claim_running(&id, Utc::now().timestamp_millis(), 2)
+            .unwrap();
+        let response = run_now(State(api.clone()), Path(id.clone())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_json(response).await["job"]["runningCount"], 1);
+        api.state
+            .try_claim_running(&id, Utc::now().timestamp_millis(), 2)
+            .unwrap();
+        let response = run_now(State(api), Path(id)).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn background_run_now_checks_capacity_instead_of_any_active_run() {
+        let (api, _dir) = api_with_runner(false);
+        let id = create_one(&api).await;
+        let body = serde_json::from_value(json!({ "maxConcurrent": 2 })).unwrap();
+        update_job(State(api.clone()), Path(id.clone()), Ok(Json(body))).await;
+        api.state
+            .try_claim_running(&id, Utc::now().timestamp_millis(), 2)
+            .unwrap();
+        let response = run_now_route(
+            State(api.clone()),
+            Path(id.clone()),
+            Query(RunNowQuery { background: true }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while api.state.runtime(&id).running_count() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let response = run_now_route(
+            State(api.clone()),
+            Path(id.clone()),
+            Query(RunNowQuery { background: true }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        api.state.wait_manual_runs().await;
+        assert_eq!(api.state.runtime(&id).running_count(), 1);
+    }
+
+    #[tokio::test]
     async fn run_now_already_running_is_409() {
         let (api, _dir) = api();
         let id = create_one(&api).await;
         assert!(api
             .state
-            .try_claim_running(&id, Utc::now().timestamp_millis()));
+            .try_claim_running(&id, Utc::now().timestamp_millis(), 1)
+            .is_some());
         let resp = run_now(State(api), Path(id)).await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
@@ -1440,6 +1599,7 @@ mod tests {
             schedule: None,
             payload: None,
             timeout_ms: None,
+            max_concurrent: None,
             deliver: None,
         });
         update_job(State(api.clone()), Path(id.clone()), Ok(body)).await;

@@ -44,6 +44,8 @@ On boot the scheduler loads `cron/jobs.json`, computes each enabled job's next f
 
 A per-job timeout override is set with `timeoutMs` on the job (milliseconds), taking precedence over `extensions.scheduler.jobTimeoutMs` and the default.
 
+Set optional `maxConcurrent` to an integer of at least 1 to allow overlapping runs of one job, for example `"maxConcurrent": 2`. When omitted, the cap is 1. Only explicitly configured values are persisted. HTTP and tool updates accept `null` to clear the override back to 1; zero is rejected by HTTP, tools, and jobs-file validation. Lowering the cap does not stop existing runs; new claims are refused until active runs drop below the cap.
+
 Jobs have three shapes, chosen by fields rather than a `kind` value:
 
 - **Agent job:** `message` only. The runner is started for every fire.
@@ -141,7 +143,7 @@ Agent responses and non-empty script stdout are delivered. Silent gate ticks and
 
 The scheduler enforces three safety semantics so it is trustworthy unattended:
 
-- **Overlap-skip.** A scheduled fire of a job whose previous run is still in flight is skipped: a warning is logged, the skip is bookmarked (so later run-now logic can tell a skip from a normal completion), and the job's next fire is recomputed so the timer re-arms forward. The same job never overlaps itself.
+- **Overlap-skip.** A scheduled fire is skipped when the job has `maxConcurrent` active runs (default 1): a warning is logged, the skip is bookmarked, and the job's next fire is recomputed so the timer re-arms forward. Skipped occurrences are dropped. Scheduled and manual runs share the same cap; each completion or panic frees only its own slot.
 - **Timeout.** Every run is bounded by a timeout. The effective timeout is the per-job `timeoutMs`, else `extensions.scheduler.jobTimeoutMs`, else a 10-minute default. On timeout the runner child is killed and the run is recorded as an `error` output file with a timeout message; the job's next fire is still computed.
 - **Kill switch (boot-time).** `extensions.scheduler.enabled: false` prevents arming any timers — nothing fires — while `cron/jobs.json` stays readable/writable. Because the host freezes the whole `extensions.*` config map after boot (it is not live-reloaded), flipping `enabled` or changing `jobTimeoutMs` takes effect only after a host **restart**. Per-job `enabled: false` inside `cron/jobs.json`, by contrast, is read from the (hot-reloaded) jobs file: a disabled job never fires and never gets a next-run.
 
@@ -154,7 +156,7 @@ Reload semantics:
 - **Add / change / remove** a job → reflected within the poll interval and the timer is re-armed to the new earliest fire.
 - **Per-job `enabled: false`** inside `cron/jobs.json` is live-reloaded: flip it and the job drops out (or back in) on the next poll. This is distinct from the boot-time `extensions.scheduler.enabled` switch above, which is immutable at runtime.
 - **Malformed edit** → one warning, the file is treated as empty (no jobs armed), no crash; the scheduler recovers automatically on the next valid write.
-- **In-flight runs survive a reload.** Each job carries an overlap guard; a job edited while one of its runs is in flight keeps that guard, so overlap-skip still applies (a second fire is skipped until the first run returns). A job deleted while running is dropped from the armed set but its in-flight run owns its own guard handle and completes (and writes output) normally — it is never orphan-tracked twice.
+- **In-flight runs survive a reload.** A job edited while runs are in flight keeps those runs counted against its cap. A job deleted while running is dropped from the armed set and runtime state, while its in-flight runs complete and write output normally.
 - The poll loop selects on the shutdown token, so a shutdown during polling or between fires stops the scheduler promptly.
 
 ## HTTP API
@@ -166,8 +168,8 @@ A create/update/delete re-arms the timer in-process so a sooner schedule fires i
 | Method   | Path                   | Description                                                                  |
 | -------- | ---------------------- | ---------------------------------------------------------------------------- |
 | `GET`    | `/scheduler/jobs`      | List jobs, each merged with runtime state.                                   |
-| `POST`   | `/scheduler/jobs`      | Create a job. The id is generated server-side; `enabled` defaults to `true`. Returns `201` with the new job. |
-| `PATCH`  | `/scheduler/jobs/{id}` | Patch any of `name`, `enabled`, `schedule`, `payload`, `timeoutMs`. Re-arms when the schedule changes. |
+| `POST`   | `/scheduler/jobs`      | Create a job, optionally with `maxConcurrent`. The id is generated server-side; `enabled` defaults to `true`. Returns `201` with the new job. |
+| `PATCH`  | `/scheduler/jobs/{id}` | Patch any of `name`, `enabled`, `schedule`, `payload`, `timeoutMs`, `maxConcurrent` (`null` clears its override). Re-arms when the schedule changes. |
 | `DELETE` | `/scheduler/jobs/{id}` | Remove a job. Returns `204`.                                                 |
 | `POST`   | `/scheduler/jobs/{id}/run-now` | Fire the job immediately without disturbing its schedule. See below. |
 | `GET`    | `/scheduler/jobs/{id}/tail`    | Return the newest output file for the job (path + content). |
@@ -182,12 +184,14 @@ Request/response job shape (runtime fields are read-only and present only on res
   "schedule": { "cron": "0 8 * * *", "tz": "Europe/Paris", "startAt": "2026-05-19T07:00:00.000Z" },
   "payload": { "message": "Summarize overnight events." },
   "timeoutMs": 60000,              // optional; falls back to runner.max_run_timeout_ms
+  "maxConcurrent": 2,             // optional; defaults to 1
   // runtime-only (responses):
   "nextRunAtMs": 1750000000000,
   "lastRunAtMs": null,
   "lastStatus": null,             // "ok" | "error" | null
   "lastError": null,              // error message when lastStatus == "error", else null
-  "runningForMs": null
+  "runningForMs": null,           // age of the oldest active run
+  "runningCount": 0
 }
 ```
 
@@ -195,7 +199,7 @@ Validation: a bad cron expression, a missing or unknown `tz`, an out-of-range `s
 
 ### Run now and tail (operator test-and-inspect loop)
 
-`POST /scheduler/jobs/{id}/run-now` fires a job **immediately** through the same path as a scheduled fire — the output file is written to `cron/output/<job_id>/<timestamp>.md` like any scheduled run — **without disturbing the schedule**. The job's previously computed next fire is restored after the manual run, _unless_ a scheduled fire was overlap-skipped while the manual run was in flight; in that case the loop's recomputed next fire stands (the skipped occurrence is consumed, not replayed — aihub's skipped-fire bookkeeping). The response carries the run result:
+`POST /scheduler/jobs/{id}/run-now` fires a job **immediately** through the same path as a scheduled fire — the output file is written to `cron/output/<job_id>/<timestamp>.md` like any scheduled run — **without disturbing the schedule**. Any next fire advanced by the timer loop during the manual run is preserved, whether the scheduled occurrence ran or was overlap-skipped. Run now starts while active runs are below `maxConcurrent` (default 1). With `?background=true`, an accepted request returns `202` immediately; the capacity pre-check is best-effort and the task still claims a slot atomically. The response for a synchronous run carries the run result:
 
 | Outcome                          | Status | Body                                            |
 | --------------------------------- | ------ | ----------------------------------------------- |
@@ -203,7 +207,7 @@ Validation: a bad cron expression, a missing or unknown `tz`, an out-of-range `s
 | Ran with error                   | `500`  | `{ status: "error", ..., error: "<message>", job }` |
 | Job disabled (inactive)          | `500`  | `{ status: "inactive", error, job: null }`      |
 | Fire skipped before running      | `202`  | `{ status: "skipped", error, job: null }`       |
-| Job already running              | `409`  | `{ error: "job ... is already running" }`       |
+| Job at its concurrency cap       | `409`  | `{ error: "job ... is already running" }`       |
 | Unknown job id                   | `404`  | `{ error: ... }`                                |
 
 `GET /scheduler/jobs/{id}/tail` returns the **newest** output file for the job — the lexicographically-greatest entry in `cron/output/<job_id>/` (filenames are `YYYY-MM-DD_HH-mm-ss.md`, so lexicographic order is timestamp order):
@@ -233,11 +237,11 @@ curl -sS localhost:$PORT/scheduler/jobs/<id>/tail
 curl -sS -XDELETE localhost:$PORT/scheduler/jobs/<id>
 ```
 
-## Cron dashboard tab (read-only)
+## Cron dashboard tab
 
-When the scheduler is enabled it contributes a read-only **"Cron"** tab to the web dashboard through the [dashboard-tab contract](extensions.md#dashboard-tab). The tab lists each job with its schedule + timezone, enabled flag, next/last run times, last status (with the error message when the last run failed), running-for, and the most recent output files per job. It refreshes with the dashboard's existing self-poll: when the Cron tab is active the dashboard re-fetches its fragment into `#content` on the shared cadence (the same poller the orchestrator run view uses), so the fragment carries no inner poll of its own.
+When the scheduler is enabled it contributes a **"Cron"** tab to the web dashboard through the [dashboard-tab contract](extensions.md#dashboard-tab). The tab lists each job with its schedule + timezone, enabled flag, next/last run times, last status (with the error message when the last run failed), running-for, and the most recent output files per job. The running pill includes a count when more than one run is active; Run now is available while the enabled job is below its cap. It refreshes with the dashboard's existing self-poll: when the Cron tab is active the dashboard re-fetches its fragment into `#content` on the shared cadence (the same poller the orchestrator run view uses), so the fragment carries no inner poll of its own.
 
-The tab is **read-only** — there are no mutation controls. All mutation stays with the Scheduler HTTP API above and direct edits to `cron/jobs.json`. The tab is present only when the scheduler is linked and enabled: in the shipped `dist` binary that means an `extensions.scheduler` section that is not `enabled: false`; in an FSC per-agent binary it means the composer selected the scheduler crate (driven by the `agent.yaml` section). When the scheduler is absent or kill-switched, no tab is registered and the dashboard renders exactly as before.
+The tab's Run now and Enable/Disable controls use the Scheduler HTTP API above. The tab is present only when the scheduler is linked and enabled: in the shipped `dist` binary that means an `extensions.scheduler` section that is not `enabled: false`; in an FSC per-agent binary it means the composer selected the scheduler crate (driven by the `agent.yaml` section). When the scheduler is absent or kill-switched, no tab is registered and the dashboard renders exactly as before.
 
 Cron activity is surfaced at the scheduler's own level: scheduled runs fire the runner service directly and **never** appear in the orchestrator's run list or its retained `RunSnapshot`. The orchestrator "Runs" view stays the default tab.
 

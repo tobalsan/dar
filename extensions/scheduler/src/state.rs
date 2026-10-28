@@ -34,6 +34,19 @@ impl LastStatus {
     }
 }
 
+/// Details published by the most recently completed run.
+pub struct RunCompletion {
+    pub status: LastStatus,
+    pub error: Option<String>,
+    pub exit_code: Option<i32>,
+    pub run_kind: Option<String>,
+    pub delivery: Vec<String>,
+}
+
+/// A claim identifies one run across completion, panic, and job replacement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RunToken(u64);
+
 /// In-memory runtime state for one job. Never persisted.
 #[derive(Clone, Debug, Default)]
 pub struct JobRuntime {
@@ -54,13 +67,24 @@ pub struct JobRuntime {
     pub last_run_kind: Option<String>,
     /// Per-target delivery outcomes from the last run.
     pub last_delivery: Vec<String>,
-    /// When the currently-executing run started (UTC epoch millis); `Some` only
-    /// while a run is in flight, used to compute `running-for`.
-    pub running_since_ms: Option<i64>,
-    /// UTC epoch millis of the last scheduled fire that was overlap-skipped
-    /// because a run was already in flight. Run-now reads this to decide whether
-    /// to restore the pre-run next fire or keep the loop's recomputed one.
+    /// Active run claims and their UTC start times. Never persisted.
+    active_runs: HashMap<RunToken, i64>,
+    /// UTC epoch millis of the last scheduled fire skipped at capacity.
     pub last_skipped_at_ms: Option<i64>,
+}
+
+impl JobRuntime {
+    pub fn running_count(&self) -> usize {
+        self.active_runs.len()
+    }
+
+    pub fn oldest_active_start(&self) -> Option<i64> {
+        self.active_runs.values().copied().min()
+    }
+
+    pub fn at_capacity(&self, max_concurrent: u32) -> bool {
+        self.running_count() >= max_concurrent as usize
+    }
 }
 
 /// Shared, mutable scheduler state. Cheap to clone behind an `Arc`.
@@ -75,6 +99,7 @@ pub struct SchedulerState {
 
 struct Inner {
     jobs: Vec<ScheduleJob>,
+    next_run_token: u64,
     runtime: HashMap<String, JobRuntime>,
 }
 
@@ -86,6 +111,7 @@ impl SchedulerState {
             manual_runs: AtomicUsize::new(0),
             inner: Mutex::new(Inner {
                 jobs,
+                next_run_token: 0,
                 runtime: HashMap::new(),
             }),
             changed: Notify::new(),
@@ -196,31 +222,34 @@ impl SchedulerState {
         // Neither branch: job has no runtime entry and next_run_at_ms is None → no-op.
     }
 
-    /// Atomically claim a run for this job: set `running_since_ms` and return
-    /// `true` only if no run was already in flight. This is the single source of
-    /// truth both the timer loop and the run-now handler use to gate overlap, so
-    /// there is no publish gap between a "claimed" check and the mark — a
-    /// concurrent scheduled fire and manual run-now (or two run-nows) can never
-    /// both win the claim.
-    pub fn try_claim_running(&self, job_id: &str, started_at_ms: i64) -> bool {
+    /// Atomically claim one slot below the cap shared by scheduled and manual runs.
+    pub fn try_claim_running(
+        &self,
+        job_id: &str,
+        started_at_ms: i64,
+        max_concurrent: u32,
+    ) -> Option<RunToken> {
         let mut inner = self.lock();
-        let rt = inner.runtime.entry(job_id.to_string()).or_default();
-        if rt.running_since_ms.is_some() {
-            return false;
-        }
-        rt.running_since_ms = Some(started_at_ms);
-        rt.last_run_at_ms = Some(started_at_ms);
-        true
-    }
-
-    /// True if a run of this job is currently in flight (scheduled or manual).
-    /// Test-only: production overlap gating goes through `try_claim_running`.
-    #[cfg(test)]
-    pub fn is_running(&self, job_id: &str) -> bool {
-        self.lock()
+        if inner
             .runtime
             .get(job_id)
-            .is_some_and(|rt| rt.running_since_ms.is_some())
+            .is_some_and(|rt| rt.at_capacity(max_concurrent))
+            || max_concurrent == 0
+        {
+            return None;
+        }
+        let token = RunToken(inner.next_run_token);
+        inner.next_run_token += 1;
+        let rt = inner.runtime.entry(job_id.to_string()).or_default();
+        rt.active_runs.insert(token, started_at_ms);
+        rt.last_run_at_ms = Some(started_at_ms);
+        Some(token)
+    }
+
+    /// True if any scheduled or manual run is in flight.
+    #[cfg(test)]
+    pub fn is_running(&self, job_id: &str) -> bool {
+        self.runtime(job_id).running_count() > 0
     }
 
     /// Bookmark a scheduled fire that was overlap-skipped at `at_ms`.
@@ -234,6 +263,7 @@ impl SchedulerState {
     }
 
     /// The last overlap-skip bookmark for a job, if any.
+    #[cfg(test)]
     pub fn last_skipped_at_ms(&self, job_id: &str) -> Option<i64> {
         self.lock()
             .runtime
@@ -244,22 +274,47 @@ impl SchedulerState {
     /// Mark a run as finished with its status and, for an error run, the error
     /// message (cleared on a subsequent `ok` run).
     #[cfg(test)]
-    pub fn mark_finished(&self, job_id: &str, status: LastStatus, error: Option<String>) {
-        self.mark_finished_details(job_id, status, error, None, None, Vec::new());
+    pub fn mark_finished(
+        &self,
+        job_id: &str,
+        token: Option<RunToken>,
+        status: LastStatus,
+        error: Option<String>,
+    ) {
+        self.mark_finished_details(
+            job_id,
+            token,
+            RunCompletion {
+                status,
+                error,
+                exit_code: None,
+                run_kind: None,
+                delivery: Vec::new(),
+            },
+        );
     }
 
     pub fn mark_finished_details(
         &self,
         job_id: &str,
-        status: LastStatus,
-        error: Option<String>,
-        exit_code: Option<i32>,
-        run_kind: Option<String>,
-        delivery: Vec<String>,
+        token: Option<RunToken>,
+        completion: RunCompletion,
     ) {
+        let RunCompletion {
+            status,
+            error,
+            exit_code,
+            run_kind,
+            delivery,
+        } = completion;
         let mut inner = self.lock();
-        let rt = inner.runtime.entry(job_id.to_string()).or_default();
-        rt.running_since_ms = None;
+        let Some(rt) = inner.runtime.get_mut(job_id) else {
+            return;
+        };
+        let Some(token) = token else { return };
+        if rt.active_runs.remove(&token).is_none() {
+            return;
+        }
         rt.last_status = Some(status);
         rt.last_error = match status {
             LastStatus::Error => error,
@@ -273,9 +328,9 @@ impl SchedulerState {
     /// Release a run claim without recording a status. Idempotent: used by the
     /// fire task's drop guard so a panicking run still frees the overlap gate
     /// (a normal completion already cleared it via `mark_finished`).
-    pub fn clear_running(&self, job_id: &str) {
+    pub fn clear_running(&self, job_id: &str, token: RunToken) {
         if let Some(rt) = self.lock().runtime.get_mut(job_id) {
-            rt.running_since_ms = None;
+            rt.active_runs.remove(&token);
         }
     }
 
@@ -311,15 +366,95 @@ mod tests {
                 quiet_output: false,
             },
             timeout_ms: None,
+            max_concurrent: None,
             deliver: Vec::new(),
         }
     }
 
     #[test]
+    fn cap_two_accepts_two_claims() {
+        let state = SchedulerState::new(vec![job("a")]);
+        assert!(state.try_claim_running("a", 100, 2).is_some());
+        assert!(state.try_claim_running("a", 200, 2).is_some());
+    }
+
+    #[test]
+    fn releasing_a_claim_preserves_siblings_and_ignores_stale_completions() {
+        let state = SchedulerState::new(vec![job("a")]);
+        let first = state.try_claim_running("a", 200, 2).unwrap();
+        let oldest = state.try_claim_running("a", 100, 2).unwrap();
+        assert!(state.try_claim_running("a", 300, 2).is_none());
+        assert_eq!(state.runtime("a").running_count(), 2);
+        assert_eq!(state.runtime("a").oldest_active_start(), Some(100));
+        assert_eq!(state.runtime("a").last_run_at_ms, Some(100));
+
+        state.mark_finished("a", Some(first), LastStatus::Ok, None);
+        assert_eq!(state.runtime("a").running_count(), 1);
+        assert_eq!(state.runtime("a").oldest_active_start(), Some(100));
+        let third = state.try_claim_running("a", 400, 2).unwrap();
+        state.clear_running("a", first); // Drop after normal completion is idempotent.
+        state.mark_finished("a", Some(first), LastStatus::Error, Some("stale".into()));
+        state.mark_finished("a", None, LastStatus::Error, Some("absent".into()));
+        assert_eq!(state.runtime("a").last_status, Some(LastStatus::Ok));
+        assert!(state.try_claim_running("a", 500, 2).is_none());
+        state.clear_running("a", oldest);
+        state.clear_running("a", oldest);
+        assert_eq!(state.runtime("a").oldest_active_start(), Some(400));
+        assert!(state.try_claim_running("a", 500, 2).is_some());
+        state.mark_finished("a", Some(third), LastStatus::Error, Some("latest".into()));
+        assert_eq!(state.runtime("a").last_error.as_deref(), Some("latest"));
+        assert_eq!(state.runtime("a").running_count(), 1);
+    }
+
+    #[test]
+    fn concurrent_claims_never_exceed_cap() {
+        let state = std::sync::Arc::new(SchedulerState::new(vec![job("a")]));
+        let start = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let state = state.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    state.try_claim_running("a", i, 2)
+                })
+            })
+            .collect();
+        let claims = handles
+            .into_iter()
+            .filter_map(|h| h.join().unwrap())
+            .count();
+        assert_eq!(claims, 2);
+        assert_eq!(state.runtime("a").running_count(), 2);
+    }
+
+    #[test]
+    fn edits_preserve_claims_and_deleted_runs_cannot_release_recreated_slots() {
+        let state = SchedulerState::new(vec![job("a")]);
+        let stale = state.try_claim_running("a", 100, 2).unwrap();
+        assert!(state.try_claim_running("a", 200, 2).is_some());
+        let mut edited = job("a");
+        edited.max_concurrent = Some(1);
+        state.set_jobs(vec![edited]);
+        assert_eq!(state.runtime("a").running_count(), 2);
+        assert!(state.try_claim_running("a", 300, 1).is_none());
+        state.set_jobs(vec![]);
+        state.mark_finished("a", Some(stale), LastStatus::Ok, None);
+        assert_eq!(state.runtime("a").last_status, None);
+        assert_eq!(state.runtime("a").running_count(), 0);
+        state.set_jobs(vec![job("a")]);
+        assert!(state.try_claim_running("a", 400, 1).is_some());
+        state.clear_running("a", stale);
+        state.mark_finished("a", Some(stale), LastStatus::Error, None);
+        assert!(state.try_claim_running("a", 500, 1).is_none());
+        assert_eq!(state.runtime("a").last_status, None);
+    }
+
+    #[test]
     fn set_jobs_prunes_runtime_for_removed_jobs() {
         let state = SchedulerState::new(vec![job("a"), job("b")]);
-        assert!(state.try_claim_running("a", 1));
-        assert!(state.try_claim_running("b", 2));
+        assert!(state.try_claim_running("a", 1, 1).is_some());
+        assert!(state.try_claim_running("b", 2, 1).is_some());
         state.set_jobs(vec![job("a")]);
         assert!(state.runtime("a").last_run_at_ms.is_some());
         // b removed → runtime cleared.
@@ -329,13 +464,13 @@ mod tests {
     #[test]
     fn running_then_finished_updates_status() {
         let state = SchedulerState::new(vec![job("a")]);
-        assert!(state.try_claim_running("a", 100));
-        assert_eq!(state.runtime("a").running_since_ms, Some(100));
+        let token = state.try_claim_running("a", 100, 1).unwrap();
+        assert_eq!(state.runtime("a").oldest_active_start(), Some(100));
         // A second claim while running is rejected.
-        assert!(!state.try_claim_running("a", 200));
-        state.mark_finished("a", LastStatus::Ok, None);
+        assert!(state.try_claim_running("a", 200, 1).is_none());
+        state.mark_finished("a", Some(token), LastStatus::Ok, None);
         let rt = state.runtime("a");
-        assert_eq!(rt.running_since_ms, None);
+        assert_eq!(rt.oldest_active_start(), None);
         assert_eq!(rt.last_status, Some(LastStatus::Ok));
         assert_eq!(rt.last_run_at_ms, Some(100));
     }
@@ -343,14 +478,19 @@ mod tests {
     #[test]
     fn error_run_records_message_and_ok_run_clears_it() {
         let state = SchedulerState::new(vec![job("a")]);
-        assert!(state.try_claim_running("a", 100));
-        state.mark_finished("a", LastStatus::Error, Some("boom".to_string()));
+        let token = state.try_claim_running("a", 100, 1).unwrap();
+        state.mark_finished(
+            "a",
+            Some(token),
+            LastStatus::Error,
+            Some("boom".to_string()),
+        );
         let rt = state.runtime("a");
         assert_eq!(rt.last_status, Some(LastStatus::Error));
         assert_eq!(rt.last_error.as_deref(), Some("boom"));
         // A later ok run clears the stale error.
-        assert!(state.try_claim_running("a", 200));
-        state.mark_finished("a", LastStatus::Ok, None);
+        let token = state.try_claim_running("a", 200, 1).unwrap();
+        state.mark_finished("a", Some(token), LastStatus::Ok, None);
         assert!(state.runtime("a").last_error.is_none());
     }
 
