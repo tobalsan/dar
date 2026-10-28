@@ -86,6 +86,13 @@ pub struct ScheduleJob {
     /// `None` so the persisted shape stays config-only.
     #[serde(rename = "timeoutMs", skip_serializing_if = "Option::is_none", default)]
     pub timeout_ms: Option<u64>,
+    /// Maximum active runs for this job. Absent means one run at a time.
+    #[serde(
+        rename = "maxConcurrent",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub max_concurrent: Option<u32>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub deliver: Vec<DeliverTarget>,
 }
@@ -158,6 +165,9 @@ impl ScheduleJob {
         self.payload.validate()?;
         if self.timeout_ms == Some(0) {
             return Err("timeoutMs must be greater than 0".to_string());
+        }
+        if self.max_concurrent == Some(0) {
+            return Err("maxConcurrent must be at least 1".to_string());
         }
         for target in &self.deliver {
             target.validate()?;
@@ -411,6 +421,7 @@ mod tests {
         assert_eq!(jobs[1].name, "");
         assert!(jobs[1].enabled);
         assert_eq!(jobs[1].timeout_ms, None);
+        assert_eq!(jobs[1].max_concurrent, None);
     }
 
     #[test]
@@ -516,6 +527,7 @@ mod tests {
                 quiet_output: false,
             },
             timeout_ms: Some(60_000),
+            max_concurrent: None,
             deliver: Vec::new(),
         }
     }
@@ -586,9 +598,41 @@ mod tests {
     }
 
     #[test]
+    fn max_concurrent_survives_disk_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("cron")).unwrap();
+        std::fs::write(
+            jobs_path(dir.path()),
+            r#"{"jobs":[{"id":"parallel","schedule":{"cron":"* * * * *","tz":"UTC"},"payload":{"message":"tick"},"maxConcurrent":2}]}"#,
+        )
+        .unwrap();
+        let jobs = load_jobs_checked(dir.path()).unwrap();
+        save_jobs(dir.path(), &jobs).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(jobs_path(dir.path())).unwrap()).unwrap();
+        assert_eq!(saved["jobs"][0]["maxConcurrent"], 2);
+    }
+
+    #[test]
+    fn zero_max_concurrent_is_rejected_when_loading_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("cron")).unwrap();
+        std::fs::write(
+            jobs_path(dir.path()),
+            r#"{"jobs":[{"id":"parallel","schedule":{"cron":"* * * * *","tz":"UTC"},"payload":{"message":"tick"},"maxConcurrent":0}]}"#,
+        )
+        .unwrap();
+        assert!(load_jobs_checked(dir.path())
+            .unwrap_err()
+            .contains("maxConcurrent must be at least 1"));
+    }
+
+    #[test]
     fn save_omits_runtime_state_and_writes_version() {
         let dir = tempfile::tempdir().unwrap();
-        save_jobs(dir.path(), &[sample_job("a")]).unwrap();
+        let mut configured = sample_job("a");
+        configured.max_concurrent = Some(2);
+        save_jobs(dir.path(), &[configured]).unwrap();
         let raw = std::fs::read_to_string(jobs_path(dir.path())).unwrap();
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
         // Disk shape: version + jobs, each job is config-only.
@@ -604,11 +648,17 @@ mod tests {
             assert!(
                 matches!(
                     *key,
-                    "id" | "name" | "enabled" | "schedule" | "payload" | "timeoutMs"
+                    "id" | "name"
+                        | "enabled"
+                        | "schedule"
+                        | "payload"
+                        | "timeoutMs"
+                        | "maxConcurrent"
                 ),
                 "unexpected disk key {key:?}"
             );
         }
+        assert_eq!(job["maxConcurrent"], 2);
         // No runtime-state fields ever persisted.
         for forbidden in [
             "nextRunAt",
@@ -636,6 +686,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let j = &value["jobs"][0];
         assert!(j.get("timeoutMs").is_none());
+        assert!(j.get("maxConcurrent").is_none());
         assert!(j["schedule"].get("startAt").is_none());
     }
 

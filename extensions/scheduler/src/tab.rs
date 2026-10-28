@@ -162,6 +162,7 @@ struct JobRow {
     status_label: String,
     status_class: &'static str,
     running_for: Option<String>,
+    at_capacity: bool,
     schedule_human: String,
     schedule_raw: String,
     /// Fully-formed one-line next/last summary, e.g. `"<span title="...">next
@@ -194,9 +195,14 @@ impl JobRow {
             &job.name
         };
         let (status_label, status_class) = status_label_and_class(rt.last_status);
-        let running_for = rt
-            .running_since_ms
-            .map(|since| fmt_duration((now_ms - since).max(0)));
+        let running_for = rt.oldest_active_start().map(|since| {
+            let duration = fmt_duration((now_ms - since).max(0));
+            if rt.running_count() > 1 {
+                format!("×{} {duration}", rt.running_count())
+            } else {
+                duration
+            }
+        });
         let schedule_human = humanize_cron(&job.schedule.cron)
             .unwrap_or_else(|| format!("{} · {}", job.schedule.cron, job.schedule.tz));
         let next_part = match rt.next_run_at_ms {
@@ -229,6 +235,7 @@ impl JobRow {
             status_label: status_label.to_string(),
             status_class,
             running_for,
+            at_capacity: rt.at_capacity(job.max_concurrent.unwrap_or(1)),
             schedule_human: escape_html(&schedule_human),
             schedule_raw: escape_html(&format!("{} · {}", job.schedule.cron, job.schedule.tz)),
             meta_line: format!("{next_part} · {last_part}{execution}"),
@@ -309,8 +316,8 @@ fn render_job(row: &JobRow) -> String {
         " <span class=\"pill other\">disabled</span>".to_string()
     };
     // Run-now is refused by the API (500 inactive) for a disabled job, and
-    // overlap-gated while one is already in flight; the button reflects both.
-    let run_disabled_attr = if row.running_for.is_some() || !row.enabled {
+    // refused at capacity; the button reflects both conditions.
+    let run_disabled_attr = if row.at_capacity || !row.enabled {
         " disabled"
     } else {
         ""
@@ -576,6 +583,7 @@ mod tests {
                 quiet_output: false,
             },
             timeout_ms: None,
+            max_concurrent: None,
             deliver: Vec::new(),
         }
     }
@@ -631,8 +639,8 @@ mod tests {
                     .timestamp_millis(),
             ),
         );
-        assert!(state.try_claim_running("digest", Utc::now().timestamp_millis()));
-        state.mark_finished("digest", LastStatus::Ok, None);
+        let token = state.try_claim_running("digest", Utc::now().timestamp_millis(), 1);
+        state.mark_finished("digest", token, LastStatus::Ok, None);
         let tab = tab_with(state, dir.path().to_path_buf());
         let html = tab.render().unwrap();
         assert!(html.contains("Morning digest"), "job name shown: {html}");
@@ -659,9 +667,10 @@ mod tests {
     fn failed_run_shows_error_message() {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(SchedulerState::new(vec![job("j", "Job", true)]));
-        assert!(state.try_claim_running("j", Utc::now().timestamp_millis()));
+        let token = state.try_claim_running("j", Utc::now().timestamp_millis(), 1);
         state.mark_finished(
             "j",
+            token,
             LastStatus::Error,
             Some("runner exited abnormally".to_string()),
         );
@@ -758,10 +767,36 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_running_pill_and_run_now_follow_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = job("j", "Job", true);
+        config.max_concurrent = Some(2);
+        let state = Arc::new(SchedulerState::new(vec![config]));
+        state
+            .try_claim_running("j", Utc::now().timestamp_millis() - 5_000, 2)
+            .unwrap();
+        let tab = tab_with(state.clone(), dir.path().to_path_buf());
+        let html = tab.render().unwrap();
+        assert!(
+            html.contains(">running ") && !html.contains(">running ×"),
+            "single run has no count: {html}"
+        );
+        assert!(html.contains("<button class=\"cron-btn\" onclick=\"fetch('/scheduler/jobs/j/run-now?background=true'"), "capacity remains: {html}");
+        state
+            .try_claim_running("j", Utc::now().timestamp_millis(), 2)
+            .unwrap();
+        let html = tab.render().unwrap();
+        assert!(html.contains(">running ×2 "), "active run count: {html}");
+        assert!(html.contains("<button class=\"cron-btn\" disabled onclick=\"fetch('/scheduler/jobs/j/run-now?background=true'"), "at capacity: {html}");
+    }
+
+    #[test]
     fn run_now_disabled_while_running() {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(SchedulerState::new(vec![job("j", "Job", true)]));
-        assert!(state.try_claim_running("j", Utc::now().timestamp_millis()));
+        assert!(state
+            .try_claim_running("j", Utc::now().timestamp_millis(), 1)
+            .is_some());
         let tab = tab_with(state, dir.path().to_path_buf());
         let html = tab.render().unwrap();
         assert!(

@@ -5,17 +5,17 @@
 //! effect immediately instead of after the current sleep.
 //!
 //! Execution guards (ALG-221):
-//! - **Overlap-skip:** a scheduled fire of a job that is still running from a
-//!   previous fire is skipped (warning logged), the skip is bookmarked
-//!   (`last_skipped_at_ms`) so later run-now logic can tell the cases apart, and
+//! - **Overlap-skip:** a scheduled fire at the job's `maxConcurrent`
+//!   limit (default 1) is skipped (warning logged), the skip is bookmarked
+//!   (`last_skipped_at_ms`) for occurrence bookkeeping, and
 //!   the job's next fire is recomputed so the timer re-arms forward.
 //! - **Timeout:** every run is bounded by a timeout (per-job `timeoutMs`, else
 //!   `extensions.scheduler.jobTimeoutMs`, else a 10-minute default). On timeout
 //!   the runner child is killed and the run is recorded as an error.
 //! - **Re-arm on every path:** the timer loop recomputes the next fire after
 //!   every tick; a fired job runs in its own task so a hung/panicking/erroring
-//!   job never wedges the loop, and a `RunningGuard` clears the overlap flag on
-//!   drop so even a panicking fire releases the job for its next occurrence.
+//!   job never wedges the loop, and a `RunningGuard` releases only its own slot on
+//!   drop, including when a fire panics.
 //!
 //! Hot reload (ALG-223): in addition to HTTP mutations, the loop polls
 //! `cron/jobs.json` on `poll_interval_ms`. When the file's fingerprint (mtime +
@@ -51,7 +51,7 @@ use host_api::{assert_contained, ServiceRegistry, ShutdownToken};
 use crate::output::{write_cron_run_output, CronRunOutput, RunStatus};
 use crate::runner::{fire_runner, FireRunnerRequest};
 use crate::schedule::{compute_next_run_at_ms, format_schedule};
-use crate::state::{LastStatus, SchedulerState};
+use crate::state::{LastStatus, RunCompletion, RunToken, SchedulerState};
 use crate::store::{jobs_path, load_jobs_checked, ScheduleJob};
 
 /// Floor so a misconfigured tiny poll interval cannot spin the loop.
@@ -163,28 +163,23 @@ impl SchedulerConfig {
     }
 }
 
-/// RAII guard that releases a job's shared `running` claim on drop, so the
-/// overlap-skip gate is cleared even if the fire task panics (a tokio task panic
-/// unwinds through this drop but would skip any trailing statement). A normal
-/// completion clears `running_since_ms` via `mark_finished` first; this drop is
-/// then a no-op (idempotent) and only matters on the panic path.
+/// Releases one run claim on panic or cancellation. Normal completion already
+/// releases the token, so the subsequent drop is idempotent.
 struct RunningGuard {
     state: Arc<SchedulerState>,
     job_id: String,
+    token: RunToken,
 }
 
 impl Drop for RunningGuard {
     fn drop(&mut self) {
-        self.state.clear_running(&self.job_id);
+        self.state.clear_running(&self.job_id, self.token);
     }
 }
 
 /// A loaded job paired with its computed next-fire instant (UTC epoch millis).
 ///
-/// Overlap-skip is gated entirely on shared [`SchedulerState::running_since_ms`]
-/// (via [`SchedulerState::try_claim_running`]), which is preserved across
-/// reloads for surviving jobs and pruned for removed ones, so a job edited
-/// mid-run still overlap-skips. No per-armed-job running flag is needed.
+/// Capacity claims live in shared state, survive edits, and are pruned on delete.
 struct ArmedJob {
     job: ScheduleJob,
     next_run_at_ms: i64,
@@ -342,8 +337,8 @@ fn arm_jobs(state: &SchedulerState) -> Vec<ArmedJob> {
     armed
 }
 
-/// Fire every job whose next-fire instant is now due. A job still running from a
-/// previous fire is skipped (overlap-skip) and bookmarked; the rest fire
+/// Fire every job whose next-fire instant is now due. A job at its concurrency
+/// limit is skipped (overlap-skip) and bookmarked; the rest fire
 /// concurrently in their own tasks. Every due job's next fire is recomputed so
 /// the timer always re-arms forward, even for skipped, hung, or erroring jobs.
 async fn run_due_jobs(
@@ -369,21 +364,16 @@ async fn run_due_jobs(
     let config = Arc::new(config.clone());
     for &idx in &due {
         let job_id = armed[idx].job.id.clone();
-        // Atomically claim the run via shared state. The claim fails when a
-        // previous fire of this job is still in flight — a scheduled run OR a
-        // manual run-now, since both go through the same `running_since_ms`
-        // gate. On a failed claim, overlap-skip: bookmark the skip in shared
-        // state so a concurrent run-now can keep the recomputed next fire, and
-        // let the re-arm below recompute. This single check-and-claim closes the
-        // publish gap a separate is_running()+mark would leave between the loop
-        // and run-now.
-        if !state.try_claim_running(&job_id, now_ms) {
+        // Scheduled fires and Run now share one atomic capacity claim.
+        let Some(token) =
+            state.try_claim_running(&job_id, now_ms, armed[idx].job.max_concurrent.unwrap_or(1))
+        else {
             state.mark_skipped(&job_id, now_ms);
             tracing::warn!(
-                "[scheduler] Skipping fire of job {job_id}: previous run still in progress"
+                "[scheduler] Skipping fire of job {job_id}: concurrent run limit reached"
             );
             continue;
-        }
+        };
 
         // Spawn the fire in its own task so a hung, panicking, or erroring run
         // cannot block the schedule loop. A `RunningGuard` releases the shared
@@ -396,11 +386,12 @@ async fn run_due_jobs(
         let guard = RunningGuard {
             state: Arc::clone(&state),
             job_id,
+            token,
         };
         let shutdown = shutdown.clone();
         fires.spawn(async move {
             let _guard = guard;
-            let _ = execute_job(&config, &services, &state, &job, shutdown).await;
+            let _ = execute_job(&config, &services, &state, &job, Some(token), shutdown).await;
         });
     }
 
@@ -693,12 +684,13 @@ fn wake_agent(final_line: Option<&str>) -> (bool, Option<String>) {
 async fn persist_execute_result(
     services: &ServiceRegistry,
     config: &SchedulerConfig,
-    state: &SchedulerState,
+    state: (&SchedulerState, Option<RunToken>),
     job: &ScheduleJob,
     fired_at: chrono::DateTime<Utc>,
     recorder: Option<&RunRecorder>,
     output: ExecutionOutput,
 ) -> ExecuteResult {
+    let (state, token) = state;
     let name = if job.name.is_empty() {
         &job.id
     } else {
@@ -822,11 +814,14 @@ async fn persist_execute_result(
     });
     state.mark_finished_details(
         &job.id,
-        final_status,
-        error.clone(),
-        exit_code,
-        run_kind,
-        delivery,
+        token,
+        RunCompletion {
+            status: final_status,
+            error: error.clone(),
+            exit_code,
+            run_kind,
+            delivery,
+        },
     );
 
     ExecuteResult {
@@ -844,11 +839,11 @@ async fn execute_job(
     services: &ServiceRegistry,
     state: &SchedulerState,
     job: &ScheduleJob,
+    token: Option<RunToken>,
     shutdown: ShutdownToken,
 ) -> ExecuteResult {
     // The caller (timer loop or run-now) has already claimed the run via
-    // `try_claim_running`, which set `running_since_ms`. `execute_job` only
-    // records the outcome.
+    // `try_claim_running`, which reserved this token. Completion releases only that claim.
     let fired_at = Utc::now();
 
     let phase = if job.payload.script.is_some() {
@@ -886,7 +881,7 @@ async fn execute_job(
             return persist_execute_result(
                 services,
                 config,
-                state,
+                (state, token),
                 job,
                 fired_at,
                 None,
@@ -918,7 +913,7 @@ async fn execute_job(
             return persist_execute_result(
                 services,
                 config,
-                state,
+                (state, token),
                 job,
                 fired_at,
                 recorder.as_ref(),
@@ -941,7 +936,7 @@ async fn execute_job(
                     return persist_execute_result(
                         services,
                         config,
-                        state,
+                        (state, token),
                         job,
                         fired_at,
                         recorder.as_ref(),
@@ -958,7 +953,7 @@ async fn execute_job(
             return persist_execute_result(
                 services,
                 config,
-                state,
+                (state, token),
                 job,
                 fired_at,
                 recorder.as_ref(),
@@ -975,7 +970,7 @@ async fn execute_job(
             return persist_execute_result(
                 services,
                 config,
-                state,
+                (state, token),
                 job,
                 fired_at,
                 recorder.as_ref(),
@@ -1028,7 +1023,7 @@ async fn execute_job(
         return persist_execute_result(
             services,
             config,
-            state,
+            (state, token),
             job,
             fired_at,
             recorder.as_ref(),
@@ -1076,7 +1071,7 @@ async fn execute_job(
     persist_execute_result(
         services,
         config,
-        state,
+        (state, token),
         job,
         fired_at,
         recorder.as_ref(),
@@ -1098,7 +1093,7 @@ pub enum RunNowOutcome {
     /// The fire was skipped at execution time (the job vanished or was disabled
     /// between the claim and the fire) — aihub `skipped` result → 202.
     Skipped,
-    /// A run of this job was already in flight; the manual fire was rejected
+    /// This job is at its concurrency limit; the manual fire was rejected
     /// → 409.
     Conflict,
     /// The job is disabled, so it was not fired — aihub `inactive` result → 500.
@@ -1109,12 +1104,8 @@ pub enum RunNowOutcome {
 
 /// Fire a job immediately over HTTP without disturbing its schedule.
 ///
-/// Mirrors aihub's run-now skipped-fire bookkeeping: the job's pre-run
-/// `nextRunAt` is captured, the job runs synchronously (marked running so a
-/// concurrent scheduled tick overlap-skips and bookmarks the skip), and
-/// afterwards the pre-run next fire is restored — UNLESS a scheduled fire was
-/// overlap-skipped during the manual run, in which case the loop's recomputed
-/// next fire stands (the skipped occurrence is consumed, not replayed).
+/// Leaves the next fire untouched, preserving any advancement by the timer
+/// while the manual run is active, whether the scheduled fire succeeds or skips.
 struct ManualRunGuard(Arc<SchedulerState>);
 
 impl Drop for ManualRunGuard {
@@ -1164,25 +1155,17 @@ async fn run_job_now_inner(
         return RunNowOutcome::Disabled;
     }
 
-    // Capture the schedule's pre-run next fire and the current skip bookmark so
-    // we can tell, afterwards, whether a scheduled fire was skipped *during*
-    // this manual run.
-    let pre_next_run = state.runtime(&job.id).next_run_at_ms;
-    let pre_skipped = state.last_skipped_at_ms(&job.id);
-
-    // Atomically claim the run before the runner spawns. The claim fails if a
-    // scheduled fire or another run-now is already in flight — that is the
-    // already-running conflict (409). This single check-and-claim shares one
-    // gate with the timer loop, so the two can never both fire the same job.
-    if !state.try_claim_running(&job.id, Utc::now().timestamp_millis()) {
+    let Some(token) = state.try_claim_running(
+        &job.id,
+        Utc::now().timestamp_millis(),
+        job.max_concurrent.unwrap_or(1),
+    ) else {
         return RunNowOutcome::Conflict;
-    }
-    // Release the claim even if `execute_job` panics (the HTTP handler task
-    // unwinds through this drop). A normal completion clears it first via
-    // `mark_finished`, making this drop a no-op.
+    };
     let _guard = RunningGuard {
         state: Arc::clone(state),
         job_id: job.id.clone(),
+        token,
     };
 
     // Re-check the job survived the claim: a concurrent delete or disable over
@@ -1191,26 +1174,17 @@ async fn run_job_now_inner(
     match state.jobs().into_iter().find(|j| j.id == job_id) {
         Some(j) if j.enabled => {}
         _ => {
-            state.clear_running(&job.id);
-            if state.last_skipped_at_ms(&job.id) == pre_skipped {
-                state.set_next_run(&job.id, pre_next_run);
-            }
+            state.clear_running(&job.id, token);
             return RunNowOutcome::Skipped;
         }
     }
 
     let (_shutdown_tx, fallback_shutdown) = never_shutdown();
     let shutdown = state.shutdown().unwrap_or(fallback_shutdown);
-    let result = execute_job(config, services, state, &job, shutdown).await;
+    let result = execute_job(config, services, state, &job, Some(token), shutdown).await;
 
-    // If a scheduled fire was overlap-skipped while this manual run was in
-    // flight, the loop already recomputed and published a fresh next fire; keep
-    // it. Otherwise restore the pre-run next fire so the manual run did not
-    // disturb the schedule.
-    let skipped_during = state.last_skipped_at_ms(&job.id) != pre_skipped;
-    if !skipped_during {
-        state.set_next_run(&job.id, pre_next_run);
-    }
+    // Manual execution never writes next_run_at_ms, preserving timer advances
+    // without a check/restore race against a concurrent scheduled fire.
 
     RunNowOutcome::Ran(result)
 }
@@ -1360,6 +1334,76 @@ mod tests {
         (services, spawns)
     }
 
+    #[derive(Default)]
+    struct ControlledRunner {
+        completions: std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<ExitKind>>>,
+        sessions: std::sync::Mutex<Vec<String>>,
+        panic_on_second: bool,
+    }
+
+    impl Runner for ControlledRunner {
+        fn spawn<'a>(
+            &self,
+            params: SpawnParams<'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<RunnerHandle>> + Send + 'a>,
+        > {
+            let should_panic = {
+                let mut sessions = self.sessions.lock().unwrap();
+                sessions.push(params.run_id);
+                self.panic_on_second && sessions.len() == 2
+            };
+            if should_panic {
+                return Box::pin(async { panic!("second run panics") });
+            }
+            let (complete, completed) = tokio::sync::oneshot::channel();
+            self.completions.lock().unwrap().push(complete);
+            Box::pin(async move {
+                let (kill, killed) = tokio::sync::oneshot::channel();
+                let done = tokio::spawn(async move {
+                    tokio::select! {
+                        outcome = completed => outcome.unwrap(),
+                        _ = killed => ExitKind::Interrupted { reason: "killed" },
+                    }
+                });
+                Ok(RunnerHandle::new(0, kill, done))
+            })
+        }
+    }
+
+    impl ControlledRunner {
+        async fn wait_for_starts(&self, count: usize) {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while self.sessions.lock().unwrap().len() < count {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("runner started");
+        }
+
+        fn finish_first(&self) {
+            self.completions
+                .lock()
+                .unwrap()
+                .remove(0)
+                .send(ExitKind::Normal)
+                .unwrap();
+        }
+    }
+
+    fn controlled_services(panic_on_second: bool) -> (ServiceRegistry, Arc<ControlledRunner>) {
+        let runner = Arc::new(ControlledRunner {
+            panic_on_second,
+            ..Default::default()
+        });
+        let mut services = ServiceRegistry::default();
+        services
+            .service::<dyn Runner>("fake", runner.clone())
+            .unwrap();
+        (services, runner)
+    }
+
     fn test_config(root: PathBuf, job_timeout_ms: u64) -> SchedulerConfig {
         SchedulerConfig {
             root,
@@ -1402,6 +1446,7 @@ mod tests {
                 quiet_output: false,
             },
             timeout_ms,
+            max_concurrent: None,
             deliver: Vec::new(),
         }
     }
@@ -1499,6 +1544,179 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cap_two_fires_twice_skips_third_and_completion_frees_one_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (services, runner) = controlled_services(false);
+        let config = test_config(dir.path().to_path_buf(), 60_000);
+        let mut jobs = vec![armed("job", None)];
+        jobs[0].job.max_concurrent = Some(2);
+        let history = crate::history::History::open(dir.path(), 100).unwrap();
+        let state = Arc::new(SchedulerState::with_history(
+            vec![jobs[0].job.clone()],
+            history.clone(),
+        ));
+        let mut fires = tokio::task::JoinSet::new();
+        let (_tx, shutdown) = never_shutdown();
+        for starts in 1..=2 {
+            jobs[0].next_run_at_ms = 0;
+            run_due_jobs(&config, &services, &state, &mut jobs, &mut fires, &shutdown).await;
+            runner.wait_for_starts(starts).await;
+        }
+        assert_eq!(state.runtime("job").running_count(), 2);
+        assert_eq!(history.list("job").unwrap().len(), 2);
+        jobs[0].next_run_at_ms = 0;
+        run_due_jobs(&config, &services, &state, &mut jobs, &mut fires, &shutdown).await;
+        assert_eq!(runner.sessions.lock().unwrap().len(), 2);
+        assert!(state.last_skipped_at_ms("job").is_some());
+        runner.finish_first();
+        tokio::time::timeout(Duration::from_secs(2), fires.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.runtime("job").running_count(), 1);
+        jobs[0].next_run_at_ms = 0;
+        run_due_jobs(&config, &services, &state, &mut jobs, &mut fires, &shutdown).await;
+        runner.wait_for_starts(3).await;
+        jobs[0].next_run_at_ms = 0;
+        run_due_jobs(&config, &services, &state, &mut jobs, &mut fires, &shutdown).await;
+        assert_eq!(runner.sessions.lock().unwrap().len(), 3);
+        runner.finish_first();
+        runner.finish_first();
+        while let Some(result) = fires.join_next().await {
+            result.unwrap();
+        }
+        assert_eq!(state.runtime("job").running_count(), 0);
+        let records = history.list("job").unwrap();
+        assert_eq!(records.len(), 3);
+        assert!(records.iter().all(|record| record.outcome == "succeeded"));
+        let outputs = std::fs::read_dir(dir.path().join("cron/output/job"))
+            .unwrap()
+            .count();
+        assert_eq!(outputs, 3);
+        let sessions = runner.sessions.lock().unwrap();
+        assert_eq!(
+            sessions
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_history_off_runs_get_distinct_runner_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let (services, runner) = controlled_services(false);
+        let config = test_config(dir.path().to_path_buf(), 60_000);
+        let mut jobs = vec![armed("job", None)];
+        jobs[0].job.max_concurrent = Some(32);
+        let state = Arc::new(SchedulerState::new(vec![jobs[0].job.clone()]));
+        let mut fires = tokio::task::JoinSet::new();
+        let (_tx, shutdown) = never_shutdown();
+        for _ in 0..32 {
+            jobs[0].next_run_at_ms = 0;
+            run_due_jobs(&config, &services, &state, &mut jobs, &mut fires, &shutdown).await;
+        }
+        runner.wait_for_starts(32).await;
+        let unique = runner
+            .sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        for _ in 0..32 {
+            runner.finish_first();
+        }
+        while let Some(result) = fires.join_next().await {
+            result.unwrap();
+        }
+        assert_eq!(unique, 32, "one session per run even when history is off");
+    }
+
+    #[tokio::test]
+    async fn panic_releases_only_the_panicking_runs_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (services, runner) = controlled_services(true);
+        let config = test_config(dir.path().to_path_buf(), 60_000);
+        let mut jobs = vec![armed("job", None)];
+        jobs[0].job.max_concurrent = Some(2);
+        let state = Arc::new(SchedulerState::new(vec![jobs[0].job.clone()]));
+        let mut fires = tokio::task::JoinSet::new();
+        let (_tx, shutdown) = never_shutdown();
+        run_due_jobs(&config, &services, &state, &mut jobs, &mut fires, &shutdown).await;
+        runner.wait_for_starts(1).await;
+        jobs[0].next_run_at_ms = 0;
+        run_due_jobs(&config, &services, &state, &mut jobs, &mut fires, &shutdown).await;
+        let panic = tokio::time::timeout(Duration::from_secs(2), fires.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(panic.is_panic());
+        assert_eq!(state.runtime("job").running_count(), 1);
+        jobs[0].next_run_at_ms = 0;
+        run_due_jobs(&config, &services, &state, &mut jobs, &mut fires, &shutdown).await;
+        runner.wait_for_starts(3).await;
+        jobs[0].next_run_at_ms = 0;
+        run_due_jobs(&config, &services, &state, &mut jobs, &mut fires, &shutdown).await;
+        assert_eq!(runner.sessions.lock().unwrap().len(), 3);
+        runner.finish_first();
+        runner.finish_first();
+        while let Some(result) = fires.join_next().await {
+            result.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_runs_respect_cap_and_keep_a_successful_scheduled_advance() {
+        let dir = tempfile::tempdir().unwrap();
+        let (services, runner) = controlled_services(false);
+        let config = test_config(dir.path().to_path_buf(), 60_000);
+        let mut jobs = vec![armed("job", None)];
+        jobs[0].job.max_concurrent = Some(2);
+        let state = Arc::new(SchedulerState::new(vec![jobs[0].job.clone()]));
+        state.set_next_run("job", Some(123));
+        let manual = {
+            let config = config.clone();
+            let services = services.clone();
+            let state = state.clone();
+            tokio::spawn(async move { run_job_now(&config, &services, &state, "job").await })
+        };
+        runner.wait_for_starts(1).await;
+        let mut fires = tokio::task::JoinSet::new();
+        let (_tx, shutdown) = never_shutdown();
+        run_due_jobs(&config, &services, &state, &mut jobs, &mut fires, &shutdown).await;
+        runner.wait_for_starts(2).await;
+        let advanced = state.runtime("job").next_run_at_ms.unwrap();
+        assert!(advanced > 123);
+        assert!(matches!(
+            run_job_now(&config, &services, &state, "job").await,
+            RunNowOutcome::Conflict
+        ));
+        runner.finish_first();
+        assert!(matches!(manual.await.unwrap(), RunNowOutcome::Ran(_)));
+        assert_eq!(state.runtime("job").next_run_at_ms, Some(advanced));
+        assert_eq!(state.runtime("job").running_count(), 1);
+        let extra = {
+            let config = config.clone();
+            let services = services.clone();
+            let state = state.clone();
+            tokio::spawn(async move { run_job_now(&config, &services, &state, "job").await })
+        };
+        runner.wait_for_starts(3).await;
+        assert_eq!(state.runtime("job").running_count(), 2);
+        runner.finish_first();
+        runner.finish_first();
+        assert!(matches!(extra.await.unwrap(), RunNowOutcome::Ran(_)));
+        while let Some(result) = fires.join_next().await {
+            result.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn timed_out_run_is_killed_and_recorded_as_error() {
         let dir = tempfile::tempdir().unwrap();
         // Child would run for 10s, but the job timeout is 150ms.
@@ -1508,7 +1726,15 @@ mod tests {
         let state = Arc::new(SchedulerState::new(vec![]));
 
         let (_shutdown_tx, shutdown) = never_shutdown();
-        execute_job(&config, &services, &state, &job, shutdown).await;
+        execute_job(
+            &config,
+            &services,
+            &state,
+            &job,
+            state.try_claim_running(&job.id, Utc::now().timestamp_millis(), 1),
+            shutdown,
+        )
+        .await;
 
         let out = latest_output(dir.path(), "timeout-job").expect("output written");
         assert!(out.contains("status: error"), "recorded as error: {out}");
@@ -1643,9 +1869,9 @@ mod tests {
         // The timer loop claims the run before firing; `execute_job` only
         // records the outcome. Mirror that here so the claimed `last_run_at_ms`
         // is set, as it would be in production.
-        assert!(state.try_claim_running("isolated", Utc::now().timestamp_millis()));
+        let token = state.try_claim_running("isolated", Utc::now().timestamp_millis(), 1);
         let (_shutdown_tx, shutdown) = never_shutdown();
-        execute_job(&config, &services, &state, &job, shutdown).await;
+        execute_job(&config, &services, &state, &job, token, shutdown).await;
 
         assert_eq!(spawns.load(Ordering::SeqCst), 1, "runner fired directly");
         let rt = state.runtime("isolated");
@@ -1775,7 +2001,9 @@ mod tests {
         let _ = arm_jobs(&state);
 
         // Claim job "a" as running.
-        assert!(state.try_claim_running("a", Utc::now().timestamp_millis()));
+        assert!(state
+            .try_claim_running("a", Utc::now().timestamp_millis(), 1)
+            .is_some());
 
         // Edit "a"'s message in state, then re-arm.
         state.set_jobs(vec![job_with("a", None, true, "edited")]);
@@ -1795,7 +2023,9 @@ mod tests {
         let _ = arm_jobs(&state);
 
         // Job "b" is running.
-        assert!(state.try_claim_running("b", Utc::now().timestamp_millis()));
+        assert!(state
+            .try_claim_running("b", Utc::now().timestamp_millis(), 1)
+            .is_some());
 
         // Remove "b" and re-arm.
         state.set_jobs(vec![job_with("a", None, true, "x")]);
@@ -1958,14 +2188,30 @@ mod tests {
         job.payload.message = Some("wake".into());
         job.payload.quiet_output = true;
         let (_tx, shutdown) = never_shutdown();
-        let result = execute_job(&config, &services, &state, &job, shutdown.clone()).await;
+        let result = execute_job(
+            &config,
+            &services,
+            &state,
+            &job,
+            state.try_claim_running(&job.id, Utc::now().timestamp_millis(), 1),
+            shutdown.clone(),
+        )
+        .await;
         assert_eq!(result.status, RunStatus::Ok);
         assert!(result.output_path.is_none());
         assert!(history.list("quiet").unwrap().is_empty());
         assert_eq!(state.runtime("quiet").last_status, Some(LastStatus::Ok));
 
         job.payload.script = Some("cron/scripts/fail.sh".into());
-        let result = execute_job(&config, &services, &state, &job, shutdown).await;
+        let result = execute_job(
+            &config,
+            &services,
+            &state,
+            &job,
+            state.try_claim_running(&job.id, Utc::now().timestamp_millis(), 1),
+            shutdown,
+        )
+        .await;
         assert_eq!(result.status, RunStatus::Error);
         let record = history.list("quiet").unwrap().remove(0);
         assert_eq!(record.outcome, "failed");
@@ -2032,7 +2278,15 @@ mod tests {
         .unwrap();
         let job = script_job("write-fail", "cron/scripts/ok.sh", 60_000);
         let (_tx, shutdown) = never_shutdown();
-        let result = execute_job(&config, &services, &state, &job, shutdown).await;
+        let result = execute_job(
+            &config,
+            &services,
+            &state,
+            &job,
+            state.try_claim_running(&job.id, Utc::now().timestamp_millis(), 1),
+            shutdown,
+        )
+        .await;
         assert_eq!(result.status, RunStatus::Error);
         let record = history.list("write-fail").unwrap().remove(0);
         assert_eq!(record.outcome, "failed");

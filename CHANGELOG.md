@@ -9,6 +9,8 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Scheduler jobs accept `maxConcurrent` (default 1) to allow bounded overlapping scheduled and manual runs; job status and the Cron dashboard show the active run count.
+
 - Web chat now shows `/compact` as a command with progress, inline errors, Stop support, and saved summary cards; overlapping submissions are refused and Pi context usage updates immediately.
 - Fixed `self_update` from chat sessions and web chats losing backend context after a host restart; known web session bindings now persist in `data/chat/slots.json`.
 - The web chat header now shows an info icon after the agent name. Hover, focus, or tap it to see the runner, provider, model, and thinking level from `agent.yaml`.

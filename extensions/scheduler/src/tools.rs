@@ -102,7 +102,9 @@ fn iso(ms: i64) -> Option<String> {
 /// converting timestamps itself.
 fn job_view(deps: &ToolDeps, job: &ScheduleJob, now_ms: i64) -> Value {
     let rt = deps.state.runtime(&job.id);
-    let running_for_ms = rt.running_since_ms.map(|since| (now_ms - since).max(0));
+    let running_for_ms = rt
+        .oldest_active_start()
+        .map(|since| (now_ms - since).max(0));
     let computed_next_run_at_ms = compute_next_run_at_ms(&job.schedule, now_ms).ok();
     let mut value = serde_json::to_value(job).unwrap_or_else(|_| json!({}));
     if let Value::Object(map) = &mut value {
@@ -133,6 +135,7 @@ fn job_view(deps: &ToolDeps, job: &ScheduleJob, now_ms: i64) -> Value {
         map.insert("lastExitCode".to_string(), json!(rt.last_exit_code));
         map.insert("lastRunKind".to_string(), json!(rt.last_run_kind));
         map.insert("runningForMs".to_string(), json!(running_for_ms));
+        map.insert("runningCount".to_string(), json!(rt.running_count()));
         map.insert(
             "scheduleHuman".to_string(),
             json!(format_schedule(&job.schedule)),
@@ -436,7 +439,9 @@ impl ToolExecutor for StatusTool {
         let body = json!({
             "id": job.id,
             "enabled": job.enabled,
-            "running": rt.running_since_ms.is_some(),
+            "running": rt.running_count() > 0,
+            "runningCount": rt.running_count(),
+            "runningForMs": rt.oldest_active_start().map(|since| (now_ms - since).max(0)),
             "schedule": job.schedule,
             "scheduleHuman": format_schedule(&job.schedule),
             "nextRunAtMs": computed_next,
@@ -548,7 +553,7 @@ fn run_now_spec() -> ToolSpec {
         "scheduler_run_job_now",
         "Run a scheduler job immediately, on demand, without disturbing its \
          schedule (the next fire is preserved). Uses the same execution and \
-         overlap semantics as a scheduled fire: if a run is already in flight \
+         overlap semantics as a scheduled fire: when maxConcurrent is reached \
          the call is rejected. Non-destructive; no confirmation needed.",
         json!({
             "type": "object",
@@ -667,7 +672,8 @@ fn create_spec() -> ToolSpec {
                     },
                     "additionalProperties": false,
                 },
-                "timeoutMs": { "type": "integer", "minimum": 1, "description": "Optional per-job run timeout in ms." }
+                "timeoutMs": { "type": "integer", "minimum": 1, "description": "Optional per-job run timeout in ms." },
+                "maxConcurrent": { "type": "integer", "minimum": 1, "maximum": 4294967295u64, "description": "Maximum active runs of this job (default 1)." }
                 ,"deliver": { "type": "array", "description": "Runtime delivery targets; the job agent must not send its own result.", "items": { "type": "object", "properties": { "target": { "type": "string" }, "channel": { "type": "string" }, "user": { "type": "string" } }, "required": ["target"], "additionalProperties": false } }
             },
             "required": ["schedule", "payload"],
@@ -724,6 +730,10 @@ impl ToolExecutor for CreateTool {
                 schedule,
                 payload,
                 timeout_ms: args.get("timeoutMs").and_then(Value::as_u64),
+                max_concurrent: args
+                    .get("maxConcurrent")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as u32),
                 deliver,
             };
             validate_job(&self.deps.root, &job)?;
@@ -771,6 +781,7 @@ fn update_spec() -> ToolSpec {
                     "additionalProperties": false,
                 },
                 "timeoutMs": { "type": ["integer", "null"], "minimum": 1, "description": "Per-job timeout in ms; null clears it (inherit the default)." },
+                "maxConcurrent": { "type": ["integer", "null"], "minimum": 1, "maximum": 4294967295u64, "description": "Maximum active runs; null restores the default of 1." },
                 "deliver": { "type": "array", "description": "Runtime delivery targets; the job agent must not send its own result.", "items": { "type": "object", "properties": { "target": { "type": "string" }, "channel": { "type": "string" }, "user": { "type": "string" } }, "required": ["target"], "additionalProperties": false } },
                 "confirm": { "type": "boolean", "description": "Required only when setting enabled=false." }
             },
@@ -826,6 +837,9 @@ impl ToolExecutor for UpdateTool {
                     Value::Null => None,
                     v => v.as_u64(),
                 };
+            }
+            if let Some(value) = args.get("maxConcurrent") {
+                job.max_concurrent = value.as_u64().map(|v| v as u32);
             }
             if let Some(deliver) = args.get("deliver") {
                 job.deliver = serde_json::from_value(deliver.clone()).map_err(|e| {
@@ -1188,6 +1202,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn max_concurrent_tools_round_trip_and_null_clear() {
+        let (deps, dir) = deps();
+        let out = dispatch(
+            &deps,
+            "scheduler_create_job",
+            json!({
+                "schedule": { "cron": "0 8 * * *", "tz": "UTC" },
+                "payload": { "message": "hi" },
+                "maxConcurrent": 2
+            }),
+        )
+        .await;
+        assert!(!out.is_error, "{}", out.text);
+        assert_eq!(parse(&out)["maxConcurrent"], 2);
+        let id = parse(&out)["id"].as_str().unwrap().to_string();
+        let out = dispatch(
+            &deps,
+            "scheduler_update_job",
+            json!({ "id": id, "maxConcurrent": 3 }),
+        )
+        .await;
+        assert!(!out.is_error, "{}", out.text);
+        assert_eq!(parse(&out)["maxConcurrent"], 3);
+        assert_eq!(load_jobs(dir.path(), |_| {})[0].max_concurrent, Some(3));
+        let out = dispatch(
+            &deps,
+            "scheduler_update_job",
+            json!({ "id": id, "maxConcurrent": null }),
+        )
+        .await;
+        assert!(!out.is_error, "{}", out.text);
+        assert!(parse(&out)["maxConcurrent"].is_null());
+        assert_eq!(load_jobs(dir.path(), |_| {})[0].max_concurrent, None);
+    }
+
+    #[tokio::test]
+    async fn max_concurrent_tools_reject_zero_without_persisting() {
+        let (deps, dir) = deps();
+        let out = dispatch(
+            &deps,
+            "scheduler_create_job",
+            json!({
+                "schedule": { "cron": "0 8 * * *", "tz": "UTC" },
+                "payload": { "message": "hi" },
+                "maxConcurrent": 0
+            }),
+        )
+        .await;
+        assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "invalid_args");
+        assert!(deps.state.jobs().is_empty());
+        let id = create_job(&deps, "0 8 * * *", "UTC", "hi").await;
+        let out = dispatch(
+            &deps,
+            "scheduler_update_job",
+            json!({ "id": id, "maxConcurrent": 0 }),
+        )
+        .await;
+        assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "invalid_args");
+        assert_eq!(load_jobs(dir.path(), |_| {})[0].max_concurrent, None);
+    }
+
+    #[tokio::test]
+    async fn status_and_job_view_report_active_count_and_oldest_age() {
+        let (deps, _dir) = deps();
+        let id = create_job(&deps, "0 8 * * *", "UTC", "hi").await;
+        let now = Utc::now().timestamp_millis();
+        deps.state.try_claim_running(&id, now - 4_000, 2).unwrap();
+        deps.state.try_claim_running(&id, now - 1_000, 2).unwrap();
+        let status = parse(&dispatch(&deps, "scheduler_job_status", json!({ "id": id })).await);
+        assert_eq!(status["running"], true);
+        assert_eq!(status["runningCount"], 2);
+        assert!(status["runningForMs"].as_i64().unwrap() >= 4_000);
+        let listed = parse(&dispatch(&deps, "scheduler_list_jobs", json!({})).await);
+        assert_eq!(listed["jobs"][0]["runningCount"], 2);
+        assert!(listed["jobs"][0]["runningForMs"].as_i64().unwrap() >= 4_000);
+    }
+
+    #[tokio::test]
     async fn create_zero_timeout_is_invalid_args() {
         let (deps, _dir) = deps();
         let out = dispatch(
@@ -1490,13 +1584,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_now_tool_accepts_below_cap_and_conflicts_at_cap() {
+        let (deps, _dir) = deps_with_runner(false);
+        let id = create_job(&deps, "0 0 1 1 *", "UTC", "hi").await;
+        let out = dispatch(
+            &deps,
+            "scheduler_update_job",
+            json!({ "id": id, "maxConcurrent": 2 }),
+        )
+        .await;
+        assert!(!out.is_error, "{}", out.text);
+        deps.state
+            .try_claim_running(&id, Utc::now().timestamp_millis(), 2)
+            .unwrap();
+        let out = dispatch(&deps, "scheduler_run_job_now", json!({ "id": id })).await;
+        assert!(!out.is_error, "{}", out.text);
+        assert_eq!(parse(&out)["job"]["runningCount"], 1);
+        deps.state
+            .try_claim_running(&id, Utc::now().timestamp_millis(), 2)
+            .unwrap();
+        let out = dispatch(&deps, "scheduler_run_job_now", json!({ "id": id })).await;
+        assert!(out.is_error);
+        assert_eq!(out.error.as_ref().unwrap().code, "already_running");
+    }
+
+    #[tokio::test]
     async fn run_now_already_running_is_conflict() {
         let (deps, _dir) = deps_with_runner(false);
         let id = create_job(&deps, "0 0 1 1 *", "UTC", "hi").await;
         // Claim the run so run-now hits the same overlap gate the loop uses.
         assert!(deps
             .state
-            .try_claim_running(&id, Utc::now().timestamp_millis()));
+            .try_claim_running(&id, Utc::now().timestamp_millis(), 1)
+            .is_some());
         let out = dispatch(&deps, "scheduler_run_job_now", json!({ "id": id })).await;
         assert!(out.is_error);
         assert_eq!(out.error.as_ref().unwrap().code, "already_running");
