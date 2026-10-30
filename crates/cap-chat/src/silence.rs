@@ -10,6 +10,7 @@ use std::future::Future;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, Sender, WeakSender};
 
+use crate::shape::{ChatShape, Shaper};
 use crate::{BoxFuture, ChatEvent, ChatRole, ChatSession};
 
 /// The token an agent replies with, alone, to deliver nothing.
@@ -266,12 +267,36 @@ where
     F: FnOnce(Sender<ChatEvent>) -> Fut,
     Fut: Future<Output = anyhow::Result<Box<dyn ChatSession>>>,
 {
+    open_shaped(config, None, tx, open).await
+}
+
+/// [`open_guarded`] plus the chat-shape stage (hold, lint, one rewrite,
+/// `/topics`) when `shape` is set. `None` = identical to [`open_guarded`].
+pub async fn open_shaped<F, Fut>(
+    config: AgentLoopConfig,
+    shape: Option<ChatShape>,
+    tx: Sender<ChatEvent>,
+    open: F,
+) -> anyhow::Result<Box<dyn ChatSession>>
+where
+    F: FnOnce(Sender<ChatEvent>) -> Fut,
+    Fut: Future<Output = anyhow::Result<Box<dyn ChatSession>>>,
+{
     let (raw_tx, mut raw_rx) = mpsc::channel(tx.max_capacity());
+    let (mut shaper, handles) = match shape.map(Shaper::new) {
+        Some((s, h)) => (Some(s), Some(h)),
+        None => (None, None),
+    };
+    let out = tx.clone();
     tokio::spawn(async move {
         let mut filter = NoReplyFilter::default();
         while let Some(event) = raw_rx.recv().await {
             for event in filter.push(event) {
-                if tx.send(event).await.is_err() {
+                let open = match shaper.as_mut() {
+                    Some(shaper) => shaper.push(event, &tx).await,
+                    None => tx.send(event).await.is_ok(),
+                };
+                if !open {
                     return;
                 }
             }
@@ -279,11 +304,15 @@ where
     });
     let weak = raw_tx.downgrade();
     let inner = open(raw_tx).await?;
-    Ok(Box::new(GuardedSession {
+    let guarded: Box<dyn ChatSession> = Box::new(GuardedSession {
         inner,
         guard: LoopGuard::new(config),
         tx: weak,
-    }))
+    });
+    Ok(match handles {
+        Some(handles) => handles.attach(guarded, &out).await,
+        None => guarded,
+    })
 }
 
 #[cfg(test)]

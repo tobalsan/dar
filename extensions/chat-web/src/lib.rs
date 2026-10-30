@@ -1444,6 +1444,7 @@ impl AppState {
             .system_prompt(None)
             .host_tool_bridge(None)
             .resume_session_id(None)
+            .chat_shape(None)
             .build();
         let (tx, mut rx) = mpsc::channel(64);
         let mut title_session = match backend.open(params, tx).await {

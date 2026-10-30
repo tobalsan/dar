@@ -21,5 +21,6 @@ cap-runner = { package = "dar-cap-runner", path = "../cap-runner", version = "0.
 dar-artifacts = { path = "../artifacts", version = "0.6" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1.43", features = ["sync", "rt"] }
+serde_yaml = "0.9"
+tokio = { version = "1.43", features = ["sync", "rt", "process", "time", "io-util"] }
 tracing = "0.1"

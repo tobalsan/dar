@@ -9,6 +9,7 @@ Breaking changes are marked **⚠ BREAKING**.
 
 ## [Unreleased]
 
+- Added opt-in chat-shape (`extensions.chat-shape` in `agent.yaml`). Pi chat replies to humans stay short: the host holds each reply, lints it with the chat-shape core, and asks for one rewrite on a failure. Agents can declare long mode with `reply_mode`, and `/topics` lists open topic plans. Optional keys: `log`, `core`, `pi_extension`.
 - Scheduler jobs accept `maxConcurrent` (default 1) to allow bounded overlapping scheduled and manual runs; job status and the Cron dashboard show the active run count.
 
 - Web chat now shows `/compact` as a command with progress, inline errors, Stop support, and saved summary cards; overlapping submissions are refused and Pi context usage updates immediately.
