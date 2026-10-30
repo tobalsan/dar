@@ -37,7 +37,7 @@ const stoppedRow = reduce(reduce([], { type: 'compaction_started', command: '/co
 assert.equal(reduce(stoppedRow, { type: 'aborted', error: 'aborted' }).length, 1, 'the terminal wire event does not add another interrupted block');
 assert.equal(reduce(reduce([], { type: 'compaction_started', command: '/compact' }), { type: 'finished' })[0].state, 'done');
 
-function browser(respond) {
+function browser(respond, { humanChat = false } = {}) {
   const handlers = {}, calls = [];
   const attrs = {};
   const element = id => {
@@ -54,6 +54,7 @@ function browser(respond) {
   const ids = ['chat-root', 'chat-transcript', 'chat-input', 'chat-chips', 'chat-send', 'chat-abort', 'chat-token-meter', 'chat-slash-menu'];
   const elements = Object.fromEntries(ids.map(id => [id, element(id)]));
   elements['chat-slash-menu'].hidden = true;
+  if (humanChat) elements['chat-root'].dataset.humanChat = '';
   const sandbox = {
     document: { getElementById: id => elements[id] || null, addEventListener: (t, fn) => (handlers[t] ||= []).push(fn) },
     window: { innerHeight: 1000, addEventListener() {} },
@@ -82,6 +83,18 @@ const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(
   let p = browser();
   p.type('/');
   assert.deepEqual(p.options(), ['/new', '/compact', '/stop']);
+  p.type('/t');
+  assert.equal(p.menu.hidden, true, '/topics is hidden when human-chat is off');
+
+  p = browser(null, { humanChat: true });
+  p.type('/');
+  assert.deepEqual(p.options(), ['/new', '/compact', '/stop', '/topics']);
+  p.type('/t');
+  p.key('Tab');
+  assert.equal(p.input.value, '/topics ');
+
+  p = browser();
+  p.type('/');
   assert.equal(p.attrs['aria-expanded'], 'true');
   assert.equal(p.attrs['aria-activedescendant'], 'chat-slash-0');
   p.type('/co');

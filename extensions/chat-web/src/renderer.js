@@ -195,7 +195,13 @@
     { name: '/compact', description: 'Summarize the conversation to free context' },
     { name: '/stop', description: 'Stop the current response' },
   ];
-  const slashMatches = draft => /^\/\S*$/.test(draft) ? SLASH_COMMANDS.filter(c => c.name.startsWith(draft.toLowerCase()) && c.name !== draft.toLowerCase()) : [];
+  // `/topics` is answered by the human-chat host, so list it only when that is on.
+  const TOPICS_COMMAND = { name: '/topics', description: 'List open topics' };
+  const slashCommands = () => {
+    let root = typeof document !== 'undefined' && document.getElementById('chat-root');
+    return root && root.dataset.humanChat != null ? [...SLASH_COMMANDS, TOPICS_COMMAND] : SLASH_COMMANDS;
+  };
+  const slashMatches = draft => /^\/\S*$/.test(draft) ? slashCommands().filter(c => c.name.startsWith(draft.toLowerCase()) && c.name !== draft.toLowerCase()) : [];
   const slashOpen = () => { let menu = $('chat-slash-menu'); return !!menu && !menu.hidden; };
   const closeSlash = () => {
     let menu = $('chat-slash-menu'), input = $('chat-input');

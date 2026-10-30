@@ -116,6 +116,7 @@ impl Extension for ChatWebExtension {
                 agent_description: agent_description(ctx.paths.root()),
                 agent_avatar: agent_avatar(ctx.paths.root()),
                 root: ctx.paths.root().to_path_buf(),
+                human_chat: cap_chat::HumanChat::load(ctx.paths.root()).is_some(),
             }))?;
             ctx.http.mount(host_api::HttpMount {
                 namespace: "/chat".into(),
@@ -209,6 +210,8 @@ struct ChatTab {
     agent_description: Option<String>,
     agent_avatar: Option<Avatar>,
     root: std::path::PathBuf,
+    /// Lists `/topics` in the composer menu when human-chat is on.
+    human_chat: bool,
 }
 impl DashboardTab for ChatTab {
     fn id(&self) -> &str {
@@ -225,10 +228,15 @@ impl DashboardTab for ChatTab {
     }
     fn render(&self) -> Result<String> {
         Ok(format!(
-            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"{}><aside class="chat-sidebar" aria-label="Conversations"><div class="chat-sidebar-head"><strong>Chats</strong><div class="chat-sidebar-controls"><button type="button" id="chat-search-open" class="chat-icon" aria-label="Search conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></button><button type="button" id="chat-sidebar-toggle" data-sidebar-toggle class="chat-icon" aria-label="Toggle sidebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button></div></div><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><header class="chat-header"><button type="button" data-sidebar-toggle class="chat-icon chat-mobile-sidebar-toggle" aria-label="Open conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button><div>{}<span class="chat-title"><span class="chat-name-row"><strong>{}</strong>{}</span>{}</span><span id="chat-session-title" class="chat-session-title" aria-label="Current conversation" data-untitled="true">New chat</span></div><button type="button" class="chat-new" onclick="window.__chatWeb&amp;&amp;window.__chatWeb.newChat()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button></header><div class="chat-dropzone" id="chat-dropzone" hidden>Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite"></div><div class="chat-hero" id="chat-hero">{}<div class="chat-hero-line" id="chat-hero-line"></div></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips"></div><div class="chat-cap-hint" id="chat-cap-hint"></div><div class="chat-compose-line"><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.4 11.1l-9.2 9.1a6 6 0 01-8.4-8.4L13 2.6a4 4 0 015.6 5.6l-9.2 9.2a2 2 0 01-2.8-2.8l8.5-8.5"/></svg></button><input type="file" id="chat-attachments" multiple hidden><div id="chat-slash-menu" class="chat-slash-menu" role="listbox" aria-label="Commands" hidden></div><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message {}" aria-label="Message" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="chat-slash-menu"></textarea><button type="button" id="chat-abort" class="chat-icon" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon" aria-label="Send" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div><div class="chat-context"><button type="button" id="chat-context-ring" class="chat-context-ring" aria-describedby="chat-context-tooltip" hidden><svg width="32" height="32" viewBox="0 0 32 32" fill="none" stroke-width="2.5" aria-hidden="true"><circle class="chat-context-track" cx="16" cy="16" r="14"/><circle class="chat-context-fill" cx="16" cy="16" r="14" pathLength="100"/></svg><span class="chat-context-pct" aria-hidden="true"></span></button><div id="chat-context-tooltip" class="chat-context-tooltip" role="tooltip" hidden></div></div></div><div id="chat-context-warning" class="chat-context-warning" hidden>Context is filling up — send /compact to summarize.</div></form></div><div id="chat-search-palette" class="chat-search-palette" role="dialog" aria-modal="true" aria-label="Search conversations" hidden><div class="chat-search-surface"><input type="search" id="chat-search-input" aria-label="Search titles and messages" placeholder="Search titles and message text of your chats" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="chat-search-results" autocomplete="off"><div id="chat-search-results" role="listbox" aria-label="Search results"></div><div id="chat-search-status" role="status" aria-live="polite"></div></div></div></section><script>{}</script><script>{}</script><script>{}</script><script>{}</script>"#,
+            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"{}{}><aside class="chat-sidebar" aria-label="Conversations"><div class="chat-sidebar-head"><strong>Chats</strong><div class="chat-sidebar-controls"><button type="button" id="chat-search-open" class="chat-icon" aria-label="Search conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></button><button type="button" id="chat-sidebar-toggle" data-sidebar-toggle class="chat-icon" aria-label="Toggle sidebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button></div></div><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><header class="chat-header"><button type="button" data-sidebar-toggle class="chat-icon chat-mobile-sidebar-toggle" aria-label="Open conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button><div>{}<span class="chat-title"><span class="chat-name-row"><strong>{}</strong>{}</span>{}</span><span id="chat-session-title" class="chat-session-title" aria-label="Current conversation" data-untitled="true">New chat</span></div><button type="button" class="chat-new" onclick="window.__chatWeb&amp;&amp;window.__chatWeb.newChat()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button></header><div class="chat-dropzone" id="chat-dropzone" hidden>Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite"></div><div class="chat-hero" id="chat-hero">{}<div class="chat-hero-line" id="chat-hero-line"></div></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips"></div><div class="chat-cap-hint" id="chat-cap-hint"></div><div class="chat-compose-line"><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.4 11.1l-9.2 9.1a6 6 0 01-8.4-8.4L13 2.6a4 4 0 015.6 5.6l-9.2 9.2a2 2 0 01-2.8-2.8l8.5-8.5"/></svg></button><input type="file" id="chat-attachments" multiple hidden><div id="chat-slash-menu" class="chat-slash-menu" role="listbox" aria-label="Commands" hidden></div><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message {}" aria-label="Message" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="chat-slash-menu"></textarea><button type="button" id="chat-abort" class="chat-icon" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon" aria-label="Send" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div><div class="chat-context"><button type="button" id="chat-context-ring" class="chat-context-ring" aria-describedby="chat-context-tooltip" hidden><svg width="32" height="32" viewBox="0 0 32 32" fill="none" stroke-width="2.5" aria-hidden="true"><circle class="chat-context-track" cx="16" cy="16" r="14"/><circle class="chat-context-fill" cx="16" cy="16" r="14" pathLength="100"/></svg><span class="chat-context-pct" aria-hidden="true"></span></button><div id="chat-context-tooltip" class="chat-context-tooltip" role="tooltip" hidden></div></div></div><div id="chat-context-warning" class="chat-context-warning" hidden>Context is filling up — send /compact to summarize.</div></form></div><div id="chat-search-palette" class="chat-search-palette" role="dialog" aria-modal="true" aria-label="Search conversations" hidden><div class="chat-search-surface"><input type="search" id="chat-search-input" aria-label="Search titles and messages" placeholder="Search titles and message text of your chats" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="chat-search-results" autocomplete="off"><div id="chat-search-results" role="listbox" aria-label="Search results"></div><div id="chat-search-status" role="status" aria-live="polite"></div></div></div></section><script>{}</script><script>{}</script><script>{}</script><script>{}</script>"#,
             include_str!("chat.css"),
             escape_html_attr(&self.agent_name),
             avatar_icon_attr(self.agent_avatar.as_ref()),
+            if self.human_chat {
+                " data-human-chat"
+            } else {
+                ""
+            },
             avatar_html(self.agent_avatar.as_ref(), "chat-avatar", &self.agent_name),
             escape_html_attr(&self.agent_name),
             runner_info_html(&self.root),
@@ -7745,6 +7753,7 @@ mod tests {
             agent_description: None,
             agent_avatar: None,
             root: root.clone(),
+            human_chat: false,
         };
         // Visible text only: tags become spaces, so each label sits next to its value.
         let text = |html: String| {
@@ -7780,8 +7789,18 @@ mod tests {
             agent_description: Some("Does <things>".into()),
             agent_avatar: None,
             root: std::path::PathBuf::new(),
+            human_chat: false,
         };
         let html = tab.render().unwrap();
+        assert!(!html.contains("data-human-chat"));
+        let topics_tab = ChatTab {
+            agent_name: "Test Agent".into(),
+            agent_description: None,
+            agent_avatar: None,
+            root: std::path::PathBuf::new(),
+            human_chat: true,
+        };
+        assert!(topics_tab.render().unwrap().contains("data-human-chat"));
         assert!(!html.contains("class=\"chat-avatar\""));
         assert!(html.contains("id=\"chat-hero-line\""));
         assert!(html.contains("id=\"chat-composer\""));
@@ -8867,6 +8886,7 @@ mod tests {
             agent_description: None,
             agent_avatar: Some(avatar),
             root: std::path::PathBuf::new(),
+            human_chat: false,
         };
         let html = tab(Avatar::Text("🦉".into())).render().unwrap();
         assert!(html.contains(r#"<span class="chat-avatar" aria-hidden="true">🦉</span>"#));
