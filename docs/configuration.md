@@ -116,7 +116,13 @@ extensions:
   #   log: data/human-chat/long-mode.jsonl   # default, relative to the agent folder
   #   core: ~/code/agentropy/human-chat      # default path of the built core
   #   pi_extension: <core>/pi/extension.ts   # default
+  #   max_sentences: 5         # shown in the prompt
+  #   sentence_leeway: 0       # lint allows max_sentences + leeway
+  #   max_sentence_words: 25
+  #   word_leeway: 5
 ```
+
+The four limit keys are optional. A missing or invalid value uses the core default.
 
 Off by default. When on, chat replies to a human follow the
 human-chat rules: one topic, 1-5

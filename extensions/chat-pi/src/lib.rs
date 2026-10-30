@@ -265,8 +265,9 @@ impl PiChatSession {
             cmd.envs(env);
         }
         // human-chat: the Pi extension adds rules, nudge, and `reply_mode`.
-        if params.human_chat.is_some() {
+        if let Some(shape) = &params.human_chat {
             cmd.env("HUMAN_CHAT", "1");
+            cmd.envs(shape.limit_env());
         }
         cmd.current_dir(&params.agent_root)
             .stdin(Stdio::piped())

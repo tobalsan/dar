@@ -40,7 +40,30 @@ pub struct HumanChat {
     log: PathBuf,
     topics_dir: PathBuf,
     agent: String,
+    /// Optional reply limits, in `LIMIT_KEYS` order. Unset or invalid keys
+    /// are `None` so the core picks its defaults.
+    limits: [Option<u32>; 4],
 }
+
+/// `(agent.yaml key, core CLI flag, Pi child env var)` for each reply limit.
+const LIMIT_KEYS: [(&str, &str, &str); 4] = [
+    (
+        "max_sentences",
+        "--max-sentences",
+        "HUMAN_CHAT_MAX_SENTENCES",
+    ),
+    (
+        "sentence_leeway",
+        "--sentence-leeway",
+        "HUMAN_CHAT_SENTENCE_LEEWAY",
+    ),
+    (
+        "max_sentence_words",
+        "--max-sentence-words",
+        "HUMAN_CHAT_MAX_SENTENCE_WORDS",
+    ),
+    ("word_leeway", "--word-leeway", "HUMAN_CHAT_WORD_LEEWAY"),
+];
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
@@ -66,6 +89,7 @@ impl HumanChat {
         let yaml = std::fs::read_to_string(root.join("agent.yaml")).ok()?;
         let doc: Value = serde_yaml::from_str(&yaml).ok()?;
         let block = doc.get("extensions")?.get("human-chat")?;
+        let block_value = block.clone();
         let block: Block = if block.is_null() {
             Block::default()
         } else {
@@ -75,7 +99,12 @@ impl HumanChat {
             return None;
         }
         let core = expand(block.core.as_deref().unwrap_or(DEFAULT_CORE), root);
+        let limits = LIMIT_KEYS.map(|(key, _, _)| {
+            let n = block_value.get(key)?.as_u64()?;
+            u32::try_from(n).ok()
+        });
         Some(Self {
+            limits,
             pi_extension: block
                 .pi_extension
                 .map_or_else(|| core.join("pi/extension.ts"), |p| expand(&p, root)),
@@ -89,6 +118,15 @@ impl HumanChat {
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
             core,
         })
+    }
+
+    /// Env vars that hand the configured limits to the Pi child.
+    pub fn limit_env(&self) -> Vec<(&'static str, String)> {
+        LIMIT_KEYS
+            .iter()
+            .zip(self.limits)
+            .filter_map(|((_, _, env), n)| Some((*env, n?.to_string())))
+            .collect()
     }
 
     /// Run the core CLI; `None` on spawn failure, timeout, or bad exit code.
@@ -131,6 +169,11 @@ impl HumanChat {
         ]
         .map(String::from)
         .into();
+        for ((_, flag, _), n) in LIMIT_KEYS.iter().zip(self.limits) {
+            if let Some(n) = n {
+                args.extend([flag.to_string(), n.to_string()]);
+            }
+        }
         if let Some((kind, note)) = decl {
             args.extend(["--mode", "long", "--type", kind, "--note", note].map(String::from));
             if let Some(dir) = self.log.parent() {
@@ -722,7 +765,7 @@ if (a[0] === "topics") {
 }
 let t = "";
 process.stdin.on("data", (d) => (t += d)).on("end", () => {
-  const bad = t.includes("BAD"), long = a.includes("--mode");
+  const bad = t.includes("BAD") && !a.includes("--sentence-leeway"), long = a.includes("--mode");
   const log = a[a.indexOf("--log") + 1];
   if (log && long) fs.appendFileSync(log, JSON.stringify({ type: a[a.indexOf("--type") + 1] }) + "\n");
   setTimeout(() => {
@@ -909,6 +952,36 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
         let on = load("extensions:\n  human-chat:\n    pi_extension: /x/e.ts\n").unwrap();
         assert_eq!(on.pi_extension, Path::new("/x/e.ts"));
         assert_eq!(on.log, dir.path().join("data/human-chat/long-mode.jsonl"));
+    }
+
+    #[test]
+    fn limit_keys_parse_and_invalid_fall_back() {
+        let load = |yaml: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("agent.yaml"), yaml).unwrap();
+            HumanChat::load(dir.path()).unwrap()
+        };
+        let on = load(
+            "extensions:\n  human-chat:\n    max_sentences: 7\n    sentence_leeway: 1\n    \
+             max_sentence_words: x\n    word_leeway: -2\n",
+        );
+        assert_eq!(on.limits, [Some(7), Some(1), None, None]);
+        assert_eq!(
+            on.limit_env(),
+            [
+                ("HUMAN_CHAT_MAX_SENTENCES", "7".to_string()),
+                ("HUMAN_CHAT_SENTENCE_LEEWAY", "1".to_string())
+            ]
+        );
+        assert_eq!(load("extensions:\n  human-chat: {}\n").limits, [None; 4]);
+    }
+
+    #[tokio::test]
+    async fn lint_passes_the_configured_limits() {
+        let (_d, plain) = setup("");
+        assert!(!plain.lint("BAD", None, "s").await.unwrap().ok);
+        let (_d, tuned) = setup("    sentence_leeway: 2\n");
+        assert!(tuned.lint("BAD", None, "s").await.unwrap().ok);
     }
 
     #[tokio::test]
