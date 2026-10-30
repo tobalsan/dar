@@ -473,7 +473,7 @@ async fn submit_turn(
         prompt
     };
     let opened = session.as_mut().expect("session opened above");
-    if let Err(e) = opened.send_turn(outbound).await {
+    if let Err(e) = opened.send_human_turn(outbound).await {
         app.chat.fail_turn(format!("sending turn failed: {e:#}"));
         return;
     }

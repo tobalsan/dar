@@ -746,6 +746,14 @@ fn read_recent_messages(path: &Path) -> (Vec<Message>, bool) {
             continue; // malformed/partial line — tolerate, skip.
         };
         if let Some((role, text)) = message_role_text(&value) {
+            if is_rewrite_hint(&role, &text) {
+                // chat-shape rewrite: hide the hint and the draft it replaced.
+                while tail.back().is_some_and(|m| m.role == "assistant") {
+                    tail.pop_back();
+                    total -= 1;
+                }
+                continue;
+            }
             if tail.len() == READ_MAX {
                 tail.pop_front();
             }
@@ -813,11 +821,31 @@ fn read_messages(path: &Path) -> Vec<Message> {
             continue; // malformed/partial line — tolerate, skip.
         };
         if let Some((role, text)) = message_role_text(&value) {
+            if is_rewrite_hint(&role, &text) {
+                // chat-shape rewrite: hide the hint and the draft it replaced.
+                while messages
+                    .last()
+                    .is_some_and(|m: &Message| m.role == "assistant")
+                {
+                    messages.pop();
+                    index -= 1;
+                }
+                continue;
+            }
             messages.push(Message { index, role, text });
             index += 1;
         }
     }
     messages
+}
+
+/// Prefix of the follow-up turn chat-shape sends to ask for one rewrite.
+const CHAT_SHAPE_REWRITE_PREFIX: &str = "[chat-shape] ";
+
+/// A chat-shape rewrite hint. The reader drops it with the draft before it:
+/// the person never saw either.
+fn is_rewrite_hint(role: &str, text: &str) -> bool {
+    role == "user" && text.starts_with(CHAT_SHAPE_REWRITE_PREFIX)
 }
 
 /// Extract `(role, text)` from a persisted line when it is a user/assistant
@@ -1902,6 +1930,42 @@ not json
         let indices: Vec<usize> = messages.iter().map(|m| m.index).collect();
         let expected: Vec<usize> = (7..total).collect();
         assert_eq!(indices, expected);
+    }
+
+    #[test]
+    fn chat_shape_rewrite_exchange_is_not_replayed() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "2024-06-15T12:30:00Z_a.jsonl",
+            &session_with_messages(
+                "sess-a",
+                &[
+                    ("user", "first"),
+                    ("assistant", "fine"),
+                    ("user", "second"),
+                    ("assistant", "draft part one"),
+                    ("assistant", "draft part two"),
+                    ("user", "[chat-shape] Cut it down."),
+                    ("assistant", "Short."),
+                    ("user", "third"),
+                ],
+            ),
+        );
+        let texts = |messages: &[Message]| -> Vec<String> {
+            messages.iter().map(|m| m.text.clone()).collect()
+        };
+        let want = ["first", "fine", "second", "Short.", "third"];
+        let (recent, truncated) = read_recent(temp.path(), "sess-a");
+        assert!(!truncated);
+        assert_eq!(texts(&recent), want);
+        let all = read(temp.path(), "sess-a", 0, READ_MAX);
+        assert_eq!(texts(&all), want);
+        // Indexes stay contiguous so search and read agree.
+        let indices: Vec<usize> = recent.iter().map(|m| m.index).collect();
+        assert_eq!(indices, [0, 1, 2, 3, 4]);
+        let indices: Vec<usize> = all.iter().map(|m| m.index).collect();
+        assert_eq!(indices, [0, 1, 2, 3, 4]);
     }
 
     #[test]

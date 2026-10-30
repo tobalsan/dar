@@ -566,6 +566,14 @@ pub trait ChatSession: Send {
         let _ = sender;
         self.send_turn(prompt)
     }
+    /// A turn typed by a person on an interactive surface (web chat, TUI).
+    /// Default = [`send_turn_from`](Self::send_turn_from) with no sender, so
+    /// stock backends behave exactly as before. The chat-shape adapter shapes
+    /// only turns sent here; `send_turn`, `send_turn_from`, scheduler,
+    /// background, and agent turns are never shaped (human allowlist).
+    fn send_human_turn(&mut self, prompt: String) -> BoxFuture<'_, anyhow::Result<()>> {
+        self.send_turn_from(prompt, None)
+    }
     /// Graceful cancel of the in-flight turn. Session stays usable; queued
     /// accepted messages that cannot survive the abort finish as aborted.
     fn abort(&mut self) -> BoxFuture<'_, anyhow::Result<()>>;

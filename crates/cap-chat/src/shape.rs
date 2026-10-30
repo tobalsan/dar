@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -18,9 +18,17 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::watch;
 
 use crate::{parse_compact_command, BoxFuture, ChatEvent, ChatRole, ChatSession, TurnOrigin};
 
+/// Invisible prefix on an interactive human prompt. The Pi extension strips
+/// it in its `input` hook and shapes only that run (rules, nudge, tool).
+pub(crate) const HUMAN_MARKER: &str = "\u{2063}chat-shape:human\u{2063}";
+/// Same, for the rewrite hint: rules and tool, no nudge.
+pub(crate) const REWRITE_MARKER: &str = "\u{2063}chat-shape:rewrite\u{2063}";
+
+const REWRITE_PREFIX: &str = "[chat-shape] ";
 const CLI_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_CORE: &str = "~/code/agentropy/chat-shape";
 
@@ -212,29 +220,49 @@ fn iso_now() -> String {
 }
 
 type Inner = Arc<tokio::sync::Mutex<Option<Box<dyn ChatSession>>>>;
-/// One entry per accepted turn: `true` = interactive human turn (shaped).
-type Queue = Arc<Mutex<VecDeque<bool>>>;
 
-/// Session wrapper: tags each turn human/not, answers `/topics` locally.
+/// How the shaper treats one accepted run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// Interactive human turn: hold, lint, maybe ask for one rewrite.
+    Human,
+    /// The one rewrite the shaper asked for: hold, lint, never rewrite again.
+    Rewrite,
+    /// Everything else (agent, background, command): pass through untouched.
+    Skip,
+}
+
+/// One entry per accepted submitted turn, in the order the backend runs them.
+/// Pushed while holding the `inner` lock, so it matches backend order.
+type Queue = Arc<Mutex<VecDeque<Kind>>>;
+
+/// Session wrapper: tags each turn with its [`Kind`], answers `/topics`
+/// locally, and cancels a pending lint on abort.
 pub(crate) struct ShapedSession {
     inner: Inner,
     queue: Queue,
     shape: ChatShape,
     out: tokio::sync::mpsc::WeakSender<ChatEvent>,
+    abort: watch::Sender<u64>,
 }
 
-impl ChatSession for ShapedSession {
-    fn send_turn(&mut self, prompt: String) -> BoxFuture<'_, anyhow::Result<()>> {
-        self.send_turn_from(prompt, None)
-    }
-
-    fn send_turn_from(
+impl ShapedSession {
+    /// `human`: the caller declared an interactive human source.
+    fn submit(
         &mut self,
         prompt: String,
         sender: Option<crate::AgentSender>,
+        human: bool,
     ) -> BoxFuture<'_, anyhow::Result<()>> {
-        let human = sender.is_none() && parse_compact_command(&prompt).is_none();
-        let topics = sender.is_none() && prompt.trim() == "/topics";
+        let topics = human && prompt.trim() == "/topics";
+        // Pi runs `/...` prompts as commands and `/compact` has its own
+        // command: a marker prefix would break both, so they stay unshaped.
+        let shaped = human && !prompt.starts_with('/') && parse_compact_command(&prompt).is_none();
+        let (kind, prompt) = if shaped {
+            (Kind::Human, format!("{HUMAN_MARKER}{prompt}"))
+        } else {
+            (Kind::Skip, prompt)
+        };
         let (inner, queue, shape, out) = (
             self.inner.clone(),
             self.queue.clone(),
@@ -260,11 +288,11 @@ impl ChatSession for ShapedSession {
                 }
                 return Ok(());
             }
-            queue.lock().unwrap().push_back(human);
             let mut guard = inner.lock().await;
             let session = guard
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("chat session closed"))?;
+            queue.lock().unwrap().push_back(kind);
             let result = session.send_turn_from(prompt, sender).await;
             if result.is_err() {
                 queue.lock().unwrap().pop_back();
@@ -272,8 +300,28 @@ impl ChatSession for ShapedSession {
             result
         })
     }
+}
+
+impl ChatSession for ShapedSession {
+    fn send_turn(&mut self, prompt: String) -> BoxFuture<'_, anyhow::Result<()>> {
+        self.submit(prompt, None, false)
+    }
+
+    fn send_turn_from(
+        &mut self,
+        prompt: String,
+        sender: Option<crate::AgentSender>,
+    ) -> BoxFuture<'_, anyhow::Result<()>> {
+        self.submit(prompt, sender, false)
+    }
+
+    fn send_human_turn(&mut self, prompt: String) -> BoxFuture<'_, anyhow::Result<()>> {
+        self.submit(prompt, None, true)
+    }
 
     fn abort(&mut self) -> BoxFuture<'_, anyhow::Result<()>> {
+        // Before reaching the backend: a pending lint must not start a rewrite.
+        self.abort.send_modify(|n| *n += 1);
         let inner = self.inner.clone();
         Box::pin(async move {
             match inner.lock().await.as_mut() {
@@ -308,138 +356,302 @@ impl ChatSession for ShapedSession {
     }
 }
 
-/// Event-stream stage: holds human-turn text, lints at turn end.
-pub(crate) struct Shaper {
-    shape: ChatShape,
-    inner: Inner,
-    queue: Queue,
-    session: String,
-    /// Current run: `Some(true)` = shaped human turn.
-    current: Option<bool>,
-    /// Assistant text segments, split at tool boundaries.
+/// Output of the run in progress, held until its turn ends.
+#[derive(Default)]
+struct Held {
+    thinking: String,
+    /// Assistant text segments, split at tool and thinking boundaries.
     segs: Vec<String>,
     seg_open: bool,
+    /// `NO_REPLY` markers, released after the text like the unshaped order.
+    silent: Vec<ChatEvent>,
+}
+
+impl Held {
+    fn text(&self) -> String {
+        self.segs.join("\n\n")
+    }
+}
+
+/// The run being processed.
+struct Run {
+    kind: Kind,
+    /// Abort count when the run started; a change means the user aborted.
+    abort_gen: u64,
+    /// Started while an earlier rewrite was pending: output queues behind it.
+    buffered: bool,
+    held: Held,
     decl: Option<(String, String)>,
-    rewriting: bool,
+}
+
+/// Output of one run (or one pending rewrite), delivered in conversation order.
+#[derive(Default)]
+struct Section {
+    /// The run failed lint and its rewrite has not finished yet.
+    awaiting: bool,
+    events: Vec<ChatEvent>,
+}
+
+/// Event-stream stage: holds shaped-run output, lints at turn end, and keeps
+/// the caller's event order when a rewrite runs after other queued turns.
+pub(crate) struct Shaper {
+    shape: ChatShape,
+    /// Weak: the backend owns the sender this task reads, so a strong handle
+    /// here would keep the session (and this task) alive after the caller
+    /// drops it.
+    inner: Weak<tokio::sync::Mutex<Option<Box<dyn ChatSession>>>>,
+    queue: Queue,
+    aborts: watch::Receiver<u64>,
+    session: String,
+    run: Option<Run>,
+    deferred: VecDeque<Section>,
 }
 
 impl Shaper {
-    fn shaped(&mut self) -> bool {
-        let queue = &self.queue;
-        *self
-            .current
-            .get_or_insert_with(|| queue.lock().unwrap().pop_front().unwrap_or(false))
-    }
-
-    fn reset(&mut self) {
-        self.current = None;
-        self.segs.clear();
-        self.seg_open = false;
-        self.decl = None;
-        self.rewriting = false;
-    }
-
-    async fn emit_held(&mut self, tx: &Sender<ChatEvent>) -> bool {
-        if self.segs.is_empty() {
-            return true;
+    fn begin(&mut self, kind: Kind) {
+        let buffered = kind != Kind::Rewrite && !self.deferred.is_empty();
+        if buffered {
+            self.deferred.push_back(Section::default());
         }
-        let text = std::mem::take(&mut self.segs).join("\n\n");
-        self.seg_open = false;
-        tx.send(ChatEvent::Delta {
-            role: ChatRole::Assistant,
-            text,
-        })
-        .await
-        .is_ok()
+        self.run = Some(Run {
+            kind,
+            abort_gen: *self.aborts.borrow(),
+            buffered,
+            held: Held::default(),
+            decl: None,
+        });
+    }
+
+    fn pop_kind(&self) -> Kind {
+        self.queue.lock().unwrap().pop_front().unwrap_or(Kind::Skip)
+    }
+
+    /// The current run; starts one (a submitted turn) if the backend sent no
+    /// `TurnStarted`.
+    fn run_mut(&mut self) -> &mut Run {
+        if self.run.is_none() {
+            let kind = self.pop_kind();
+            self.begin(kind);
+        }
+        self.run.as_mut().expect("run begun above")
+    }
+
+    /// Send a turn-stream event in conversation order: live when nothing is
+    /// pending, else into the pending section it belongs to.
+    async fn route(&mut self, event: ChatEvent, tx: &Sender<ChatEvent>) -> bool {
+        let rewrite = self.run.as_ref().is_some_and(|r| r.kind == Kind::Rewrite);
+        let slot = if rewrite {
+            self.deferred.iter_mut().find(|s| s.awaiting)
+        } else {
+            self.deferred.back_mut()
+        };
+        match slot {
+            Some(section) => {
+                section.events.push(event);
+                true
+            }
+            None => tx.send(event).await.is_ok(),
+        }
+    }
+
+    /// Send every finished leading section (`all`: even pending ones).
+    async fn flush(&mut self, all: bool, tx: &Sender<ChatEvent>) -> bool {
+        while self.deferred.front().is_some_and(|s| all || !s.awaiting) {
+            for event in self.deferred.pop_front().expect("front checked").events {
+                if tx.send(event).await.is_err() {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Release the held output of the current run.
+    async fn release(&mut self, tx: &Sender<ChatEvent>) -> bool {
+        let held = self
+            .run
+            .as_mut()
+            .map(|r| std::mem::take(&mut r.held))
+            .unwrap_or_default();
+        if !held.thinking.is_empty() {
+            let thinking = ChatEvent::Delta {
+                role: ChatRole::Thinking,
+                text: held.thinking.clone(),
+            };
+            if !self.route(thinking, tx).await {
+                return false;
+            }
+        }
+        if !held.segs.is_empty() {
+            let text = ChatEvent::Delta {
+                role: ChatRole::Assistant,
+                text: held.text(),
+            };
+            if !self.route(text, tx).await {
+                return false;
+            }
+        }
+        for event in held.silent {
+            if !self.route(event, tx).await {
+                return false;
+            }
+        }
+        true
     }
 
     /// Process one event; `false` when `tx` is closed.
     pub(crate) async fn push(&mut self, event: ChatEvent, tx: &Sender<ChatEvent>) -> bool {
         match event {
-            ChatEvent::SessionIdentity { ref id } => self.session = id.clone(),
-            ChatEvent::TurnStarted { origin } => {
-                if self.rewriting {
-                    return true;
-                }
-                self.current = Some(origin == TurnOrigin::Submitted && self.shaped_pop());
+            ChatEvent::SessionIdentity { ref id } => {
+                self.session = id.clone();
+                tx.send(event).await.is_ok()
             }
-            ChatEvent::Delta {
-                role: ChatRole::Assistant,
-                text,
-            } if self.shaped() => {
-                if !self.seg_open {
-                    self.segs.push(String::new());
-                    self.seg_open = true;
+            ChatEvent::TurnStarted { origin } => {
+                let kind = match origin {
+                    TurnOrigin::Submitted => self.pop_kind(),
+                    TurnOrigin::Autonomous => Kind::Skip,
+                };
+                self.begin(kind);
+                // The rewrite continues the failed turn the caller saw start.
+                kind == Kind::Rewrite || self.route(event, tx).await
+            }
+            ChatEvent::Delta { role, text } => {
+                let run = self.run_mut();
+                if run.kind == Kind::Skip {
+                    return self.route(ChatEvent::Delta { role, text }, tx).await;
                 }
-                self.segs.last_mut().expect("segment").push_str(&text);
-                return true;
+                let held = &mut run.held;
+                match role {
+                    ChatRole::Assistant => {
+                        if !held.seg_open {
+                            held.segs.push(String::new());
+                            held.seg_open = true;
+                        }
+                        held.segs.last_mut().expect("segment").push_str(&text);
+                    }
+                    ChatRole::Thinking => {
+                        held.seg_open = false;
+                        held.thinking.push_str(&text);
+                    }
+                }
+                true
             }
             ChatEvent::ToolCall {
                 ref name, ref args, ..
             } => {
-                self.seg_open = false;
-                if name == "reply_mode" && self.shaped() {
+                let run = self.run_mut();
+                run.held.seg_open = false;
+                if name == "reply_mode" && run.kind != Kind::Skip {
                     if let Ok(v) = serde_json::from_str::<Value>(args) {
                         if v["mode"] == "long" {
                             let field = |k: &str| v[k].as_str().unwrap_or_default().to_string();
-                            self.decl = Some((field("type"), field("note")));
+                            run.decl = Some((field("type"), field("note")));
                         }
                     }
                 }
+                self.route(event, tx).await
             }
-            ChatEvent::ToolOutput { .. } => self.seg_open = false,
-            ChatEvent::Silent { .. } => self.segs.clear(),
-            ChatEvent::Error(_) | ChatEvent::SessionClosed { .. } => {
-                if !self.emit_held(tx).await {
-                    return false;
+            ChatEvent::ToolOutput { .. } => {
+                self.run_mut().held.seg_open = false;
+                self.route(event, tx).await
+            }
+            ChatEvent::Silent { .. } => {
+                let run = self.run_mut();
+                if run.kind == Kind::Skip {
+                    return self.route(event, tx).await;
                 }
+                run.held.silent.push(event);
+                true
             }
-            ChatEvent::TurnFinished { ok, .. } => return self.finish(event, ok, tx).await,
-            _ => {}
+            ChatEvent::Compacted { .. } => self.route(event, tx).await,
+            ChatEvent::SessionClosed { .. } => {
+                // No more events will come: release everything as is.
+                let sent = self.release(tx).await && self.flush(true, tx).await;
+                self.run = None;
+                sent && tx.send(event).await.is_ok()
+            }
+            ChatEvent::TurnFinished { ok, .. } => self.finish(event, ok, tx).await,
+            // Live: errors and notices (not turn ends), questions, usage, ...
+            other => tx.send(other).await.is_ok(),
         }
-        tx.send(event).await.is_ok()
     }
 
-    fn shaped_pop(&mut self) -> bool {
-        self.queue.lock().unwrap().pop_front().unwrap_or(false)
+    /// Lint `text`; `None` = linter failed (fail open) or the user aborted.
+    async fn lint(&self, text: &str) -> Option<Lint> {
+        let run = self.run.as_ref()?;
+        let mut aborts = self.aborts.clone();
+        let abort_gen = run.abort_gen;
+        let cancelled = async move {
+            loop {
+                if *aborts.borrow_and_update() != abort_gen {
+                    return;
+                }
+                if aborts.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        tokio::select! {
+            lint = self.shape.lint(text, run.decl.as_ref(), &self.session) => lint,
+            () = cancelled => None,
+        }
+    }
+
+    /// Queue the one rewrite turn behind everything already accepted.
+    async fn request_rewrite(&self, hint: &str) -> bool {
+        let Some(inner) = self.inner.upgrade() else {
+            return false;
+        };
+        let mut guard = inner.lock().await;
+        let Some(session) = guard.as_mut() else {
+            return false;
+        };
+        self.queue.lock().unwrap().push_back(Kind::Rewrite);
+        let sent = session
+            .send_turn(format!("{REWRITE_MARKER}{REWRITE_PREFIX}{hint}"))
+            .await
+            .is_ok();
+        if !sent {
+            self.queue.lock().unwrap().pop_back();
+        }
+        sent
     }
 
     async fn finish(&mut self, event: ChatEvent, ok: bool, tx: &Sender<ChatEvent>) -> bool {
-        let text = self.segs.join("\n\n");
-        if !self.shaped() || !ok || text.trim().is_empty() {
-            let sent = self.emit_held(tx).await && tx.send(event).await.is_ok();
-            self.reset();
-            return sent;
-        }
-        let Some(lint) = self
-            .shape
-            .lint(&text, self.decl.as_ref(), &self.session)
-            .await
-        else {
-            tracing::warn!("chat-shape: lint failed; sending reply unchanged");
-            let sent = self.emit_held(tx).await && tx.send(event).await.is_ok();
-            self.reset();
-            return sent;
-        };
-        if !lint.ok && !self.rewriting {
-            self.segs.clear();
-            self.seg_open = false;
-            let hint = format!("[chat-shape] {}", lint.hint);
-            let sent = match self.inner.lock().await.as_mut() {
-                Some(s) => s.send_turn(hint).await.is_ok(),
-                None => false,
-            };
-            if sent {
-                self.rewriting = true;
-                return true;
+        let run = self.run_mut();
+        let (kind, abort_gen, text) = (run.kind, run.abort_gen, run.held.text());
+        if kind != Kind::Skip && ok && !text.trim().is_empty() {
+            match self.lint(&text).await {
+                None => tracing::warn!("chat-shape: lint failed or aborted; sending reply as is"),
+                Some(lint) if !lint.ok && kind == Kind::Rewrite => {
+                    self.shape.log_rewrite_failed(&self.session, &lint.rules);
+                }
+                Some(lint) if !lint.ok && *self.aborts.borrow() == abort_gen => {
+                    if self.request_rewrite(&lint.hint).await {
+                        // Draft dropped; its finish comes with the rewrite's.
+                        let own = self.run.as_ref().is_some_and(|r| r.buffered);
+                        match self.deferred.back_mut().filter(|_| own) {
+                            Some(section) => section.awaiting = true,
+                            None => self.deferred.push_back(Section {
+                                awaiting: true,
+                                events: Vec::new(),
+                            }),
+                        }
+                        self.run = None;
+                        return true;
+                    }
+                }
+                Some(_) => {}
             }
-            // Rewrite impossible: deliver the draft.
-            self.segs.push(text);
-        } else if !lint.ok {
-            self.shape.log_rewrite_failed(&self.session, &lint.rules);
         }
-        let sent = self.emit_held(tx).await && tx.send(event).await.is_ok();
-        self.reset();
+        let mut sent = self.release(tx).await && self.route(event, tx).await;
+        if kind == Kind::Rewrite {
+            if let Some(section) = self.deferred.iter_mut().find(|s| s.awaiting) {
+                section.awaiting = false;
+            }
+            sent = sent && self.flush(false, tx).await;
+        }
+        self.run = None;
         sent
     }
 }
@@ -449,6 +661,7 @@ pub(crate) struct Handles {
     shape: ChatShape,
     inner: Inner,
     queue: Queue,
+    abort: watch::Sender<u64>,
 }
 
 impl Handles {
@@ -464,6 +677,7 @@ impl Handles {
             queue: self.queue,
             shape: self.shape,
             out: tx.downgrade(),
+            abort: self.abort,
         })
     }
 }
@@ -472,16 +686,15 @@ impl Shaper {
     pub(crate) fn new(shape: ChatShape) -> (Self, Handles) {
         let inner = Inner::default();
         let queue = Queue::default();
+        let (abort, aborts) = watch::channel(0);
         let shaper = Self {
             shape: shape.clone(),
-            inner: inner.clone(),
+            inner: Arc::downgrade(&inner),
             queue: queue.clone(),
+            aborts,
             session: String::new(),
-            current: None,
-            segs: Vec::new(),
-            seg_open: false,
-            decl: None,
-            rewriting: false,
+            run: None,
+            deferred: VecDeque::new(),
         };
         (
             shaper,
@@ -489,6 +702,7 @@ impl Shaper {
                 shape,
                 inner,
                 queue,
+                abort,
             },
         )
     }
@@ -511,8 +725,10 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
   const bad = t.includes("BAD"), long = a.includes("--mode");
   const log = a[a.indexOf("--log") + 1];
   if (log && long) fs.appendFileSync(log, JSON.stringify({ type: a[a.indexOf("--type") + 1] }) + "\n");
-  console.log(JSON.stringify({ ok: !bad || long, hint: "HINT", violations: bad ? [{ rule: "too_many_sentences" }] : [] }));
-  process.exit(bad && !long ? 1 : 0);
+  setTimeout(() => {
+    console.log(JSON.stringify({ ok: !bad || long, hint: "HINT", violations: bad ? [{ rule: "too_many_sentences" }] : [] }));
+    process.exit(bad && !long ? 1 : 0);
+  }, t.includes("SLOW") ? 400 : 0);
 });
 "#;
 
@@ -540,10 +756,31 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
         }
     }
 
+    fn think(s: &str) -> ChatEvent {
+        ChatEvent::Delta {
+            role: ChatRole::Thinking,
+            text: s.into(),
+        }
+    }
+
     fn done() -> ChatEvent {
         ChatEvent::TurnFinished {
             ok: true,
             error: None,
+        }
+    }
+
+    fn started() -> ChatEvent {
+        ChatEvent::TurnStarted {
+            origin: TurnOrigin::Submitted,
+        }
+    }
+
+    fn tool(name: &str) -> ChatEvent {
+        ChatEvent::ToolCall {
+            id: "1".into(),
+            name: name.into(),
+            args: String::new(),
         }
     }
 
@@ -560,10 +797,7 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
             let events = self.script.pop_front().unwrap_or_default();
             let tx = self.tx.clone();
             Box::pin(async move {
-                tx.send(ChatEvent::TurnStarted {
-                    origin: TurnOrigin::Submitted,
-                })
-                .await?;
+                tx.send(started()).await?;
                 for e in events {
                     tx.send(e).await?;
                 }
@@ -600,22 +834,64 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
         (session, rx, prompts)
     }
 
+    /// Prompts the model saw, markers shown as `H|` (human) and `R|` (rewrite).
+    fn seen(prompts: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|p| p.replace(HUMAN_MARKER, "H|").replace(REWRITE_MARKER, "R|"))
+            .collect()
+    }
+
+    fn label(e: &ChatEvent) -> String {
+        match e {
+            ChatEvent::Delta {
+                role: ChatRole::Assistant,
+                text,
+            } => format!("text:{text}"),
+            ChatEvent::Delta { text, .. } => format!("think:{text}"),
+            ChatEvent::TurnFinished { .. } => "done".into(),
+            ChatEvent::TurnStarted { .. } => "start".into(),
+            ChatEvent::ToolCall { name, .. } => format!("tool:{name}"),
+            other => format!("{other:?}"),
+        }
+    }
+
     /// Events of one turn as short strings.
     async fn turn(rx: &mut mpsc::Receiver<ChatEvent>) -> Vec<String> {
         let mut out = Vec::new();
-        while let Some(e) = rx.recv().await {
-            out.push(match &e {
-                ChatEvent::Delta { text, .. } => format!("text:{text}"),
-                ChatEvent::TurnFinished { .. } => "done".into(),
-                ChatEvent::TurnStarted { .. } => "start".into(),
-                ChatEvent::ToolCall { name, .. } => format!("tool:{name}"),
-                other => format!("{other:?}"),
-            });
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+            let Ok(Some(e)) = next else {
+                panic!("turn did not finish; got {out:?}")
+            };
+            out.push(label(&e));
             if matches!(e, ChatEvent::TurnFinished { .. }) {
                 break;
             }
         }
         out
+    }
+
+    /// Everything already delivered, without waiting.
+    fn drained(rx: &mut mpsc::Receiver<ChatEvent>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            out.push(label(&e));
+        }
+        out
+    }
+
+    /// A bare shaper plus its output channel, for event-level tests.
+    fn bare(
+        shape: ChatShape,
+        kind: Kind,
+    ) -> (Shaper, Sender<ChatEvent>, mpsc::Receiver<ChatEvent>) {
+        let (shaper, handles) = Shaper::new(shape);
+        handles.queue.lock().unwrap().push_back(kind);
+        let (tx, rx) = mpsc::channel(32);
+        (shaper, tx, rx)
     }
 
     #[test]
@@ -639,7 +915,7 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
     async fn off_streams_deltas_before_turn_end() {
         let (mut s, mut rx, _) =
             open(None, vec![vec![text("BAD one"), text(" two"), done()]]).await;
-        s.send_turn("hi".into()).await.unwrap();
+        s.send_human_turn("hi".into()).await.unwrap();
         assert_eq!(
             turn(&mut rx).await,
             ["start", "text:BAD one", "text: two", "done"]
@@ -649,10 +925,11 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
     #[tokio::test]
     async fn on_holds_text_then_passes() {
         let (_dir, shape) = setup("");
-        let (mut s, mut rx, _) =
+        let (mut s, mut rx, prompts) =
             open(Some(shape), vec![vec![text("Hi "), text("there."), done()]]).await;
-        s.send_turn("hi".into()).await.unwrap();
+        s.send_human_turn("hi".into()).await.unwrap();
         assert_eq!(turn(&mut rx).await, ["start", "text:Hi there.", "done"]);
+        assert_eq!(seen(&prompts), ["H|hi"]);
     }
 
     #[tokio::test]
@@ -663,9 +940,9 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
             vec![text("Short."), done()],
         ];
         let (mut s, mut rx, prompts) = open(Some(shape), script).await;
-        s.send_turn("hi".into()).await.unwrap();
+        s.send_human_turn("hi".into()).await.unwrap();
         assert_eq!(turn(&mut rx).await, ["start", "text:Short.", "done"]);
-        assert_eq!(*prompts.lock().unwrap(), ["hi", "[chat-shape] HINT"]);
+        assert_eq!(seen(&prompts), ["H|hi", "R|[chat-shape] HINT"]);
     }
 
     #[tokio::test]
@@ -673,7 +950,7 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
         let (dir, shape) = setup("");
         let script = vec![vec![text("BAD one"), done()], vec![text("BAD two"), done()]];
         let (mut s, mut rx, prompts) = open(Some(shape), script).await;
-        s.send_turn("hi".into()).await.unwrap();
+        s.send_human_turn("hi".into()).await.unwrap();
         assert_eq!(turn(&mut rx).await, ["start", "text:BAD two", "done"]);
         assert_eq!(prompts.lock().unwrap().len(), 2);
         let log =
@@ -693,7 +970,7 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
         };
         let (mut s, mut rx, prompts) =
             open(Some(shape), vec![vec![call, text("BAD long"), done()]]).await;
-        s.send_turn("hi".into()).await.unwrap();
+        s.send_human_turn("hi".into()).await.unwrap();
         assert_eq!(
             turn(&mut rx).await,
             ["start", "tool:reply_mode", "text:BAD long", "done"]
@@ -718,14 +995,38 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
             turn(&mut rx).await,
             ["start", "text:BAD ", "text:live", "done"]
         );
-        assert_eq!(prompts.lock().unwrap().len(), 1);
+        assert_eq!(seen(&prompts), ["hi"]);
+    }
+
+    #[tokio::test]
+    async fn turn_without_a_human_source_is_not_shaped() {
+        let (_dir, shape) = setup("");
+        let (mut s, mut rx, prompts) =
+            open(Some(shape), vec![vec![text("BAD "), text("live"), done()]]).await;
+        s.send_turn("background".into()).await.unwrap();
+        assert_eq!(
+            turn(&mut rx).await,
+            ["start", "text:BAD ", "text:live", "done"]
+        );
+        assert_eq!(seen(&prompts), ["background"]);
+    }
+
+    #[tokio::test]
+    async fn slash_commands_are_not_shaped_or_marked() {
+        let (_dir, shape) = setup("");
+        let script = vec![vec![text("BAD "), done()], vec![text("BAD "), done()]];
+        let (mut s, mut rx, prompts) = open(Some(shape), script).await;
+        s.send_human_turn("/skill:x go".into()).await.unwrap();
+        assert_eq!(turn(&mut rx).await, ["start", "text:BAD ", "done"]);
+        s.send_human_turn("/compact keep".into()).await.unwrap();
+        assert_eq!(turn(&mut rx).await, ["start", "text:BAD ", "done"]);
+        assert_eq!(seen(&prompts), ["/skill:x go", "/compact keep"]);
     }
 
     #[tokio::test]
     async fn autonomous_run_is_not_shaped() {
         let (dir, shape) = setup("");
-        let (mut shaper, _handles) = Shaper::new(shape);
-        let (tx, mut rx) = mpsc::channel(8);
+        let (mut shaper, tx, mut rx) = bare(shape, Kind::Human);
         let origin = TurnOrigin::Autonomous;
         for e in [
             ChatEvent::TurnStarted { origin },
@@ -746,7 +1047,7 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
     async fn topics_command_skips_the_model() {
         let (_dir, shape) = setup("");
         let (mut s, mut rx, prompts) = open(Some(shape), vec![]).await;
-        s.send_turn(" /topics ".into()).await.unwrap();
+        s.send_human_turn(" /topics ".into()).await.unwrap();
         assert_eq!(
             turn(&mut rx).await,
             ["text:Plan A (1 open): /x/a.md\n> First", "done"]
@@ -759,8 +1060,195 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
         let (_dir, mut shape) = setup("");
         shape.core = PathBuf::from("/nonexistent");
         let (mut s, mut rx, prompts) = open(Some(shape), vec![vec![text("BAD"), done()]]).await;
-        s.send_turn("hi".into()).await.unwrap();
+        s.send_human_turn("hi".into()).await.unwrap();
         assert_eq!(turn(&mut rx).await, ["start", "text:BAD", "done"]);
         assert_eq!(prompts.lock().unwrap().len(), 1);
+    }
+
+    fn rewrite_failed_lines(dir: &tempfile::TempDir) -> usize {
+        std::fs::read_to_string(dir.path().join("data/chat-shape/long-mode.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("rewrite_failed"))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn queued_turn_is_not_taken_for_the_rewrite() {
+        let (dir, shape) = setup("");
+        let script = vec![
+            vec![text("BAD a1"), done()],
+            vec![text("ok b1"), done()],
+            vec![text("BAD a2"), done()],
+        ];
+        let (mut s, mut rx, prompts) = open(Some(shape), script).await;
+        s.send_human_turn("A".into()).await.unwrap();
+        s.send_human_turn("B".into()).await.unwrap();
+        assert_eq!(turn(&mut rx).await, ["start", "text:BAD a2", "done"]);
+        assert_eq!(turn(&mut rx).await, ["start", "text:ok b1", "done"]);
+        assert_eq!(seen(&prompts), ["H|A", "H|B", "R|[chat-shape] HINT"]);
+        assert_eq!(rewrite_failed_lines(&dir), 1);
+    }
+
+    #[tokio::test]
+    async fn each_queued_human_turn_gets_one_rewrite_in_order() {
+        let (dir, shape) = setup("");
+        let script = vec![
+            vec![text("BAD a1"), done()],
+            vec![text("BAD b1"), done()],
+            vec![text("BAD a2"), done()],
+            vec![text("Short b"), done()],
+        ];
+        let (mut s, mut rx, prompts) = open(Some(shape), script).await;
+        s.send_human_turn("A".into()).await.unwrap();
+        s.send_human_turn("B".into()).await.unwrap();
+        assert_eq!(turn(&mut rx).await, ["start", "text:BAD a2", "done"]);
+        assert_eq!(turn(&mut rx).await, ["start", "text:Short b", "done"]);
+        assert_eq!(prompts.lock().unwrap().len(), 4);
+        assert_eq!(rewrite_failed_lines(&dir), 1);
+    }
+
+    #[tokio::test]
+    async fn abort_cancels_a_pending_lint_and_its_rewrite() {
+        let (_dir, shape) = setup("");
+        let script = vec![
+            vec![text("BAD SLOW draft"), done()],
+            vec![text("Short."), done()],
+        ];
+        let (mut s, mut rx, prompts) = open(Some(shape), script).await;
+        s.send_human_turn("hi".into()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        s.abort().await.unwrap();
+        assert_eq!(
+            turn(&mut rx).await,
+            ["start", "text:BAD SLOW draft", "done"]
+        );
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(seen(&prompts), ["H|hi"]);
+        assert!(drained(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn nonterminal_error_keeps_text_held() {
+        let (_dir, shape) = setup("");
+        let (mut shaper, tx, mut rx) = bare(shape.clone(), Kind::Human);
+        for e in [
+            started(),
+            text("BAD"),
+            ChatEvent::Error("stderr notice".into()),
+            text(" more"),
+        ] {
+            assert!(shaper.push(e, &tx).await);
+        }
+        assert_eq!(drained(&mut rx), ["start", "Error(\"stderr notice\")"]);
+        let (mut s, mut rx, _) = open(
+            Some(shape),
+            vec![
+                vec![
+                    text("BAD"),
+                    ChatEvent::Error("stderr".into()),
+                    text(" more"),
+                    done(),
+                ],
+                vec![text("Short."), done()],
+            ],
+        )
+        .await;
+        s.send_human_turn("hi".into()).await.unwrap();
+        assert_eq!(
+            turn(&mut rx).await,
+            ["start", "Error(\"stderr\")", "text:Short.", "done"]
+        );
+    }
+
+    #[tokio::test]
+    async fn thinking_is_held_with_the_text() {
+        let (_dir, shape) = setup("");
+        let (mut shaper, tx, mut rx) = bare(shape, Kind::Human);
+        for e in [started(), think("secret"), text("Hi.")] {
+            assert!(shaper.push(e, &tx).await);
+        }
+        assert_eq!(drained(&mut rx), ["start"]);
+        assert!(shaper.push(done(), &tx).await);
+        assert_eq!(drained(&mut rx), ["think:secret", "text:Hi.", "done"]);
+    }
+
+    #[tokio::test]
+    async fn failed_draft_thinking_is_never_shown() {
+        let (_dir, shape) = setup("");
+        let script = vec![
+            vec![think("secret"), text("BAD draft"), done()],
+            vec![think("calm"), text("Short."), done()],
+        ];
+        let (mut s, mut rx, _) = open(Some(shape), script).await;
+        s.send_human_turn("hi".into()).await.unwrap();
+        assert_eq!(
+            turn(&mut rx).await,
+            ["start", "think:calm", "text:Short.", "done"]
+        );
+    }
+
+    #[tokio::test]
+    async fn final_no_reply_after_a_tool_keeps_earlier_text() {
+        let (_dir, shape) = setup("");
+        let (mut shaper, tx, mut rx) = bare(shape, Kind::Human);
+        let silent = ChatEvent::Silent {
+            reason: None,
+            text: "NO_REPLY".into(),
+        };
+        for e in [started(), text("Checked."), tool("t"), silent, done()] {
+            assert!(shaper.push(e, &tx).await);
+        }
+        let mut got = drained(&mut rx);
+        got.sort();
+        let mut want = vec![
+            "start".to_string(),
+            "tool:t".into(),
+            "text:Checked.".into(),
+            "Silent { reason: None, text: \"NO_REPLY\" }".into(),
+            "done".into(),
+        ];
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn blocked_turn_without_start_keeps_the_queue_aligned() {
+        let (_dir, shape) = setup("");
+        let (mut shaper, tx, mut rx) = bare(shape.clone(), Kind::Skip);
+        let (_, handles) = Shaper::new(shape);
+        drop(handles);
+        shaper.queue.lock().unwrap().push_back(Kind::Human);
+        let blocked = ChatEvent::Silent {
+            reason: Some(crate::SilentReason::MaxHops),
+            text: String::new(),
+        };
+        for e in [blocked, done(), started(), text("BAD one"), done()] {
+            assert!(shaper.push(e, &tx).await);
+        }
+        // Second turn is the human one: held, linted, rewrite asked (no
+        // session here, so the draft is delivered).
+        assert_eq!(
+            drained(&mut rx),
+            [
+                "Silent { reason: Some(MaxHops), text: \"\" }",
+                "done",
+                "start",
+                "text:BAD one",
+                "done"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_session_closes_the_caller_channel() {
+        let (_dir, shape) = setup("");
+        let (s, mut rx, _) = open(Some(shape), vec![]).await;
+        drop(s);
+        let closed = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+        assert!(
+            matches!(closed, Ok(None)),
+            "channel stayed open: {closed:?}"
+        );
     }
 }

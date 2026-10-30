@@ -1793,7 +1793,7 @@ impl Session {
                 serde_json::to_string(&context)?
             )
         };
-        backend.send_turn(prompt).await?;
+        backend.send_human_turn(prompt).await?;
         {
             let mut pending = self.app_context.lock().expect("app context poisoned");
             for (view, value) in context {
@@ -5941,6 +5941,35 @@ mod tests {
         assert!(wire_events.try_recv().is_err());
         assert!(shared_events.try_recv().is_err());
         fs::remove_dir(&s.transcript).unwrap();
+    }
+
+    struct SourceProbe(Arc<std::sync::Mutex<Vec<&'static str>>>);
+    impl ChatSession for SourceProbe {
+        fn send_turn(&mut self, _prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
+            self.0.lock().unwrap().push("plain");
+            Box::pin(async { Ok(()) })
+        }
+        fn send_human_turn(&mut self, _prompt: String) -> cap_chat::BoxFuture<'_, Result<()>> {
+            self.0.lock().unwrap().push("human");
+            Box::pin(async { Ok(()) })
+        }
+        fn abort(&mut self) -> cap_chat::BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn close(self: Box<Self>) -> cap_chat::BoxFuture<'static, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn web_turns_declare_a_human_source() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s = session(Box::new(SourceProbe(Arc::clone(&calls))));
+        let mut backend = s.inner.lock().await.take().unwrap();
+        s.accept_turn(backend.as_mut(), "hi".into(), "hi".into(), vec![])
+            .await
+            .unwrap();
+        assert_eq!(*calls.lock().unwrap(), ["human"]);
     }
 
     #[test]
