@@ -13,7 +13,7 @@ use tokio::sync::mpsc::Sender;
 
 mod shape;
 mod silence;
-pub use shape::ChatShape;
+pub use shape::HumanChat;
 pub use silence::{
     is_no_reply, open_guarded, open_shaped, AgentLoopConfig, AgentSender, LoopGuard, NoReplyFilter,
     SilentReason, NO_REPLY_INSTRUCTION, NO_REPLY_TOKEN,
@@ -411,9 +411,9 @@ pub struct ChatSessionParams {
     /// `runner.context_window` from `agent.yaml`; only the builtin chat backend
     /// uses it, as the window reported with `ChatEvent::ContextUsage`.
     pub context_window: Option<u64>,
-    /// chat-shape adapter config (`extensions.chat-shape` in `agent.yaml`);
+    /// human-chat adapter config (`extensions.human-chat` in `agent.yaml`);
     /// `None` = off. Only the pi chat backend honors it.
-    pub chat_shape: Option<ChatShape>,
+    pub human_chat: Option<HumanChat>,
 }
 
 impl ChatSessionParams {
@@ -435,7 +435,7 @@ impl ChatSessionParams {
             agent_loop: AgentLoopConfig::default(),
             max_tool_calls: None,
             context_window: None,
-            chat_shape: ChatShape::load(agent_root),
+            human_chat: HumanChat::load(agent_root),
         }
     }
 }
@@ -453,7 +453,7 @@ pub struct ChatSessionParamsBuilder {
     agent_loop: AgentLoopConfig,
     max_tool_calls: Option<u32>,
     context_window: Option<u64>,
-    chat_shape: Option<ChatShape>,
+    human_chat: Option<HumanChat>,
 }
 
 impl ChatSessionParamsBuilder {
@@ -510,10 +510,10 @@ impl ChatSessionParamsBuilder {
         self
     }
 
-    /// Override the chat-shape config the builder read from `agent.yaml`
+    /// Override the human-chat config the builder read from `agent.yaml`
     /// (`None` keeps the session unshaped, e.g. title generation).
-    pub fn chat_shape(mut self, value: Option<ChatShape>) -> Self {
-        self.chat_shape = value;
+    pub fn human_chat(mut self, value: Option<HumanChat>) -> Self {
+        self.human_chat = value;
         self
     }
 
@@ -531,7 +531,7 @@ impl ChatSessionParamsBuilder {
             agent_loop: self.agent_loop,
             max_tool_calls: self.max_tool_calls,
             context_window: self.context_window,
-            chat_shape: self.chat_shape,
+            human_chat: self.human_chat,
         }
     }
 }
@@ -568,7 +568,7 @@ pub trait ChatSession: Send {
     }
     /// A turn typed by a person on an interactive surface (web chat, TUI).
     /// Default = [`send_turn_from`](Self::send_turn_from) with no sender, so
-    /// stock backends behave exactly as before. The chat-shape adapter shapes
+    /// stock backends behave exactly as before. The human-chat adapter shapes
     /// only turns sent here; `send_turn`, `send_turn_from`, scheduler,
     /// background, and agent turns are never shaped (human allowlist).
     fn send_human_turn(&mut self, prompt: String) -> BoxFuture<'_, anyhow::Result<()>> {

@@ -747,7 +747,7 @@ fn read_recent_messages(path: &Path) -> (Vec<Message>, bool) {
         };
         if let Some((role, text)) = message_role_text(&value) {
             if is_rewrite_hint(&role, &text) {
-                // chat-shape rewrite: hide the hint and the draft it replaced.
+                // human-chat rewrite: hide the hint and the draft it replaced.
                 while tail.back().is_some_and(|m| m.role == "assistant") {
                     tail.pop_back();
                     total -= 1;
@@ -822,7 +822,7 @@ fn read_messages(path: &Path) -> Vec<Message> {
         };
         if let Some((role, text)) = message_role_text(&value) {
             if is_rewrite_hint(&role, &text) {
-                // chat-shape rewrite: hide the hint and the draft it replaced.
+                // human-chat rewrite: hide the hint and the draft it replaced.
                 while messages
                     .last()
                     .is_some_and(|m: &Message| m.role == "assistant")
@@ -839,13 +839,13 @@ fn read_messages(path: &Path) -> Vec<Message> {
     messages
 }
 
-/// Prefix of the follow-up turn chat-shape sends to ask for one rewrite.
-const CHAT_SHAPE_REWRITE_PREFIX: &str = "[chat-shape] ";
+/// Prefix of the follow-up turn human-chat sends to ask for one rewrite.
+const HUMAN_CHAT_REWRITE_PREFIX: &str = "[human-chat] ";
 
-/// A chat-shape rewrite hint. The reader drops it with the draft before it:
+/// A human-chat rewrite hint. The reader drops it with the draft before it:
 /// the person never saw either.
 fn is_rewrite_hint(role: &str, text: &str) -> bool {
-    role == "user" && text.starts_with(CHAT_SHAPE_REWRITE_PREFIX)
+    role == "user" && text.starts_with(HUMAN_CHAT_REWRITE_PREFIX)
 }
 
 /// Extract `(role, text)` from a persisted line when it is a user/assistant
@@ -1933,7 +1933,7 @@ not json
     }
 
     #[test]
-    fn chat_shape_rewrite_exchange_is_not_replayed() {
+    fn human_chat_rewrite_exchange_is_not_replayed() {
         let temp = tempfile::tempdir().unwrap();
         write(
             temp.path(),
@@ -1946,7 +1946,7 @@ not json
                     ("user", "second"),
                     ("assistant", "draft part one"),
                     ("assistant", "draft part two"),
-                    ("user", "[chat-shape] Cut it down."),
+                    ("user", "[human-chat] Cut it down."),
                     ("assistant", "Short."),
                     ("user", "third"),
                 ],

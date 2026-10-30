@@ -10,7 +10,7 @@ use std::future::Future;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, Sender, WeakSender};
 
-use crate::shape::{ChatShape, Shaper};
+use crate::shape::{HumanChat, Shaper};
 use crate::{BoxFuture, ChatEvent, ChatRole, ChatSession};
 
 /// The token an agent replies with, alone, to deliver nothing.
@@ -270,11 +270,11 @@ where
     open_shaped(config, None, tx, open).await
 }
 
-/// [`open_guarded`] plus the chat-shape stage (hold, lint, one rewrite,
+/// [`open_guarded`] plus the human-chat stage (hold, lint, one rewrite,
 /// `/topics`) when `shape` is set. `None` = identical to [`open_guarded`].
 pub async fn open_shaped<F, Fut>(
     config: AgentLoopConfig,
-    shape: Option<ChatShape>,
+    shape: Option<HumanChat>,
     tx: Sender<ChatEvent>,
     open: F,
 ) -> anyhow::Result<Box<dyn ChatSession>>

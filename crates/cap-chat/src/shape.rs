@@ -1,7 +1,7 @@
-//! chat-shape adapter: short-turn replies for interactive human chat.
+//! human-chat adapter: short-turn replies for interactive human chat.
 //!
-//! Off unless `agent.yaml` has `extensions.chat-shape`. When on, the stream
-//! holds assistant text until the turn ends, lints it with the chat-shape
+//! Off unless `agent.yaml` has `extensions.human-chat`. When on, the stream
+//! holds assistant text until the turn ends, lints it with the human-chat
 //! core CLI (`node <core>/dist/cli.js lint`), and either delivers it or asks
 //! the agent for one rewrite. Rules, nudge, and the `reply_mode` tool live in
 //! the Pi extension (`pi_extension`). Lint failures open: the reply is sent
@@ -24,17 +24,17 @@ use crate::{parse_compact_command, BoxFuture, ChatEvent, ChatRole, ChatSession, 
 
 /// Invisible prefix on an interactive human prompt. The Pi extension strips
 /// it in its `input` hook and shapes only that run (rules, nudge, tool).
-pub(crate) const HUMAN_MARKER: &str = "\u{2063}chat-shape:human\u{2063}";
+pub(crate) const HUMAN_MARKER: &str = "\u{2063}human-chat:human\u{2063}";
 /// Same, for the rewrite hint: rules and tool, no nudge.
-pub(crate) const REWRITE_MARKER: &str = "\u{2063}chat-shape:rewrite\u{2063}";
+pub(crate) const REWRITE_MARKER: &str = "\u{2063}human-chat:rewrite\u{2063}";
 
-const REWRITE_PREFIX: &str = "[chat-shape] ";
+const REWRITE_PREFIX: &str = "[human-chat] ";
 const CLI_TIMEOUT: Duration = Duration::from_secs(10);
-const DEFAULT_CORE: &str = "~/code/agentropy/chat-shape";
+const DEFAULT_CORE: &str = "~/code/agentropy/human-chat";
 
-/// Resolved `extensions.chat-shape` block.
+/// Resolved `extensions.human-chat` block.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ChatShape {
+pub struct HumanChat {
     pub pi_extension: PathBuf,
     core: PathBuf,
     log: PathBuf,
@@ -60,12 +60,12 @@ fn expand(path: &str, root: &Path) -> PathBuf {
     root.join(path)
 }
 
-impl ChatShape {
+impl HumanChat {
     /// `None` when the block is absent, unreadable, or `enabled: false`.
     pub fn load(root: &Path) -> Option<Self> {
         let yaml = std::fs::read_to_string(root.join("agent.yaml")).ok()?;
         let doc: Value = serde_yaml::from_str(&yaml).ok()?;
-        let block = doc.get("extensions")?.get("chat-shape")?;
+        let block = doc.get("extensions")?.get("human-chat")?;
         let block: Block = if block.is_null() {
             Block::default()
         } else {
@@ -80,7 +80,7 @@ impl ChatShape {
                 .pi_extension
                 .map_or_else(|| core.join("pi/extension.ts"), |p| expand(&p, root)),
             log: block.log.map_or_else(
-                || root.join("data/chat-shape/long-mode.jsonl"),
+                || root.join("data/human-chat/long-mode.jsonl"),
                 |p| expand(&p, root),
             ),
             topics_dir: root.join("topics"),
@@ -185,7 +185,7 @@ impl ChatShape {
             .open(&self.log)
             .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()));
         if let Err(e) = write {
-            tracing::warn!("chat-shape: cannot write log: {e}");
+            tracing::warn!("human-chat: cannot write log: {e}");
         }
     }
 }
@@ -241,7 +241,7 @@ type Queue = Arc<Mutex<VecDeque<Kind>>>;
 pub(crate) struct ShapedSession {
     inner: Inner,
     queue: Queue,
-    shape: ChatShape,
+    shape: HumanChat,
     out: tokio::sync::mpsc::WeakSender<ChatEvent>,
     abort: watch::Sender<u64>,
 }
@@ -395,7 +395,7 @@ struct Section {
 /// Event-stream stage: holds shaped-run output, lints at turn end, and keeps
 /// the caller's event order when a rewrite runs after other queued turns.
 pub(crate) struct Shaper {
-    shape: ChatShape,
+    shape: HumanChat,
     /// Weak: the backend owns the sender this task reads, so a strong handle
     /// here would keep the session (and this task) alive after the caller
     /// drops it.
@@ -622,7 +622,7 @@ impl Shaper {
         let (kind, abort_gen, text) = (run.kind, run.abort_gen, run.held.text());
         if kind != Kind::Skip && ok && !text.trim().is_empty() {
             match self.lint(&text).await {
-                None => tracing::warn!("chat-shape: lint failed or aborted; sending reply as is"),
+                None => tracing::warn!("human-chat: lint failed or aborted; sending reply as is"),
                 Some(lint) if !lint.ok && kind == Kind::Rewrite => {
                     self.shape.log_rewrite_failed(&self.session, &lint.rules);
                 }
@@ -658,7 +658,7 @@ impl Shaper {
 
 /// Shared state between the stream stage and the session wrapper.
 pub(crate) struct Handles {
-    shape: ChatShape,
+    shape: HumanChat,
     inner: Inner,
     queue: Queue,
     abort: watch::Sender<u64>,
@@ -683,7 +683,7 @@ impl Handles {
 }
 
 impl Shaper {
-    pub(crate) fn new(shape: ChatShape) -> (Self, Handles) {
+    pub(crate) fn new(shape: HumanChat) -> (Self, Handles) {
         let inner = Inner::default();
         let queue = Queue::default();
         let (abort, aborts) = watch::channel(0);
@@ -732,7 +732,7 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
 });
 "#;
 
-    fn setup(yaml: &str) -> (tempfile::TempDir, ChatShape) {
+    fn setup(yaml: &str) -> (tempfile::TempDir, HumanChat) {
         let dir = tempfile::tempdir().unwrap();
         let core = dir.path().join("core");
         std::fs::create_dir_all(core.join("dist")).unwrap();
@@ -740,12 +740,12 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
         std::fs::write(
             dir.path().join("agent.yaml"),
             format!(
-                "extensions:\n  chat-shape:\n    core: {}\n{yaml}",
+                "extensions:\n  human-chat:\n    core: {}\n{yaml}",
                 core.display()
             ),
         )
         .unwrap();
-        let shape = ChatShape::load(dir.path()).unwrap();
+        let shape = HumanChat::load(dir.path()).unwrap();
         (dir, shape)
     }
 
@@ -818,7 +818,7 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
         Arc<Mutex<Vec<String>>>,
     );
 
-    async fn open(shape: Option<ChatShape>, script: Vec<Vec<ChatEvent>>) -> Opened {
+    async fn open(shape: Option<HumanChat>, script: Vec<Vec<ChatEvent>>) -> Opened {
         let prompts = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = mpsc::channel(64);
         let p = prompts.clone();
@@ -885,7 +885,7 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
 
     /// A bare shaper plus its output channel, for event-level tests.
     fn bare(
-        shape: ChatShape,
+        shape: HumanChat,
         kind: Kind,
     ) -> (Shaper, Sender<ChatEvent>, mpsc::Receiver<ChatEvent>) {
         let (shaper, handles) = Shaper::new(shape);
@@ -899,16 +899,16 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
         let dir = tempfile::tempdir().unwrap();
         let load = |yaml: &str| {
             std::fs::write(dir.path().join("agent.yaml"), yaml).unwrap();
-            ChatShape::load(dir.path())
+            HumanChat::load(dir.path())
         };
         assert!(load("runner: {}\n").is_none());
         assert!(load("extensions:\n  other: {}\n").is_none());
-        assert!(load("extensions:\n  chat-shape: {}\n").is_some());
-        assert!(load("extensions:\n  chat-shape:\n").is_some());
-        assert!(load("extensions:\n  chat-shape:\n    enabled: false\n").is_none());
-        let on = load("extensions:\n  chat-shape:\n    pi_extension: /x/e.ts\n").unwrap();
+        assert!(load("extensions:\n  human-chat: {}\n").is_some());
+        assert!(load("extensions:\n  human-chat:\n").is_some());
+        assert!(load("extensions:\n  human-chat:\n    enabled: false\n").is_none());
+        let on = load("extensions:\n  human-chat:\n    pi_extension: /x/e.ts\n").unwrap();
         assert_eq!(on.pi_extension, Path::new("/x/e.ts"));
-        assert_eq!(on.log, dir.path().join("data/chat-shape/long-mode.jsonl"));
+        assert_eq!(on.log, dir.path().join("data/human-chat/long-mode.jsonl"));
     }
 
     #[tokio::test]
@@ -942,7 +942,7 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
         let (mut s, mut rx, prompts) = open(Some(shape), script).await;
         s.send_human_turn("hi".into()).await.unwrap();
         assert_eq!(turn(&mut rx).await, ["start", "text:Short.", "done"]);
-        assert_eq!(seen(&prompts), ["H|hi", "R|[chat-shape] HINT"]);
+        assert_eq!(seen(&prompts), ["H|hi", "R|[human-chat] HINT"]);
     }
 
     #[tokio::test]
@@ -954,7 +954,7 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
         assert_eq!(turn(&mut rx).await, ["start", "text:BAD two", "done"]);
         assert_eq!(prompts.lock().unwrap().len(), 2);
         let log =
-            std::fs::read_to_string(dir.path().join("data/chat-shape/long-mode.jsonl")).unwrap();
+            std::fs::read_to_string(dir.path().join("data/human-chat/long-mode.jsonl")).unwrap();
         let line: Value = serde_json::from_str(log.trim()).unwrap();
         assert_eq!(line["event"], "rewrite_failed");
         assert_eq!(line["rules"][0], "too_many_sentences");
@@ -977,7 +977,7 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
         );
         assert_eq!(prompts.lock().unwrap().len(), 1);
         let log =
-            std::fs::read_to_string(dir.path().join("data/chat-shape/long-mode.jsonl")).unwrap();
+            std::fs::read_to_string(dir.path().join("data/human-chat/long-mode.jsonl")).unwrap();
         assert!(log.contains(r#""type":"steps""#));
     }
 
@@ -1066,7 +1066,7 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
     }
 
     fn rewrite_failed_lines(dir: &tempfile::TempDir) -> usize {
-        std::fs::read_to_string(dir.path().join("data/chat-shape/long-mode.jsonl"))
+        std::fs::read_to_string(dir.path().join("data/human-chat/long-mode.jsonl"))
             .unwrap_or_default()
             .lines()
             .filter(|l| l.contains("rewrite_failed"))
@@ -1086,7 +1086,7 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
         s.send_human_turn("B".into()).await.unwrap();
         assert_eq!(turn(&mut rx).await, ["start", "text:BAD a2", "done"]);
         assert_eq!(turn(&mut rx).await, ["start", "text:ok b1", "done"]);
-        assert_eq!(seen(&prompts), ["H|A", "H|B", "R|[chat-shape] HINT"]);
+        assert_eq!(seen(&prompts), ["H|A", "H|B", "R|[human-chat] HINT"]);
         assert_eq!(rewrite_failed_lines(&dir), 1);
     }
 

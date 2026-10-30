@@ -65,7 +65,7 @@ impl ChatBackend for PiChatBackend {
     ) -> cap_chat::BoxFuture<'a, Result<Box<dyn ChatSession>>> {
         Box::pin(cap_chat::open_shaped(
             params.agent_loop,
-            params.chat_shape.clone(),
+            params.human_chat.clone(),
             tx,
             move |tx| async move {
                 let session = PiChatSession::spawn(&params, tx).await?;
@@ -264,9 +264,9 @@ impl PiChatSession {
             cmd.args(bridge_args);
             cmd.envs(env);
         }
-        // chat-shape: the Pi extension adds rules, nudge, and `reply_mode`.
-        if params.chat_shape.is_some() {
-            cmd.env("CHAT_SHAPE", "1");
+        // human-chat: the Pi extension adds rules, nudge, and `reply_mode`.
+        if params.human_chat.is_some() {
+            cmd.env("HUMAN_CHAT", "1");
         }
         cmd.current_dir(&params.agent_root)
             .stdin(Stdio::piped())
@@ -437,7 +437,7 @@ fn pi_args(params: &ChatSessionParams) -> Vec<OsString> {
             args.push(OsString::from(system_prompt));
         }
     }
-    if let Some(shape) = &params.chat_shape {
+    if let Some(shape) = &params.human_chat {
         args.push(OsString::from("-e"));
         args.push(shape.pi_extension.clone().into_os_string());
     }
@@ -1054,16 +1054,16 @@ mod tests {
     }
 
     #[test]
-    fn pi_args_load_chat_shape_extension_only_when_enabled() {
+    fn pi_args_load_human_chat_extension_only_when_enabled() {
         let dir = tempfile::tempdir().unwrap();
         let sessions = dir.path().join("sessions");
         let args = |yaml: &str| {
             std::fs::write(dir.path().join("agent.yaml"), yaml).unwrap();
             pi_args(&ChatSessionParams::builder("", dir.path(), &sessions).build())
         };
-        let off = args("extensions:\n  chat-shape:\n    enabled: false\n");
+        let off = args("extensions:\n  human-chat:\n    enabled: false\n");
         assert!(!off.contains(&OsString::from("-e")));
-        let on = args("extensions:\n  chat-shape:\n    pi_extension: /x/e.ts\n");
+        let on = args("extensions:\n  human-chat:\n    pi_extension: /x/e.ts\n");
         let at = on.iter().position(|a| a == "-e").expect("-e flag");
         assert_eq!(on[at + 1], OsString::from("/x/e.ts"));
     }

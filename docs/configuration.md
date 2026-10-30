@@ -106,20 +106,20 @@ count. A turn over either limit is dropped without calling the model, logged,
 and finishes silently (see `NO_REPLY` in [chat.md](chat.md)). Both default as
 shown when omitted. Read when a chat session opens.
 
-## Short chat replies (`extensions.chat-shape`)
+## Short chat replies (`extensions.human-chat`)
 
 ```yaml
 extensions:
-  chat-shape: {}          # or a bare `chat-shape:` key
-  # chat-shape:
+  human-chat: {}          # or a bare `human-chat:` key
+  # human-chat:
   #   enabled: false                         # turns it off
-  #   log: data/chat-shape/long-mode.jsonl   # default, relative to the agent folder
-  #   core: ~/code/agentropy/chat-shape      # default path of the built core
+  #   log: data/human-chat/long-mode.jsonl   # default, relative to the agent folder
+  #   core: ~/code/agentropy/human-chat      # default path of the built core
   #   pi_extension: <core>/pi/extension.ts   # default
 ```
 
 Off by default. When on, chat replies to a human follow the
-chat-shape rules: one topic, 1-5
+human-chat rules: one topic, 1-5
 sentences, at most one question. The agent can declare long mode with the
 `reply_mode` tool and a reason type.
 
@@ -128,7 +128,7 @@ For each human turn sent through `send_human_turn` (web chat and the TUI), Dar:
 1. Adds the rules to the system prompt and a one-line nudge to the prompt, through the Pi extension.
 2. Holds all text and thinking deltas until the turn ends. Live streaming stops for these turns.
 3. Lints the full reply with `node <core>/dist/cli.js lint --json`.
-4. On a failure, sends one hidden `[chat-shape]` rewrite turn and delivers the rewrite, even if it fails again.
+4. On a failure, sends one hidden `[human-chat]` rewrite turn and delivers the rewrite, even if it fails again.
 
 Dar does not shape agent senders, autonomous runs, or the web chat title
 session. It does not shape Telegram and Discord yet, because those channel
