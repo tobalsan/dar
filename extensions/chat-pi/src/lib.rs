@@ -748,7 +748,7 @@ fn spawn_stdout_pump(
             let events = queue.lock().await.observe(&value, mapped);
             for event in events {
                 if let ChatEvent::ToolCall { id, name, .. } = &event {
-                    if name == "artifact_publish" {
+                    if is_artifact_publish(name) {
                         artifact_calls.insert(id.clone());
                     }
                 }
@@ -833,13 +833,26 @@ async fn send_next_queued_turn(
     }
 }
 
+fn is_artifact_publish(name: &str) -> bool {
+    matches!(name, "artifact_publish" | "mcp__dar__artifact_publish")
+}
+
 fn artifact_ready_from_pi(line: &str) -> Option<ArtifactReady> {
     let value: Value = serde_json::from_str(line).ok()?;
+    if value.get("isError").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
     let result = value.get("result")?;
-    let content = result.get("content")?.as_array()?;
-    content
-        .iter()
-        .find_map(|resource| ArtifactReady::from_publish_resource("artifact_publish", resource))
+    let ready = [
+        result.pointer("/structuredContent/content"),
+        result.get("content"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_array)
+    .flatten()
+    .find_map(|resource| ArtifactReady::from_publish_resource("artifact_publish", resource));
+    ready
 }
 
 fn spawn_stderr_pump(stderr: ChildStderr, tx: Sender<ChatEvent>) {
@@ -1319,6 +1332,77 @@ mod tests {
         assert!(artifact_ready_from_pi(r#"{"result":"raw text"}"#).is_none());
     }
 
+    // Hand-written Pi shape with invented artifact metadata, not a live capture.
+    const PI_PUBLISH_RESULT: &str = r#"{"type":"tool_execution_end","toolCallId":"publish-1","toolName":"mcp__dar__artifact_publish","isError":false,"result":{"content":[{"type":"text","text":"Published report.txt"},{"type":"text","text":"Artifact metadata"}],"structuredContent":{"content":[{"type":"text","text":"Published report.txt"},{"type":"resource_link","uri":"dar-artifact://00000000-0000-4000-8000-000000000001","name":"report.txt","mimeType":"text/plain","bytes":5,"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","caption":"Example report"}]}}}"#;
+
+    #[test]
+    fn artifact_ready_reads_pi_structured_publish_result() {
+        let ready = artifact_ready_from_pi(PI_PUBLISH_RESULT).expect("Pi publish resource link");
+        assert_eq!(ready.id.to_string(), "00000000-0000-4000-8000-000000000001");
+        assert_eq!(
+            ready.uri,
+            "dar-artifact://00000000-0000-4000-8000-000000000001"
+        );
+        assert_eq!(ready.name, "report.txt");
+        assert_eq!(ready.mime_type.as_deref(), Some("text/plain"));
+        assert_eq!(ready.bytes, 5);
+        assert_eq!(
+            ready.sha256,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(ready.caption.as_deref(), Some("Example report"));
+    }
+
+    #[test]
+    fn artifact_ready_rejects_failed_publish_even_with_resource_link() {
+        let mut value: Value = serde_json::from_str(PI_PUBLISH_RESULT).unwrap();
+        value["isError"] = Value::Bool(true);
+        assert!(artifact_ready_from_pi(&value.to_string()).is_none());
+    }
+
+    #[test]
+    fn artifact_publish_name_gate_accepts_only_dar_publish_names() {
+        assert!(is_artifact_publish("artifact_publish"));
+        assert!(is_artifact_publish("mcp__dar__artifact_publish"));
+        assert!(!is_artifact_publish("mcp__dar__web_preview"));
+        assert!(!is_artifact_publish("mcp__other__artifact_publish"));
+    }
+
+    #[test]
+    fn artifact_ready_rejects_missing_or_malformed_structured_resource_link() {
+        let no_link = r#"{"type":"tool_execution_end","isError":false,"result":{"content":[{"type":"text","text":"not an artifact"}],"structuredContent":{"content":[{"type":"text","text":"not an artifact"}]}}}"#;
+        assert!(artifact_ready_from_pi(no_link).is_none());
+
+        let mut malformed: Value = serde_json::from_str(PI_PUBLISH_RESULT).unwrap();
+        malformed["result"]["structuredContent"]["content"][1]["uri"] =
+            Value::String("dar-artifact://not-a-uuid".into());
+        assert!(artifact_ready_from_pi(&malformed.to_string()).is_none());
+    }
+
+    #[test]
+    fn artifact_ready_prefers_structured_link_then_falls_back_to_direct_content() {
+        let mut value: Value = serde_json::from_str(PI_PUBLISH_RESULT).unwrap();
+        value["result"]["content"] = serde_json::json!([{
+            "type": "resource_link",
+            "uri": "dar-artifact://00000000-0000-4000-8000-000000000002",
+            "name": "fallback.txt",
+            "bytes": 7,
+            "sha256": "abcdef"
+        }]);
+        assert_eq!(
+            artifact_ready_from_pi(&value.to_string()).unwrap().name,
+            "report.txt"
+        );
+
+        value["result"]["structuredContent"]["content"] = serde_json::json!([
+            { "type": "text", "text": "no structured resource link" }
+        ]);
+        assert_eq!(
+            artifact_ready_from_pi(&value.to_string()).unwrap().name,
+            "fallback.txt"
+        );
+    }
+
     #[test]
     fn agent_end_maps_to_successful_turn_finished() {
         match mapped_event(r#"{"type":"agent_end"}"#) {
@@ -1625,6 +1709,57 @@ done"#;
         // Stub exits on stdin EOF, so close is clean and emits no SessionClosed.
         session.close().await.unwrap();
         assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prefixed_publish_delivers_one_artifact_callback() {
+        let stub = r#"while IFS= read -r line; do
+  case "$line" in
+    *'"type":"prompt"'*)
+      printf '%s\n' '{"type":"response","id":"t1","success":true}' '{"type":"agent_start"}' '{"type":"message_start","message":{"role":"user"}}'
+      printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"toolcall_end","toolCall":{"id":"publish-1","name":"mcp__dar__artifact_publish","arguments":{}}}}'
+      printf '%s\n' '$PUBLISH_RESULT'
+      printf '%s\n' '{"type":"agent_end"}'
+      ;;
+  esac
+done"#
+            .replace("$PUBLISH_RESULT", PI_PUBLISH_RESULT);
+        let temp = tempfile::tempdir().unwrap();
+        let script = write_stub(temp.path(), &stub);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let (artifact_tx, mut artifact_rx) = tokio::sync::mpsc::channel(8);
+        let mut params = stub_params(temp.path(), &script);
+        params.artifact_ready = Some(artifact_tx);
+        let mut session = PiChatBackend.open(params, tx).await.unwrap();
+
+        session
+            .send_turn("Publish the report".into())
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::ToolCall { .. }
+        ));
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::ToolOutput { done: true, .. }
+        ));
+        assert!(matches!(
+            next_event(&mut rx).await,
+            ChatEvent::TurnFinished { ok: true, .. }
+        ));
+        let ready = tokio::time::timeout(Duration::from_secs(5), artifact_rx.recv()).await;
+        session.close().await.unwrap();
+        assert_eq!(
+            ready.expect("artifact callback timed out").unwrap().name,
+            "report.txt"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), artifact_rx.recv())
+                .await
+                .expect("artifact channel did not close")
+                .is_none()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
