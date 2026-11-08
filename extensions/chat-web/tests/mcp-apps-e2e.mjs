@@ -82,6 +82,8 @@ try {
   if (process.env.APPS_EXPECT_FAILURE) {
     const region = page.getByRole('region', { name: 'MCP App: canvas', exact: true });
     await region.getByRole('status').filter({ hasText: process.env.APPS_EXPECT_FAILURE }).waitFor({ timeout: 18000 });
+    // Tool steps fold into one activity line: open the line, then the step.
+    await page.getByRole('log').getByText(/tool call/).last().click();
     await page.getByText('canvas__draw', { exact: true }).click();
     await page.getByRole('log').getByText('Drawing: first', { exact: false }).waitFor();
     await page.getByRole('combobox', { name: 'Message', exact: true }).fill('Chat progresses after app failure');

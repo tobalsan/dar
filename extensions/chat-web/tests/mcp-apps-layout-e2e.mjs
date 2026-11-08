@@ -30,7 +30,7 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 800 } });
 const failures = [];
 page.on('pageerror', error => failures.push(error.message));
 const send = async text => {
-  await page.getByRole('textbox', { name: 'Message', exact: true }).fill(text);
+  await page.getByRole('combobox', { name: 'Message', exact: true }).fill(text);
   await page.getByRole('button', { name: 'Send', exact: true }).click();
 };
 const number = async (frame, name) => Number(await frame.getByLabel(name, { exact: true }).textContent());
@@ -86,7 +86,7 @@ try {
   const panelBox = () => region.boundingBox();
   const iframeHeights = async () => ({ outer: (await page.getByTitle('canvas app', { exact: true }).boundingBox()).height });
   const inner = () => view.evaluate(() => ({ inner: window.innerHeight, width: window.innerWidth }));
-  const composer = await page.getByRole('textbox', { name: 'Message', exact: true }).boundingBox();
+  const composer = await page.getByRole('combobox', { name: 'Message', exact: true }).boundingBox();
   let panel = await panelBox();
   assert.ok(composer.x + composer.width <= panel.x + 1, 'Panel sits beside the composer');
   const log2 = await log.boundingBox();

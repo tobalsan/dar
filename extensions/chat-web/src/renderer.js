@@ -27,8 +27,13 @@
   // Mutate a private transcript buffer and report the changed block. Live
   // rendering keeps the copy-on-write wrapper below, while history can append
   // pages without repeatedly copying its complete archive.
+  const at = event => event.ts || event.timestamp || Date.now();
+  // Any event that is not a tool/thinking step closes the trailing activity
+  // group; its timestamp is the group's end (used for "Worked for").
+  const endActivity = (blocks, ts) => { let last = blocks.at(-1); if (last && (last.kind === 'tool' || last.kind === 'thinking') && !last.groupEnd) last.groupEnd = ts; };
   const reduceInto = (blocks, event) => {
     let next = blocks, text = event.text || '';
+    if (!['thinking', 'tool_call', 'tool_output', 'started', 'context_usage', 'reset'].includes(event.type)) endActivity(next, at(event));
     if (['finished', 'aborted', 'closed'].includes(event.type)) {
       let index = next.findLastIndex(block => block.kind === 'compaction' && block.pending);
       if (index >= 0) {
@@ -53,19 +58,21 @@
       case 'delta': case 'thinking': {
         let kind = event.type === 'thinking' ? 'thinking' : 'assistant', last = next.at(-1);
         if (last && last.kind === kind) { last.text += text; return next.length - 1; }
-        next.push({ kind, text, ts: event.ts || event.timestamp }); return next.length - 1;
+        next.push({ kind, text, ts: at(event) }); return next.length - 1;
       }
-      case 'tool_call': next.push({ kind: 'tool', id: event.id, name: event.name || event.id, args: event.args || '', ts: event.ts || event.timestamp, text: '', is_error: false, done: false }); return next.length - 1;
+      case 'tool_call': next.push({ kind: 'tool', id: event.id, name: event.name || event.id, args: event.args || '', ts: at(event), text: '', is_error: false, done: false }); return next.length - 1;
       case 'tool_output': {
         let index = next.length - 1;
         while (index >= 0 && (next[index].kind !== 'tool' || next[index].id !== event.id)) index--;
         let tool = next[index];
-        if (!tool) { tool = { kind: 'tool', id: event.id, name: event.id, args: '', text: '', is_error: false, done: false }; next.push(tool); index = next.length - 1; }
-        tool.app = event.app || tool.app; tool.text = text; tool.is_error = !!event.is_error; tool.done = !!event.done; return index;
+        if (!tool) { tool = { kind: 'tool', id: event.id, name: event.id, args: '', ts: at(event), text: '', is_error: false, done: false }; next.push(tool); index = next.length - 1; }
+        tool.app = event.app || tool.app; tool.text = text; tool.is_error = !!event.is_error; tool.done = !!event.done;
+        if (tool.done) tool.endTs = at(event);
+        return index;
       }
-      case 'question': next.push({ kind: 'question', id: event.id, questions: event.questions || [], done: false, rejected: false, answerText: '' }); return next.length - 1;
+      case 'question': next.push({ kind: 'question', id: event.id, questions: event.questions || [], done: false, rejected: false, answerText: '', ts: at(event) }); return next.length - 1;
       case 'question_done': { let index = next.length - 1; while (index >= 0 && (next[index].kind !== 'question' || next[index].id !== event.id)) index--; let q = next[index]; if (q) { q.done = true; q.rejected = !!event.is_error; q.answerText = event.text || ''; } return index >= 0 ? index : next.length - 1; }
-      case 'error': next.push({ kind: 'error', text: event.error || 'unknown error' }); return next.length - 1;
+      case 'error': next.push({ kind: 'error', text: event.error || 'unknown error', ts: at(event) }); return next.length - 1;
       case 'context_usage': return -1;
       // Agent chose silence (NO_REPLY) or the loop guard dropped the turn.
       case 'silent': return -1;
@@ -92,24 +99,68 @@
     return changed;
   };
 
-  const agentName = () => (typeof document !== 'undefined' && document.getElementById('chat-root') && document.getElementById('chat-root').dataset.agentName) || 'Agent';
-
   const timeLabel = ts => { if (!ts) return ''; let d = new Date(typeof ts === 'number' ? ts : Date.parse(ts)); return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); };
   const argSummary = args => { try { let value = typeof args === 'string' ? JSON.parse(args) : args; for (let key of ['path','command','query','url']) if (value && value[key]) return String(value[key]).replace(/\s+/g, ' ').slice(0, 90); } catch (_) {} return String(args || '').replace(/\s+/g, ' ').slice(0, 90); };
   const stamp = block => block.ts ? `<time class="chat-time" datetime="${esc(new Date(block.ts).toISOString())}">${esc(timeLabel(block.ts))}</time>` : '';
+  const duration = (from, to) => {
+    if (!from || !to || to < from) return '';
+    let s = (to - from) / 1000;
+    if (s < 10) return `${Math.max(0.1, s).toFixed(1)}s`;
+    if (s < 60) return `${Math.round(s)}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+    return `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m`;
+  };
 
-  const html = (blocks, qsel = {}, readOnly = false) => blocks.map((block, i) => {
+  const CHEV = '<svg class="chat-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>';
+  const SPIN = '<svg class="chat-spin" viewBox="0 0 16 16" fill="none" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 2a6 6 0 0 1 6 6"/></svg>';
+  const OK = '<i class="chat-ok" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5 6.5 11.5 12.5 4.5"/></svg></i>';
+  const isActivity = block => block && (block.kind === 'tool' || block.kind === 'thinking');
+
+  // One consecutive run of tool/thinking blocks collapses into a single
+  // activity line; its MCP app anchors are hoisted after it so app views stay
+  // visible while the step history is folded away.
+  const activityHtml = (blocks, start, end) => {
+    let steps = blocks.slice(start, end), last = steps[steps.length - 1];
+    let running = end === blocks.length && !last.groupEnd;
+    let tools = steps.filter(b => b.kind === 'tool'), failed = tools.filter(b => b.is_error).length;
+    let endTs = last.groupEnd || (end < blocks.length ? blocks[end].ts : null) || (tools.length && !running ? Math.max(...tools.map(t => t.endTs || 0)) : null);
+    let worked = duration(steps[0].ts, endTs);
+    let label;
+    if (running) label = last.kind === 'tool' ? `<span class="chat-activity-name">${esc(last.name)}</span><span class="chat-activity-arg">${esc(argSummary(last.args))}</span>` : 'Thinking…';
+    else if (!tools.length) label = esc(worked ? `Thought for ${worked}` : 'Thought');
+    else label = esc(`${worked ? `Worked for ${worked} · ` : ''}${tools.length} tool call${tools.length === 1 ? '' : 's'}${failed ? ` · ${failed} failed` : ''}`);
+    let hist = steps.map((b, k) => {
+      let i = start + k, live = running && k === steps.length - 1, next = blocks[i + 1];
+      if (b.kind === 'thinking') {
+        let first = b.text.trim().split('\n')[0].slice(0, 160), took = duration(b.ts, next ? next.ts : b.groupEnd);
+        return `<div class="chat-step" data-state="${live ? 'run' : 'done'}"><span class="chat-step-node"><i class="${live ? 'chat-step-pulse' : 'chat-step-ring'}"></i></span><details class="chat-step-tool" data-bi="${i}"><summary><span class="chat-step-think">${esc(first)}</span><span class="chat-step-meta">${took ? `<time>${took}</time>` : ''}</span>${CHEV}</summary><div class="chat-step-io"><div><div class="chat-step-k">Thought</div><p>${esc(b.text)}</p></div></div></details></div>`;
+      }
+      let state = b.is_error ? 'bad' : live && !b.done ? 'run' : 'done', took = duration(b.ts, b.endTs);
+      let node = state === 'bad' ? '<i class="chat-step-bad">!</i>' : state === 'run' ? '<i class="chat-step-pulse"></i>' : OK;
+      let meta = `${b.is_error ? '<span class="chat-step-failed">Failed</span>' : ''}${took ? `<time>${took}</time>` : ''}`;
+      let output = b.text ? esc(b.text) : state === 'run' ? 'Running…' : '';
+      return `<div class="chat-step" data-state="${state}"><span class="chat-step-node">${node}</span><details class="chat-step-tool" data-tool-id="${esc(b.id)}" data-bi="${i}"><summary><span class="chat-step-name">${esc(b.name)}</span><span class="chat-step-arg">${esc(argSummary(b.args))}</span><span class="chat-step-meta">${meta}</span>${CHEV}</summary><div class="chat-step-io"><div><div class="chat-step-k">Input</div><pre>${esc(b.args)}</pre></div><div><div class="chat-step-k">Output</div><pre class="chat-step-out${b.is_error ? ' is-error' : ''}">${output}</pre></div></div></details></div>`;
+    }).join('');
+    let anchors = tools.filter(t => t.app).map(t => `<div data-app-anchor="${esc(t.app.recordId)}"></div>`).join('');
+    return `<details class="chat-activity" data-state="${running ? 'run' : 'done'}" data-bi="g${start}"><summary><span class="chat-activity-glyph">${running ? SPIN : OK}</span><span class="chat-activity-label">${label}</span>${CHEV}</summary><div class="chat-activity-hist">${hist}</div></details>${anchors}`;
+  };
+
+  const html = (blocks, qsel = {}, readOnly = false) => {
+    let out = '';
+    for (let i = 0; i < blocks.length;) {
+      if (isActivity(blocks[i])) { let j = i; while (j < blocks.length && isActivity(blocks[j])) j++; out += activityHtml(blocks, i, j); i = j; }
+      else { out += blockHtml(blocks[i], i, qsel, readOnly); i++; }
+    }
+    return out;
+  };
+
+  const blockHtml = (block, i, qsel, readOnly) => {
     if (block.kind === 'compaction') {
       let running = block.state === 'running';
       let label = running ? 'Compacting context...' : block.state === 'done' ? 'Context compacted.' : block.state === 'interrupted' ? 'Interrupted' : block.error || 'Compaction failed';
       let row = block.command ? `<div class="chat-compact-status${block.state === 'error' ? ' is-error' : ''}" role="status"><code>${esc(block.command)}</code>${running ? '<span class="chat-compact-spinner" aria-hidden="true"></span>' : ''}<span>${esc(label)}</span>${stamp(block)}</div>` : '';
       let summary = block.summary ? `<details class="chat-compact-summary" data-bi="${i}"><summary>Compaction summary</summary><div class="chat-body">${markdown(block.summary)}</div></details>` : '';
       return `<div class="chat-compaction">${row}${summary}</div>`;
-    }
-    if (block.kind === 'tool') {
-      let state = block.is_error ? 'bad' : block.done ? 'done' : 'live';
-      let label = block.is_error ? 'error' : block.done ? 'done' : 'running';
-      return `<details class="chat-tool" data-tool-id="${esc(block.id)}" data-bi="${i}"><summary><span class="chat-pill chat-pill-${state}">${label}</span><span class="chat-tool-name">${esc(block.name)}</span><span class="chat-tool-summary">${esc(argSummary(block.args))}</span></summary><pre class="chat-tool-args">${esc(block.args)}</pre><pre class="chat-tool-output${block.is_error ? ' is-error' : ''}${block.done ? ' is-done' : ''}">${esc(block.text)}</pre></details>${block.app ? `<div data-app-anchor="${esc(block.app.recordId)}"></div>` : ''}`;
     }
     if (block.kind === 'question') {
       let state = block.done ? (block.rejected ? 'bad' : 'done') : 'live';
@@ -136,9 +187,6 @@
       let answered = block.done && block.answerText ? `<div class="chat-q-answer">${esc(block.answerText)}</div>` : '';
       return `<div class="chat-question" data-question-id="${esc(block.id)}"><span class="chat-pill chat-pill-${state}">${label}</span>${body}${custom}${answerBtn}${answered}</div>`;
     }
-    if (block.kind === 'thinking') {
-      return `<details class="chat-think" data-bi="${i}"><summary>Thinking</summary><pre>${esc(block.text)}</pre></details>`;
-    }
     if (block.kind === 'interrupted') return `<div class="chat-interrupted">Interrupted${stamp(block)}</div>`;
     if (block.kind === 'error') {
       return `<div class="chat-turn chat-error"><span class="chat-pill chat-pill-bad">error</span><div class="chat-error-body">${markdown(block.text)}</div></div>`;
@@ -146,12 +194,13 @@
     if (block.kind === 'notice') {
       return `<div class="chat-notice">${esc(block.text)}</div>`;
     }
-    let roleLabel = block.kind === 'user' ? 'You' : block.kind === 'assistant' ? esc(agentName()) : block.kind;
     let attachments = (block.attachments || []).map(a => a.image
       ? `<img class="chat-attachment-image" src="${esc(PREFIX + a.url)}" alt="${esc(a.name)}">`
       : `<a class="chat-attachment" href="${esc(PREFIX + a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.name)}</a>`).join('');
-    return `<div class="chat-turn chat-${block.kind}"><div class="chat-role"><span>${roleLabel}</span>${stamp(block)}</div><div class="chat-body">${markdown(block.text)}${attachments ? `<div class="chat-attach-row">${attachments}</div>` : ''}</div></div>`;
-  }).join('');
+    // No role header: the user is the right-aligned bubble, the agent is plain
+    // text; the time only shows on hover/focus.
+    return `<div class="chat-turn chat-${esc(block.kind)}"><div class="chat-body">${markdown(block.text)}${attachments ? `<div class="chat-attach-row">${attachments}</div>` : ''}</div>${stamp(block)}</div>`;
+  };
 
   const usagePercent = event => event.context_window ? Math.max(0, Math.min(100, event.tokens_used / event.context_window * 100)) : 0;
   const usageText = event => event.context_window ? `${event.tokens_used.toLocaleString()} / ${event.context_window.toLocaleString()} tokens · ${Math.round(usagePercent(event))}%` : `${event.tokens_used.toLocaleString()} tokens`;
@@ -164,8 +213,6 @@
         ring.setAttribute('aria-label', usageText(event));
         ring.style.setProperty('--usage-fill', percent);
         ring.style.color = percent >= 90 ? 'var(--bad)' : percent >= 70 ? 'var(--warn)' : 'var(--muted)';
-        let label = ring.querySelector?.('.chat-context-pct');
-        if (label) label.textContent = event.context_window ? `${Math.round(percent)}%` : '';
       }
     }
     if (tooltip) { tooltip.textContent = event ? usageText(event) : ''; tooltip.hidden = true; }
@@ -261,9 +308,10 @@
 
   // Whimsy pool for the pending placeholder; a fresh word is drawn per turn.
   const WORKING_WORDS = ['Pondering', 'Conjuring', 'Brewing', 'Scheming', 'Ruminating', 'Percolating', 'Noodling', 'Tinkering', 'Divining', 'Musing', 'Incanting', 'Summoning', 'Marinating', 'Sleuthing', 'Untangling', 'Hatching'];
-  // Placeholder for the coming agent response: shown right below the user's
-  // message until the first assistant/thinking/tool block replaces it.
-  const pendingHtml = word => `<div class="chat-turn chat-assistant chat-pending"><div class="chat-role">${esc(agentName())}</div><div class="chat-body"><span class="chat-loader" role="status" aria-label="Working"><em class="chat-loader-word">${esc(word)}</em><span></span><span></span><span></span></span></div></div>`;
+  // Placeholder for the coming agent response: an activity-style line shown
+  // right below the user's message until the first assistant/thinking/tool
+  // block replaces it.
+  const pendingHtml = word => `<div class="chat-activity chat-pending" data-state="run" role="status" aria-label="Working"><span class="chat-activity-glyph">${SPIN}</span><span class="chat-activity-label"><em class="chat-loader-word">${esc(word)}</em>…</span></div>`;
 
   const paint = app => {
     let transcript = $('chat-transcript'); if (!transcript) return;
@@ -291,6 +339,8 @@
     for(const node of existing.slice(nodes.length)) node.remove();
     window.DarMcpApps.sync(app);
     }
+    // Group lines carry a `g`-prefixed key so a repaint restores the group and
+    // each nested step independently, including while the group still runs.
     for (const d of transcript.querySelectorAll('details')) if (open.has(d.dataset.bi)) d.open = true;
     if (stick) transcript.scrollTop = transcript.scrollHeight;
   };
@@ -614,6 +664,11 @@
     showChatTitle(app);
     alignChatTitle();
     if (typeof ResizeObserver !== 'undefined') { app.titleObserver?.disconnect(); app.titleObserver = new ResizeObserver(alignChatTitle); app.titleObserver.observe(document.querySelector('#chat-root .chat-main')); }
+    // The composer and the transcript share the main column: when the composer
+    // grows (autogrow, chips, warning) the transcript viewport shrinks, so a
+    // reader pinned to the bottom must be re-pinned or the end of the last
+    // message slides under the composer.
+    if (typeof ResizeObserver !== 'undefined') { app.transcriptObserver?.disconnect(); app.transcriptObserver = new ResizeObserver(() => { if (app.stick) transcript.scrollTop = transcript.scrollHeight; }); app.transcriptObserver.observe(transcript); }
     showContext(app.contextUsage);
     if ($('chat-search-palette')?.hidden) { app.searchOpen = false; ++app.searchSequence; clearTimeout(app.searchTimer); }
     $('chat-root').classList?.toggle('sidebar-collapsed', typeof localStorage !== 'undefined' && localStorage.getItem('dar-chat-sidebar') === 'collapsed');
@@ -686,7 +741,7 @@
     + `<div class="chat-session-copy"><span class="chat-session-label"><span>${esc(s.label)}</span></span></div>`
     + `<span class="chat-session-info" id="info-${esc(s.id)}" data-live="${s.busy ? 'busy' : s.connected ? 'on' : ''}">${s.busy ? 'Running · ' : s.connected ? 'Connected · ' : ''}${relativeTime(s.modified_ms)}</span>`
     + `<div class="chat-session-actions">${actionButton('rename', s.id, 'Rename')}${s.archived ? actionButton('unarchive', s.id, 'Unarchive') : actionButton('archive', s.id, 'Archive')}${actionButton('delete', s.id, 'Delete')}</div></div>`;
-  const showHistoryList = async app => { let host=$('chat-history-list'); if(!host||app.editingSession)return; let sequence=++app.sidebarSequence; try { let all=await request('/chat/sessions').then(r=>r.json()); if(app.editingSession||sequence!==app.sidebarSequence)return; clearViewed(all,app.slot); app.sessions=all; let current=all.find(s=>(s.slots||[]).includes(app.slot)); if(current)storeChatLabel(app,app.slot,current.title?.trim()||current.label); else showChatTitle(app); let active=all.filter(s=>!s.archived), archived=all.filter(s=>s.archived), groups=[]; for(let s of active){let name=groupName(s.modified_ms), g=groups.at(-1);if(!g||g.name!==name)groups.push(g={name,items:[]});g.items.push(s)} host.innerHTML=groups.map(g=>`<div class="chat-session-group"><h3>${g.name}</h3>${g.items.map(s=>sessionRow(s,app.slot)).join('')}</div>`).join('')+(archived.length?`<details class="chat-archived"${app.archivedOpen?' open':''}><summary>Archived (${archived.length})</summary>${archived.map(s=>sessionRow(s,app.slot)).join('')}</details>`:'')||'<div class="chat-empty">No conversations</div>'; } catch(error){if(sequence===app.sidebarSequence&&!app.editingSession)host.textContent=`Sessions unavailable: ${error.message}`;} };
+  const showHistoryList = async app => { let host=$('chat-history-list'); if(!host||app.editingSession)return; let sequence=++app.sidebarSequence; try { let all=await request('/chat/sessions').then(r=>r.json()); if(app.editingSession||sequence!==app.sidebarSequence)return; clearViewed(all,app.slot); app.sessions=all; let current=all.find(s=>(s.slots||[]).includes(app.slot)||s.id===app.slotSessions?.[app.slot]); if(current)storeChatLabel(app,app.slot,current.title?.trim()||current.label); else showChatTitle(app); let active=all.filter(s=>!s.archived), archived=all.filter(s=>s.archived), groups=[]; for(let s of active){let name=groupName(s.modified_ms), g=groups.at(-1);if(!g||g.name!==name)groups.push(g={name,items:[]});g.items.push(s)} host.innerHTML=groups.map(g=>`<div class="chat-session-group"><h3>${g.name}</h3>${g.items.map(s=>sessionRow(s,app.slot)).join('')}</div>`).join('')+(archived.length?`<details class="chat-archived"${app.archivedOpen?' open':''}><summary>Archived (${archived.length})</summary>${archived.map(s=>sessionRow(s,app.slot)).join('')}</details>`:'')||'<div class="chat-empty">No conversations</div>'; } catch(error){if(sequence===app.sidebarSequence&&!app.editingSession)host.textContent=`Sessions unavailable: ${error.message}`;} };
   // Slots run independently server-side; switching only repoints the stream.
   const showChatTitle = app => {
     let title = $('chat-session-title');
@@ -729,7 +784,7 @@
     app.es.onmessage = e => render(app, JSON.parse(e.data));
   };
   const newChat = async app => { let r = await request(`/chat/${app.slot}/new`, { method: 'POST' }); switchSlot(app, (await r.json()).slot); showHistoryList(app); };
-  const resumeSession = async (app,id,label) => { try { let r = await request(`/chat/${app.slot}/resume`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id})}); let slot = (await r.json()).slot; let session=app.sessions?.find(s=>s.id===id); storeChatLabel(app, slot, label || session?.title?.trim() || session?.label); switchSlot(app, slot); let root=$('chat-root'); if(root?.classList.contains('sidebar-open')){root.classList.remove('sidebar-open');$('chat-input')?.focus()} showHistoryList(app); } catch(error){render(app,{type:'error',error:`Session not resumed: ${error.message}`});} };
+  const resumeSession = async (app,id,label) => { try { let r = await request(`/chat/${app.slot}/resume`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id})}); let slot = (await r.json()).slot; (app.slotSessions ||= {})[slot] = id; let session=app.sessions?.find(s=>s.id===id); storeChatLabel(app, slot, label || session?.title?.trim() || session?.label); switchSlot(app, slot); let root=$('chat-root'); if(root?.classList.contains('sidebar-open')){root.classList.remove('sidebar-open');$('chat-input')?.focus()} showHistoryList(app); } catch(error){render(app,{type:'error',error:`Session not resumed: ${error.message}`});} };
   const sessionAction = async (app,action,id) => { try { if(action==='delete'){if(!confirm('Delete this conversation permanently?'))return;await request(`/chat/sessions/${encodeURIComponent(id)}`,{method:'DELETE'});} else if(action==='rename'){let row=document.querySelector(`[data-session-id="${CSS.escape(id)}"]`), label=row?.querySelector('.chat-session-label');if(!label)return;let input=document.createElement('input');input.className='chat-session-edit';input.value=label.textContent;label.replaceWith(input);input.focus();input.select();app.editingSession=id;let settled=false;let done=async save=>{if(settled)return;settled=true;app.editingSession=null;if(save){let title=input.value.trim();await request(`/chat/sessions/${encodeURIComponent(id)}`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({title})});let session=app.sessions?.find(s=>s.id===id);if(session){session.title=title;for(let slot of session.slots||[])storeChatLabel(app,slot,title||session.label);}}showHistoryList(app)};input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();done(true)}if(e.key==='Escape'){e.preventDefault();done(false)}});input.addEventListener('blur',()=>done(true),{once:true});return;} else await request(`/chat/sessions/${encodeURIComponent(id)}`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({archived:action==='archive'})}); showHistoryList(app); } catch(error){render(app,{type:'error',error:`Session action failed: ${error.message}`});} };
   const toggleSidebar = () => { let root=$('chat-root'); if(matchMedia('(max-width: 760px)').matches){root.classList.toggle('sidebar-open');return;} let collapsed=!root.classList.contains('sidebar-collapsed');root.classList.toggle('sidebar-collapsed',collapsed);localStorage.setItem('dar-chat-sidebar',collapsed?'collapsed':'open'); };
 

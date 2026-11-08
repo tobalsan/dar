@@ -487,6 +487,8 @@ async function artifactFailureChecks({ page, evidence }) {
       if (!viewer) await new Promise(resolve => setTimeout(resolve, 100));
     }
     assert.ok(viewer, 'Failed resource transport must show a short viewer error');
+    // Tool steps fold into one activity line: open the line, then the step.
+    await page.getByRole('log').getByText(/tool call/).last().click();
     await page.getByText('mcp__dar__artifact_publish', { exact: true }).click();
     await page.getByRole('log').getByText('artifact published', { exact: true }).waitFor();
     await page.screenshot({ path: path.join(evidence, 'artifact-failure-fallback.png'), fullPage: true });

@@ -253,6 +253,17 @@ async function local_rename_and_new_chat_update_the_header() {
   await page.respond(page.calls[4], []);
 }
 
+async function resumed_session_shows_its_real_title_before_the_backend_binds() {
+  const page = browser();
+  await page.respond(page.calls[0], []);
+  const row = { dataset: { sessionId: 'named' }, closest: selector => selector === '[data-session-id]' ? row : null };
+  page.emit('click', row);
+  assert.equal(page.calls[1].url, '/chat/main/resume');
+  await page.respond(page.calls[1], { slot: 'resumed-slot' });
+  await page.respond(page.calls[2], [session('named', 'First message', { title: 'Quarterly planning', slots: [] })]);
+  assert.equal(page.text('chat-session-title'), 'Quarterly planning', 'a named session never shows New chat');
+}
+
 (async () => {
   await opening_preserves_draft_and_escape_restores_focus();
   await query_states_and_latest_response();
@@ -261,5 +272,6 @@ async function local_rename_and_new_chat_update_the_header() {
   await context_ring_reports_usage_and_clears();
   await dismissal_focus_and_reexecution_stay_local();
   await local_rename_and_new_chat_update_the_header();
-  console.log('search palette: 7 browser scenarios passed');
+  await resumed_session_shows_its_real_title_before_the_backend_binds();
+  console.log('search palette: 8 browser scenarios passed');
 })().catch(error => { console.error(error); process.exit(1); });
