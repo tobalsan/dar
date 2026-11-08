@@ -2730,7 +2730,7 @@ fn allowed_attachment(mime: &str) -> bool {
     (mime.starts_with("image/") && mime != "image/svg+xml")
         || matches!(
             mime,
-            "application/pdf" | "text/plain" | "text/markdown" | "application/json"
+            "application/pdf" | "text/plain" | "text/markdown" | "text/html" | "application/json"
         )
 }
 
@@ -6994,6 +6994,15 @@ mod tests {
         assert!(root
             .join("data/chat/uploads/test/upload-1/0-note.txt")
             .exists());
+    }
+
+    #[test]
+    fn html_uploads_are_accepted_and_served_as_downloads() {
+        assert!(allowed_attachment("text/html; charset=utf-8"));
+        assert_eq!(
+            attachment_content_type("page.html"),
+            "application/octet-stream"
+        );
     }
 
     #[tokio::test]
