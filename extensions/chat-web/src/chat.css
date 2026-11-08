@@ -563,6 +563,12 @@ body:has(.chat-web) #content {
   font-family: var(--chat-mono);
   font-size: 0.82rem;
 }
+/* A tool name never wraps. The argument summary shrinks instead. */
+.chat-activity-name,
+.chat-step-name {
+  flex: none;
+  white-space: nowrap;
+}
 .chat-activity-arg,
 .chat-step-arg {
   min-width: 0;

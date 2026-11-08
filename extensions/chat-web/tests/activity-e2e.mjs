@@ -55,9 +55,11 @@ try {
   await event({ type: 'tool_output', id: 't2', text: "Type 'FileList' is not assignable to type 'File[]'.", is_error: true, done: true, ts: T + 8000 });
   await event({ type: 'tool_call', id: 't3', name: 'bash', args: '{"command":"pnpm vitest run"}', ts: T + 8500 });
   await event({ type: 'tool_output', id: 't3', text: 'Tests 1154 passed', done: true, ts: T + 20_000 });
+  await event({ type: 'tool_call', id: 't4', name: 'bash', args: JSON.stringify({ command: 'cd ~/code/project && git status --short; git branch --show-current; '.repeat(6) }), ts: T + 20_100 });
+  await event({ type: 'tool_output', id: 't4', text: 'main', done: true, ts: T + 20_300 });
   await event({ type: 'delta', text: 'All 1154 tests pass.', ts: T + 21_000 });
   await event({ type: 'finished', ts: T + 21_100 });
-  const first = log.getByText(/Worked for .* · 1 tool call$/), second = log.getByText(/Worked for .* · 2 tool calls · 1 failed/);
+  const first = log.getByText(/Worked for .* · 1 tool call$/), second = log.getByText(/Worked for .* · 3 tool calls · 1 failed/);
   await first.waitFor(); await second.waitFor();
   assert.equal(await log.getByRole('img', { name: 'Running' }).count(), 0, 'nothing spins after the turn');
   assert.ok(await log.getByText(/\bYou\b/).count() === 0, 'no "You" label');
@@ -70,6 +72,10 @@ try {
 
   // Open the failing group: steps, Failed meta, Input / Output wells, red error output.
   await second.click();
+  // A long argument summary never wraps the tool name: each "bash" label keeps one line height.
+  const names = log.getByText('bash', { exact: true }).filter({ visible: true });
+  const heights = await names.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().height));
+  assert.ok(heights.length >= 3 && heights.every(h => h === heights[0]), `tool names keep one line: ${heights}`);
   const typecheck = log.getByText('pnpm typecheck', { exact: true });
   await typecheck.click();
   await log.getByText('Failed', { exact: true }).waitFor();
@@ -94,7 +100,7 @@ try {
   await page.evaluate(() => document.activeElement?.blur());
   const summary = first.locator('xpath=ancestor::summary');
   await page.keyboard.press('Tab');
-  for (let i = 0; i < 12 && !(await summary.evaluate(node => node === document.activeElement)); i++) await page.keyboard.press('Tab');
+  for (let i = 0; i < 20 && !(await summary.evaluate(node => node === document.activeElement)); i++) await page.keyboard.press('Tab');
   assert.ok(await summary.evaluate(node => node === document.activeElement), 'the activity line takes keyboard focus');
   await wait(300); // chevron fades in
   assert.equal(await summary.locator('svg').last().evaluate(node => getComputedStyle(node).opacity), '1', 'the chevron shows on keyboard focus');
