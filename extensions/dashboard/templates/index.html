@@ -218,11 +218,21 @@
       var radios = group.querySelectorAll('[role="radio"]');
       function paint(choice) {
         radios.forEach(function (r) {
-          r.setAttribute('aria-checked', String(r.dataset.themeChoice === choice));
+          var on = r.dataset.themeChoice === choice;
+          r.setAttribute('aria-checked', String(on));
+          r.tabIndex = on ? 0 : -1; // ARIA radio pattern: one tab stop, arrows move within the group
         });
       }
-      radios.forEach(function (r) {
+      radios.forEach(function (r, i) {
         r.addEventListener('click', function () { paint(window.__darTheme.set(r.dataset.themeChoice)); });
+        r.addEventListener('keydown', function (e) {
+          var step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+          var to = e.key === 'Home' ? 0 : e.key === 'End' ? radios.length - 1 : step ? (i + step + radios.length) % radios.length : -1;
+          if (to < 0) return;
+          e.preventDefault();
+          radios[to].focus();
+          paint(window.__darTheme.set(radios[to].dataset.themeChoice));
+        });
       });
       window.addEventListener('storage', function (e) { if (e.key === 'dar-theme') paint(window.__darTheme.apply()); });
       paint(window.__darTheme.choice());

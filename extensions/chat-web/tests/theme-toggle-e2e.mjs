@@ -22,8 +22,8 @@ let logs = '';
 const host = spawn(binary, ['run', '--dir', agent], { stdio: ['ignore', 'pipe', 'pipe'] });
 host.stdout.on('data', chunk => { logs += chunk; });
 host.stderr.on('data', chunk => { logs += chunk; });
-const DARK = 'rgb(17, 19, 23)';
-const LIGHT = 'rgb(247, 248, 250)';
+const DARK = 'dark';
+const LIGHT = 'light';
 const browser = await chromium.launch({ headless: true, channel: process.env.PLAYWRIGHT_CHANNEL });
 const context = await browser.newContext({ viewport: { width: 1200, height: 800 }, locale: 'en-US', colorScheme: 'dark' });
 const page = await context.newPage();
@@ -37,9 +37,13 @@ const expectChecked = async name => {
     assert.equal(await radio(other).getAttribute('aria-checked'), String(other === name), `${other} radio checked state with ${name} selected`);
   }
 };
-const expectPage = async (bg, step) => {
-  await page.waitForFunction(expected => getComputedStyle(document.body).backgroundColor === expected, bg, { timeout: 3000 }).catch(async () => {
-    throw new Error(`${step}: body background ${await background('body')} != ${bg}`);
+// What the user sees: the page background is dark or light (by luminance), whatever the exact palette.
+const expectPage = async (mode, step) => {
+  await page.waitForFunction(expected => {
+    const [r, g, b] = getComputedStyle(document.body).backgroundColor.match(/\d+/g).map(Number);
+    return ((0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5 ? 'dark' : 'light') === expected;
+  }, mode, { timeout: 3000 }).catch(async () => {
+    throw new Error(`${step}: page is not ${mode} (body background ${await background('body')})`);
   });
 };
 try {
@@ -87,6 +91,20 @@ try {
   await expectPage(LIGHT, 'invalid stored value');
   pass('invalid stored value falls back to System');
 
+  // Keyboard: the group is one tab stop and arrows / Home / End move the choice.
+  await radio('System').focus();
+  await page.keyboard.press('ArrowLeft');
+  await expectChecked('Dark');
+  await expectPage(DARK, 'ArrowLeft selects Dark');
+  await page.keyboard.press('Home');
+  await expectChecked('Light');
+  await page.keyboard.press('End');
+  await expectChecked('System');
+  await page.keyboard.press('ArrowRight');
+  await expectChecked('Light');
+  assert.equal(await radio('Dark').getAttribute('tabindex'), '-1', 'unchecked radios leave the tab order');
+  pass('arrow keys, Home and End move the theme choice like a radio group');
+
   // Tab row: active tab joins the page, bell and theme controls keep clear of the edge.
   const tab = page.getByRole('button', { name: 'Chat', exact: true });
   const tabStyle = await tab.evaluate(node => { const s = getComputedStyle(node); return { bg: s.backgroundColor, border: s.borderTopWidth + s.borderLeftWidth + s.borderRightWidth + s.borderBottomWidth }; });
@@ -94,7 +112,7 @@ try {
   assert.equal(tabStyle.border, '0px0px0px0px', 'active tab has no border');
   const inactive = page.getByRole('button', { name: 'MCP', exact: true });
   if (await inactive.count()) assert.notEqual(await inactive.evaluate(node => getComputedStyle(node).backgroundColor), tabStyle.bg, 'inactive tab differs from the page');
-  const bell = await page.locator('#sound-toggle').boundingBox();
+  const bell = await page.getByRole('button', { name: /Notification sound/ }).boundingBox();
   const group = await page.getByRole('radiogroup', { name: 'Theme' }).boundingBox();
   assert.ok(group.x + group.width <= 1200 - 16, 'theme control keeps at least 1rem from the right edge');
   assert.ok(group.x - (bell.x + bell.width) >= 8, 'bell and theme control are spaced apart');

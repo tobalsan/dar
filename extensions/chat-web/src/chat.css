@@ -493,15 +493,6 @@ body:has(.chat-web) #content {
 .chat-compact-summary .chat-body {
   margin: 0.5rem 0;
 }
-@keyframes chat-pulse {
-  0%,
-  100% {
-    opacity: 0.55;
-  }
-  50% {
-    opacity: 1;
-  }
-}
 .chat-interrupted .chat-time {
   margin-left: 0.5rem;
 }
@@ -590,6 +581,7 @@ body:has(.chat-web) #content {
     rotate 0.3s cubic-bezier(0.22, 1, 0.36, 1);
 }
 summary:hover .chat-chev,
+summary:focus-visible .chat-chev,
 details[open] > summary .chat-chev {
   opacity: 1;
 }
@@ -744,6 +736,10 @@ details[open] > summary .chat-chev {
 .chat-step-failed {
   color: var(--bad);
   font-weight: 600;
+}
+.chat-step-stopped {
+  color: var(--muted);
+  font-style: italic;
 }
 .chat-step-io {
   display: grid;
@@ -1180,8 +1176,9 @@ details[open] > summary .chat-chev {
 .chat-title { flex-shrink: 0; }
 .chat-header > div { overflow: hidden; }
 .chat-context { position: relative; flex-shrink: 0; align-self: flex-end; }
-.chat-context-ring { display: flex; align-items: center; justify-content: center; width: 2.25rem; height: 2.25rem; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; }
+.chat-context-ring { position: relative; display: flex; align-items: center; justify-content: center; width: 2.25rem; height: 2.25rem; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; }
 .chat-context-ring:hover { background: var(--panel-2); }
+.chat-context-pct { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: color-mix(in srgb, var(--fg) 72%, var(--bg)); font-size: 0.56rem; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; pointer-events: none; }
 .chat-context-ring[hidden], .chat-context-tooltip[hidden], .chat-search-palette[hidden] { display: none; }
 .chat-context-ring:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .chat-context-track { stroke: var(--border); }

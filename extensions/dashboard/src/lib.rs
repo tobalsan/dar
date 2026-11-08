@@ -787,13 +787,19 @@ mod tests {
             .await
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains(r#"role="radiogroup""#));
+        // The toggle is one named radiogroup whose three radios are labelled
+        // Light / Dark / System (the runtime behavior is covered by theme-toggle-e2e).
+        let group = html
+            .split(r#"role="radiogroup" aria-label="Theme""#)
+            .nth(1)
+            .expect("theme radiogroup rendered")
+            .split("</div>")
+            .next()
+            .unwrap();
+        assert_eq!(group.matches(r#"role="radio""#).count(), 3);
         for name in ["Light", "Dark", "System"] {
             assert!(
-                html.contains(&format!(
-                    r#"role="radio" data-theme-choice="{}""#,
-                    name.to_lowercase()
-                )) && html.contains(&format!(r#"aria-label="{name}""#)),
+                group.contains(&format!(r#"aria-label="{name}""#)),
                 "{name} theme radio rendered"
             );
         }

@@ -33,7 +33,7 @@
   const endActivity = (blocks, ts) => { let last = blocks.at(-1); if (last && (last.kind === 'tool' || last.kind === 'thinking') && !last.groupEnd) last.groupEnd = ts; };
   const reduceInto = (blocks, event) => {
     let next = blocks, text = event.text || '';
-    if (!['thinking', 'tool_call', 'tool_output', 'started', 'context_usage', 'reset'].includes(event.type)) endActivity(next, at(event));
+    if (!['thinking', 'tool_call', 'tool_output', 'context_usage', 'reset'].includes(event.type)) endActivity(next, at(event));
     if (['finished', 'aborted', 'closed'].includes(event.type)) {
       let index = next.findLastIndex(block => block.kind === 'compaction' && block.pending);
       if (index >= 0) {
@@ -57,10 +57,15 @@
       case 'reset': next.splice(0, next.length); return null;
       case 'delta': case 'thinking': {
         let kind = event.type === 'thinking' ? 'thinking' : 'assistant', last = next.at(-1);
-        if (last && last.kind === kind) { last.text += text; return next.length - 1; }
+        if (last && last.kind === kind && !last.groupEnd) { last.text += text; return next.length - 1; }
         next.push({ kind, text, ts: at(event) }); return next.length - 1;
       }
-      case 'tool_call': next.push({ kind: 'tool', id: event.id, name: event.name || event.id, args: event.args || '', ts: at(event), text: '', is_error: false, done: false }); return next.length - 1;
+      case 'tool_call': {
+        // A tool_output that arrived first left a bare placeholder: fill it in rather than adding a second step.
+        let last = next.at(-1);
+        if (last && last.kind === 'tool' && last.id === event.id && last.name === last.id && !last.args) { Object.assign(last, { name: event.name || event.id, args: event.args || '', ts: at(event) }); return next.length - 1; }
+        next.push({ kind: 'tool', id: event.id, name: event.name || event.id, args: event.args || '', ts: at(event), text: '', is_error: false, done: false }); return next.length - 1;
+      }
       case 'tool_output': {
         let index = next.length - 1;
         while (index >= 0 && (next[index].kind !== 'tool' || next[index].id !== event.id)) index--;
@@ -101,7 +106,7 @@
 
   const timeLabel = ts => { if (!ts) return ''; let d = new Date(typeof ts === 'number' ? ts : Date.parse(ts)); return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); };
   const argSummary = args => { try { let value = typeof args === 'string' ? JSON.parse(args) : args; for (let key of ['path','command','query','url']) if (value && value[key]) return String(value[key]).replace(/\s+/g, ' ').slice(0, 90); } catch (_) {} return String(args || '').replace(/\s+/g, ' ').slice(0, 90); };
-  const stamp = block => block.ts ? `<time class="chat-time" datetime="${esc(new Date(block.ts).toISOString())}">${esc(timeLabel(block.ts))}</time>` : '';
+  const stamp = (block, focusable) => block.ts ? `<time class="chat-time"${focusable ? ' tabindex="0"' : ''} datetime="${esc(new Date(block.ts).toISOString())}">${esc(timeLabel(block.ts))}</time>` : '';
   const duration = (from, to) => {
     if (!from || !to || to < from) return '';
     let s = (to - from) / 1000;
@@ -135,20 +140,22 @@
         let first = b.text.trim().split('\n')[0].slice(0, 160), took = duration(b.ts, next ? next.ts : b.groupEnd);
         return `<div class="chat-step" data-state="${live ? 'run' : 'done'}"><span class="chat-step-node"><i class="${live ? 'chat-step-pulse' : 'chat-step-ring'}"></i></span><details class="chat-step-tool" data-bi="${i}"><summary><span class="chat-step-think">${esc(first)}</span><span class="chat-step-meta">${took ? `<time>${took}</time>` : ''}</span>${CHEV}</summary><div class="chat-step-io"><div><div class="chat-step-k">Thought</div><p>${esc(b.text)}</p></div></div></details></div>`;
       }
-      let state = b.is_error ? 'bad' : live && !b.done ? 'run' : 'done', took = duration(b.ts, b.endTs);
-      let node = state === 'bad' ? '<i class="chat-step-bad">!</i>' : state === 'run' ? '<i class="chat-step-pulse"></i>' : OK;
-      let meta = `${b.is_error ? '<span class="chat-step-failed">Failed</span>' : ''}${took ? `<time>${took}</time>` : ''}`;
+      // A tool still waiting for output is running while its group runs (parallel calls included) and interrupted once the group ended.
+      let state = b.is_error ? 'bad' : b.done ? 'done' : running ? 'run' : 'stopped', took = duration(b.ts, b.endTs);
+      let node = state === 'bad' ? '<i class="chat-step-bad">!</i>' : state === 'run' ? '<i class="chat-step-pulse"></i>' : state === 'stopped' ? '<i class="chat-step-ring"></i>' : OK;
+      let meta = `${b.is_error ? '<span class="chat-step-failed">Failed</span>' : state === 'stopped' ? '<span class="chat-step-stopped">Interrupted</span>' : ''}${took ? `<time>${took}</time>` : ''}`;
       let output = b.text ? esc(b.text) : state === 'run' ? 'Running…' : '';
       return `<div class="chat-step" data-state="${state}"><span class="chat-step-node">${node}</span><details class="chat-step-tool" data-tool-id="${esc(b.id)}" data-bi="${i}"><summary><span class="chat-step-name">${esc(b.name)}</span><span class="chat-step-arg">${esc(argSummary(b.args))}</span><span class="chat-step-meta">${meta}</span>${CHEV}</summary><div class="chat-step-io"><div><div class="chat-step-k">Input</div><pre>${esc(b.args)}</pre></div><div><div class="chat-step-k">Output</div><pre class="chat-step-out${b.is_error ? ' is-error' : ''}">${output}</pre></div></div></details></div>`;
     }).join('');
     let anchors = tools.filter(t => t.app).map(t => `<div data-app-anchor="${esc(t.app.recordId)}"></div>`).join('');
-    return `<details class="chat-activity" data-state="${running ? 'run' : 'done'}" data-bi="g${start}"><summary><span class="chat-activity-glyph">${running ? SPIN : OK}</span><span class="chat-activity-label">${label}</span>${CHEV}</summary><div class="chat-activity-hist">${hist}</div></details>${anchors}`;
+    return `<details class="chat-activity" data-state="${running ? 'run' : 'done'}" data-bi="g${start}"><summary><span class="chat-activity-glyph" role="img" aria-label="${running ? 'Running' : 'Done'}">${running ? SPIN : OK}</span><span class="chat-activity-label">${label}</span>${CHEV}</summary><div class="chat-activity-hist">${hist}</div></details>${anchors}`;
   };
 
   const html = (blocks, qsel = {}, readOnly = false) => {
     let out = '';
     for (let i = 0; i < blocks.length;) {
-      if (isActivity(blocks[i])) { let j = i; while (j < blocks.length && isActivity(blocks[j])) j++; out += activityHtml(blocks, i, j); i = j; }
+      // An ended group (groupEnd) never absorbs the next turn's steps.
+      if (isActivity(blocks[i])) { let j = i + 1; while (j < blocks.length && isActivity(blocks[j]) && !blocks[j - 1].groupEnd) j++; out += activityHtml(blocks, i, j); i = j; }
       else { out += blockHtml(blocks[i], i, qsel, readOnly); i++; }
     }
     return out;
@@ -199,7 +206,7 @@
       : `<a class="chat-attachment" href="${esc(PREFIX + a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.name)}</a>`).join('');
     // No role header: the user is the right-aligned bubble, the agent is plain
     // text; the time only shows on hover/focus.
-    return `<div class="chat-turn chat-${esc(block.kind)}"><div class="chat-body">${markdown(block.text)}${attachments ? `<div class="chat-attach-row">${attachments}</div>` : ''}</div>${stamp(block)}</div>`;
+    return `<div class="chat-turn chat-${esc(block.kind)}"><div class="chat-body">${markdown(block.text)}${attachments ? `<div class="chat-attach-row">${attachments}</div>` : ''}</div>${stamp(block, true)}</div>`;
   };
 
   const usagePercent = event => event.context_window ? Math.max(0, Math.min(100, event.tokens_used / event.context_window * 100)) : 0;
@@ -213,6 +220,8 @@
         ring.setAttribute('aria-label', usageText(event));
         ring.style.setProperty('--usage-fill', percent);
         ring.style.color = percent >= 90 ? 'var(--bad)' : percent >= 70 ? 'var(--warn)' : 'var(--muted)';
+        let label = ring.querySelector?.('.chat-context-pct');
+        if (label) label.textContent = event.context_window ? `${Math.round(percent)}%` : '';
       }
     }
     if (tooltip) { tooltip.textContent = event ? usageText(event) : ''; tooltip.hidden = true; }
@@ -272,7 +281,15 @@
     input.value = name + ' '; app.draft = input.value;
     closeSlash(); autogrow(input); refreshBusy(app); input.focus && input.focus();
   };
-  const autogrow = el => { if (!el) return; el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, Math.round(0.4 * window.innerHeight)) + 'px'; };
+  // Measuring the textarea collapses it for a moment, which lets the thread
+  // grow and some engines clamp its scrollTop; keep the distance from the
+  // bottom constant across the resize so typing never moves the reader.
+  const autogrow = el => {
+    if (!el) return;
+    let thread = $('chat-transcript'), gap = thread ? thread.scrollHeight - thread.scrollTop - thread.clientHeight : 0;
+    el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, Math.round(0.4 * window.innerHeight)) + 'px';
+    if (thread) thread.scrollTop = thread.scrollHeight - thread.clientHeight - gap;
+  };
 
 
   const renderChips = app => {
