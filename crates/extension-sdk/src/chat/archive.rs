@@ -2113,6 +2113,42 @@ not json
     }
 
     #[test]
+    fn read_events_passes_chat_web_transcript_lines_through() {
+        let temp = tempfile::tempdir().unwrap();
+        write(
+            temp.path(),
+            "2024-06-15T12:30:00Z_a.jsonl",
+            concat!(
+                "{\"type\":\"session\",\"id\":\"sess\"}\n",
+                "{\"type\":\"activity\",\"text\":\"Read the styles\"}\n",
+                "{\"type\":\"tool_call\",\"id\":\"t1\",\"name\":\"bash\",\"args\":\"{}\"}\n",
+                "{\"type\":\"delta\",\"text\":\"» kept as typed\\n\"}\n"
+            ),
+        );
+        let events = read_events(temp.path(), "sess", 0, READ_MAX)
+            .unwrap()
+            .events;
+        let shape: Vec<_> = events
+            .iter()
+            .map(|e| {
+                (
+                    e["type"].as_str().unwrap(),
+                    e["text"].as_str().unwrap_or(""),
+                )
+            })
+            .collect();
+        // A saved chat-web line is already filtered: no second projection.
+        assert_eq!(
+            shape,
+            [
+                ("activity", "Read the styles"),
+                ("tool_call", ""),
+                ("delta", "» kept as typed\n"),
+            ]
+        );
+    }
+
+    #[test]
     fn read_events_renders_pi_tool_calls_and_results() {
         let temp = tempfile::tempdir().unwrap();
         write(temp.path(), "2024-06-15T12:30:00Z_p.jsonl", concat!(

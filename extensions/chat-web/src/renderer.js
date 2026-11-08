@@ -31,14 +31,20 @@
   // Any event that is not a tool/thinking step closes the trailing activity
   // group; its timestamp is the group's end (used for "Worked for").
   const endActivity = (blocks, ts) => { let last = blocks.at(-1); if (last && (last.kind === 'tool' || last.kind === 'thinking') && !last.groupEnd) last.groupEnd = ts; };
-  // The label a new tool call takes: the nearest label of its group. Parallel calls share it; a finished tool closes the batch.
+  // The label a new tool call takes: the oldest label no call has taken yet (first in, first out, so `» A` `» B` then two calls pair up),
+  // else the nearest label of the open batch. Parallel calls share a label; a finished tool closes the batch.
   const takeLabel = blocks => {
+    let unbound = null, nearest = null, closed = false;
     for (let i = blocks.length - 1; i >= 0; i--) {
       let block = blocks[i];
-      if (block.kind === 'label') { block.bound = true; return block.text; }
-      if (block.groupEnd || (block.kind !== 'tool' && block.kind !== 'thinking') || (block.kind === 'tool' && block.done)) return '';
+      if (block.kind === 'label') { if (!block.bound) unbound = block; else if (!closed) nearest ||= block; continue; }
+      if (block.groupEnd || (block.kind !== 'tool' && block.kind !== 'thinking')) break;
+      if (block.kind === 'tool' && block.done) closed = true;
     }
-    return '';
+    let pick = unbound || nearest;
+    if (!pick) return '';
+    pick.bound = true;
+    return pick.text;
   };
   // A label no tool call took is plain text: show it without the glyph so nothing is lost.
   const settleLabels = blocks => {
@@ -166,15 +172,15 @@
   // activity line; its MCP app anchors are hoisted after it so app views stay
   // visible while the step history is folded away.
   const activityHtml = (blocks, start, end) => {
-    let all = blocks.slice(start, end), steps = all.filter(b => b.kind !== 'label'), last = steps[steps.length - 1] || all[all.length - 1];
-    let running = end === blocks.length && !last.groupEnd;
+    let all = blocks.slice(start, end), steps = all.filter(b => b.kind !== 'label'), tail = all[all.length - 1], last = steps[steps.length - 1] || tail;
+    let running = end === blocks.length && !tail.groupEnd;
     if (!steps.length && !running) return '';
     let tools = steps.filter(b => b.kind === 'tool'), failed = tools.filter(b => b.is_error).length;
     let endTs = last.groupEnd || (end < blocks.length ? blocks[end].ts : null) || (tools.length && !running ? Math.max(...tools.map(t => t.endTs || 0)) : null);
     let worked = duration((steps[0] || last).ts, endTs);
     let label;
     if (running) {
-      let named = last.kind === 'label' ? last.text : last.kind === 'tool' ? stepLabel(last, blocks[start + all.indexOf(last) - 1]) : '';
+      let named = tail.kind === 'label' ? tail.text : last.kind === 'tool' ? stepLabel(last, blocks[start + all.indexOf(last) - 1]) : '';
       if (named) label = `<span title="${esc(last.name || '')}">${esc(named)}</span>`;
       else label = last.kind === 'tool' ? `<span class="chat-activity-name">${esc(last.name)}</span><span class="chat-activity-arg">${esc(argSummary(last.args))}</span>` : 'Thinking…';
     }

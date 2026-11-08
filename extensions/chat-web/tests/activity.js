@@ -161,6 +161,32 @@ page = text(html(labeled));
 assert.equal((page.match(/Read the chat styles/g) || []).length, 2, 'a finished batch does not hand its label to a later call');
 assert.match(page, /\[Running\]\s*bash git status/, 'an unlabeled shell call falls back to the raw summary');
 
+// A second label shows on the live line as soon as it arrives, not after its tool call (chat-codex sends the call late).
+let second = play([
+  { type: 'activity', text: 'Read the first file', ts: T },
+  { type: 'tool_call', id: 's1', name: 'bash', args: '{"command":"cat a"}', ts: T + 100 },
+  { type: 'tool_output', id: 's1', text: 'a', done: true, ts: T + 200 },
+  { type: 'activity', text: 'Check the second file', ts: T + 300 },
+]);
+page = text(html(second));
+assert.match(page, /\[Running\]\s*Check the second file/, 'the live line reads the newest label');
+assert.doesNotMatch(page, /\[Running\]\s*Read the first file/, 'the live line no longer shows the finished step');
+
+// Labels written ahead of their calls (runner-builtin streams all text first) pair with the calls in order.
+let fifo = play([
+  { type: 'activity', text: 'Open the first file', ts: T },
+  { type: 'activity', text: 'Open the second file', ts: T + 10 },
+  { type: 'tool_call', id: 'f1', name: 'bash', args: '{"command":"cat a"}', ts: T + 100 },
+  { type: 'tool_call', id: 'f2', name: 'bash', args: '{"command":"cat b"}', ts: T + 110 },
+  { type: 'tool_output', id: 'f1', text: 'a', done: true, ts: T + 200 },
+  { type: 'tool_output', id: 'f2', text: 'b', done: true, ts: T + 210 },
+  { type: 'finished', ts: T + 300 },
+]);
+page = text(html(fifo));
+assert.match(page, /bash Open the first file.*bash Open the second file/s, 'each call takes the next label');
+assert.equal((page.match(/Open the first file/g) || []).length, 1, 'no label is left over as stray text');
+assert.equal((page.match(/Open the second file/g) || []).length, 1);
+
 // A label no tool call takes comes back as plain text at the turn end, without the glyph.
 let orphan = play([
   { type: 'activity', text: 'All set', ts: T },

@@ -52,7 +52,7 @@ const ACTIVITY_LABEL_MAX: usize = 120;
 
 /// System-prompt rule that teaches the model the activity marker. Only
 /// surfaces that render activity labels (web chat) add it to their prompt.
-pub const ACTIVITY_INSTRUCTION: &str = "Before each tool call, or before each batch of parallel tool calls, write one line that starts with `» ` and gives 3 to 8 plain words for the user. Example: `» Read the chat styles`. Example: `» Check the open pull requests`. Do not write a `»` line before your final answer.";
+pub const ACTIVITY_INSTRUCTION: &str = "Before each tool call, or before each batch of parallel tool calls, write one line that starts with `» ` and gives 3 to 8 plain words for the user. Put it on its own line as plain text: not in bold, a list, or a code block. Example: `» Read the chat styles`. Example: `» Check the open pull requests`. Do not write a `»` line before your final answer.";
 
 /// The label of a complete marker line (`» label`), or `None` when `line` is
 /// not a well-formed marker. The line must have no newline.
@@ -101,6 +101,16 @@ impl ActivityFilter {
                 role: ChatRole::Assistant,
                 text,
             } => self.push_text(&text),
+            // Thinking between two assistant chunks: the next chunk starts a new line.
+            ChatEvent::Delta {
+                role: ChatRole::Thinking,
+                ..
+            } => {
+                if self.line == Line::Plain {
+                    self.end_plain_line();
+                }
+                vec![event]
+            }
             ChatEvent::ToolCall { .. } => self.boundary(true, event),
             ChatEvent::ToolOutput { .. }
             | ChatEvent::Error(_)
@@ -758,6 +768,71 @@ mod tests {
         assert_eq!(
             activity(vec![thinking("» Plan the work\n"), tool()]),
             ["Thinking:» Plan the work\n", "tool"]
+        );
+    }
+
+    #[test]
+    fn thinking_between_chunks_starts_a_new_line() {
+        // Interleaved thinking: the marker is the first text of a line again.
+        assert_eq!(
+            activity(vec![
+                assistant("Let me check.".into()),
+                thinking("hm"),
+                assistant("» Read x\n".into()),
+                tool(),
+            ]),
+            [
+                "Assistant:Let me check.",
+                "Thinking:hm",
+                "label:Read x",
+                "tool"
+            ]
+        );
+    }
+
+    #[test]
+    fn turn_edges_reset_fence_and_held_marker() {
+        // An unclosed fence does not hide the next turn's marker.
+        assert_eq!(
+            activity(vec![
+                assistant("```\n".into()),
+                done(),
+                assistant("» Read x\n".into()),
+                tool(),
+            ]),
+            ["Assistant:```\n", "done", "label:Read x", "tool"]
+        );
+        // An aborted turn releases a half-held marker as text; the next turn starts clean.
+        let aborted = ChatEvent::TurnFinished {
+            ok: false,
+            error: Some("aborted".into()),
+        };
+        assert_eq!(
+            activity(vec![
+                assistant("» Rea".into()),
+                aborted,
+                assistant("d\n".into()),
+                done(),
+            ]),
+            ["Assistant:Rea", "done", "Assistant:d\n", "done"]
+        );
+        // A new turn start also resets the filter.
+        let started = ChatEvent::TurnStarted {
+            origin: crate::TurnOrigin::Submitted,
+        };
+        assert_eq!(
+            activity(vec![
+                assistant("```\n".into()),
+                started,
+                assistant("» Read x\n".into()),
+                tool(),
+            ]),
+            [
+                "Assistant:```\n",
+                "TurnStarted { origin: Submitted }",
+                "label:Read x",
+                "tool"
+            ]
         );
     }
 

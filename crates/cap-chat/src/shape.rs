@@ -996,6 +996,29 @@ process.stdin.on("data", (d) => (t += d)).on("end", () => {
     }
 
     #[tokio::test]
+    async fn activity_label_passes_live_while_shaped_text_is_held() {
+        let (_dir, shape) = setup("");
+        let script = vec![vec![
+            text("Checking.\n"),
+            text("» Read the styles\n"),
+            tool("t"),
+            text("Done."),
+            done(),
+        ]];
+        let (mut s, mut rx, _) = open(Some(shape), script).await;
+        s.send_human_turn("hi".into()).await.unwrap();
+        let got = turn(&mut rx).await;
+        let at = |needle: &str| got.iter().position(|e| e.contains(needle));
+        let label = at("Activity { label: \"Read the styles\" }").expect("label delivered");
+        let first_text = at("text:").expect("text delivered");
+        assert!(
+            label < first_text,
+            "label is not held with the text: {got:?}"
+        );
+        assert!(got.iter().all(|e| !e.contains('»')), "{got:?}");
+    }
+
+    #[tokio::test]
     async fn on_holds_text_then_passes() {
         let (_dir, shape) = setup("");
         let (mut s, mut rx, prompts) =
