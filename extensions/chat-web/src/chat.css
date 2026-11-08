@@ -537,6 +537,7 @@ body:has(.chat-web) #content {
 }
 .chat-activity-label {
   display: inline-flex;
+  align-items: baseline;
   gap: 0.4rem;
   min-width: 0;
   overflow: hidden;
