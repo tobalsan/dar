@@ -487,6 +487,8 @@ impl ChatState {
             ChatEvent::Error(message) => self.blocks.push(ChatBlock::Error(message)),
             // Silent turn (NO_REPLY / loop guard): render nothing.
             ChatEvent::Silent { .. } => {}
+            // The TUI prompt has no activity rule; a label would only decorate tools.
+            ChatEvent::Activity { .. } => {}
             ChatEvent::ContextUsage {
                 tokens_used,
                 context_window,

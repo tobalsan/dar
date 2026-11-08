@@ -512,7 +512,15 @@ pub fn read_events(
 }
 
 fn normalize_events(value: Value) -> Vec<Value> {
-    if value
+    if is_normalized(&value) {
+        return vec![value];
+    }
+    project_activity(normalize_message(value))
+}
+
+/// True for a line already in the chat-web event shape.
+fn is_normalized(value: &Value) -> bool {
+    value
         .get("type")
         .and_then(Value::as_str)
         .is_some_and(|kind| {
@@ -534,11 +542,42 @@ fn normalize_events(value: Value) -> Vec<Value> {
                     | "compaction_started"
                     | "compaction_finished"
                     | "reset"
+                    | "activity"
             )
         })
-    {
-        return vec![value];
+}
+
+/// Replay the live activity stage on one archived message: `» label` lines
+/// in assistant text become `activity` events, as they were live. The raw
+/// archive keeps the marker text. A marker with no tool call later in the
+/// same message stays text without its glyph.
+fn project_activity(events: Vec<Value>) -> Vec<Value> {
+    let is = |event: &Value, kind: &str| event.get("type").and_then(Value::as_str) == Some(kind);
+    let mut out = Vec::with_capacity(events.len());
+    for (index, event) in events.iter().enumerate() {
+        let text = event.get("text").and_then(Value::as_str);
+        let Some(text) = text.filter(|text| is(event, "delta") && text.contains('»')) else {
+            out.push(event.clone());
+            continue;
+        };
+        let tool_follows = events[index + 1..]
+            .iter()
+            .any(|event| is(event, "tool_call"));
+        for part in cap_chat::split_activity(text, tool_follows) {
+            let (kind, text) = match part {
+                cap_chat::ActivityPart::Text(text) => ("delta", text),
+                cap_chat::ActivityPart::Label(label) => ("activity", label),
+            };
+            let mut piece = event.clone();
+            piece["type"] = kind.into();
+            piece["text"] = text.into();
+            out.push(piece);
+        }
     }
+    out
+}
+
+fn normalize_message(value: Value) -> Vec<Value> {
     if value.get("type").and_then(Value::as_str) == Some("compaction") {
         if let Some(summary) = value
             .get("summary")
@@ -2040,6 +2079,37 @@ not json
         assert_eq!(page.events[1]["args"], "{\"q\":\"x\"}");
         assert_eq!(page.events[2]["type"], "tool_output");
         assert_eq!(page.events[2]["text"], "result");
+    }
+
+    #[test]
+    fn read_events_turns_marker_lines_into_activity_events() {
+        let temp = tempfile::tempdir().unwrap();
+        write(temp.path(), "2024-06-15T12:30:00Z_a.jsonl", concat!(
+            "{\"type\":\"session\",\"id\":\"sess\"}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Looking.\\n» Read the styles\\n\"},{\"type\":\"toolCall\",\"id\":\"t1\",\"name\":\"bash\",\"arguments\":{\"command\":\"ls\"}}]}}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":\"» All done\"}}\n"
+        ));
+        let events = read_events(temp.path(), "sess", 0, READ_MAX)
+            .unwrap()
+            .events;
+        let shape: Vec<_> = events
+            .iter()
+            .map(|e| {
+                (
+                    e["type"].as_str().unwrap(),
+                    e["text"].as_str().unwrap_or(""),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("delta", "Looking.\n"),
+                ("activity", "Read the styles"),
+                ("tool_call", ""),
+                ("delta", "All done"),
+            ]
+        );
     }
 
     #[test]

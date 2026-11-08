@@ -117,6 +117,30 @@ try {
   await ring.hover();
   await page.getByRole('tooltip').filter({ hasText: '130,000 / 200,000 tokens · 65%' }).waitFor();
   pass('the context ring reads as a gauge (65%) and keeps its usage tooltip');
+
+  // A `» label` names the call: the live line and the step read it, the raw command stays in Input; a call with no label uses the formatter.
+  const shown = text => log.getByText(text, { exact: true }).filter({ visible: true });
+  await event({ type: 'user', text: 'Which styles apply?', ts: T + 30_000 });
+  await event({ type: 'activity', text: 'Read the chat styles', ts: T + 30_100 });
+  await shown('Read the chat styles').waitFor();
+  pass('a label shows on the live line before its tool call arrives');
+  await event({ type: 'tool_call', id: 'l1', name: 'bash', args: '{"command":"sed -n 555,580p chat.css"}', ts: T + 30_200 });
+  await shown('Read the chat styles').waitFor();
+  assert.equal(await log.getByText('sed -n 555,580p chat.css').filter({ visible: true }).count(), 0, 'the raw command is not on the live line');
+  await event({ type: 'tool_output', id: 'l1', text: '.chat-step {}', done: true, ts: T + 30_400 });
+  await event({ type: 'tool_call', id: 'l2', name: 'read', args: '{"path":"/repo/src/chat.css"}', ts: T + 30_500 });
+  await event({ type: 'tool_output', id: 'l2', text: 'css', done: true, ts: T + 30_600 });
+  await event({ type: 'delta', text: 'The step styles are in chat.css.', ts: T + 31_000 });
+  await event({ type: 'finished', ts: T + 31_100 });
+  const labeled = log.getByText(/Worked for .* · 2 tool calls$/);
+  await labeled.click();
+  await shown('Read the chat styles').waitFor();
+  await shown('Read chat.css').waitFor();
+  pass('a labeled step and an unlabeled read step show plain labels');
+  assert.equal(await log.getByText('sed -n 555,580p chat.css').filter({ visible: true }).count(), 0, 'the raw command stays folded until the step opens');
+  await shown('Read the chat styles').click();
+  await log.getByText('sed -n 555,580p chat.css').filter({ visible: true }).waitFor();
+  pass('opening a labeled step shows the raw command in Input');
   assert.deepEqual(failures, [], 'No uncaught browser errors');
 } finally {
   await browser?.close();

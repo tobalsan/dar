@@ -31,9 +31,24 @@
   // Any event that is not a tool/thinking step closes the trailing activity
   // group; its timestamp is the group's end (used for "Worked for").
   const endActivity = (blocks, ts) => { let last = blocks.at(-1); if (last && (last.kind === 'tool' || last.kind === 'thinking') && !last.groupEnd) last.groupEnd = ts; };
+  // The label a new tool call takes: the nearest label of its group. Parallel calls share it; a finished tool closes the batch.
+  const takeLabel = blocks => {
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      let block = blocks[i];
+      if (block.kind === 'label') { block.bound = true; return block.text; }
+      if (block.groupEnd || (block.kind !== 'tool' && block.kind !== 'thinking') || (block.kind === 'tool' && block.done)) return '';
+    }
+    return '';
+  };
+  // A label no tool call took is plain text: show it without the glyph so nothing is lost.
+  const settleLabels = blocks => {
+    let changed = false;
+    for (let block of blocks) if (block.kind === 'label' && !block.bound) { block.kind = 'assistant'; changed = true; }
+    return changed;
+  };
   const reduceInto = (blocks, event) => {
     let next = blocks, text = event.text || '';
-    if (!['thinking', 'tool_call', 'tool_output', 'context_usage', 'reset'].includes(event.type)) endActivity(next, at(event));
+    if (!['thinking', 'tool_call', 'tool_output', 'context_usage', 'reset', 'activity'].includes(event.type)) endActivity(next, at(event));
     if (['finished', 'aborted', 'closed'].includes(event.type)) {
       let index = next.findLastIndex(block => block.kind === 'compaction' && block.pending);
       if (index >= 0) {
@@ -60,11 +75,13 @@
         if (last && last.kind === kind && !last.groupEnd) { last.text += text; return next.length - 1; }
         next.push({ kind, text, ts: at(event) }); return next.length - 1;
       }
+      // A `» label` line from the model: names the tool call(s) that follow. It stays hidden once a call takes it.
+      case 'activity': { let label = text.trim(); if (!label) return -1; next.push({ kind: 'label', text: label, ts: at(event), bound: false }); return next.length - 1; }
       case 'tool_call': {
         // A tool_output that arrived first left a bare placeholder: fill it in rather than adding a second step.
         let last = next.at(-1);
         if (last && last.kind === 'tool' && last.id === event.id && last.name === last.id && !last.args) { Object.assign(last, { name: event.name || event.id, args: event.args || '', ts: at(event) }); return next.length - 1; }
-        next.push({ kind: 'tool', id: event.id, name: event.name || event.id, args: event.args || '', ts: at(event), text: '', is_error: false, done: false }); return next.length - 1;
+        next.push({ kind: 'tool', id: event.id, name: event.name || event.id, args: event.args || '', ts: at(event), text: '', is_error: false, done: false, label: takeLabel(next) }); return next.length - 1;
       }
       case 'tool_output': {
         let index = next.length - 1;
@@ -97,9 +114,9 @@
   // Pending questions can't outlive their turn: any terminal turn event marks
   // them dismissed so the UI never sticks on "pending" (e.g. when an abort
   // discards a late opencode rejected event). 'reset' already replaces every
-  // block wholesale.
+  // block wholesale. The same turn end settles labels no tool call took.
   const dismissPendingQuestions = blocks => {
-    let changed = false;
+    let changed = settleLabels(blocks);
     for (const block of blocks) if (block.kind === 'question' && !block.done) { block.done = true; block.rejected = true; block.answerText = 'dismissed'; changed = true; }
     return changed;
   };
@@ -119,23 +136,53 @@
   const CHEV = '<svg class="chat-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>';
   const SPIN = '<svg class="chat-spin" viewBox="0 0 16 16" fill="none" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 2a6 6 0 0 1 6 6"/></svg>';
   const OK = '<i class="chat-ok" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5 6.5 11.5 12.5 4.5"/></svg></i>';
-  const isActivity = block => block && (block.kind === 'tool' || block.kind === 'thinking');
+  const isActivity = block => block && (block.kind === 'tool' || block.kind === 'thinking' || block.kind === 'label');
+
+  // Plain-words step label, best source first: the model's `» label`, a short bold title that ends the Thinking block right before the call,
+  // a fixed phrase for well-known tools, else '' (the caller falls back to the raw argument summary).
+  const base = path => String(path).split(/[\\/]/).filter(Boolean).pop() || String(path);
+  const readable = name => { let text = String(name).replace(/[_-]+/g, ' ').trim(); return text ? text[0].toUpperCase() + text.slice(1) : ''; };
+  const formatTool = tool => {
+    let name = String(tool.name || '').toLowerCase().split('__').pop(), args = {};
+    try { args = typeof tool.args === 'string' ? JSON.parse(tool.args) : tool.args || {}; } catch (_) {}
+    if (!args || typeof args !== 'object') args = {};
+    let path = args.path || args.file_path || args.filePath || args.file, word = args.pattern || args.query || args.regex || args.glob || args.name;
+    if (/^(read|view|cat)(_file)?$/.test(name)) return path ? `Read ${base(path)}` : '';
+    if (/^(write|create)(_file)?$/.test(name)) return path ? `Write ${base(path)}` : '';
+    if (/^(edit|multiedit|str_replace\w*)(_file)?$/.test(name)) return path ? `Edit ${base(path)}` : '';
+    if (/^(grep|rg|search)$/.test(name)) return word ? `Search for ${String(word).slice(0, 60)}` : '';
+    if (/^(find|glob)$/.test(name)) return word ? `Find ${String(word).slice(0, 60)}` : '';
+    if (/^(ls|list)$/.test(name)) return `List ${base(path || args.dir || args.directory || '.')}`;
+    return String(tool.name || '').includes('__') ? readable(name) : '';
+  };
+  const thinkTitle = block => {
+    if (!block || block.kind !== 'thinking') return '';
+    let match = /^\*\*([^*]{1,60})\*\*$/.exec(block.text.trim().split('\n')[0].trim());
+    return match ? match[1].trim() : '';
+  };
+  const stepLabel = (tool, prev) => tool.label || thinkTitle(prev) || formatTool(tool);
 
   // One consecutive run of tool/thinking blocks collapses into a single
   // activity line; its MCP app anchors are hoisted after it so app views stay
   // visible while the step history is folded away.
   const activityHtml = (blocks, start, end) => {
-    let steps = blocks.slice(start, end), last = steps[steps.length - 1];
+    let all = blocks.slice(start, end), steps = all.filter(b => b.kind !== 'label'), last = steps[steps.length - 1] || all[all.length - 1];
     let running = end === blocks.length && !last.groupEnd;
+    if (!steps.length && !running) return '';
     let tools = steps.filter(b => b.kind === 'tool'), failed = tools.filter(b => b.is_error).length;
     let endTs = last.groupEnd || (end < blocks.length ? blocks[end].ts : null) || (tools.length && !running ? Math.max(...tools.map(t => t.endTs || 0)) : null);
-    let worked = duration(steps[0].ts, endTs);
+    let worked = duration((steps[0] || last).ts, endTs);
     let label;
-    if (running) label = last.kind === 'tool' ? `<span class="chat-activity-name">${esc(last.name)}</span><span class="chat-activity-arg">${esc(argSummary(last.args))}</span>` : 'Thinking…';
+    if (running) {
+      let named = last.kind === 'label' ? last.text : last.kind === 'tool' ? stepLabel(last, blocks[start + all.indexOf(last) - 1]) : '';
+      if (named) label = `<span title="${esc(last.name || '')}">${esc(named)}</span>`;
+      else label = last.kind === 'tool' ? `<span class="chat-activity-name">${esc(last.name)}</span><span class="chat-activity-arg">${esc(argSummary(last.args))}</span>` : 'Thinking…';
+    }
     else if (!tools.length) label = esc(worked ? `Thought for ${worked}` : 'Thought');
     else label = esc(`${worked ? `Worked for ${worked} · ` : ''}${tools.length} tool call${tools.length === 1 ? '' : 's'}${failed ? ` · ${failed} failed` : ''}`);
-    let hist = steps.map((b, k) => {
-      let i = start + k, live = running && k === steps.length - 1, next = blocks[i + 1];
+    let hist = all.map((b, k) => {
+      let i = start + k, live = running && k === all.length - 1, next = blocks[i + 1];
+      if (b.kind === 'label') return '';
       if (b.kind === 'thinking') {
         let first = b.text.trim().split('\n')[0].slice(0, 160), took = duration(b.ts, next ? next.ts : b.groupEnd);
         return `<div class="chat-step" data-state="${live ? 'run' : 'done'}"><span class="chat-step-node"><i class="${live ? 'chat-step-pulse' : 'chat-step-ring'}"></i></span><details class="chat-step-tool" data-bi="${i}"><summary><span class="chat-step-think">${esc(first)}</span><span class="chat-step-meta">${took ? `<time>${took}</time>` : ''}</span>${CHEV}</summary><div class="chat-step-io"><div><div class="chat-step-k">Thought</div><p>${esc(b.text)}</p></div></div></details></div>`;
@@ -145,7 +192,7 @@
       let node = state === 'bad' ? '<i class="chat-step-bad">!</i>' : state === 'run' ? '<i class="chat-step-pulse"></i>' : state === 'stopped' ? '<i class="chat-step-ring"></i>' : OK;
       let meta = `${b.is_error ? '<span class="chat-step-failed">Failed</span>' : state === 'stopped' ? '<span class="chat-step-stopped">Interrupted</span>' : ''}${took ? `<time>${took}</time>` : ''}`;
       let output = b.text ? esc(b.text) : state === 'run' ? 'Running…' : '';
-      return `<div class="chat-step" data-state="${state}"><span class="chat-step-node">${node}</span><details class="chat-step-tool" data-tool-id="${esc(b.id)}" data-bi="${i}"><summary><span class="chat-step-name">${esc(b.name)}</span><span class="chat-step-arg">${esc(argSummary(b.args))}</span><span class="chat-step-meta">${meta}</span>${CHEV}</summary><div class="chat-step-io"><div><div class="chat-step-k">Input</div><pre>${esc(b.args)}</pre></div><div><div class="chat-step-k">Output</div><pre class="chat-step-out${b.is_error ? ' is-error' : ''}">${output}</pre></div></div></details></div>`;
+      return `<div class="chat-step" data-state="${state}"><span class="chat-step-node">${node}</span><details class="chat-step-tool" data-tool-id="${esc(b.id)}" data-bi="${i}"><summary><span class="chat-step-name">${esc(b.name)}</span><span class="chat-step-arg">${esc(stepLabel(b, blocks[i - 1]) || argSummary(b.args))}</span><span class="chat-step-meta">${meta}</span>${CHEV}</summary><div class="chat-step-io"><div><div class="chat-step-k">Input</div><pre>${esc(b.args)}</pre></div><div><div class="chat-step-k">Output</div><pre class="chat-step-out${b.is_error ? ' is-error' : ''}">${output}</pre></div></div></details></div>`;
     }).join('');
     let anchors = tools.filter(t => t.app).map(t => `<div data-app-anchor="${esc(t.app.recordId)}"></div>`).join('');
     return `<details class="chat-activity" data-state="${running ? 'run' : 'done'}" data-bi="g${start}"><summary><span class="chat-activity-glyph" role="img" aria-label="${running ? 'Running' : 'Done'}">${running ? SPIN : OK}</span><span class="chat-activity-label">${label}</span>${CHEV}</summary><div class="chat-activity-hist">${hist}</div></details>${anchors}`;

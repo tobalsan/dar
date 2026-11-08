@@ -85,7 +85,7 @@ let replay = play([
   { type: 'delta', text: 'done', historical: true, ts: T + 800 },
   { type: 'finished', historical: true, ts: T + 900 },
 ]);
-assert.match(text(html(replay)), /old.*Worked for 0\.7s · 1 tool call read x.*content.*done/);
+assert.match(text(html(replay)), /old.*Worked for 0\.7s · 1 tool call read Read x.*content.*done/);
 
 // Agent replies are plain text with a hover time; user bubbles have no header row.
 let plain = play([{ type: 'user', text: 'hey', ts: T }, { type: 'delta', text: 'hello', ts: T + 10 }]);
@@ -135,5 +135,65 @@ let early = play([
 page = text(html(early));
 assert.match(page, /1 tool call(?!s)/, 'one tool call counted');
 assert.match(page, /bash echo hi.*Output early output/s, 'the step carries the call and its output');
+
+// A `» label` names the tool calls after it: live line, step row, and a parallel batch. The raw command stays in Input.
+let labeled = play([
+  { type: 'user', text: 'Style check', ts: T },
+  { type: 'activity', text: 'Read the chat styles', ts: T + 100 },
+]);
+page = text(html(labeled));
+assert.match(page, /\[Running\].*Read the chat styles/s, 'a label shows on the live line before its tool call arrives');
+labeled = play([
+  { type: 'tool_call', id: 'l1', name: 'bash', args: '{"command":"sed -n 555,580p chat.css"}', ts: T + 200 },
+  { type: 'tool_call', id: 'l2', name: 'bash', args: '{"command":"wc -l chat.css"}', ts: T + 210 },
+], labeled);
+page = text(html(labeled));
+assert.match(page, /\[Running\]\s*Read the chat styles/, 'the live line shows the label, not the raw command');
+assert.doesNotMatch(page, /bash sed -n 555,580p chat\.css/, 'the raw command is not the live label');
+assert.equal((page.match(/Read the chat styles/g) || []).length, 3, 'live line plus both calls of the parallel batch carry the label');
+assert.match(page, /Input\s*\{?"?command"?.*sed -n 555,580p chat\.css/s, 'the raw command stays in the Input well');
+labeled = play([
+  { type: 'tool_output', id: 'l1', text: 'a', done: true, ts: T + 300 },
+  { type: 'tool_output', id: 'l2', text: 'b', done: true, ts: T + 310 },
+  { type: 'tool_call', id: 'l3', name: 'bash', args: '{"command":"git status"}', ts: T + 400 },
+], labeled);
+page = text(html(labeled));
+assert.equal((page.match(/Read the chat styles/g) || []).length, 2, 'a finished batch does not hand its label to a later call');
+assert.match(page, /\[Running\]\s*bash git status/, 'an unlabeled shell call falls back to the raw summary');
+
+// A label no tool call takes comes back as plain text at the turn end, without the glyph.
+let orphan = play([
+  { type: 'activity', text: 'All set', ts: T },
+  { type: 'finished', ts: T + 100 },
+]);
+page = text(html(orphan));
+assert.match(page, /All set/, 'an orphan label is shown as text');
+assert.doesNotMatch(page, /»/, 'the glyph is gone');
+assert.doesNotMatch(page, /\[Running\]/, 'an orphan label leaves no running line');
+
+// Without a label: a bold Thinking title, then a fixed phrase for known tools, then the raw summary.
+const steps = (events) => text(html(play(events)));
+page = steps([
+  { type: 'thinking', text: '**Checking git status**\nLet me look.', ts: T },
+  { type: 'tool_call', id: 'g1', name: 'bash', args: '{"command":"git status --short"}', ts: T + 100 },
+]);
+assert.match(page, /\[Running\]\s*Checking git status/, 'a short bold thinking title labels the next call');
+page = steps([
+  { type: 'thinking', text: 'Paste should reuse the drag and drop check.', ts: T },
+  { type: 'tool_call', id: 'g2', name: 'bash', args: '{"command":"rg -n isSupportedFile src"}', ts: T + 100 },
+]);
+assert.match(page, /bash rg -n isSupportedFile src/, 'a plain thinking sentence is not a label');
+for (const [name, args, want] of [
+  ['read', { path: '/repo/src/chat.css' }, 'Read chat.css'],
+  ['write', { path: 'notes/x.md' }, 'Write x.md'],
+  ['edit', { file_path: '/repo/src/renderer.js' }, 'Edit renderer.js'],
+  ['grep', { pattern: 'isSupportedFile' }, 'Search for isSupportedFile'],
+  ['find', { pattern: '*.rs' }, 'Find *.rs'],
+  ['ls', { path: '/repo/crates' }, 'List crates'],
+  ['mcp__dar__artifact_publish', { name: 'x' }, 'Artifact publish'],
+]) {
+  page = steps([{ type: 'tool_call', id: 'f', name, args: JSON.stringify(args), ts: T }]);
+  assert.match(page, new RegExp(`\\[Running\\]\\s*${want.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), `${name} reads "${want}"`);
+}
 
 console.log('activity ok');

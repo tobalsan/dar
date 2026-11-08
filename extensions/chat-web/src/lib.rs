@@ -1259,10 +1259,15 @@ impl AppState {
         } else {
             "web chat"
         };
-        let params = chat::agent_session_params_with_interface(start, &session_dir, interface)
+        let mut params = chat::agent_session_params_with_interface(start, &session_dir, interface)
             .command(self.config.command.as_deref().unwrap_or(""))
             .resume_session_id(resume_session_id)
             .build();
+        // Only web chat renders activity labels. An empty identity stays empty
+        // so the backend keeps its default system prompt.
+        params.system_prompt = params
+            .system_prompt
+            .map(|prompt| format!("{prompt}\n\n{}", chat::ACTIVITY_INSTRUCTION));
         let generation = session
             .generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -1981,6 +1986,20 @@ impl Session {
             } => (
                 "thinking",
                 Some(text),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            ChatEvent::Activity { label } => (
+                "activity",
+                Some(label),
                 None,
                 None,
                 None,
@@ -5689,6 +5708,7 @@ mod tests {
             prompt.contains("[ENVIRONMENT]\ninterface: web chat\n"),
             "{prompt}"
         );
+        assert!(prompt.ends_with(chat::ACTIVITY_INSTRUCTION), "{prompt}");
         assert_eq!(user_turns.try_recv().unwrap(), "Hello");
         settle().await;
         let coordinator = start

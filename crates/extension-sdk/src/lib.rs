@@ -39,8 +39,8 @@ pub mod chat {
     use serde::Deserialize;
 
     pub use cap_chat::{
-        is_no_reply, AgentLoopConfig, AgentSender, SilentReason, NO_REPLY_INSTRUCTION,
-        NO_REPLY_TOKEN,
+        is_no_reply, AgentLoopConfig, AgentSender, SilentReason, ACTIVITY_INSTRUCTION,
+        NO_REPLY_INSTRUCTION, NO_REPLY_TOKEN,
     };
     pub use cap_chat::{
         ArtifactReady, BoxFuture, ChatBackend, ChatCoordinator, ChatEvent, ChatRole, ChatSession,

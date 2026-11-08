@@ -15,8 +15,9 @@ mod shape;
 mod silence;
 pub use shape::HumanChat;
 pub use silence::{
-    is_no_reply, open_guarded, open_shaped, AgentLoopConfig, AgentSender, LoopGuard, NoReplyFilter,
-    SilentReason, NO_REPLY_INSTRUCTION, NO_REPLY_TOKEN,
+    is_no_reply, open_guarded, open_shaped, split_activity, ActivityFilter, ActivityPart,
+    AgentLoopConfig, AgentSender, LoopGuard, NoReplyFilter, SilentReason, ACTIVITY_INSTRUCTION,
+    NO_REPLY_INSTRUCTION, NO_REPLY_TOKEN,
 };
 
 /// Parse the `/compact [instructions]` slash command.
@@ -315,6 +316,10 @@ pub enum ChatEvent {
     SessionReset,
     /// Streamed text; UI appends to current block of this role (new block on role change).
     Delta { role: ChatRole, text: String },
+    /// Short human label for the tool call(s) that follow, taken from a
+    /// `» label` line in the model text (see `ActivityFilter`). The line itself
+    /// is removed from the visible text.
+    Activity { label: String },
     /// Completed tool call (name + rendered args).
     ToolCall {
         id: String,

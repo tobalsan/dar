@@ -43,6 +43,185 @@ fn could_be_no_reply(text: &str) -> bool {
         .is_some_and(|rest| rest.chars().all(|c| c == '.' || is_decoration(c)))
 }
 
+/// Line-start glyph of an activity marker line.
+const ACTIVITY_GLYPH: char = '»';
+
+/// Longest accepted activity label, in characters. A longer marker line is
+/// not a label and stays normal text.
+const ACTIVITY_LABEL_MAX: usize = 120;
+
+/// System-prompt rule that teaches the model the activity marker. Only
+/// surfaces that render activity labels (web chat) add it to their prompt.
+pub const ACTIVITY_INSTRUCTION: &str = "Before each tool call, or before each batch of parallel tool calls, write one line that starts with `» ` and gives 3 to 8 plain words for the user. Example: `» Read the chat styles`. Example: `» Check the open pull requests`. Do not write a `»` line before your final answer.";
+
+/// The label of a complete marker line (`» label`), or `None` when `line` is
+/// not a well-formed marker. The line must have no newline.
+fn marker_label(line: &str) -> Option<String> {
+    let label = line.strip_prefix(ACTIVITY_GLYPH)?.strip_prefix(' ')?.trim();
+    (!label.is_empty() && label.chars().count() <= ACTIVITY_LABEL_MAX).then(|| label.to_owned())
+}
+
+/// Where the filter is inside the current assistant line.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Line {
+    /// No character of the line seen yet.
+    #[default]
+    Start,
+    /// The line starts with `»` and may still be a marker line; held back.
+    Held,
+    /// The line is normal text; released as it arrives.
+    Plain,
+}
+
+/// One piece of assistant text after marker extraction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ActivityPart {
+    Text(String),
+    Label(String),
+}
+
+/// Pulls `» label` lines out of assistant text and reports each as
+/// [`ChatEvent::Activity`]. Only text that could still be a marker line is held
+/// back (a line start `»`). All other text passes at once. Thinking text and
+/// text inside a code fence are never touched. A malformed marker stays text.
+#[derive(Default)]
+pub struct ActivityFilter {
+    line: Line,
+    /// Held text of the current line while `line` is [`Line::Held`].
+    held: String,
+    /// Start of the current plain line, to spot code fences.
+    probe: String,
+    fence: bool,
+}
+
+impl ActivityFilter {
+    pub fn push(&mut self, event: ChatEvent) -> Vec<ChatEvent> {
+        match event {
+            ChatEvent::Delta {
+                role: ChatRole::Assistant,
+                text,
+            } => self.push_text(&text),
+            ChatEvent::ToolCall { .. } => self.boundary(true, event),
+            ChatEvent::ToolOutput { .. }
+            | ChatEvent::Error(_)
+            | ChatEvent::TurnStarted { .. }
+            | ChatEvent::TurnFinished { .. }
+            | ChatEvent::SessionClosed { .. } => self.boundary(false, event),
+            other => vec![other],
+        }
+    }
+
+    fn push_text(&mut self, text: &str) -> Vec<ChatEvent> {
+        let mut out = Vec::new();
+        let mut plain = String::new();
+        for ch in text.chars() {
+            if self.line == Line::Start && ch == ACTIVITY_GLYPH && !self.fence {
+                self.line = Line::Held;
+            }
+            match self.line {
+                Line::Held => {
+                    self.held.push(ch);
+                    if ch == '\n' {
+                        let line = std::mem::take(&mut self.held);
+                        self.line = Line::Start;
+                        match marker_label(line.trim_end_matches(['\n', '\r'])) {
+                            Some(label) => {
+                                if !plain.is_empty() {
+                                    out.push(assistant(std::mem::take(&mut plain)));
+                                }
+                                out.push(ChatEvent::Activity { label });
+                            }
+                            None => plain.push_str(&line),
+                        }
+                    } else if !self.could_be_marker() {
+                        plain.push_str(&std::mem::take(&mut self.held));
+                        self.line = Line::Plain;
+                    }
+                }
+                Line::Start | Line::Plain => {
+                    self.line = Line::Plain;
+                    plain.push(ch);
+                    if ch == '\n' {
+                        self.end_plain_line();
+                    } else if self.probe.len() < 8 {
+                        self.probe.push(ch);
+                    }
+                }
+            }
+        }
+        if !plain.is_empty() {
+            out.push(assistant(plain));
+        }
+        out
+    }
+
+    /// True while the held line can still become a well-formed marker.
+    fn could_be_marker(&self) -> bool {
+        let mut chars = self.held.chars();
+        chars.next();
+        match chars.next() {
+            None | Some(' ') => chars.count() <= ACTIVITY_LABEL_MAX,
+            Some(_) => false,
+        }
+    }
+
+    fn end_plain_line(&mut self) {
+        if self.probe.trim_start().starts_with("```") {
+            self.fence = !self.fence;
+        }
+        self.probe.clear();
+        self.line = Line::Start;
+    }
+
+    /// A tool call or a turn edge ends the segment. A held marker line without
+    /// a newline becomes a label before a tool call and plain text otherwise.
+    fn boundary(&mut self, tool_follows: bool, event: ChatEvent) -> Vec<ChatEvent> {
+        let mut out = Vec::new();
+        if self.line == Line::Held {
+            let held = std::mem::take(&mut self.held);
+            match marker_label(held.trim_end_matches('\r')) {
+                Some(label) if tool_follows => out.push(ChatEvent::Activity { label }),
+                Some(label) => out.push(assistant(label)),
+                None => out.push(assistant(held)),
+            }
+        }
+        *self = Self::default();
+        out.push(event);
+        out
+    }
+}
+
+/// Split `text` into plain text and marker labels, as the live
+/// [`ActivityFilter`] does. `tool_follows` says whether a tool call comes
+/// after the text in the same message. Without one, a marker line stays text
+/// and loses its glyph.
+pub fn split_activity(text: &str, tool_follows: bool) -> Vec<ActivityPart> {
+    let mut filter = ActivityFilter::default();
+    let end = if tool_follows {
+        ChatEvent::ToolCall {
+            id: String::new(),
+            name: String::new(),
+            args: String::new(),
+        }
+    } else {
+        ChatEvent::TurnFinished {
+            ok: true,
+            error: None,
+        }
+    };
+    let events = filter.push(assistant(text.to_owned()));
+    let mut parts = Vec::new();
+    for event in events.into_iter().chain(filter.push(end)) {
+        match event {
+            ChatEvent::Delta { text, .. } => parts.push(ActivityPart::Text(text)),
+            ChatEvent::Activity { label } if tool_follows => parts.push(ActivityPart::Label(label)),
+            ChatEvent::Activity { label } => parts.push(ActivityPart::Text(format!("{label}\n"))),
+            _ => {}
+        }
+    }
+    parts
+}
+
 /// Why a turn delivered nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -290,8 +469,13 @@ where
     let out = tx.clone();
     tokio::spawn(async move {
         let mut filter = NoReplyFilter::default();
+        let mut activity = ActivityFilter::default();
         while let Some(event) = raw_rx.recv().await {
-            for event in filter.push(event) {
+            for event in filter
+                .push(event)
+                .into_iter()
+                .flat_map(|e| activity.push(e))
+            {
                 let open = match shaper.as_mut() {
                     Some(shaper) => shaper.push(event, &tx).await,
                     None => tx.send(event).await.is_ok(),
@@ -439,6 +623,182 @@ mod tests {
             done(),
         ]);
         assert_eq!(out, ["text:hm", "silent:NO_REPLY", "done"]);
+    }
+
+    fn thinking(text: &str) -> ChatEvent {
+        ChatEvent::Delta {
+            role: ChatRole::Thinking,
+            text: text.into(),
+        }
+    }
+
+    fn activity(events: Vec<ChatEvent>) -> Vec<String> {
+        let mut f = ActivityFilter::default();
+        events
+            .into_iter()
+            .flat_map(|e| f.push(e))
+            .map(|e| match e {
+                ChatEvent::Delta { role, text } => format!("{role:?}:{text}"),
+                ChatEvent::Activity { label } => format!("label:{label}"),
+                ChatEvent::ToolCall { .. } => "tool".into(),
+                ChatEvent::TurnFinished { .. } => "done".into(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn marker_split_across_deltas_becomes_a_label() {
+        assert_eq!(
+            activity(vec![
+                assistant("»".into()),
+                assistant(" Read the ".into()),
+                assistant("chat styles\n".into()),
+                tool(),
+                done(),
+            ]),
+            ["label:Read the chat styles", "tool", "done"]
+        );
+    }
+
+    #[test]
+    fn label_is_sent_at_once_before_a_late_tool_call() {
+        // chat-codex sends the ToolCall only after the tool finished.
+        let mut f = ActivityFilter::default();
+        let out = f.push(assistant("» Check git status\n".into()));
+        assert!(matches!(
+            out.as_slice(),
+            [ChatEvent::Activity { label }] if label == "Check git status"
+        ));
+    }
+
+    #[test]
+    fn unterminated_marker_line_becomes_a_label_at_the_tool_call() {
+        assert_eq!(
+            activity(vec![assistant("» Read it".into()), tool(), done()]),
+            ["label:Read it", "tool", "done"]
+        );
+    }
+
+    #[test]
+    fn normal_text_is_not_delayed() {
+        assert_eq!(
+            activity(vec![
+                assistant("Hel".into()),
+                assistant("lo\nsecond".into()),
+                done()
+            ]),
+            ["Assistant:Hel", "Assistant:lo\nsecond", "done"]
+        );
+        // Only the line start glyph is held; a lone glyph is released as text.
+        assert_eq!(
+            activity(vec![assistant("»x".into()), done()]),
+            ["Assistant:»x", "done"]
+        );
+    }
+
+    #[test]
+    fn text_around_a_marker_keeps_its_order() {
+        assert_eq!(
+            activity(vec![
+                assistant("I look.\n» Read a file\nDone looking".into()),
+                tool(),
+            ]),
+            [
+                "Assistant:I look.\n",
+                "label:Read a file",
+                "Assistant:Done looking",
+                "tool"
+            ]
+        );
+    }
+
+    #[test]
+    fn marker_inside_a_code_fence_is_ignored() {
+        assert_eq!(
+            activity(vec![
+                assistant("```\n» Read a file\n```\n".into()),
+                assistant("» Real label\n".into()),
+                tool(),
+            ]),
+            [
+                "Assistant:```\n» Read a file\n```\n",
+                "label:Real label",
+                "tool"
+            ]
+        );
+    }
+
+    #[test]
+    fn orphan_marker_at_turn_end_is_text_without_the_glyph() {
+        assert_eq!(
+            activity(vec![assistant("» All done".into()), done()]),
+            ["Assistant:All done", "done"]
+        );
+    }
+
+    #[test]
+    fn malformed_markers_stay_text() {
+        for text in ["»\n", "» \n", "»no space\n", "mid » line\n"] {
+            assert_eq!(
+                activity(vec![assistant(text.into()), done()]),
+                [format!("Assistant:{text}"), "done".into()],
+                "{text:?}"
+            );
+        }
+        let long = format!("» {}\n", "x".repeat(ACTIVITY_LABEL_MAX + 1));
+        assert_eq!(
+            activity(vec![assistant(long.clone()), done()]),
+            [format!("Assistant:{long}"), "done".into()]
+        );
+    }
+
+    #[test]
+    fn thinking_is_never_a_marker() {
+        assert_eq!(
+            activity(vec![thinking("» Plan the work\n"), tool()]),
+            ["Thinking:» Plan the work\n", "tool"]
+        );
+    }
+
+    #[test]
+    fn split_activity_projects_archived_text() {
+        let text = "Looking.\n» Read the styles\n";
+        assert_eq!(
+            split_activity(text, true),
+            [
+                ActivityPart::Text("Looking.\n".into()),
+                ActivityPart::Label("Read the styles".into())
+            ]
+        );
+        assert_eq!(
+            split_activity(text, false),
+            [
+                ActivityPart::Text("Looking.\n".into()),
+                ActivityPart::Text("Read the styles\n".into())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pump_turns_marker_lines_into_activity_events() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let session = open_guarded(AgentLoopConfig::default(), tx, |tx| async move {
+            Ok(Box::new(Model {
+                calls: Default::default(),
+                tx,
+                reply: "» Read the styles\n",
+            }) as Box<dyn ChatSession>)
+        })
+        .await
+        .unwrap();
+        let mut session = session;
+        session.send_turn("hi".into()).await.unwrap();
+        let events = drain_turn(&mut rx).await;
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::Activity { label } if label == "Read the styles")));
+        assert!(!events.iter().any(|e| matches!(e, ChatEvent::Delta { .. })));
     }
 
     fn agent(hops: Option<u32>) -> AgentSender {
