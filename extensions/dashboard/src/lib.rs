@@ -776,6 +776,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tab_nav_renders_light_dark_system_theme_radios() {
+        let state = make_state();
+        let _ = state.bus.set(Arc::new(host_api::EventBus::new()));
+        let registry = Arc::new(DashboardTabs::default());
+        registry.add(Arc::new(ClaimTab)).unwrap();
+        let _ = state.tabs.set(registry);
+        let resp = index(axum::extract::State(state), axum::http::HeaderMap::new()).await;
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains(r#"role="radiogroup""#));
+        for name in ["Light", "Dark", "System"] {
+            assert!(
+                html.contains(&format!(
+                    r#"role="radio" data-theme-choice="{}""#,
+                    name.to_lowercase()
+                )) && html.contains(&format!(r#"aria-label="{name}""#)),
+                "{name} theme radio rendered"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn index_passive_snapshot_activates_claiming_tab() {
         // No retained snapshot registered -> RunSnapshot::empty() (tracker
         // empty), which is the passive case.

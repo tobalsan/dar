@@ -130,7 +130,7 @@ try {
   await page.reload();
   await titleIs('Legacy migration notes');
   pass('keyboard opens archived old chat; header fallback survives reload outside list');
-  await page.getByRole('button', { name: 'Toggle light and dark theme' }).click();
+  await page.getByRole('radio', { name: 'Light', exact: true }).click();
   await open('pgbouncer pooling meridian');
   await palette().getByRole('option').filter({ hasText: 'Meridian PgBouncer pooling' }).waitFor();
   await page.screenshot({ path: path.join(evidence, '02-palette-light.png'), fullPage: true, animations: 'disabled' });
@@ -152,7 +152,7 @@ try {
   await ring.hover();
   assert.equal(await page.getByRole('tooltip').filter({ hasText: '83,632 / 200,000 tokens · 42%' }).isVisible(), true);
   await page.screenshot({ path: path.join(evidence, '04-context-light.png'), fullPage: true, animations: 'disabled' });
-  await page.getByRole('button', { name: 'Toggle light and dark theme' }).click();
+  await page.getByRole('radio', { name: 'Dark', exact: true }).click();
   await ring.focus();
   assert.equal(await page.getByRole('tooltip').filter({ hasText: '83,632 / 200,000 tokens · 42%' }).isVisible(), true);
   await page.screenshot({ path: path.join(evidence, '05-context-dark.png'), fullPage: true, animations: 'disabled' });
@@ -221,7 +221,7 @@ try {
   await palette().getByRole('option').filter({ hasText: 'Meridian PgBouncer pooling' }).waitFor();
   await page.screenshot({ path: path.join(evidence, '07-mobile-dark.png'), fullPage: true, animations: 'disabled' });
   await search().press('Escape');
-  await page.getByRole('button', { name: 'Toggle light and dark theme' }).click();
+  await page.getByRole('radio', { name: 'Light', exact: true }).click();
   await open('pgbouncer');
   await palette().getByRole('option').filter({ hasText: 'Meridian PgBouncer pooling' }).waitFor();
   await page.screenshot({ path: path.join(evidence, '08-mobile-light.png'), fullPage: true, animations: 'disabled' });

@@ -33,6 +33,31 @@
       window.EventSource.prototype = NativeEventSource.prototype;
     })();
   </script>
+  <script>
+    // Theme: choice (light|dark|system) lives in localStorage 'dar-theme';
+    // the resolved light|dark lands on <html data-theme>. Runs in <head> so the
+    // first paint is already themed; the body script wires the toggle to it.
+    window.__darTheme = (function () {
+      var mq = matchMedia('(prefers-color-scheme: dark)');
+      function choice() {
+        var v = null;
+        try { v = localStorage.getItem('dar-theme'); } catch (e) {}
+        return v === 'light' || v === 'dark' ? v : 'system';
+      }
+      function apply() {
+        var c = choice();
+        document.documentElement.dataset.theme = c === 'system' ? (mq.matches ? 'dark' : 'light') : c;
+        return c;
+      }
+      function set(c) {
+        try { localStorage.setItem('dar-theme', c); } catch (e) {}
+        return apply();
+      }
+      mq.addEventListener('change', function () { if (choice() === 'system') apply(); });
+      apply();
+      return { choice: choice, apply: apply, set: set };
+    })();
+  </script>
   <style>
     :root {
       --bg: #111317; --panel: #1b1f26; --panel-2: #202630; --border: #303844;
@@ -124,24 +149,38 @@
     ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
     ::-webkit-scrollbar-track { background: transparent; }
     .dash-tabs {
-      display: flex; gap: .35rem; padding: .55rem 1.25rem 0;
-      border-bottom: 1px solid var(--border); background: var(--panel);
+      display: flex; align-items: flex-end; gap: .15rem; padding: 0 1.25rem; min-height: 2.9rem;
+      border-bottom: 1px solid var(--border); background: var(--chrome);
     }
-    .theme-toggle { margin-left: auto; align-self: center; border-radius: 999px; }
-    .sound-toggle { margin-left: auto; margin-right: .35rem; align-self: center; border-radius: 999px; display: inline-flex; align-items: center; }
-    .sound-toggle + .theme-toggle { margin-left: 0; }
     .dash-tab {
-      border: 1px solid var(--border); border-bottom: none; background: var(--panel-2);
-      color: var(--muted); border-radius: 6px 6px 0 0; padding: .4rem .8rem;
+      border: none; background: var(--panel-2); color: var(--muted);
+      border-radius: 8px 8px 0 0; padding: .5rem .9rem; margin-bottom: -1px;
       font: inherit; cursor: pointer;
     }
-    .dash-tab:hover { color: var(--fg); border-color: var(--accent); }
-    .dash-tab.active { color: var(--fg); background: var(--panel); border-color: var(--accent); }
+    .dash-tab:hover { color: var(--fg); }
+    .dash-tab.active { color: var(--fg); background: var(--bg); }
+    .sound-toggle {
+      margin-left: auto; align-self: center; width: 2rem; height: 2rem; padding: 0; border: none;
+      border-radius: 999px; background: transparent; color: var(--muted);
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .sound-toggle:hover { background: var(--panel-2); color: var(--fg); }
+    .theme-seg {
+      margin-left: .75rem; align-self: center; display: inline-flex; gap: 2px; padding: 3px;
+      border-radius: 999px; background: var(--panel-2);
+    }
+    .theme-seg button {
+      width: 1.8rem; height: 1.6rem; padding: 0; border: none; border-radius: 999px;
+      background: transparent; color: var(--muted); display: inline-grid; place-items: center;
+    }
+    .theme-seg button:hover { color: var(--fg); }
+    .theme-seg button[aria-checked="true"] { background: var(--bg); color: var(--accent); box-shadow: 0 1px 3px var(--shadow); }
+    .theme-seg svg { width: 14px; height: 14px; }
     @media (max-width: 760px) {
       header, main { padding-left: .8rem; padding-right: .8rem; }
       main.runs-grid { grid-template-columns: 1fr; }
       .drawer { width: 100%; }
-      .dash-tabs { padding-left: .8rem; padding-right: .8rem; flex-wrap: wrap; }
+      .dash-tabs { padding-left: .8rem; padding-right: 1rem; flex-wrap: wrap; }
     }
   </style>
 </head>
@@ -157,7 +196,11 @@
             onclick="activateDashTab(this,'/tabs/{{ t.id }}')">{{ t.title }}</button>
     {% endfor %}
     <button type="button" class="sound-toggle" id="sound-toggle" aria-pressed="true" aria-label="Notification sound on" title="Notification sound"><span id="sound-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 01-3.4 0"/></svg></span></button>
-    <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Toggle light and dark theme" title="Toggle theme">◐</button>
+    <div class="theme-seg" id="theme-toggle" role="radiogroup" aria-label="Theme">
+      <button type="button" role="radio" data-theme-choice="light" aria-checked="false" aria-label="Light" title="Light"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
+      <button type="button" role="radio" data-theme-choice="dark" aria-checked="false" aria-label="Dark" title="Dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg></button>
+      <button type="button" role="radio" data-theme-choice="system" aria-checked="false" aria-label="System" title="System"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg></button>
+    </div>
   </nav>
   {% endif %}
   <div id="content">
@@ -170,15 +213,19 @@
   <script>
     window.__dashPage = window.__dashPage || 1;
     (function () {
-      var stored = localStorage.getItem('dar-theme');
-      var theme = stored || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
-      document.documentElement.dataset.theme = theme;
-      var button = document.getElementById('theme-toggle');
-      if (button) button.addEventListener('click', function () {
-        theme = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
-        document.documentElement.dataset.theme = theme;
-        localStorage.setItem('dar-theme', theme);
+      var group = document.getElementById('theme-toggle');
+      if (!group) return;
+      var radios = group.querySelectorAll('[role="radio"]');
+      function paint(choice) {
+        radios.forEach(function (r) {
+          r.setAttribute('aria-checked', String(r.dataset.themeChoice === choice));
+        });
+      }
+      radios.forEach(function (r) {
+        r.addEventListener('click', function () { paint(window.__darTheme.set(r.dataset.themeChoice)); });
       });
+      window.addEventListener('storage', function (e) { if (e.key === 'dar-theme') paint(window.__darTheme.apply()); });
+      paint(window.__darTheme.choice());
     })();
     (function () {
       var BELL = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 01-3.4 0"/>';
