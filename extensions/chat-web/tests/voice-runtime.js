@@ -33,7 +33,20 @@ function tab(shared, { fetchFor = () => 'ok', prefix } = {}) {
     createBuffer() { return { len: 0 }; }
     async decodeAudioData() { return { len: 1 }; }
   }
+  // Play buttons as the page shows them: key -> accessible name, kept in step by the page script.
+  t.buttons = new Map();
+  // Play button elements live for the whole test: the page script must update them in place, so focus stays.
+  const buttonList = () => [...t.buttons.values()];
+  const makeButton = key => ({
+    attrs: { 'data-voice-play': key, 'data-state': 'idle', 'aria-label': 'Play message' },
+    getAttribute(name) { return this.attrs[name]; },
+    setAttribute(name, value) { this.attrs[name] = value; },
+    removeAttribute(name) { delete this.attrs[name]; },
+  });
+  t.addButton = key => t.buttons.set(String(key), makeButton(String(key)));
+  t.label = key => t.buttons.get(String(key)).attrs['aria-label'];
   const document = {
+    querySelectorAll: () => buttonList(),
     get hidden() { return t.hidden; }, hasFocus: () => !t.hidden,
     getElementById: id => (id === 'chat-root' ? { hasAttribute: () => true } : id === 'chat-voice' ? button : null),
     addEventListener: listen('document'),
@@ -140,6 +153,46 @@ const chat = (slot = "main") => ({ slot, blocks: [{ kind: 'user', text: 'q' }, {
     await wait(300);
     assert.equal(b.playing.size, 0);
     assert.deepEqual(b.warnings, [], 'a stop is not an error');
+  }
+  // 6. Play button of a message: works with the voice toggle off, one message at a time, Stop drops the queue.
+  {
+    const p = profile(), a = tab(p);
+    a.addButton(1); a.addButton(2);
+    const focused = a.buttons.get('1'); // the same element must stay in the page, so keyboard focus is kept
+    assert.equal(a.label(1), 'Play message');
+    a.voice.playMessage(1, REPLY); // voice toggle is off
+    assert.equal(a.label(1), 'Stop message', 'loading counts as playing: the button offers Stop');
+    await wait(60);
+    assert.equal(a.playing.size, 1, 'a click plays the message');
+    assert.equal(a.buttons.get('1').attrs['data-state'], 'playing');
+    assert.equal(a.buttons.get('1'), focused, 'a state change updates the button in place');
+    a.voice.playMessage(2, 'Second message.');
+    assert.equal(a.label(1), 'Play message', 'the first message went back to Play');
+    assert.equal(a.label(2), 'Stop message');
+    await wait(40);
+    assert.equal(a.fetched.at(-1), 'Second message.');
+    assert.equal(a.playing.size, 1, 'only one message plays');
+    a.voice.playMessage(2, 'Second message.'); // Stop
+    assert.equal(a.playing.size, 0, 'Stop silences the audio');
+    assert.equal(a.label(2), 'Play message');
+    const spoken = a.fetched.length;
+    await wait(300);
+    assert.equal(a.fetched.length, spoken, 'Stop drops the queue');
+    a.voice.playMessage(1, REPLY);
+    await wait(700);
+    assert.equal(a.playing.size, 0);
+    assert.equal(a.label(1), 'Play message', 'the button returns to Play after the end');
+    a.voice.playMessage(1, '```\ncode only\n```');
+    assert.equal(a.label(1), 'Play message', 'a message with nothing to read does nothing');
+    const f = tab(profile(), { fetchFor: () => 'fail' });
+    f.addButton(3);
+    f.voice.playMessage(3, 'Will fail.');
+    await wait(100);
+    assert.equal(f.label(3), 'Play message', 'a failure returns the button to Play');
+    assert.ok(f.warnings.some(w => w.includes('network down')), 'the error goes to the console');
+    const g = tab(profile());
+    g.addButton(4); g.voice.playMessage(4, 'Stopped by a new message.'); g.voice.stop();
+    assert.equal(g.label(4), 'Play message', 'a new message or chat switch resets the button');
   }
   await wait(50);
   assert.deepEqual(unhandled, [], 'no unhandled rejections');

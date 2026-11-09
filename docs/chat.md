@@ -76,6 +76,8 @@ last reply of each finished turn aloud in the chat you are viewing (code,
 links and tables are skipped). The server must answer `POST <url>/tts` with
 `{"text": "..."}` (max 1000 chars) as `audio/wav`; the browser calls it through
 `POST /chat/tts`, never directly. Off by default, remembered per browser.
+Each assistant message also has a play/stop button that reads that one message
+aloud, whether the toggle is on or off. Only one message plays at a time.
 
 Idle conversations: after `idle_minutes` with no running turn, chat-web closes
 that conversation's backend process. Transcript and backend identity are kept;

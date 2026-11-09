@@ -214,3 +214,17 @@ const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(
   p.key('Enter');
   assert.equal(p.input.value, '', 'Enter after a chat switch does not complete a stale command');
 })().catch(err => { console.error(err); process.exit(1); });
+
+// Play button of a message appears only when the page has a voice (TTS) feature.
+{
+  const blocks = [{ kind: 'user', text: 'q' }, { kind: 'assistant', text: 'Hello there.' }];
+  assert.doesNotMatch(html(blocks), /Play message/, 'no button without TTS');
+  global.window = { __chatVoice: { enabled: () => true, stateOf: () => 'idle', playButton: (key, state) => `<button aria-label="${state === 'idle' ? 'Play message' : 'Stop message'}"></button>` } };
+  assert.equal((html(blocks).match(/aria-label="Play message"/g) || []).length, 1, 'one button, on the assistant message only');
+  const stamped = [{ kind: 'user', text: 'q' }, { kind: 'assistant', text: 'Hello there.', ts: 1700000000000 }];
+  assert.match(html(stamped), /<\/time><button[^>]*aria-label="Play message"/, 'the button follows the time, in the same row');
+  assert.doesNotMatch(html(blocks, {}, true), /Play message/, 'no button in a read-only view');
+  global.window.__chatVoice.enabled = () => false;
+  assert.doesNotMatch(html(blocks), /Play message/, 'no button when the page has no TTS');
+  delete global.window;
+}

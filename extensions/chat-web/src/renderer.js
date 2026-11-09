@@ -259,7 +259,8 @@
       : `<a class="chat-attachment" href="${esc(PREFIX + a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.name)}</a>`).join('');
     // No role header: the user is the right-aligned bubble, the agent is plain
     // text; the time only shows on hover/focus.
-    return `<div class="chat-turn chat-${esc(block.kind)}"><div class="chat-body">${markdown(block.text)}${attachments ? `<div class="chat-attach-row">${attachments}</div>` : ''}</div>${stamp(block, true)}</div>`;
+    let voice = typeof window !== 'undefined' ? window.__chatVoice : null, play = block.kind === 'assistant' && !readOnly && voice?.enabled() && block.text ? voice.playButton(i, voice.stateOf(String(i))) : '';
+    return `<div class="chat-turn chat-${esc(block.kind)}"><div class="chat-body">${markdown(block.text)}${attachments ? `<div class="chat-attach-row">${attachments}</div>` : ''}</div>${play ? `<div class="chat-meta">${stamp(block, true)}${play}</div>` : stamp(block, true)}</div>`;
   };
 
   const usagePercent = event => event.context_window ? Math.max(0, Math.min(100, event.tokens_used / event.context_window * 100)) : 0;
@@ -656,6 +657,8 @@
     document.addEventListener('focusout', e => { contextTip(e, false); infoTip(e, false); });
     document.addEventListener('focusin', e => { if (app.searchOpen && $('chat-root') && !$('chat-search-palette')?.contains(e.target)) $('chat-search-input')?.focus(); });
     document.addEventListener('click', e => {
+      let play = e.target.closest('[data-voice-play]');
+      if (play) { window.__chatVoice?.playMessage(play.dataset.voicePlay, app.blocks[Number(play.dataset.voicePlay)]?.text); return; }
       if (e.target.closest('#chat-info-button')) { let tip = $('chat-info-tooltip'); showInfoTip(tip, tip.hidden); return; }
       if (e.target.closest('#chat-context-ring')) { $('chat-context-tooltip').hidden = false; return; }
       let result = e.target.closest('[data-search-index]');
