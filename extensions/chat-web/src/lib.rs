@@ -67,6 +67,8 @@ struct Config {
 struct TtsConfig {
     /// Base URL of a server that answers `POST <url>/tts` with `audio/wav`.
     url: Option<String>,
+    /// Opaque voice name sent to the TTS server as `"voice"`. The browser cannot choose it.
+    voice: Option<String>,
 }
 
 #[derive(Default)]
@@ -513,11 +515,21 @@ async fn tts(
     {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let Ok(mut payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(fields) = payload.as_object_mut() else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    fields.remove("voice");
+    if let Some(voice) = state.config.tts.voice.as_deref() {
+        fields.insert("voice".into(), voice.into());
+    }
     let url = format!("{}/tts", base.trim_end_matches('/'));
     let sent = reqwest::Client::new()
         .post(url)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(body)
+        .body(payload.to_string())
         .timeout(TTS_TIMEOUT)
         .send()
         .await;
@@ -9248,9 +9260,16 @@ mod tests {
     }
 
     fn tts_state(url: Option<String>) -> Arc<AppState> {
+        tts_state_with_voice(url, None)
+    }
+
+    fn tts_state_with_voice(url: Option<String>, voice: Option<&str>) -> Arc<AppState> {
         Arc::new(AppState {
             config: Config {
-                tts: TtsConfig { url },
+                tts: TtsConfig {
+                    url,
+                    voice: voice.map(str::to_owned),
+                },
                 ..Config::default()
             },
             root: test_root(),
@@ -9311,6 +9330,57 @@ mod tests {
     async fn tts_route_is_404_without_a_configured_server() {
         let response = post_tts(tts_state(None), r#"{"text":"hi"}"#).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Starts a fake TTS server and returns its URL and the last body it saw.
+    async fn fake_tts() -> (String, Arc<std::sync::Mutex<String>>) {
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let fake = {
+            let seen = Arc::clone(&seen);
+            Router::new().route(
+                "/tts",
+                axum::routing::post(move |body: String| async move {
+                    *seen.lock().unwrap() = body;
+                    ([(header::CONTENT_TYPE, "audio/wav")], b"RIFF".to_vec())
+                }),
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+        (url, seen)
+    }
+
+    async fn forwarded_json(voice: Option<&str>, body: &str) -> serde_json::Value {
+        let (url, seen) = fake_tts().await;
+        let response = post_tts(tts_state_with_voice(Some(url), voice), body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let sent = seen.lock().unwrap().clone();
+        serde_json::from_str(&sent).unwrap()
+    }
+
+    #[tokio::test]
+    async fn tts_route_sends_the_configured_voice() {
+        let sent = forwarded_json(Some("iris"), r#"{"text":"hi"}"#).await;
+        assert_eq!(sent, serde_json::json!({"text":"hi","voice":"iris"}));
+    }
+
+    #[tokio::test]
+    async fn tts_route_replaces_a_client_voice_with_the_configured_one() {
+        let sent = forwarded_json(Some("iris"), r#"{"text":"hi","voice":"evil"}"#).await;
+        assert_eq!(sent, serde_json::json!({"text":"hi","voice":"iris"}));
+    }
+
+    #[tokio::test]
+    async fn tts_route_removes_a_client_voice_when_none_is_configured() {
+        let sent = forwarded_json(None, r#"{"text":"hi","voice":"evil"}"#).await;
+        assert_eq!(sent, serde_json::json!({"text":"hi"}));
+    }
+
+    #[tokio::test]
+    async fn tts_route_rejects_invalid_json() {
+        let response = post_tts(tts_state(Some("http://127.0.0.1:9".into())), "not json").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

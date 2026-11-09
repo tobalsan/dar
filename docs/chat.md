@@ -69,13 +69,16 @@ extensions:
     idle_minutes: 5    # optional; close an idle conversation's backend after N minutes (default 5, 0 = never)
     tts:
       url: http://127.0.0.1:7880   # optional; local TTS server, enables the "Voice replies" button
+      voice: iris                  # optional; voice name sent to the TTS server (opaque string)
 ```
 
 Voice replies: with `tts.url` set, a speaker button in the composer reads the
 last reply of each finished turn aloud in the chat you are viewing (code,
 links and tables are skipped). The server must answer `POST <url>/tts` with
-`{"text": "..."}` (max 1000 chars) as `audio/wav`; the browser calls it through
-`POST /chat/tts`, never directly. Off by default, remembered per browser.
+`{"text": "...", "voice": "<name>"}` (text max 1000 chars; `voice` is optional
+and only present when `tts.voice` is set) as `audio/wav`. The browser calls it
+through `POST /chat/tts`, never directly. The proxy always drops any `voice`
+the browser sends and adds the configured one. Invalid JSON gets a 400. Off by default, remembered per browser.
 Each assistant message also has a play/stop button that reads that one message
 aloud, whether the toggle is on or off. Only one message plays at a time.
 
