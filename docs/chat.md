@@ -67,7 +67,15 @@ extensions:
     backend: pi        # optional; default: follow runner.use, then pi
     command: ""        # optional backend binary override ("" = backend default)
     idle_minutes: 5    # optional; close an idle conversation's backend after N minutes (default 5, 0 = never)
+    tts:
+      url: http://127.0.0.1:7880   # optional; local TTS server, enables the "Voice replies" button
 ```
+
+Voice replies: with `tts.url` set, a speaker button in the composer reads the
+last reply of each finished turn aloud in the chat you are viewing (code,
+links and tables are skipped). The server must answer `POST <url>/tts` with
+`{"text": "..."}` (max 1000 chars) as `audio/wav`; the browser calls it through
+`POST /chat/tts`, never directly. Off by default, remembered per browser.
 
 Idle conversations: after `idle_minutes` with no running turn, chat-web closes
 that conversation's backend process. Transcript and backend identity are kept;

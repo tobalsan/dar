@@ -27,6 +27,7 @@ sha2 = "0.10"
 host-api = { package = "dar-host-api", path = "../../crates/host-api", version = "0.6" }
 orchestrator-api = { package = "dar-orchestrator-api", path = "../../crates/orchestrator-api", version = "0.6" }
 tokio = { version = "1.43", features = ["rt", "sync", "time"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 url = "2"

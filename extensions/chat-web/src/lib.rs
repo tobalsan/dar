@@ -39,6 +39,7 @@ const MAX_UPLOAD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ATTACHMENTS: usize = 8;
 /// Default idle time before a resumable slot's backend is closed.
 const DEFAULT_IDLE_MINUTES: u64 = 5;
+const TTS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const IDLE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 /// Bound on a reaped backend's `close()`; a hung close is abandoned.
 const IDLE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -57,6 +58,15 @@ struct Config {
     /// scheduler extension's `enabled` flag.
     enabled: Option<bool>,
     apps: apps::AppsConfig,
+    tts: TtsConfig,
+}
+
+/// Optional local text-to-speech server for voice replies. No `url`, no voice.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct TtsConfig {
+    /// Base URL of a server that answers `POST <url>/tts` with `audio/wav`.
+    url: Option<String>,
 }
 
 #[derive(Default)]
@@ -117,6 +127,7 @@ impl Extension for ChatWebExtension {
                 agent_avatar: agent_avatar(ctx.paths.root()),
                 root: ctx.paths.root().to_path_buf(),
                 human_chat: cap_chat::HumanChat::load(ctx.paths.root()).is_some(),
+                voice: state.config.tts.url.is_some(),
             }))?;
             ctx.http.mount(host_api::HttpMount {
                 namespace: "/chat".into(),
@@ -129,6 +140,7 @@ impl Extension for ChatWebExtension {
                     "/notify.mp3".into(),
                     "/notify.js".into(),
                     "/events".into(),
+                    "/tts".into(),
                     "/apps/config".into(),
                     "/{session}/apps/{record}".into(),
                     "/{session}/apps/{record}/rpc".into(),
@@ -212,6 +224,8 @@ struct ChatTab {
     root: std::path::PathBuf,
     /// Lists `/topics` in the composer menu when human-chat is on.
     human_chat: bool,
+    /// Shows the voice-replies toggle (`extensions.chat-web.tts.url` is set).
+    voice: bool,
 }
 impl DashboardTab for ChatTab {
     fn id(&self) -> &str {
@@ -228,7 +242,7 @@ impl DashboardTab for ChatTab {
     }
     fn render(&self) -> Result<String> {
         Ok(format!(
-            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"{}{}><aside class="chat-sidebar" aria-label="Conversations"><div class="chat-sidebar-head"><strong>Chats</strong><div class="chat-sidebar-controls"><button type="button" id="chat-search-open" class="chat-icon" aria-label="Search conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></button><button type="button" id="chat-sidebar-toggle" data-sidebar-toggle class="chat-icon" aria-label="Toggle sidebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button></div></div><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><header class="chat-header"><button type="button" data-sidebar-toggle class="chat-icon chat-mobile-sidebar-toggle" aria-label="Open conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button><div>{}<span class="chat-title"><span class="chat-name-row"><strong>{}</strong>{}</span>{}</span><span id="chat-session-title" class="chat-session-title" aria-label="Current conversation" data-untitled="true">New chat</span></div><button type="button" class="chat-new" onclick="window.__chatWeb&amp;&amp;window.__chatWeb.newChat()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button></header><div class="chat-dropzone" id="chat-dropzone" hidden>Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite"></div><div class="chat-hero" id="chat-hero">{}<div class="chat-hero-line" id="chat-hero-line"></div></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips"></div><div class="chat-cap-hint" id="chat-cap-hint"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.4 11.1l-9.2 9.1a6 6 0 01-8.4-8.4L13 2.6a4 4 0 015.6 5.6l-9.2 9.2a2 2 0 01-2.8-2.8l8.5-8.5"/></svg></button><input type="file" id="chat-attachments" multiple hidden><div id="chat-slash-menu" class="chat-slash-menu" role="listbox" aria-label="Commands" hidden></div><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message {}" aria-label="Message" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="chat-slash-menu"></textarea><div class="chat-context"><button type="button" id="chat-context-ring" class="chat-context-ring" aria-describedby="chat-context-tooltip" hidden><svg width="32" height="32" viewBox="0 0 32 32" fill="none" stroke-width="2.5" aria-hidden="true"><circle class="chat-context-track" cx="16" cy="16" r="14"/><circle class="chat-context-fill" cx="16" cy="16" r="14" pathLength="100"/></svg><span class="chat-context-pct" aria-hidden="true"></span></button><div id="chat-context-tooltip" class="chat-context-tooltip" role="tooltip" hidden></div></div><button type="button" id="chat-abort" class="chat-icon" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon" aria-label="Send" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div><div id="chat-context-warning" class="chat-context-warning" hidden>Context is filling up — send /compact to summarize.</div></form></div><div id="chat-search-palette" class="chat-search-palette" role="dialog" aria-modal="true" aria-label="Search conversations" hidden><div class="chat-search-surface"><input type="search" id="chat-search-input" aria-label="Search titles and messages" placeholder="Search titles and message text of your chats" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="chat-search-results" autocomplete="off"><div id="chat-search-results" role="listbox" aria-label="Search results"></div><div id="chat-search-status" role="status" aria-live="polite"></div></div></div></section><script>{}</script><script>{}</script><script>{}</script><script>{}</script>"#,
+            r#"<style>{}</style><section class="chat-web" id="chat-root" data-agent-name="{}"{}{}{}><aside class="chat-sidebar" aria-label="Conversations"><div class="chat-sidebar-head"><strong>Chats</strong><div class="chat-sidebar-controls"><button type="button" id="chat-search-open" class="chat-icon" aria-label="Search conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></button><button type="button" id="chat-sidebar-toggle" data-sidebar-toggle class="chat-icon" aria-label="Toggle sidebar"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button></div></div><div id="chat-history-list" class="chat-history-list" aria-live="polite"></div></aside><div class="chat-main"><header class="chat-header"><button type="button" data-sidebar-toggle class="chat-icon chat-mobile-sidebar-toggle" aria-label="Open conversations"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button><div>{}<span class="chat-title"><span class="chat-name-row"><strong>{}</strong>{}</span>{}</span><span id="chat-session-title" class="chat-session-title" aria-label="Current conversation" data-untitled="true">New chat</span></div><button type="button" class="chat-new" onclick="window.__chatWeb&amp;&amp;window.__chatWeb.newChat()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat</button></header><div class="chat-dropzone" id="chat-dropzone" hidden>Drop files to attach</div><div class="chat-transcript" id="chat-transcript" role="log" aria-live="polite"></div><div class="chat-hero" id="chat-hero">{}<div class="chat-hero-line" id="chat-hero-line"></div></div><form class="chat-dock" id="chat-composer" autocomplete="off" onsubmit="event.preventDefault()"><div class="chat-chips" id="chat-chips"></div><div class="chat-cap-hint" id="chat-cap-hint"></div><div class="chat-row"><button type="button" id="chat-attach" class="chat-icon" aria-label="Attach files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.4 11.1l-9.2 9.1a6 6 0 01-8.4-8.4L13 2.6a4 4 0 015.6 5.6l-9.2 9.2a2 2 0 01-2.8-2.8l8.5-8.5"/></svg></button><input type="file" id="chat-attachments" multiple hidden><div id="chat-slash-menu" class="chat-slash-menu" role="listbox" aria-label="Commands" hidden></div><textarea class="chat-input" id="chat-input" rows="1" placeholder="Message {}" aria-label="Message" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="chat-slash-menu"></textarea><div class="chat-context"><button type="button" id="chat-context-ring" class="chat-context-ring" aria-describedby="chat-context-tooltip" hidden><svg width="32" height="32" viewBox="0 0 32 32" fill="none" stroke-width="2.5" aria-hidden="true"><circle class="chat-context-track" cx="16" cy="16" r="14"/><circle class="chat-context-fill" cx="16" cy="16" r="14" pathLength="100"/></svg><span class="chat-context-pct" aria-hidden="true"></span></button><div id="chat-context-tooltip" class="chat-context-tooltip" role="tooltip" hidden></div></div>{}<button type="button" id="chat-abort" class="chat-icon" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><button type="submit" id="chat-send" class="chat-icon" aria-label="Send" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button></div><div id="chat-context-warning" class="chat-context-warning" hidden>Context is filling up — send /compact to summarize.</div></form></div><div id="chat-search-palette" class="chat-search-palette" role="dialog" aria-modal="true" aria-label="Search conversations" hidden><div class="chat-search-surface"><input type="search" id="chat-search-input" aria-label="Search titles and messages" placeholder="Search titles and message text of your chats" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="chat-search-results" autocomplete="off"><div id="chat-search-results" role="listbox" aria-label="Search results"></div><div id="chat-search-status" role="status" aria-live="polite"></div></div></div></section><script>{}</script><script>{}</script><script>{}</script><script>{}</script><script>{}</script>"#,
             include_str!("chat.css"),
             escape_html_attr(&self.agent_name),
             avatar_icon_attr(self.agent_avatar.as_ref()),
@@ -237,6 +251,7 @@ impl DashboardTab for ChatTab {
             } else {
                 ""
             },
+            if self.voice { " data-voice" } else { "" },
             avatar_html(self.agent_avatar.as_ref(), "chat-avatar", &self.agent_name),
             escape_html_attr(&self.agent_name),
             runner_info_html(&self.root),
@@ -250,13 +265,17 @@ impl DashboardTab for ChatTab {
                 &self.agent_name
             ),
             escape_html_attr(&self.agent_name),
+            if self.voice { VOICE_BUTTON } else { "" },
             include_str!("vendor/marked.min.js"),
             include_str!("vendor/purify.min.js"),
             include_str!("apps.js"),
             include_str!("renderer.js"),
+            include_str!("voice.js"),
         ))
     }
 }
+
+const VOICE_BUTTON: &str = r#"<button type="button" id="chat-voice" class="chat-icon" title="Voice replies" aria-label="Voice replies" aria-pressed="false"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4z"/><path class="chat-voice-wave" d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg></button>"#;
 
 /// Reads `agent.yaml`'s `name` (falling back to `id`, then `"Agent"`) so the
 /// Chat tab can show which agent it's talking to. Any read/parse error also
@@ -460,6 +479,64 @@ async fn turn_events_stream(State(state): State<Arc<AppState>>) -> impl IntoResp
             .take_until(shutdown_signal),
     )
     .keep_alive(KeepAlive::default())
+}
+
+/// Voice replies: forwards the browser's `{"text": ...}` body to the local TTS
+/// server and returns its WAV. The browser never talks to that server itself.
+async fn tts(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let Some(base) = state.config.tts.url.as_deref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // Only the dashboard's own page may occupy the single-generation TTS
+    // server: JSON forces a CORS preflight for foreign pages, and browsers
+    // label cross-site requests (also from sandboxed frames) themselves.
+    let is_json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("application/json")
+        });
+    if !is_json {
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+    }
+    if headers
+        .get("sec-fetch-site")
+        .is_some_and(|v| v != "same-origin" && v != "none")
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let url = format!("{}/tts", base.trim_end_matches('/'));
+    let sent = reqwest::Client::new()
+        .post(url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body)
+        .timeout(TTS_TIMEOUT)
+        .send()
+        .await;
+    let upstream = match sent {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => {
+            tracing::warn!(status = %response.status(), "chat-web tts server refused request");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+        Err(error) => {
+            tracing::warn!(%error, "chat-web tts server unreachable");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
+    (
+        [(header::CONTENT_TYPE, "audio/wav")],
+        axum::body::Body::from_stream(upstream.bytes_stream()),
+    )
+        .into_response()
 }
 
 async fn notify_script() -> impl IntoResponse {
@@ -683,6 +760,7 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/notify.mp3", get(notify_sound))
         .route("/notify.js", get(notify_script))
         .route("/events", get(turn_events_stream))
+        .route("/tts", post(tts))
         .route("/apps/config", get(apps::config))
         .route("/{session}/apps/{record}", get(apps::resource))
         .route("/{session}/apps/{record}/download", get(apps::download))
@@ -7783,6 +7861,7 @@ mod tests {
             agent_avatar: None,
             root: root.clone(),
             human_chat: false,
+            voice: false,
         };
         // Visible text only: tags become spaces, so each label sits next to its value.
         let text = |html: String| {
@@ -7819,6 +7898,7 @@ mod tests {
             agent_avatar: None,
             root: std::path::PathBuf::new(),
             human_chat: false,
+            voice: false,
         };
         let html = tab.render().unwrap();
         assert!(!html.contains("data-human-chat"));
@@ -7828,6 +7908,7 @@ mod tests {
             agent_avatar: None,
             root: std::path::PathBuf::new(),
             human_chat: true,
+            voice: false,
         };
         assert!(topics_tab.render().unwrap().contains("data-human-chat"));
         assert!(!html.contains("class=\"chat-avatar\""));
@@ -8916,6 +8997,7 @@ mod tests {
             agent_avatar: Some(avatar),
             root: std::path::PathBuf::new(),
             human_chat: false,
+            voice: false,
         };
         let html = tab(Avatar::Text("🦉".into())).render().unwrap();
         assert!(html.contains(r#"<span class="chat-avatar" aria-hidden="true">🦉</span>"#));
@@ -9117,6 +9199,203 @@ mod tests {
             .status()
             .expect("node is available for browser renderer tests");
         assert!(status.success());
+    }
+
+    #[test]
+    fn browser_voice_text_preparation() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let status = std::process::Command::new("node")
+            .args([
+                format!("{root}/tests/voice.js"),
+                format!("{root}/src/voice.js"),
+            ])
+            .status()
+            .expect("node is available for browser renderer tests");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn browser_voice_playback_behaviors() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let status = std::process::Command::new("node")
+            .args([
+                format!("{root}/tests/voice-runtime.js"),
+                format!("{root}/src/voice.js"),
+            ])
+            .status()
+            .expect("node is available for browser renderer tests");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn voice_button_shows_only_with_a_tts_server() {
+        let tab = |voice| ChatTab {
+            agent_name: "Test Agent".into(),
+            agent_description: None,
+            agent_avatar: None,
+            root: std::path::PathBuf::new(),
+            human_chat: false,
+            voice,
+        };
+        assert!(!tab(false)
+            .render()
+            .unwrap()
+            .contains(r#"title="Voice replies""#));
+        assert!(tab(true)
+            .render()
+            .unwrap()
+            .contains(r#"title="Voice replies""#));
+    }
+
+    fn tts_state(url: Option<String>) -> Arc<AppState> {
+        Arc::new(AppState {
+            config: Config {
+                tts: TtsConfig { url },
+                ..Config::default()
+            },
+            root: test_root(),
+            start: std::sync::OnceLock::new(),
+            sessions: Mutex::new(HashMap::new()),
+            transition: Mutex::new(()),
+            slot_registry: Arc::default(),
+            bindings: Arc::default(),
+            meta: Mutex::new(HashMap::new()),
+        })
+    }
+
+    async fn post_tts(state: Arc<AppState>, body: &str) -> Response {
+        post_tts_with(state, body, "application/json", None).await
+    }
+
+    async fn post_tts_with(
+        state: Arc<AppState>,
+        body: &str,
+        content_type: &str,
+        site: Option<&str>,
+    ) -> Response {
+        let mut request =
+            axum::http::Request::post("/tts").header(header::CONTENT_TYPE, content_type);
+        if let Some(site) = site {
+            request = request.header("sec-fetch-site", site);
+        }
+        router(state)
+            .oneshot(request.body(Body::from(body.to_owned())).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn tts_route_rejects_foreign_pages() {
+        let url = Some("http://127.0.0.1:9".to_owned());
+        let simple = post_tts_with(
+            tts_state(url.clone()),
+            r#"{"text":"hi"}"#,
+            "text/plain",
+            None,
+        )
+        .await;
+        assert_eq!(simple.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        for site in ["cross-site", "same-site"] {
+            let foreign = post_tts_with(
+                tts_state(url.clone()),
+                r#"{"text":"hi"}"#,
+                "application/json",
+                Some(site),
+            )
+            .await;
+            assert_eq!(foreign.status(), StatusCode::FORBIDDEN, "{site}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tts_route_is_404_without_a_configured_server() {
+        let response = post_tts(tts_state(None), r#"{"text":"hi"}"#).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn tts_route_forwards_the_body_and_returns_the_audio() {
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let fake = {
+            let seen = Arc::clone(&seen);
+            Router::new().route(
+                "/tts",
+                axum::routing::post(move |body: String| async move {
+                    *seen.lock().unwrap() = body;
+                    (
+                        [(header::CONTENT_TYPE, "audio/wav")],
+                        b"RIFFfake-wav".to_vec(),
+                    )
+                }),
+            )
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+
+        let response = post_tts_with(
+            tts_state(Some(url)),
+            r#"{"text":"Hello there."}"#,
+            "application/json; charset=utf-8",
+            Some("same-origin"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "audio/wav");
+        let audio = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&audio[..], b"RIFFfake-wav");
+        assert_eq!(*seen.lock().unwrap(), r#"{"text":"Hello there."}"#);
+    }
+
+    #[tokio::test]
+    async fn tts_route_streams_audio_before_the_upstream_ends() {
+        let (release, gate) = tokio::sync::oneshot::channel::<()>();
+        let gate = Arc::new(Mutex::new(Some(gate)));
+        let fake = Router::new().route(
+            "/tts",
+            axum::routing::post(move || {
+                let gate = Arc::clone(&gate);
+                async move {
+                    let gate = gate.lock().await.take().unwrap();
+                    let stream = futures_util::stream::once(async {
+                        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"RIFF"))
+                    })
+                    .chain(futures_util::stream::once(async move {
+                        let _ = gate.await;
+                        Ok(axum::body::Bytes::from_static(b"tail"))
+                    }));
+                    (
+                        [(header::CONTENT_TYPE, "audio/wav")],
+                        Body::from_stream(stream),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+
+        let response = post_tts(tts_state(Some(url)), r#"{"text":"Hi."}"#).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+            .await
+            .expect("first bytes arrive while the upstream is still open")
+            .unwrap()
+            .unwrap();
+        assert_eq!(&first.into_data().unwrap()[..], b"RIFF");
+        release.send(()).unwrap();
+        let rest = body.collect().await.unwrap().to_bytes();
+        assert_eq!(&rest[..], b"tail");
+    }
+
+    #[tokio::test]
+    async fn tts_route_reports_an_unreachable_server_as_bad_gateway() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let response = post_tts(tts_state(Some(url)), r#"{"text":"hi"}"#).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[test]

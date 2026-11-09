@@ -1224,3 +1224,10 @@ details[open] > summary .chat-chev {
 .chat-info-tooltip td { font-family: var(--mono, ui-monospace, monospace); }
 .chat-info-tooltip tr + tr th, .chat-info-tooltip tr + tr td { border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent); }
 .chat-info-tooltip { position: fixed; width: max-content; max-width: calc(100vw - 2rem); padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 0.5rem; background: var(--panel); color: var(--fg); font-size: 0.75rem; font-weight: 400; z-index: 40; }
+#chat-voice[aria-pressed="true"] {
+  background: var(--panel-2);
+  color: var(--accent);
+}
+#chat-voice[aria-pressed="false"] .chat-voice-wave {
+  display: none;
+}

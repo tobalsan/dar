@@ -78,7 +78,7 @@
       case 'reset': next.splice(0, next.length); return null;
       case 'delta': case 'thinking': {
         let kind = event.type === 'thinking' ? 'thinking' : 'assistant', last = next.at(-1);
-        if (last && last.kind === kind && !last.groupEnd) { last.text += text; return next.length - 1; }
+        if (last && last.kind === kind && !last.groupEnd && !last.turnEnd) { last.text += text; return next.length - 1; }
         next.push({ kind, text, ts: at(event) }); return next.length - 1;
       }
       // A `» label` line from the model: names the tool call(s) that follow. It stays hidden once a call takes it.
@@ -104,9 +104,9 @@
       case 'context_usage': return -1;
       // Agent chose silence (NO_REPLY) or the loop guard dropped the turn.
       case 'silent': return -1;
-      case 'aborted': { let dismissed = dismissPendingQuestions(next); next.push(event.error === 'aborted' ? { kind: 'interrupted', text: 'Interrupted', ts: event.ts } : { kind: 'error', text: `turn failed: ${event.error || 'unknown error'}`, ts: event.ts }); return dismissed ? null : next.length - 1; }
+      case 'aborted': { let dismissed = dismissPendingQuestions(next); next.push(event.error === 'aborted' ? { kind: 'interrupted', text: 'Interrupted', ts: event.ts, turnEnd: 1 } : { kind: 'error', text: `turn failed: ${event.error || 'unknown error'}`, ts: event.ts, turnEnd: 1 }); return dismissed ? null : next.length - 1; }
       case 'closed': { let dismissed = dismissPendingQuestions(next); next.push({ kind: 'error', text: `chat session closed${event.error ? `: ${event.error}` : ''}` }); return dismissed ? null : next.length - 1; }
-      case 'finished': return dismissPendingQuestions(next) ? null : -1;
+      case 'finished': { if (next.length) { let end = next[next.length - 1]; end.turnEnd = (end.turnEnd || 0) + 1; } return dismissPendingQuestions(next) ? null : -1; }
     }
     return next.length - 1;
   };
@@ -431,7 +431,9 @@
     if (!event.historical && event.type === 'started' && event.origin === 'autonomous') { app.turns++; refreshBusy(app); return; }
     if (!event.historical && event.type === 'user') { app.turns++; app.workingWord = WORKING_WORDS[Math.floor(Math.random() * WORKING_WORDS.length)]; }
     if (event.type === 'finished' || event.type === 'aborted' || event.type === 'closed') { app.compactionPending = false; if (!event.historical) app.turns = Math.max(0, app.turns - 1); }
+    if (event.type === 'reset' || (!event.historical && event.type === 'user')) window.__chatVoice?.stop();
     app.blocks = reduce(app.blocks, event);
+    if (!event.historical && event.type === 'finished') window.__chatVoice?.turnEnded(app, event.seq);
     schedulePaint(app);
   };
 
@@ -473,6 +475,7 @@
       return;
     }
     app.draft = ''; input.value = ''; app.pending = []; renderChips(app); autogrow(input); refreshBusy(app);
+    window.__chatVoice?.stop();
     try {
       if (files.length) {
         let body = new FormData();
@@ -840,7 +843,7 @@
   };
   const switchSlot = (app, slot) => {
     if (!slot || slot === app.slot) return;
-    app.es?.close(); app.slot = slot;
+    app.es?.close(); app.slot = slot; window.__chatVoice?.stop();
     try { sessionStorage.setItem(SLOT_KEY, slot); } catch {}
     // Composer state belongs to the old chat: drop draft + attachments (and their preview URLs).
     for (const file of app.pending) if (file._preview) URL.revokeObjectURL(file._preview);
