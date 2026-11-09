@@ -18,15 +18,15 @@
     return out;
   };
 
-  // Markdown -> plain words a voice can read. Code, tables, URLs and paths are dropped.
+  // Markdown -> plain words a voice can read. Fenced code and tables are dropped; inline code is kept; a URL becomes its host name.
   const speakable = md => {
     let text = String(md || '')
       .replace(/^ {0,3}(```|~~~)[^\n]*\n[\s\S]*?(\n {0,3}\1[^\n]*|$)/gm, '\n')
       .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
       .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-      .replace(/`([^`\n]+)`/g, (_, code) => (/[\/\\]|\.\w{1,6}$/.test(code.trim()) ? '' : code))
+      .replace(/`([^`\n]+)`/g, '$1')
       .replace(/<[^>\n]+>/g, '')
-      .replace(/\b(?:https?:\/\/|www\.)\S+/g, '');
+      .replace(/\b(?:https?:\/\/|www\.)([^\s\/?#]+)\S*/g, '$1');
     let lines = [];
     for (let line of dropTables(text.split('\n'))) {
       line = line.trim();
@@ -39,9 +39,12 @@
     return lines.join(' ').replace(/\s+/g, ' ').trim();
   };
 
-  // Sentences packed into chunks of at most `max` characters, in order.
+  // The first chunk is the first sentence alone, so sound starts fast. Each next chunk holds
+  // at most twice the length of the one before (min 80, max `max`): the TTS server makes audio
+  // slower than it plays, so a chunk twice as long as the playing one is ready before it ends.
   const splitChunks = (text, max = MAX_CHUNK) => {
-    let pieces = [];
+    // Only a sentence longer than `max` is cut. Other sentences stay whole, so no pause falls mid-sentence.
+    const pieces = [];
     for (let sentence of String(text || '').split(/(?<=[.!?])\s+/)) {
       while (sentence.length > max) {
         let cut = sentence.lastIndexOf(' ', max);
@@ -51,10 +54,13 @@
       }
       if (sentence) pieces.push(sentence);
     }
-    let chunks = [];
-    for (let piece of pieces) {
-      let last = chunks.length - 1;
-      if (last >= 0 && chunks[last].length + 1 + piece.length <= max) chunks[last] += ' ' + piece;
+    // The first sentence stands alone for a fast first sound. Each next chunk packs up to
+    // 2x the previous chunk (min 80, max `max`), so it is ready before the previous one ends.
+    const chunks = [];
+    for (const piece of pieces) {
+      const last = chunks.length - 1;
+      const limit = last >= 1 ? Math.min(max, Math.max(80, 2 * chunks[last - 1].length)) : 0;
+      if (last >= 1 && chunks[last].length + 1 + piece.length <= limit) chunks[last] += ' ' + piece;
       else chunks.push(piece);
     }
     return chunks;
@@ -155,7 +161,7 @@
     node.start();
   });
 
-  // Plays chunks in order, requesting chunk N+1 while chunk N plays.
+  // Plays chunks in order, requesting chunk N+1 as soon as chunk N arrives.
   const speak = async (text, key = null) => {
     stop();
     const token = run, chunks = splitChunks(text);
@@ -163,7 +169,13 @@
     if (key !== null) setCurrent({ key, state: 'loading' });
     try {
       const fetches = new Map();
-      const request = i => { if (i < chunks.length && !fetches.has(i)) fetches.set(i, fetchAudio(chunks[i], token)); };
+      // Chunk N+1 is requested when chunk N arrives (chunk 1 together with chunk 0): one request in flight.
+      const request = i => {
+        if (i >= chunks.length || fetches.has(i)) return;
+        const pending = fetchAudio(chunks[i], token);
+        fetches.set(i, pending);
+        pending.then(() => { if (token === run) request(i + 1); }, () => {});
+      };
       request(0);
       for (let i = 0; i < chunks.length; i++) {
         request(i + 1);

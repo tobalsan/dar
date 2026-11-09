@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const { speakable, splitChunks, lastReply } = require(process.argv[2]);
 
-// Code, tables, URLs and file paths are not read; plain words stay.
+// Fenced code and tables are not read; inline code stays; a URL is read as its host.
 const reply = [
   '# Result',
   'I fixed **the parser** and updated [the guide](https://example.com/guide).',
@@ -18,8 +18,8 @@ const reply = [
   'See https://example.com/docs for more',
 ].join('\n');
 const spoken = speakable(reply);
-assert.equal(spoken, 'Result. I fixed the parser and updated the guide. edited. renamed parse to read. run the tests. See for more.');
-for (const noise of ['```', 'fn main', 'src/lib.rs', 'a.rs', '|', 'https', '**', '`', '#']) assert.ok(!spoken.includes(noise), `not spoken: ${noise}`);
+assert.equal(spoken, 'Result. I fixed the parser and updated the guide. edited src/lib.rs. renamed parse to read. run the tests. See example.com for more.');
+for (const noise of ['```', 'fn main', 'a.rs', '|', 'https', '**', '`', '#']) assert.ok(!spoken.includes(noise), `not spoken: ${noise}`);
 assert.equal(speakable('```\nunclosed code'), '', 'an unclosed fence is dropped');
 assert.equal(speakable(''), '');
 assert.equal(speakable(undefined), '');
@@ -31,8 +31,16 @@ const chunks = splitChunks(text);
 assert.ok(chunks.length > 1);
 assert.ok(chunks.every(c => c.length <= 250), 'no chunk is over 250 characters');
 assert.equal(chunks.join(' '), text, 'nothing lost, order kept');
+assert.equal(chunks[0], sentence(0), 'the first chunk is the first sentence');
+chunks.slice(1).forEach((c, i) => assert.ok(c.length <= Math.min(250, Math.max(80, 2 * chunks[i].length)), `chunk ${i + 1} is at most twice the one before`));
+assert.ok(chunks[1].length > chunks[0].length, 'chunks grow');
 assert.ok(chunks.slice(0, -1).every(c => /[.!?]$/.test(c)), 'chunks end on sentence boundaries');
-assert.deepEqual(splitChunks('Hello there. How are you?'), ['Hello there. How are you?']);
+assert.deepEqual(splitChunks('Hello there.'), ['Hello there.'], 'one sentence is one chunk');
+assert.deepEqual(splitChunks('Hello there. How are you?'), ['Hello there.', 'How are you?']);
+const mid = 'Your first meeting starts at ten, and the client report is ready in the reports folder today.';
+assert.deepEqual(splitChunks(`Hi. Good morning. ${mid} Done.`), ['Hi.', 'Good morning.', mid, 'Done.'], 'a sentence over the growth limit stays whole');
+assert.equal(speakable('the [client report](https://example.com/r) is ready in `reports/w45.html`'), 'the client report is ready in reports/w45.html.');
+assert.equal(speakable('Open https://github.com/x/y now'), 'Open github.com now.');
 assert.deepEqual(splitChunks(''), []);
 const long = splitChunks('word '.repeat(200).trim());
 assert.ok(long.length > 1 && long.every(c => c.length <= 250), 'a sentence with no stop is cut at spaces');
