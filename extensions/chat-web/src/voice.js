@@ -98,6 +98,8 @@
   const MODE_KEY = 'dar-voice-mode', CLAIM_KEY = `dar-voice-claim|${PREFIX}`;
   const tabId = Math.random().toString(36).slice(2);
   const enabled = () => !!document.getElementById('chat-root')?.hasAttribute('data-voice');
+  // `data-voice-away` (`tts.when_away`): hold (default) waits for the user, play speaks at once, pause is hold plus pausing speech on leave.
+  const away = () => document.getElementById('chat-root')?.getAttribute?.('data-voice-away') || 'hold';
   const isOn = () => { try { return localStorage.getItem(MODE_KEY) === 'on'; } catch { return false; } };
   const syncButton = () => {
     const button = document.getElementById('chat-voice');
@@ -109,6 +111,9 @@
   if (window.__chatVoice) { syncButton(); return; }
 
   let ctx = null, run = 0, source = null, aborts = new Set(), delay = null;
+  let pending = null; // { slot, turn, text, chunk, key } the reply held until the user is back; turn is null for play-button speech
+  let active = null; // the speech now running, same fields; becomes `pending` when the user leaves
+  let viewApp = null; // the chat in view, as last seen by turnEnded
   let current = null; // { key, state: 'loading' | 'playing' } of the message the play button speaks
 
   const stateOf = key => (current && current.key === key ? current.state : 'idle');
@@ -127,14 +132,24 @@
   };
   const setCurrent = next => { current = next; syncPlay(); };
 
-  const stop = () => {
+  // Stops audio and requests. Keeps `pending`.
+  const halt = () => {
     run++;
+    active = null;
     clearTimeout(delay);
     for (const abort of aborts) abort.abort();
     aborts.clear();
     try { source?.stop(); } catch {}
     source = null;
     if (current) setCurrent(null);
+  };
+  // Explicit stop (Stop button, toggle off, new message, chat switch): drops the held reply too.
+  const stop = () => { pending = null; halt(); };
+  // The user left: keep the speech that runs as the pending reply, at the chunk that plays.
+  const pause = () => {
+    clearTimeout(delay);
+    if (active) pending = { ...active };
+    halt();
   };
 
   const fetchAudio = async (text, token) => {
@@ -162,10 +177,11 @@
   });
 
   // Plays chunks in order, requesting chunk N+1 as soon as chunk N arrives.
-  const speak = async (text, key = null) => {
+  const speak = async (text, key = null, from = 0, turn = null, slot = viewApp?.slot ?? null) => {
     stop();
     const token = run, chunks = splitChunks(text);
-    if (!ctx || !chunks.length) return;
+    if (!ctx || from >= chunks.length) return;
+    active = { slot, turn, text, chunk: from, key };
     if (key !== null) setCurrent({ key, state: 'loading' });
     try {
       const fetches = new Map();
@@ -176,18 +192,20 @@
         fetches.set(i, pending);
         pending.then(() => { if (token === run) request(i + 1); }, () => {});
       };
-      request(0);
-      for (let i = 0; i < chunks.length; i++) {
+      request(from);
+      for (let i = from; i < chunks.length; i++) {
         request(i + 1);
+        active.chunk = i;
         const { buffer, error } = await fetches.get(i);
         if (token !== run) return;
         if (error) throw error;
         await playBuffer(buffer, token);
         if (token !== run) return;
       }
+      active = null;
       if (current) setCurrent(null);
     } catch (error) {
-      if (token === run) { console.warn('voice replies:', error); if (current) setCurrent(null); }
+      if (token === run) { console.warn('voice replies:', error); active = null; if (current) setCurrent(null); }
     }
   };
 
@@ -214,23 +232,43 @@
 
   const visible = () => !document.hidden && document.hasFocus?.() !== false;
 
+  // Speaks the pending reply once the user is back: the tab must be visible, the chat in view the same,
+  // and an auto reply needs the toggle on. `wait` lets a quick window flick pass without sound.
+  const tryStart = wait => {
+    clearTimeout(delay);
+    if (!pending) return;
+    delay = setTimeout(() => {
+      const reply = pending;
+      const ready = () => pending === reply && ctx && (away() === 'play' || visible()) && (viewApp?.slot ?? null) === reply.slot && (!reply.turn || isOn());
+      if (!reply || !ready()) return;
+      const go = () => { if (ready()) speak(reply.text, reply.key, reply.chunk, reply.turn, reply.slot); };
+      if (!reply.turn) return go();
+      const id = `${reply.turn}|${tabId}`;
+      try {
+        const claim = localStorage.getItem(CLAIM_KEY) || '';
+        if (claim === id) return go();
+        if (claim.startsWith(reply.turn + '|')) { pending = null; return; } // another tab speaks this turn
+        localStorage.setItem(CLAIM_KEY, id);
+        delay = setTimeout(() => { if (localStorage.getItem(CLAIM_KEY) === id) go(); }, 150);
+      } catch { go(); }
+    }, wait);
+  };
+
   // Called by the renderer when a live turn finishes in the viewed chat.
   const turnEnded = (app, seq) => {
-    if (!enabled() || !isOn() || !ctx || !visible()) return;
-    const reply = lastReply(app.blocks), text = speakable(reply?.text);
+    if (!enabled() || !isOn()) return;
+    const text = speakable(lastReply(app.blocks)?.text);
     if (!text) return;
-    const slot = app.slot, turn = `${slot}:${seq}`, id = `${turn}|${tabId}`, gen = run;
-    // Stop, a mode change, a chat switch or a hidden tab during the claim delay cancels this reply.
-    const go = () => { if (gen === run && isOn() && app.slot === slot && visible()) speak(text); };
-    try {
-      if ((localStorage.getItem(CLAIM_KEY) || '').startsWith(turn + '|')) return;
-      localStorage.setItem(CLAIM_KEY, id);
-      delay = setTimeout(() => { if (localStorage.getItem(CLAIM_KEY) === id) go(); }, 150);
-    } catch { go(); }
+    viewApp = app;
+    pending = { slot: app.slot, turn: `${app.slot}:${seq}`, text, chunk: 0, key: null };
+    tryStart(0);
   };
 
   // The audio context needs a gesture: after a reload, or when another tab turned the mode on, the next one unlocks it.
-  const resume = () => { if (isOn() && !ctx) unlock(); else if (ctx?.state === 'suspended') ctx.resume(); };
+  const resume = () => {
+    if (isOn() && !ctx) unlock(); else if (ctx?.state === 'suspended') ctx.resume();
+    tryStart(0);
+  };
   document.addEventListener('keydown', resume);
   document.addEventListener('click', e => {
     if (!e.target.closest?.('#chat-voice')) return resume();
@@ -241,8 +279,10 @@
   });
 
   // Only the tab the user is looking at may speak; mode changes in other tabs apply here too.
-  document.addEventListener('visibilitychange', () => { if (document.hidden) stop(); });
-  window.addEventListener('blur', stop);
+  // In `pause` mode leaving pauses the speech; coming back plays the pending reply from its chunk.
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { if (away() === 'pause') pause(); } else tryStart(300); });
+  window.addEventListener('blur', () => { if (away() === 'pause') pause(); });
+  window.addEventListener('focus', () => tryStart(300));
   window.addEventListener('storage', e => {
     if (e.key !== MODE_KEY) return;
     if (!isOn()) stop();

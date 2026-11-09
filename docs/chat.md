@@ -70,6 +70,7 @@ extensions:
     tts:
       url: http://127.0.0.1:7880   # optional; local TTS server, enables the "Voice replies" button
       voice: iris                  # optional; voice name sent to the TTS server (opaque string)
+      when_away: hold              # optional; hold (default) | play | pause
 ```
 
 Voice replies: with `tts.url` set, a speaker button in the composer reads the
@@ -81,6 +82,18 @@ through `POST /chat/tts`, never directly. The proxy always drops any `voice`
 the browser sends and adds the configured one. Invalid JSON gets a 400. Off by default, remembered per browser.
 Each assistant message also has a play/stop button that reads that one message
 aloud, whether the toggle is on or off. Only one message plays at a time.
+
+`tts.when_away` sets what happens when the tab is hidden or unfocused. An
+unknown value stops the agent at startup.
+
+- `hold` (default): a reply that ends while you are away waits and plays when
+  you come back. Speech that has started continues when you leave.
+- `play`: the reply plays at once, even while you are away. Nothing is held.
+- `pause`: like `hold`, and speech also pauses when you leave. It resumes at
+  the same chunk when you come back.
+
+Stop, turning voice off, sending a message, and switching chats always stop
+speech and drop the held reply. Only one browser tab speaks a given reply.
 
 Idle conversations: after `idle_minutes` with no running turn, chat-web closes
 that conversation's backend process. Transcript and backend identity are kept;

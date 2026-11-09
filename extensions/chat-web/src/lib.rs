@@ -69,6 +69,29 @@ struct TtsConfig {
     url: Option<String>,
     /// Opaque voice name sent to the TTS server as `"voice"`. The browser cannot choose it.
     voice: Option<String>,
+    /// What a reply does when the user is away from the tab (default `hold`).
+    when_away: WhenAway,
+}
+
+/// Voice behavior while the tab is hidden or unfocused: `hold` waits and speaks on return,
+/// `play` speaks at once, `pause` is `hold` plus a pause of speech that already runs.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum WhenAway {
+    #[default]
+    Hold,
+    Play,
+    Pause,
+}
+
+impl WhenAway {
+    fn as_str(self) -> &'static str {
+        match self {
+            WhenAway::Hold => "hold",
+            WhenAway::Play => "play",
+            WhenAway::Pause => "pause",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -130,6 +153,7 @@ impl Extension for ChatWebExtension {
                 root: ctx.paths.root().to_path_buf(),
                 human_chat: cap_chat::HumanChat::load(ctx.paths.root()).is_some(),
                 voice: state.config.tts.url.is_some(),
+                when_away: state.config.tts.when_away,
             }))?;
             ctx.http.mount(host_api::HttpMount {
                 namespace: "/chat".into(),
@@ -228,6 +252,8 @@ struct ChatTab {
     human_chat: bool,
     /// Shows the voice-replies toggle (`extensions.chat-web.tts.url` is set).
     voice: bool,
+    /// Value of `data-voice-away` on the page (`extensions.chat-web.tts.when_away`).
+    when_away: WhenAway,
 }
 impl DashboardTab for ChatTab {
     fn id(&self) -> &str {
@@ -253,7 +279,14 @@ impl DashboardTab for ChatTab {
             } else {
                 ""
             },
-            if self.voice { " data-voice" } else { "" },
+            if self.voice {
+                format!(
+                    " data-voice data-voice-away=\"{}\"",
+                    self.when_away.as_str()
+                )
+            } else {
+                String::new()
+            },
             avatar_html(self.agent_avatar.as_ref(), "chat-avatar", &self.agent_name),
             escape_html_attr(&self.agent_name),
             runner_info_html(&self.root),
@@ -7874,6 +7907,7 @@ mod tests {
             root: root.clone(),
             human_chat: false,
             voice: false,
+            when_away: WhenAway::default(),
         };
         // Visible text only: tags become spaces, so each label sits next to its value.
         let text = |html: String| {
@@ -7911,6 +7945,7 @@ mod tests {
             root: std::path::PathBuf::new(),
             human_chat: false,
             voice: false,
+            when_away: WhenAway::default(),
         };
         let html = tab.render().unwrap();
         assert!(!html.contains("data-human-chat"));
@@ -7921,6 +7956,7 @@ mod tests {
             root: std::path::PathBuf::new(),
             human_chat: true,
             voice: false,
+            when_away: WhenAway::default(),
         };
         assert!(topics_tab.render().unwrap().contains("data-human-chat"));
         assert!(!html.contains("class=\"chat-avatar\""));
@@ -9010,6 +9046,7 @@ mod tests {
             root: std::path::PathBuf::new(),
             human_chat: false,
             voice: false,
+            when_away: WhenAway::default(),
         };
         let html = tab(Avatar::Text("🦉".into())).render().unwrap();
         assert!(html.contains(r#"<span class="chat-avatar" aria-hidden="true">🦉</span>"#));
@@ -9248,6 +9285,7 @@ mod tests {
             root: std::path::PathBuf::new(),
             human_chat: false,
             voice,
+            when_away: WhenAway::default(),
         };
         assert!(!tab(false)
             .render()
@@ -9257,6 +9295,35 @@ mod tests {
             .render()
             .unwrap()
             .contains(r#"title="Voice replies""#));
+    }
+
+    #[test]
+    fn when_away_reaches_the_page_and_rejects_unknown_values() {
+        for (value, expected) in [("hold", "hold"), ("play", "play"), ("pause", "pause")] {
+            let tts: TtsConfig = serde_json::from_value(
+                serde_json::json!({ "url": "http://x", "when_away": value }),
+            )
+            .unwrap();
+            let tab = ChatTab {
+                agent_name: "Test Agent".into(),
+                agent_description: None,
+                agent_avatar: None,
+                root: std::path::PathBuf::new(),
+                human_chat: false,
+                voice: true,
+                when_away: tts.when_away,
+            };
+            assert!(tab
+                .render()
+                .unwrap()
+                .contains(&format!(r#"data-voice-away="{expected}""#)));
+        }
+        let default: TtsConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default.when_away, WhenAway::Hold);
+        assert!(serde_json::from_value::<TtsConfig>(
+            serde_json::json!({ "when_away": "sometimes" })
+        )
+        .is_err());
     }
 
     fn tts_state(url: Option<String>) -> Arc<AppState> {
@@ -9269,6 +9336,7 @@ mod tests {
                 tts: TtsConfig {
                     url,
                     voice: voice.map(str::to_owned),
+                    ..TtsConfig::default()
                 },
                 ..Config::default()
             },

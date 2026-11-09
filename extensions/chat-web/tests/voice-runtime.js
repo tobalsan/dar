@@ -9,11 +9,12 @@ process.on('unhandledRejection', e => unhandled.push(e));
 
 const sentence = 'This is a fairly long sentence that fills most of one chunk so the reply needs several chunks to be read out loud now.';
 const REPLY = [sentence, sentence, sentence].join(' ');
+const splitFirst = text => text.split(/(?<=[.!?])\s+/)[0];
 
 // Browser profile: storage shared by all tabs, fires `storage` in the others.
 const profile = () => { const store = {}, tabs = []; return { store, tabs, set(tab, k, v) { store[k] = String(v); for (const t of tabs) if (t !== tab) t.fire('window', 'storage', { key: k }); } }; };
 
-function tab(shared, { fetchFor = () => 'ok', prefix } = {}) {
+function tab(shared, { fetchFor = () => 'ok', prefix, away = 'pause' } = {}) {
   const handlers = { window: {}, document: {} };
   const t = { playing: new Set(), fetched: [], warnings: [], hidden: false };
   t.fire = (where, type, event = {}) => (handlers[where][type] || []).forEach(h => h(event));
@@ -48,7 +49,7 @@ function tab(shared, { fetchFor = () => 'ok', prefix } = {}) {
   const document = {
     querySelectorAll: () => buttonList(),
     get hidden() { return t.hidden; }, hasFocus: () => !t.hidden,
-    getElementById: id => (id === 'chat-root' ? { hasAttribute: () => true } : id === 'chat-voice' ? button : null),
+    getElementById: id => (id === 'chat-root' ? { hasAttribute: () => true, getAttribute: n => (n === 'data-voice-away' ? away : null) } : id === 'chat-voice' ? button : null),
     addEventListener: listen('document'),
   };
   const sandbox = {
@@ -193,6 +194,125 @@ const chat = (slot = "main") => ({ slot, blocks: [{ kind: 'user', text: 'q' }, {
     const g = tab(profile());
     g.addButton(4); g.voice.playMessage(4, 'Stopped by a new message.'); g.voice.stop();
     assert.equal(g.label(4), 'Play message', 'a new message or chat switch resets the button');
+  }
+  // 7. Away: a reply that ends while hidden is held and plays on return; pause resumes at the same chunk.
+  const away = t => { t.hidden = true; t.fire('document', 'visibilitychange'); };
+  const back = t => { t.hidden = false; t.fire('window', 'focus'); };
+  {
+    const p = profile(), a = tab(p);
+    a.click('voice'); away(a); a.finish(chat());
+    await wait(300);
+    assert.equal(a.fetched.length, 0, 'nothing is spoken while away');
+    back(a);
+    await wait(200);
+    assert.equal(a.fetched.length, 0, 'the return delay holds the speech');
+    await wait(400);
+    assert.equal(a.fetched[0], splitFirst(REPLY), 'the held reply plays on return');
+    await wait(500);
+    assert.equal(a.fetched.join(' '), REPLY);
+  }
+  {
+    const p = profile(), a = tab(p);
+    a.click('voice'); a.finish(chat());
+    await wait(300); // chunk 0 done, chunk 1 plays
+    away(a);
+    assert.equal(a.playing.size, 0, 'leaving stops the audio');
+    const before = a.fetched.length;
+    await wait(200);
+    assert.equal(a.fetched.length, before, 'no request while away');
+    a.fetched.length = 0;
+    back(a);
+    await wait(700);
+    assert.ok(a.fetched.length >= 1 && a.fetched.length < 3, 'resumes at the chunk that played, not chunk 0');
+    assert.equal(a.playing.size, 0);
+  }
+  {
+    const p = profile(), a = tab(p);
+    a.addButton(1);
+    a.voice.playMessage(1, REPLY); // toggle off
+    await wait(100);
+    away(a);
+    assert.equal(a.label(1), 'Play message', 'paused button is idle');
+    a.fetched.length = 0;
+    back(a);
+    await wait(500);
+    assert.ok(a.fetched.length >= 1, 'play-button speech resumes on return');
+  }
+  {
+    const p = profile(), a = tab(p);
+    a.click('voice'); away(a);
+    a.finish(chat(), 1);
+    const app2 = chat(); app2.blocks[1].text = 'Newer reply.';
+    a.finish(app2, 2);
+    back(a);
+    await wait(500);
+    assert.deepEqual(a.fetched, ['Newer reply.'], 'only the latest pending reply plays');
+  }
+  for (const clear of ['stop', 'toggle off', 'switch chat']) {
+    const p = profile(), a = tab(p), app = chat();
+    a.click('voice'); away(a); a.finish(app);
+    if (clear === 'stop') a.voice.stop();
+    if (clear === 'toggle off') a.click('voice');
+    if (clear === 'switch chat') { app.slot = 'other'; a.voice.stop(); }
+    back(a);
+    await wait(500);
+    assert.equal(a.fetched.length, 0, `${clear} clears the pending reply`);
+  }
+  {
+    const p = profile(), a = tab(p);
+    a.click('voice'); away(a); a.finish(chat());
+    back(a); await wait(100);
+    a.fire('window', 'blur'); a.hidden = true; await wait(100);
+    back(a); await wait(100); a.hidden = true; back(a);
+    await wait(500);
+    assert.equal(a.fetched.join(' '), REPLY, 'a quick blur and focus plays once');
+  }
+  {
+    const p = profile(), a = tab(p), b = tab(p);
+    a.click('voice'); b.fire('document', 'keydown');
+    away(a); a.finish(chat(), 1);
+    b.finish(chat(), 1); // B speaks this turn
+    await wait(250);
+    assert.equal(b.playing.size, 1);
+    back(a);
+    await wait(600);
+    assert.equal(a.fetched.length, 0, 'a turn another tab claimed is not spoken');
+  }
+  // 8. when_away modes.
+  {
+    const p = profile(), a = tab(p, { away: 'hold' });
+    a.click('voice'); a.finish(chat());
+    await wait(250);
+    assert.equal(a.playing.size, 1, 'hold: speech runs');
+    away(a);
+    assert.equal(a.playing.size, 1, 'hold: speech continues when the user leaves');
+    a.fire('window', 'blur');
+    await wait(600);
+    assert.equal(a.fetched.join(' '), REPLY, 'hold: the whole reply is spoken');
+    const q = profile(), b = tab(q, { away: 'hold' });
+    b.click('voice'); away(b); b.finish(chat());
+    await wait(400);
+    assert.equal(b.fetched.length, 0, 'hold: nothing starts while away');
+  }
+  {
+    const p = profile(), a = tab(p, { away: 'play' });
+    a.click('voice'); away(a); a.finish(chat());
+    await wait(250);
+    assert.equal(a.playing.size, 1, 'play: speaks while away');
+    a.fire('window', 'blur');
+    assert.equal(a.playing.size, 1, 'play: keeps playing');
+    await wait(500);
+    assert.equal(a.fetched.join(' '), REPLY);
+    a.finish(chat(), 9);
+    await wait(250);
+    a.voice.stop();
+    assert.equal(a.playing.size, 0, 'play: stop still stops');
+  }
+  {
+    const p = profile(), a = tab(p, { away: null });
+    a.click('voice'); away(a); a.finish(chat());
+    await wait(400);
+    assert.equal(a.fetched.length, 0, 'no attribute means hold');
   }
   await wait(50);
   assert.deepEqual(unhandled, [], 'no unhandled rejections');
