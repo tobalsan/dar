@@ -135,6 +135,9 @@ type Client = RunningService<RoleClient, rmcp::model::ClientConfig>;
 
 fn client_config() -> rmcp::model::ClientConfig {
     let mut info = rmcp::model::ClientConfig::default();
+    // rmcp defaults to LATEST (2026-07-28), which has no `initialize` handshake.
+    // Servers that predate it (e.g. Magnific) reject that version outright.
+    info.protocol_version = rmcp::model::ProtocolVersion::LATEST_WITH_INITIALIZE;
     info.capabilities.extensions = Some(BTreeMap::from([(
         "io.modelcontextprotocol/ui".into(),
         serde_json::json!({"mimeTypes":["text/html;profile=mcp-app"]})
